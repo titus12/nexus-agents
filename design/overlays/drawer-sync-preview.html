@@ -1,0 +1,17 @@
+<div class="drawer-overlay" onclick="closeOverlay('drawer-sync-preview')"></div>
+<aside class="drawer wide" id="drawer-sync-preview">
+  <div class="drawer-header">
+    <div>
+      <div class="drawer-title">同步预览</div>
+      <div class="drawer-subtitle">写回仓库前必须确认 diff。</div>
+    </div>
+    <div class="section-spacer"></div>
+    <button class="close-btn" type="button" onclick="closeOverlay('drawer-sync-preview')">x</button>
+  </div>
+  <div class="drawer-body" id="sync-preview-body"></div>
+  <div class="drawer-footer">
+    <button class="btn-secondary" type="button" onclick="closeOverlay('drawer-sync-preview')">取消</button>
+    <button class="btn-primary" type="button" onclick="applySyncPreview()">应用同步</button>
+  </div>
+</aside>
+

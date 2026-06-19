@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexus Agents - AI Development Console</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232d6cdf'/%3E%3Cpath d='M18 45V19h7l14 17V19h7v26h-7L25 28v17z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="shared.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-icon">N</div>
+        <div>
+          <div class="logo-text">Nexus Agents</div>
+          <div class="logo-sub">AI Development Console</div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">Main</div>
+        <button class="sidebar-item active" type="button" data-nav="projects">
+          <span class="sidebar-icon">P</span><span>项目</span>
+        </button>
+        <button class="sidebar-item" type="button" data-nav="agents">
+          <span class="sidebar-icon">A</span><span>Agents</span><span class="sidebar-badge">12</span>
+        </button>
+        <button class="sidebar-item" type="button" data-nav="rules">
+          <span class="sidebar-icon">R</span><span>Rules</span>
+        </button>
+        <button class="sidebar-item" type="button" data-nav="skills">
+          <span class="sidebar-icon">S</span><span>Skills</span>
+        </button>
+        <button class="sidebar-item" type="button" data-nav="workflows">
+          <span class="sidebar-icon">W</span><span>Workflows</span>
+        </button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">System</div>
+        <button class="sidebar-item" type="button" data-nav="model-routes">
+          <span class="sidebar-icon">M</span><span>模型代理</span>
+        </button>
+      </div>
+
+      <div class="sidebar-section compact">
+        <div class="sidebar-label">Projects</div>
+      </div>
+      <div class="project-list" id="project-tree"></div>
+
+      <div class="sidebar-footer">
+        <button class="btn-primary full-width" type="button" onclick="openImportProject()">导入项目</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <nav class="breadcrumb" id="breadcrumb">
+          <span class="breadcrumb-current">项目</span>
+        </nav>
+        <div class="topbar-spacer"></div>
+      </header>
+
+      <section class="content" id="page-container"></section>
+    </main>
+  </div>
+
+  <div id="overlay-container"></div>
+  <div id="toast-container" aria-live="polite"></div>
+
+  <script src="js/mock-data.js"></script>
+  <script src="js/common.js"></script>
+  <script src="js/pages.js"></script>
+  <script src="js/workflow-canvas.js"></script>
+  <script src="js/fragment-cache.js"></script>
+  <script src="js/nav.js"></script>
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      if (typeof renderProjectTree === 'function') renderProjectTree();
+      if (typeof navigate === 'function') navigate('projects');
+    });
+  </script>
+</body>
+</html>

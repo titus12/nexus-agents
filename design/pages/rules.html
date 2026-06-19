@@ -1,0 +1,17 @@
+<div id="page-rules" class="page">
+  <div class="page-header">
+    <div class="page-description">全局规则库和项目规则入口。V1 不复制 `.claude/rules` 到 `.codex`。</div>
+    <button class="btn-primary" type="button" onclick="openRuleDrawer('00-routing')">新建规则</button>
+  </div>
+
+  <div class="toolbar">
+    <div class="project-filter" id="rule-project-filter"></div>
+    <input type="search" placeholder="搜索规则 / 路径" style="max-width:300px">
+    <span class="chip chip-purple">Claude source</span>
+    <span class="chip chip-teal">Codex direct reference</span>
+    <div class="toolbar-spacer"></div>
+    <button class="btn-secondary" type="button" onclick="showToast('已模拟刷新规则库')">刷新</button>
+  </div>
+
+  <div class="asset-grid compact" id="rule-card-grid"></div>
+</div>

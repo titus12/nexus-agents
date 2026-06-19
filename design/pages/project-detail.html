@@ -1,0 +1,41 @@
+<div id="page-project-detail" class="page">
+  <div class="page-header">
+    <div class="page-description mono" id="project-detail-description">D:\workspace\src\btd-game-server</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn-secondary" type="button" onclick="showToast('已模拟重新扫描')">重新扫描</button>
+      <button class="btn-primary" type="button" onclick="openSyncPreview()">同步预览</button>
+    </div>
+  </div>
+
+  <div class="stats-row" id="project-detail-stats"></div>
+
+  <div class="grid-2">
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">配置来源</div>
+        <div class="section-spacer"></div>
+        <span class="chip chip-teal">Repo first</span>
+      </div>
+      <div class="panel-body source-list" id="project-sources"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header"><div class="panel-title">健康检查</div></div>
+      <div class="panel-body timeline" id="project-health"></div>
+    </section>
+  </div>
+
+  <div class="section-header">
+    <div class="section-title">工具投影策略</div>
+    <div class="section-hint">Claude Markdown 是语义源，Codex TOML 是投影。</div>
+  </div>
+  <pre class="code-block">source_of_truth:
+  agents: .claude/agents/*.md
+  rules: .claude/rules/*.md
+  skills: .claude/skills/*.md
+projection:
+  codex_agents: .codex/agents/*.toml
+  codex_rules: direct reference to .claude/rules
+  codex_skills: direct reference to .claude/skills
+sync_policy: preview_then_apply</pre>
+</div>

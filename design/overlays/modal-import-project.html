@@ -1,0 +1,28 @@
+<div class="modal-backdrop" onclick="closeOverlay('modal-import-project')"></div>
+<section class="modal" id="modal-import-project">
+  <div class="modal-header">
+    <div>
+      <div class="drawer-title">导入已有项目</div>
+      <div class="drawer-subtitle">扫描 agents、rules、skills、MCP 和代理配置。</div>
+    </div>
+    <div class="section-spacer"></div>
+    <button class="close-btn" type="button" onclick="closeOverlay('modal-import-project')">x</button>
+  </div>
+  <div class="modal-body">
+    <div class="form-row">
+      <label class="form-label" for="import-project-path">项目路径</label>
+      <input id="import-project-path" type="text" value="D:\workspace\src\btd-game-server">
+      <div class="form-hint">原型只模拟扫描，不访问本地文件系统。</div>
+    </div>
+    <div class="source-list">
+      <div class="source-item"><span>.claude/agents</span><span class="chip chip-green">12 found</span></div>
+      <div class="source-item"><span>.codex/agents</span><span class="chip chip-green">12 found</span></div>
+      <div class="source-item"><span>.proxy</span><span class="chip chip-orange">runtime key</span></div>
+    </div>
+  </div>
+  <div class="modal-footer">
+    <button class="btn-secondary" type="button" onclick="closeOverlay('modal-import-project')">取消</button>
+    <button class="btn-primary" type="button" onclick="simulateImportProject()">导入</button>
+  </div>
+</section>
+

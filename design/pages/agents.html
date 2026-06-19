@@ -1,0 +1,17 @@
+<div id="page-agents" class="page">
+  <div class="page-header">
+    <div class="page-description">管理全局角色、项目绑定、模型档位、rules、skills、tools 和 MCP。</div>
+    <button class="btn-primary" type="button" onclick="openAgentDrawer('hephaestus')">新建角色</button>
+  </div>
+
+  <div class="toolbar">
+    <input type="search" placeholder="搜索角色 / 能力 / 模型" style="max-width:300px">
+    <select style="width:160px"><option>全部模型</option><option>gpt-5.5</option><option>gpt-5.4</option><option>gpt-5.4-mini</option></select>
+    <div class="project-filter" id="agent-project-filter"></div>
+    <div class="toolbar-spacer"></div>
+    <span class="chip chip-purple">12 roles</span>
+    <span class="chip chip-teal">MCP aware</span>
+  </div>
+
+  <div class="asset-grid" id="agent-card-grid"></div>
+</div>
