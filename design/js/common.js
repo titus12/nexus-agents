@@ -21,6 +21,11 @@ function statusChip(state) {
     paused: ["Paused", "orange"],
     draft: ["Draft", "gray"],
     failed: ["Failed", "red"],
+    synced: ["Synced", "green"],
+    project_modified: ["Project Modified", "orange"],
+    template_updated: ["Template Updated", "purple"],
+    diverged: ["Diverged", "red"],
+    detached: ["Detached", "gray"],
     create: ["Create", "teal"],
     update: ["Update", "orange"],
     idle: ["Idle", "gray"],
@@ -96,12 +101,30 @@ async function openSyncPreview() {
     body.innerHTML = project.syncDiffs.map((item) => `
       <div class="panel" style="margin-bottom:12px">
         <div class="panel-header">
-          <div class="panel-title mono">${escapeHtml(item.file)}</div>
+          <div>
+            <div class="panel-title">${escapeHtml(item.kind || "item")} / ${escapeHtml(item.name || item.file)}</div>
+            <div class="drawer-subtitle mono">${escapeHtml(item.path || item.file || "")}</div>
+          </div>
           <div class="section-spacer"></div>
           ${statusChip(item.status)}
         </div>
         <div class="panel-body">
+          <div class="asset-meta-strip" style="margin-bottom:10px">
+            <span><strong>origin.templateId</strong>${escapeHtml(item.origin?.templateId || "project-only")}</span>
+            <span><strong>baseVersion</strong>${escapeHtml(item.origin?.baseVersion || "-")}</span>
+            <span><strong>baseHash</strong>${escapeHtml(item.origin?.baseHash || "-")}</span>
+          </div>
+          <div class="asset-meta-strip" style="margin-bottom:10px">
+            <span><strong>localVersion</strong>${escapeHtml(item.localVersion || "-")}</span>
+            <span><strong>syncMode</strong>${escapeHtml(item.syncMode || "manual")}</span>
+            <span><strong>action</strong>manual preview</span>
+          </div>
           <pre class="diff-block">${escapeHtml(item.diff)}</pre>
+          <div class="asset-actions" style="margin-top:10px">
+            <button class="link-btn" type="button" onclick="syncTemplateToProject('${item.id}')">同步模板到项目</button>
+            <button class="link-btn" type="button" onclick="keepProjectVersion('${item.id}')">保留项目版本</button>
+            <button class="link-btn" type="button" onclick="detachTemplateCopy('${item.id}')">解除模板关联</button>
+          </div>
         </div>
       </div>
     `).join("") || `<div class="panel-pad muted">当前没有待同步变更。</div>`;
@@ -111,7 +134,103 @@ async function openSyncPreview() {
 
 function applySyncPreview() {
   closeOverlay("drawer-sync-preview");
-  showToast("已模拟应用同步。真实版本会写回仓库文件。");
+  showToast("已模拟手动同步。V1 不会自动覆盖项目配置。");
+}
+
+function findProjectCopy(copyId) {
+  return Object.values(NEXUS.projectConfigSets || {})
+    .flat()
+    .find((copy) => copy.id === copyId);
+}
+
+function renderProjectCopyDrawerContent(copyId) {
+  const copy = findProjectCopy(copyId);
+  if (!copy) return;
+  const template = typeof findTemplateForCopy === "function" ? findTemplateForCopy(copy) : null;
+  const origin = copy.origin || {};
+  const originId = origin.templateId || "project-only";
+  const baseVersion = origin.baseVersion || "-";
+  const baseHash = origin.baseHash || "-";
+  const project = findById(NEXUS.projects, NEXUS.state.currentProjectId) || NEXUS.projects[0];
+
+  document.getElementById("project-copy-title").textContent = copy.name;
+  document.getElementById("project-copy-subtitle").textContent = `${project?.name || "Project"} / ${copy.kind} / ${copy.path}`;
+  document.getElementById("project-copy-body").innerHTML = `
+    <section class="panel" style="margin-bottom:12px">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Project Config Set</div>
+          <div class="drawer-subtitle">Project-local copy with manual template sync.</div>
+        </div>
+        <div class="section-spacer"></div>
+        ${syncStatusChip(copy.status)}
+      </div>
+      <div class="panel-body">
+        <div class="asset-meta-strip">
+          <span><strong>origin.templateId</strong>${escapeHtml(originId)}</span>
+          <span><strong>baseVersion</strong>${escapeHtml(baseVersion)}</span>
+          <span><strong>baseHash</strong>${escapeHtml(baseHash)}</span>
+        </div>
+        <div class="asset-meta-strip" style="margin-top:8px">
+          <span><strong>localVersion</strong>${escapeHtml(copy.localVersion)}</span>
+          <span><strong>syncMode</strong>${escapeHtml(copy.syncMode)}</span>
+          <span><strong>path</strong>${escapeHtml(copy.path)}</span>
+        </div>
+      </div>
+    </section>
+    <section class="panel" style="margin-bottom:12px">
+      <div class="panel-header"><div class="panel-title">Template Link</div></div>
+      <div class="panel-body source-list">
+        <div class="source-item"><span>Template</span><span>${escapeHtml(template?.name || originId)}</span></div>
+        <div class="source-item"><span>Template version</span><span>v${escapeHtml(template?.version || baseVersion)}</span></div>
+        <div class="source-item"><span>Entry</span><span class="mono">${escapeHtml(template?.entry || template?.source || "detached")}</span></div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-header"><div class="panel-title">Sync Preview</div></div>
+      <div class="panel-body">
+        <pre class="diff-block">${escapeHtml(copy.diff || "No diff available.")}</pre>
+      </div>
+    </section>
+  `;
+  setDrawerFooter("drawer-project-copy", "project-copy-footer", `
+    <button class="btn-secondary" type="button" onclick="closeOverlay('drawer-project-copy')">关闭</button>
+    <button class="btn-primary" type="button" onclick="syncTemplateToProject('${copy.id}')">同步模板</button>
+  `);
+}
+
+async function openProjectCopyDrawer(copyId) {
+  await loadOverlay("drawer-project-copy");
+  NEXUS.state.currentProjectCopyId = copyId;
+  renderProjectCopyDrawerContent(copyId);
+  openDrawer("drawer-project-copy");
+}
+
+function syncTemplateToProject(copyId) {
+  const copy = findProjectCopy(copyId);
+  if (copy) copy.status = "synced";
+  if (typeof renderProjectConfigSet === "function") renderProjectConfigSet(NEXUS.state.currentProjectId);
+  if (typeof renderCurrentProjectResourcePage === "function") renderCurrentProjectResourcePage();
+  if (NEXUS.state.currentProjectCopyId === copyId) renderProjectCopyDrawerContent(copyId);
+  showToast("已模拟同步模板到项目副本");
+}
+
+function keepProjectVersion(copyId) {
+  const copy = findProjectCopy(copyId);
+  if (copy) copy.status = "project_modified";
+  if (typeof renderProjectConfigSet === "function") renderProjectConfigSet(NEXUS.state.currentProjectId);
+  if (typeof renderCurrentProjectResourcePage === "function") renderCurrentProjectResourcePage();
+  if (NEXUS.state.currentProjectCopyId === copyId) renderProjectCopyDrawerContent(copyId);
+  showToast("已保留项目版本，等待后续手动处理");
+}
+
+function detachTemplateCopy(copyId) {
+  const copy = findProjectCopy(copyId);
+  if (copy) copy.status = "detached";
+  if (typeof renderProjectConfigSet === "function") renderProjectConfigSet(NEXUS.state.currentProjectId);
+  if (typeof renderCurrentProjectResourcePage === "function") renderCurrentProjectResourcePage();
+  if (NEXUS.state.currentProjectCopyId === copyId) renderProjectCopyDrawerContent(copyId);
+  showToast("已模拟解除模板关联");
 }
 
 function viewAgentRules(agentId) {
@@ -186,6 +305,14 @@ async function openRuleDrawer(ruleId) {
   document.getElementById("rule-drawer-title").textContent = rule.name;
   document.getElementById("rule-drawer-subtitle").textContent = rule.source;
   document.getElementById("rule-drawer-body").innerHTML = `
+    <section class="panel" style="margin-bottom:12px">
+      <div class="panel-header"><div class="panel-title">Template Metadata</div></div>
+      <div class="panel-body asset-meta-strip">
+        <span><strong>id</strong>${escapeHtml(rule.id)}</span>
+        <span><strong>version</strong>v${escapeHtml(rule.version || 1)}</span>
+        <span><strong>files</strong>${escapeHtml((rule.files || [rule.source]).join(", "))}</span>
+      </div>
+    </section>
     <div class="drawer-editor-layout">
       <div class="asset-edit-grid">
         <label class="form-label">Rule Name
@@ -239,6 +366,23 @@ async function openSkillDrawer(skillId) {
   document.getElementById("skill-drawer-title").textContent = skill.name;
   document.getElementById("skill-drawer-subtitle").textContent = skill.source;
   document.getElementById("skill-drawer-body").innerHTML = `
+    <section class="panel" style="margin-bottom:12px">
+      <div class="panel-header"><div class="panel-title">Template Metadata</div></div>
+      <div class="panel-body asset-meta-strip">
+        <span><strong>id</strong>${escapeHtml(skill.id)}</span>
+        <span><strong>version</strong>v${escapeHtml(skill.version || 1)}</span>
+        <span><strong>entry</strong>${escapeHtml(skill.entry || skill.source || "templates/skills/skill.md")}</span>
+      </div>
+      <div class="panel-body">
+        <pre class="diff-block">id: ${escapeHtml(skill.id)}
+kind: skill
+slug: ${escapeHtml(skill.slug || skill.id)}
+version: ${escapeHtml(skill.version || 1)}
+entry: ${escapeHtml(skill.entry || skill.source || "templates/skills/skill.md")}
+files:
+${(skill.files || [skill.entry || skill.source || "templates/skills/skill.md"]).map((file) => `  - ${escapeHtml(file)}`).join("\n")}</pre>
+      </div>
+    </section>
     <div class="drawer-editor-layout">
       <div class="asset-edit-grid">
         <label class="form-label">Skill Name

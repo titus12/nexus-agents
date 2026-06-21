@@ -1,11 +1,10 @@
 <div id="page-rules" class="page">
   <div class="page-header">
-    <div class="page-description">全局规则库和项目规则入口。V1 不复制 `.claude/rules` 到 `.codex`。</div>
+    <div class="page-description">Template Library for reusable rules. Project copies keep origin.templateId, baseVersion, baseHash, and manual sync status.</div>
     <button class="btn-primary" type="button" onclick="openRuleDrawer('00-routing')">新建规则</button>
   </div>
 
   <div class="toolbar">
-    <div class="project-filter" id="rule-project-filter"></div>
     <input type="search" placeholder="搜索规则 / 路径" style="max-width:300px">
     <span class="chip chip-purple">Claude source</span>
     <span class="chip chip-teal">Codex direct reference</span>

@@ -1,32 +1,73 @@
-# Agent Rule Skill Prototype Plan
+# Agent Rule Skill Plan
 
-## Goal
-Prototype the global Template Library for Agents, Rules, and Skills, plus how project copies keep lineage to templates.
+## Status
+- Status: Done.
+- Completed on: 2026-06-20.
+- Implementation: Template Library cards, project-scoped resource cards, detail drawers, origin lineage, package metadata, and template CRUD APIs.
+- Backend evidence: `GET/POST/PUT/DELETE /api/templates/{kind}` and `GET /api/projects/{projectId}/config?kind=agent|rule|skill`.
+- Frontend evidence: `web/src/App.vue`, `web/src/api.ts`, `web/src/types.ts`.
+- Verification: `rtk powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify_all.ps1`.
+- Out of scope by this plan: one-click project-to-template promotion.
 
-## Files
+## Design Baseline
+Use these accepted design fragments as the source of truth:
+
 - `design/pages/agents.html`
 - `design/pages/rules.html`
 - `design/pages/skills.html`
+- `design/pages/project-agents.html`
+- `design/pages/project-rules.html`
+- `design/pages/project-skills.html`
 - `design/overlays/drawer-agent.html`
 - `design/overlays/drawer-rule.html`
 - `design/overlays/drawer-skill.html`
+- `design/overlays/drawer-project-copy.html`
 
-## Implementation
-- Agents, Rules, and Skills pages are global Template Library views.
-- Use horizontal resource cards, not compact tables.
-- Cards show template name, summary, version, usage project count, last updated time, and status.
-- Project dropdown filters can show all templates or templates relevant to a selected project.
-- Drawers show template metadata, package/source paths, project usage, and manual create/edit controls.
-- Users can manually create templates in the global library.
-- Project copies record lineage using `origin.templateId + origin.baseVersion + origin.baseHash`.
-- Rule can be a single file with metadata frontmatter or a sidecar manifest.
-- Skill defaults to a directory package with package-level metadata in `nexus.skill.yaml`.
-- Skill package metadata owns immutable id, kind, slug, version, entry file, file list, origin, local version, sync mode, and sync status.
-- File names are display and legacy import helpers only; they are not synchronization identity.
-- V1 does not support project-change promotion back into templates.
+## Template Library Pages
+Global Agents, Rules, and Skills are Template Library pages.
 
-## Metadata Examples
-Template Skill package:
+- They do not have project dropdown filters.
+- They use horizontal resource cards.
+- Template cards have a single `查看` style entry action.
+- Cards show only compact, useful information:
+  - Agent: role name, responsibility summary, model tier, rules count, skills count, status.
+  - Rule: rule name, source, summary/content preview, template metadata, status.
+  - Skill: skill name, purpose/content preview, copied file source, applicable agents, status.
+- Detailed fields such as tools, MCP, Codex TOML projection, Claude source paths, and package files belong in drawers.
+
+## Project Resource Pages
+Project Agents, Rules, and Skills show Project Config Set copies.
+
+- They reuse the same card visual system as Template Library pages.
+- They show origin lineage and manual sync status.
+- Sync actions are not placed on cards.
+- Project copy detail opens in `drawer-project-copy`.
+- V1 sync action is manual template-to-project sync. Project-to-template promotion is not available.
+
+## Drawers
+- Agent drawer links to related Rules and Skills.
+- Rule and Skill drawers show concrete content, metadata, and mock save feedback according to the accepted prototype.
+- Project copy drawer shows:
+  - kind
+  - local name
+  - status
+  - path
+  - `origin.templateId`
+  - `origin.baseVersion`
+  - `origin.baseHash`
+  - `localVersion`
+  - `syncMode`
+  - diff preview
+
+## Metadata Rules
+- Template identity uses immutable `id`, not file name.
+- `slug` is human-readable and may change.
+- Rule is represented by a copied markdown file in `templates/rules/`.
+- Skill is represented by copied markdown files in `templates/skills/` for V1.
+- Go-related Rule and Skill template filenames use the `go-` prefix.
+- Template metadata owns id, kind, slug, version, entry, and files; no YAML manifest or profile directory is used under `templates/`.
+
+Template Skill file:
 
 ```yaml
 id: tpl_skill_testing
@@ -34,11 +75,9 @@ kind: skill
 slug: testing
 name: testing
 version: 5
-entry: SKILL.md
+entry: templates/skills/go-testing.md
 files:
-  - SKILL.md
-  - references/test-policy.md
-  - scripts/verify.ps1
+  - templates/skills/go-testing.md
 ```
 
 Project Skill copy:
@@ -54,17 +93,15 @@ origin:
 localVersion: 1
 syncMode: manual
 status: project_modified
-entry: SKILL.md
+entry: .claude/skills/testing.md
 files:
-  - SKILL.md
-  - references/test-policy.md
-  - scripts/verify.ps1
+  - .claude/skills/testing.md
 ```
 
 ## Acceptance Criteria
-- Agent, Rule, and Skill cards open their drawers.
-- Cards and drawers make Template Library identity and project usage obvious.
-- Rules and Skills show editable content in drawers for the prototype.
-- Skill multi-file package metadata is visible in the prototype content.
-- Filters use dropdown project selection rather than many project chips.
-- The UI clearly states that template sync is manual and promotion is not available in V1.
+- Global Agents, Rules, and Skills render as Template Library cards.
+- Global pages do not include project filters.
+- Project Agents, Rules, and Skills render as project-local copy cards.
+- Cards are aligned in size and density with the accepted design.
+- Drawers expose detailed content without overcrowding cards.
+- File names are never treated as synchronization identity.

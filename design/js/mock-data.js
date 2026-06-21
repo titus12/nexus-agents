@@ -6,9 +6,6 @@ window.NEXUS = {
     currentWorkflowId: "btd-review-flow",
     workflowEditorMode: false,
     workflowRunState: "idle",
-    ruleProjectFilter: "all",
-    skillProjectFilter: "all",
-    workflowProjectFilter: "all",
   },
   projects: [
     {
@@ -38,7 +35,7 @@ window.NEXUS = {
       ],
       syncDiffs: [
         {
-          file: ".nexus/workflows/main-review.yaml",
+          file: "templates/workflows/go-code-review.md",
           status: "create",
           diff: "+ id: main-review\n+ nodes:\n+   - agent: reviewer-logic\n+   - parallel: [reviewer-perf, reviewer-security]",
         },
@@ -146,3 +143,129 @@ window.NEXUS = {
     { id: "run_20260618_009", workflow: "bug-triage", project: "btd-game-server", status: "failed", modelCost: "mini + pro", startedAt: "2026-06-18 14:08", duration: "52s", summary: "Proxy route test failed: missing runtime key." },
   ],
 };
+
+(function enrichTemplateLibraryMockData() {
+  const versions = {
+    agents: { default: 4 },
+    rules: { default: 3 },
+    skills: { default: 5 },
+    workflows: { default: 2 },
+  };
+
+  NEXUS.agents.forEach((agent, index) => {
+    agent.templateId = agent.id;
+    agent.kind = "agent";
+    agent.version = versions.agents.default + (index % 3);
+    agent.updatedAt = index % 2 === 0 ? "2026-06-18 15:47" : "2026-06-17 18:30";
+    agent.slug = agent.id;
+    agent.files = [agent.source || `.claude/agents/${agent.id}.md`, agent.projection || `.codex/agents/${agent.id}.toml`];
+  });
+
+  NEXUS.rules.forEach((rule, index) => {
+    rule.templateId = rule.id;
+    rule.kind = "rule";
+    rule.version = versions.rules.default + index;
+    rule.updatedAt = index % 2 === 0 ? "2026-06-18 12:20" : "2026-06-16 21:10";
+    rule.slug = rule.id;
+    rule.entry = rule.source || `.claude/rules/${rule.id}.md`;
+    rule.files = [rule.entry];
+  });
+
+  NEXUS.skills.forEach((skill, index) => {
+    skill.templateId = skill.id;
+    skill.kind = "skill";
+    skill.version = versions.skills.default + (index % 4);
+    skill.updatedAt = index % 2 === 0 ? "2026-06-18 14:18" : "2026-06-15 19:42";
+    skill.slug = skill.id;
+    skill.entry = skill.source || `templates/skills/${skill.id}.md`;
+    skill.files = [skill.entry];
+  });
+
+  NEXUS.workflows.forEach((workflow, index) => {
+    workflow.templateId = workflow.id;
+    workflow.kind = "workflow";
+    workflow.version = versions.workflows.default + index;
+    workflow.updatedAt = workflow.updatedAt || "2026-06-18 10:00";
+    workflow.slug = workflow.id;
+    workflow.entry = workflow.source || `templates/workflows/${workflow.id}.md`;
+    workflow.files = [workflow.entry];
+  });
+
+  NEXUS.projectConfigSets = {
+    "btd-game-server": [
+      {
+        id: "proj_agent_btd_worker",
+        kind: "agent",
+        name: "worker",
+        origin: { templateId: "worker", baseVersion: 5, baseHash: "sha256:9f0b-worker" },
+        localVersion: 2,
+        syncMode: "manual",
+        status: "template_updated",
+        path: ".claude/agents/worker.md",
+        diff: "- model_reasoning_effort = \"medium\"\n+ model_reasoning_effort = \"high\"",
+      },
+      {
+        id: "proj_rule_btd_project_model",
+        kind: "rule",
+        name: "03-project-model",
+        origin: { templateId: "03-project-model", baseVersion: 6, baseHash: "sha256:71a4-project-model" },
+        localVersion: 3,
+        syncMode: "manual",
+        status: "project_modified",
+        path: ".claude/rules/03-project-model.md",
+        diff: "- Manager handles lifecycle.\n+ Manager handles lifecycle and actor index rebuild.",
+      },
+      {
+        id: "proj_skill_btd_testing",
+        kind: "skill",
+        name: "testing",
+        origin: { templateId: "testing", baseVersion: 6, baseHash: "sha256:41d2-testing" },
+        localVersion: 1,
+        syncMode: "manual",
+        status: "synced",
+        path: "templates/skills/go-testing.md",
+        diff: "No content changes.",
+      },
+      {
+        id: "proj_skill_btd_high_risk_api",
+        kind: "skill",
+        name: "high-risk-api",
+        origin: { templateId: "high-risk-api", baseVersion: 5, baseHash: "sha256:6b80-risk-api" },
+        localVersion: 4,
+        syncMode: "manual",
+        status: "diverged",
+        path: "templates/skills/high-risk-api.md",
+        diff: "- template: add replay audit checklist\n+ project: add payment rollback checklist",
+      },
+      {
+        id: "proj_workflow_btd_review",
+        kind: "workflow",
+        name: "btd-game-server review workflow",
+        origin: { templateId: "btd-review-flow", baseVersion: 2, baseHash: "sha256:ad77-review-flow" },
+        localVersion: 2,
+        syncMode: "manual",
+        status: "detached",
+        path: "templates/workflows/go-code-review.md",
+        diff: "Detached after project-specific reviewer routing changes.",
+      },
+    ],
+    "nexus-agents": [
+      {
+        id: "proj_workflow_nexus_design",
+        kind: "workflow",
+        name: "prototype design workflow",
+        origin: null,
+        localVersion: 1,
+        syncMode: "manual",
+        status: "detached",
+        path: "templates/workflows/design.md",
+        diff: "Project-only workflow. No template origin.",
+      },
+    ],
+  };
+
+  const btd = NEXUS.projects.find((project) => project.id === "btd-game-server");
+  if (btd) {
+    btd.syncDiffs = NEXUS.projectConfigSets["btd-game-server"];
+  }
+})();

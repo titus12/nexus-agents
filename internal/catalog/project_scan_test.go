@@ -1,0 +1,533 @@
+package catalog
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestScanProjectConfigSetReadsProjectFiles(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+
+	writeTestFile(t, root, ".claude/agents/worker.md", "worker markdown")
+	writeTestFile(t, root, ".codex/agents/worker.toml", "worker toml")
+	writeTestFile(t, root, ".claude/rules/go-00-routing.md", "routing markdown")
+	writeTestFile(t, root, ".claude/skills/testing.md", "testing markdown")
+	writeTestFile(t, root, ".claude/workflows/go-feature-development.md", "workflow markdown")
+	writeTestFile(t, root, ".claude/workflows/go-feature-development.graph.json", `{"id":"go-feature-development","name":"feature graph","nodes":[],"edges":[]}`)
+	writeTestFile(t, templateRoot, "agents/claude/go-worker.md", "worker markdown")
+	writeTestFile(t, templateRoot, "agents/codex/go-worker.toml", "worker toml")
+	writeTestFile(t, templateRoot, "rules/go-00-routing.md", "routing markdown")
+	writeTestFile(t, templateRoot, "skills/go-testing.md", "testing markdown")
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.md", "workflow markdown")
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.graph.json", `{"id":"go-feature-development","name":"feature graph","nodes":[],"edges":[]}`)
+
+	library := TemplateLibrary{
+		Agents: []TemplateItem{{
+			ID:          "worker",
+			Kind:        "agent",
+			Name:        "worker",
+			Version:     1,
+			SourcePaths: []string{filepath.Join(templateRoot, "agents/claude/go-worker.md"), filepath.Join(templateRoot, "agents/codex/go-worker.toml")},
+		}},
+		Rules: []TemplateItem{{
+			ID:      "00-routing",
+			Kind:    "rule",
+			Name:    "00-routing",
+			Version: 1,
+			Entry:   filepath.Join(templateRoot, "rules/go-00-routing.md"),
+		}},
+		Skills: []TemplateItem{{
+			ID:      "testing",
+			Kind:    "skill",
+			Name:    "testing",
+			Version: 1,
+			Entry:   filepath.Join(templateRoot, "skills/go-testing.md"),
+		}},
+		Workflows: []TemplateItem{{
+			ID:          "feature-development",
+			Kind:        "workflow",
+			Name:        "feature-development",
+			Version:     1,
+			Entry:       filepath.Join(templateRoot, "workflows/go-feature-development.md"),
+			Files:       []string{filepath.Join(templateRoot, "workflows/go-feature-development.md"), filepath.Join(templateRoot, "workflows/go-feature-development.graph.json")},
+			SourcePaths: []string{filepath.Join(templateRoot, "workflows/go-feature-development.md"), filepath.Join(templateRoot, "rules/go-00-routing.md")},
+		}},
+	}
+
+	copies, err := ScanProjectConfigSet(root, library)
+	if err != nil {
+		t.Fatalf("scan project config set: %v", err)
+	}
+
+	assertProjectCopy(t, copies, "agent", "worker", "synced", ".claude/agents/worker.md")
+	assertProjectCopy(t, copies, "rule", "00-routing", "synced", ".claude/rules/go-00-routing.md")
+	assertProjectCopy(t, copies, "skill", "testing", "synced", ".claude/skills/testing.md")
+	assertProjectCopy(t, copies, "workflow", "feature-development", "synced", ".claude/workflows/go-feature-development.md")
+}
+
+func TestScanProjectConfigSetReadsWorkflowFilesAndNexusGraphs(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+
+	writeTestFile(t, root, ".claude/workflows/go-feature-development.md", "workflow markdown")
+	writeTestFile(t, root, ".claude/workflows/go-feature-development.graph.json", `{"id":"go-feature-development","name":"feature graph","nodes":[{"id":"start","type":"input","category":"event","label":"start","agent":"-","detail":"begin","x":10,"y":20}],"edges":[]}`)
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.md", "workflow markdown")
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.graph.json", `{"id":"go-feature-development","name":"feature graph","nodes":[{"id":"start","type":"input","category":"event","label":"start","agent":"-","detail":"begin","x":10,"y":20}],"edges":[]}`)
+
+	library := TemplateLibrary{
+		Workflows: []TemplateItem{{
+			ID:      "feature-development",
+			Kind:    "workflow",
+			Name:    "feature-development",
+			Version: 1,
+			Entry:   filepath.Join(templateRoot, "workflows/go-feature-development.md"),
+			Files:   []string{filepath.Join(templateRoot, "workflows/go-feature-development.md"), filepath.Join(templateRoot, "workflows/go-feature-development.graph.json")},
+		}},
+	}
+
+	copies, err := ScanProjectConfigSet(root, library)
+	if err != nil {
+		t.Fatalf("scan project config set: %v", err)
+	}
+
+	copy := assertProjectCopy(t, copies, "workflow", "feature-development", "synced", ".claude/workflows/go-feature-development.md")
+	if copy.ID != "proj_workflow_project_go_feature_development" {
+		t.Fatalf("expected workflow copy id to preserve go filename identity, got %q", copy.ID)
+	}
+	if copy.Origin == nil || copy.Origin.TemplateID != "feature-development" {
+		t.Fatalf("expected workflow copy origin to point at logical template, got %#v", copy.Origin)
+	}
+}
+
+func TestScanProjectConfigSetPrefersPrefixedTemplateCopyOverRuntimeEntry(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+
+	writeTestFile(t, root, ".claude/agents/worker.md", "legacy runtime worker")
+	writeTestFile(t, root, ".claude/agents/go-worker.md", "worker markdown")
+	writeTestFile(t, root, ".codex/agents/worker.toml", "legacy runtime worker toml")
+	writeTestFile(t, root, ".codex/agents/go-worker.toml", "worker toml")
+	writeTestFile(t, templateRoot, "agents/claude/go-worker.md", "worker markdown")
+	writeTestFile(t, templateRoot, "agents/codex/go-worker.toml", "worker toml")
+
+	library := TemplateLibrary{
+		Agents: []TemplateItem{{
+			ID:          "worker",
+			Kind:        "agent",
+			Name:        "worker",
+			Version:     1,
+			SourcePaths: []string{filepath.Join(templateRoot, "agents/claude/go-worker.md"), filepath.Join(templateRoot, "agents/codex/go-worker.toml")},
+		}},
+	}
+
+	copies, err := ScanProjectConfigSet(root, library)
+	if err != nil {
+		t.Fatalf("scan project config set: %v", err)
+	}
+	if len(copies) != 1 {
+		t.Fatalf("expected one sync copy for worker, got %#v", copies)
+	}
+	copy := assertProjectCopy(t, copies, "agent", "worker", "synced", ".claude/agents/go-worker.md")
+	if copy.ID != "proj_agent_project_go_worker" {
+		t.Fatalf("expected prefixed template filename identity, got %q", copy.ID)
+	}
+}
+
+func TestScanProjectConfigSetDetectsProjectModifiedContent(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+
+	writeTestFile(t, root, ".claude/rules/go-00-routing.md", "project routing")
+	writeTestFile(t, templateRoot, "rules/go-00-routing.md", "template routing")
+
+	library := TemplateLibrary{
+		Rules: []TemplateItem{{
+			ID:      "00-routing",
+			Kind:    "rule",
+			Name:    "00-routing",
+			Version: 1,
+			Entry:   filepath.Join(templateRoot, "rules/go-00-routing.md"),
+		}},
+	}
+
+	copies, err := ScanProjectConfigSet(root, library)
+	if err != nil {
+		t.Fatalf("scan project config set: %v", err)
+	}
+
+	copy := assertProjectCopy(t, copies, "rule", "00-routing", "project_modified", ".claude/rules/go-00-routing.md")
+	if copy.Origin == nil || copy.Origin.BaseHash == "" {
+		t.Fatalf("expected origin hash for modified copy, got %#v", copy)
+	}
+	if !strings.Contains(copy.Diff, "Project file differs from template") {
+		t.Fatalf("expected diff to explain project modification, got %q", copy.Diff)
+	}
+}
+
+func TestStoreProjectWorkflowGraphPersistsToNexusFile(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, ".claude/workflows/go-feature-development.md", "workflow markdown")
+	writeTestFile(t, root, ".claude/workflows/go-feature-development.graph.json", `{"id":"go-feature-development","name":"feature graph","nodes":[{"id":"start","type":"input","category":"event","label":"start","agent":"-","detail":"begin","x":10,"y":20}],"edges":[]}`)
+
+	store := NewStoreFromData(
+		BootstrapData{
+			Projects: []Project{{ID: "sample", Name: "sample", Path: root}},
+			ProjectConfigSets: map[string][]ProjectCopy{
+				"sample": {{
+					ID:           "proj_workflow_sample_go_feature_development",
+					Kind:         "workflow",
+					Name:         "feature-development",
+					LocalVersion: 1,
+					SyncMode:     "manual",
+					Status:       "synced",
+					Path:         ".claude/workflows/go-feature-development.md",
+					Origin:       &Origin{TemplateID: "feature-development", BaseVersion: 1, BaseHash: "sha256:test"},
+				}},
+			},
+		},
+		nil,
+		map[string]WorkflowGraph{
+			"feature-development": {
+				ID:    "feature-development",
+				Name:  "template graph",
+				Nodes: []WorkflowNode{{ID: "template", Type: "input", Category: "event", Label: "template", Agent: "-", Detail: "template", X: 1, Y: 2}},
+			},
+		},
+	)
+
+	graph, ok := store.ProjectWorkflowByCopyID("sample", "proj_workflow_sample_go_feature_development")
+	if !ok {
+		t.Fatal("expected project workflow graph")
+	}
+	if graph.ID != "go-feature-development" || graph.Nodes[0].X != 10 {
+		t.Fatalf("expected graph to load from workflow graph json, got %#v", graph)
+	}
+
+	graph.Nodes[0].X = 320
+	graph.Nodes = append(graph.Nodes, WorkflowNode{ID: "review", Type: "agent", Category: "action", Label: "review", Agent: "worker", Detail: "review", X: 540, Y: 20})
+	graph.Edges = append(graph.Edges, WorkflowEdge{From: "start", To: "review", Label: "next"})
+	updated, ok, err := store.UpdateProjectWorkflowGraph("sample", "proj_workflow_sample_go_feature_development", graph)
+	if err != nil {
+		t.Fatalf("update project workflow graph: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected project workflow graph update to find copy")
+	}
+	if updated.Nodes[0].X != 320 || len(updated.Edges) != 1 {
+		t.Fatalf("unexpected updated graph: %#v", updated)
+	}
+
+	reloaded, ok := store.ProjectWorkflowByCopyID("sample", "proj_workflow_sample_go_feature_development")
+	if !ok || reloaded.Nodes[0].X != 320 || len(reloaded.Edges) != 1 {
+		t.Fatalf("expected saved graph to reload from workflow graph json, got ok=%v graph=%#v", ok, reloaded)
+	}
+}
+
+func TestStoreCreateAndDeleteProjectWorkflowWritesProjectFiles(t *testing.T) {
+	root := t.TempDir()
+	store := NewStoreFromData(
+		BootstrapData{
+			Projects:          []Project{{ID: "sample", Name: "sample", Path: root}},
+			ProjectConfigSets: map[string][]ProjectCopy{"sample": {}},
+		},
+		nil,
+		nil,
+	)
+
+	copy, graph, ok, err := store.CreateProjectWorkflow("sample", WorkflowInput{Name: "Release Guard", Summary: "Project release checklist.", Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("create project workflow: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected project workflow create to find project")
+	}
+	if copy.Kind != "workflow" || copy.Origin != nil || copy.Status != "detached" {
+		t.Fatalf("unexpected created project workflow copy: %#v", copy)
+	}
+	if graph.ID != "release-guard" || len(graph.Nodes) == 0 {
+		t.Fatalf("unexpected created project workflow graph: %#v", graph)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "release-guard.md")); err != nil {
+		t.Fatalf("expected project workflow markdown file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "release-guard.graph.json")); err != nil {
+		t.Fatalf("expected project workflow graph file: %v", err)
+	}
+
+	ok, err = store.DeleteProjectWorkflow("sample", copy.ID)
+	if err != nil {
+		t.Fatalf("delete project workflow: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected project workflow delete to find copy")
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "release-guard.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected project workflow markdown to be removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "release-guard.graph.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected project workflow graph to be removed, err=%v", err)
+	}
+}
+
+func TestImportProjectWritesRootNexusFileAndGitIgnore(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, ".claude/rules/01-communication.md", "communication")
+
+	store := NewStoreFromData(BootstrapData{
+		TemplateLibrary: TemplateLibrary{
+			Rules: []TemplateItem{{
+				ID:      "01-communication",
+				Kind:    "rule",
+				Name:    "01-communication",
+				Version: 1,
+				Content: "communication",
+			}},
+		},
+		ProjectConfigSets: map[string][]ProjectCopy{},
+	}, nil, nil)
+
+	project, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+
+	nexusPath := filepath.Join(root, ".nexus")
+	data, err := os.ReadFile(nexusPath)
+	if err != nil {
+		t.Fatalf("expected root .nexus file: %v", err)
+	}
+	content := string(data)
+	for _, token := range []string{`"schemaVersion": 1`, `"projectId": "btd-game-server"`, `"projectName": "btd-game-server"`, `"localPath": "`} {
+		if !strings.Contains(content, token) {
+			t.Fatalf("expected .nexus metadata token %s, got %s", token, content)
+		}
+	}
+	if project.LocalConfigPath != ".nexus" || !project.LocalConfigIgnored || project.LocalPath == "" || project.RepoKey == "" {
+		t.Fatalf("expected project local import fields, got %#v", project)
+	}
+
+	gitignore, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		t.Fatalf("expected .gitignore: %v", err)
+	}
+	if count := strings.Count(string(gitignore), ".nexus"); count != 1 {
+		t.Fatalf("expected one .nexus ignore rule, got %d in %q", count, string(gitignore))
+	}
+
+	if _, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root}); err != nil {
+		t.Fatalf("repeat import project: %v", err)
+	}
+	gitignore, err = os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		t.Fatalf("expected .gitignore after repeat import: %v", err)
+	}
+	if count := strings.Count(string(gitignore), ".nexus"); count != 1 {
+		t.Fatalf("expected repeat import to keep one .nexus ignore rule, got %d in %q", count, string(gitignore))
+	}
+
+	ok, err := store.DeleteProject(project.ID)
+	if err != nil {
+		t.Fatalf("delete project: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected delete project to remove imported project")
+	}
+	if _, err := os.Stat(nexusPath); !os.IsNotExist(err) {
+		t.Fatalf("expected delete project to remove root .nexus file, err=%v", err)
+	}
+	gitignore, err = os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		t.Fatalf("expected .gitignore after delete: %v", err)
+	}
+	if count := strings.Count(string(gitignore), ".nexus"); count != 1 {
+		t.Fatalf("expected delete to keep one .nexus ignore rule, got %d in %q", count, string(gitignore))
+	}
+}
+
+func TestImportProjectMigratesLegacyNexusWorkflowDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, ".claude/workflows/go-feature-development.md", "workflow markdown")
+	writeTestFile(t, root, ".nexus/workflows/go-feature-development.json", `{"id":"go-feature-development","name":"feature graph","nodes":[],"edges":[]}`)
+
+	store := NewStoreFromData(BootstrapData{ProjectConfigSets: map[string][]ProjectCopy{}}, nil, nil)
+
+	if _, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root}); err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+
+	if stat, err := os.Stat(filepath.Join(root, ".nexus")); err != nil || stat.IsDir() {
+		t.Fatalf("expected .nexus root file after migration, stat=%#v err=%v", stat, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "go-feature-development.graph.json")); err != nil {
+		t.Fatalf("expected migrated workflow graph: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".nexus", "workflows", "go-feature-development.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy workflow graph to be removed, err=%v", err)
+	}
+}
+
+func TestStoreRescanProjectRefreshesConfigSet(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, ".claude/rules/01-communication.md", "communication")
+
+	store := NewStoreFromData(BootstrapData{
+		TemplateLibrary: TemplateLibrary{
+			Rules: []TemplateItem{{
+				ID:      "01-communication",
+				Kind:    "rule",
+				Name:    "01-communication",
+				Version: 1,
+				Content: "communication",
+			}},
+			Skills: []TemplateItem{{
+				ID:      "testing",
+				Kind:    "skill",
+				Name:    "testing",
+				Version: 1,
+				Entry:   filepath.Join(root, "template-testing.md"),
+			}},
+		},
+		ProjectConfigSets: map[string][]ProjectCopy{},
+	}, nil, nil)
+
+	project, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+	if project.ConfigSummary.Skills != 0 {
+		t.Fatalf("expected no skills before rescan, got %#v", project.ConfigSummary)
+	}
+
+	writeTestFile(t, root, ".claude/skills/testing.md", "project testing skill")
+	rescanned, copies, ok, err := store.RescanProject(project.ID)
+	if err != nil {
+		t.Fatalf("rescan project: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected project to rescan")
+	}
+	if rescanned.ConfigSummary.Skills != 1 {
+		t.Fatalf("expected rescan summary to include skill, got %#v", rescanned.ConfigSummary)
+	}
+	assertProjectCopy(t, copies, "skill", "testing", "project_modified", ".claude/skills/testing.md")
+	metadata, ok := readProjectLocalMetadata(root)
+	if !ok || metadata.LastScannedAt == "" {
+		t.Fatalf("expected rescan to refresh .nexus metadata, got %#v ok=%v", metadata, ok)
+	}
+}
+
+func TestTemplateHashPrefersDeclaredFilesOverSourcePaths(t *testing.T) {
+	root := t.TempDir()
+	templateMarkdown := filepath.Join(root, "workflow.md")
+	templateGraph := filepath.Join(root, "workflow.graph.json")
+	routingSource := filepath.Join(root, "go-00-routing.md")
+	writeTestFile(t, root, "workflow.md", "workflow")
+	writeTestFile(t, root, "workflow.graph.json", `{"id":"workflow","nodes":[],"edges":[]}`)
+	writeTestFile(t, root, "go-00-routing.md", "routing source")
+
+	withRoutingSource := templateContentHash(TemplateItem{
+		ID:          "workflow",
+		Kind:        "workflow",
+		Entry:       templateMarkdown,
+		Files:       []string{templateMarkdown, templateGraph},
+		SourcePaths: []string{templateMarkdown, templateGraph, routingSource},
+	})
+	withoutRoutingSource := templateContentHash(TemplateItem{
+		ID:    "workflow",
+		Kind:  "workflow",
+		Entry: templateMarkdown,
+		Files: []string{templateMarkdown, templateGraph},
+	})
+
+	if withRoutingSource != withoutRoutingSource {
+		t.Fatalf("expected source-only routing references not to affect hash, got %s and %s", withRoutingSource, withoutRoutingSource)
+	}
+}
+
+func TestApplyProjectLocalMetadataReadsRootNexusFile(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, ".nexus", `{
+  "schemaVersion": 1,
+  "projectId": "btd-game-server",
+  "projectName": "btd-game-server",
+  "repoKey": "github.com/example/btd-game-server",
+  "localPath": "D:\\workspace\\src\\btd-game-server",
+  "importedAt": "2026-06-20T10:00:00+08:00",
+  "lastScannedAt": "2026-06-20T10:30:00+08:00"
+}`)
+	writeTestFile(t, root, ".gitignore", "build/\n.nexus\n")
+
+	project := applyProjectLocalMetadata(Project{
+		ID:   "btd-game-server",
+		Name: "btd-game-server",
+		Path: root,
+	})
+
+	if project.RepoKey != "github.com/example/btd-game-server" {
+		t.Fatalf("expected repo key from .nexus metadata, got %#v", project)
+	}
+	if project.LocalPath != `D:\workspace\src\btd-game-server` {
+		t.Fatalf("expected local path from .nexus metadata, got %#v", project)
+	}
+	if project.LocalConfigPath != ".nexus" || !project.LocalConfigIgnored {
+		t.Fatalf("expected .nexus local config fields, got %#v", project)
+	}
+}
+
+func TestReadProjectWorkflowGraphAcceptsUTF8BOM(t *testing.T) {
+	root := t.TempDir()
+	graphPath := filepath.Join(root, ".claude", "workflows", "go-feature-development.graph.json")
+	if err := os.MkdirAll(filepath.Dir(graphPath), 0o755); err != nil {
+		t.Fatalf("create graph dir: %v", err)
+	}
+	data := append([]byte{0xef, 0xbb, 0xbf}, []byte(`{"id":"go-feature-development","name":"feature graph","nodes":[],"edges":[]}`)...)
+	if err := os.WriteFile(graphPath, data, 0o644); err != nil {
+		t.Fatalf("write bom graph: %v", err)
+	}
+
+	graph, ok := readProjectWorkflowGraph(root, ProjectCopy{
+		Kind: "workflow",
+		Name: "feature graph",
+		Path: ".claude/workflows/go-feature-development.md",
+	})
+	if !ok {
+		t.Fatal("expected BOM-prefixed graph JSON to be readable")
+	}
+	if graph.ID != "go-feature-development" {
+		t.Fatalf("expected graph id, got %#v", graph)
+	}
+}
+
+func writeTestFile(t *testing.T, root string, relative string, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create test dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write test file %s: %v", relative, err)
+	}
+}
+
+func assertProjectCopy(t *testing.T, copies []ProjectCopy, kind string, name string, status string, pathSuffix string) ProjectCopy {
+	t.Helper()
+	for _, copy := range copies {
+		if copy.Kind == kind && copy.Name == name {
+			if copy.Status != status {
+				t.Fatalf("expected %s/%s status %s, got %#v", kind, name, status, copy)
+			}
+			if !strings.HasSuffix(filepath.ToSlash(copy.Path), filepath.ToSlash(pathSuffix)) {
+				t.Fatalf("expected %s/%s path suffix %s, got %q", kind, name, pathSuffix, copy.Path)
+			}
+			if copy.SyncMode != "manual" || copy.LocalVersion != 1 {
+				t.Fatalf("expected manual v1 copy for %s/%s, got %#v", kind, name, copy)
+			}
+			return copy
+		}
+	}
+	t.Fatalf("expected %s/%s copy in %#v", kind, name, copies)
+	return ProjectCopy{}
+}

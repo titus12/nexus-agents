@@ -1,11 +1,10 @@
 <div id="page-skills" class="page">
   <div class="page-header">
-    <div class="page-description">按模块管理领域知识，支持从项目 `.claude/skills` 导入和后续提升到全局库。</div>
+    <div class="page-description">Template Library for reusable skill files. Btd skills are copied into templates/skills first, then Go-related files use a go- prefix; V1 supports manual template creation, while project edits stay local.</div>
     <button class="btn-primary" type="button" onclick="openSkillDrawer('skill-standard')">新建 Skill</button>
   </div>
 
   <div class="toolbar">
-    <div class="project-filter" id="skill-project-filter"></div>
     <input type="search" placeholder="搜索 skill / 模块 / 触发条件" style="max-width:340px">
     <select style="width:160px"><option>全部模块</option><option>config</option><option>review</option><option>safety</option></select>
     <span class="chip chip-teal">12 imported</span>

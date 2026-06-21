@@ -1,11 +1,10 @@
 <div id="page-workflows" class="page">
   <div class="page-header">
-    <div class="page-description">创建、查询、修改、删除工作流，并用节点画布编排角色输入、输出和控制流。</div>
+    <div class="page-description">Workflow Template Library for reusable agent processes. Project workflows can copy templates, diverge locally, and sync manually through diff preview.</div>
     <button class="btn-primary" type="button" onclick="createWorkflow()">新建工作流</button>
   </div>
 
   <div class="toolbar">
-    <div class="project-filter" id="workflow-project-filter"></div>
     <input id="workflow-search" type="search" placeholder="查询工作流 / 项目 / 标签" style="max-width:340px" oninput="renderWorkflowList()">
     <select style="width:150px" onchange="renderWorkflowList()">
       <option>全部状态</option>

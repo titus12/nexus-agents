@@ -1,0 +1,168 @@
+{
+    "id":  "go-refactor",
+    "name":  "go-refactor",
+    "nodes":  [
+                  {
+                      "id":  "trigger",
+                      "type":  "input",
+                      "category":  "event",
+                      "label":  "--refactor",
+                      "agent":  "-",
+                      "detail":  "User input starts this workflow.",
+                      "x":  48,
+                      "y":  210
+                  },
+                  {
+                      "id":  "route",
+                      "type":  "condition",
+                      "category":  "condition",
+                      "label":  "routing match",
+                      "agent":  "sisyphus",
+                      "detail":  "Match the command section in .claude/rules/go-00-routing.md.",
+                      "x":  300,
+                      "y":  210
+                  },
+                  {
+                      "id":  "owner",
+                      "type":  "agent",
+                      "category":  "action",
+                      "label":  "prometheus",
+                      "agent":  "prometheus",
+                      "detail":  "Stage a Go refactor while keeping external behavior unchanged.",
+                      "x":  560,
+                      "y":  210
+                  },
+                  {
+                      "id":  "skills",
+                      "type":  "transform",
+                      "category":  "data",
+                      "label":  "load skills",
+                      "agent":  "skill resolver",
+                      "detail":  "Load required rules and skills for this workflow.",
+                      "x":  820,
+                      "y":  210
+                  },
+                  {
+                      "id":  "verify",
+                      "type":  "human_approval",
+                      "category":  "human",
+                      "label":  "checkpoint",
+                      "agent":  "owner",
+                      "detail":  "Report progress and wait when scope or risk is unclear.",
+                      "x":  1080,
+                      "y":  210
+                  },
+                  {
+                      "id":  "output",
+                      "type":  "output",
+                      "category":  "data",
+                      "label":  "deliver",
+                      "agent":  "prometheus",
+                      "detail":  "Return result, evidence, and next action.",
+                      "x":  1340,
+                      "y":  210
+                  },
+                  {
+                      "id":  "logic",
+                      "type":  "agent",
+                      "category":  "action",
+                      "label":  "reviewer-logic",
+                      "agent":  "reviewer-logic",
+                      "detail":  "Check control flow, state, transactions, nil handling, and boundaries.",
+                      "x":  820,
+                      "y":  70
+                  },
+                  {
+                      "id":  "perf",
+                      "type":  "agent",
+                      "category":  "action",
+                      "label":  "reviewer-perf",
+                      "agent":  "reviewer-perf",
+                      "detail":  "Check hot paths, allocations, locks, and goroutines.",
+                      "x":  820,
+                      "y":  350
+                  },
+                  {
+                      "id":  "security",
+                      "type":  "agent",
+                      "category":  "action",
+                      "label":  "reviewer-security",
+                      "agent":  "reviewer-security",
+                      "detail":  "Check permissions, validation, leakage, replay, and economy risks.",
+                      "x":  1080,
+                      "y":  350
+                  },
+                  {
+                      "id":  "join",
+                      "type":  "join",
+                      "category":  "data",
+                      "label":  "merge findings",
+                      "agent":  "sisyphus",
+                      "detail":  "Deduplicate findings and sort by severity.",
+                      "x":  1080,
+                      "y":  70
+                  }
+              ],
+    "edges":  [
+                  {
+                      "from":  "trigger",
+                      "to":  "route",
+                      "label":  "command"
+                  },
+                  {
+                      "from":  "route",
+                      "to":  "owner",
+                      "label":  "matched"
+                  },
+                  {
+                      "from":  "owner",
+                      "to":  "skills",
+                      "label":  "context"
+                  },
+                  {
+                      "from":  "skills",
+                      "to":  "verify",
+                      "label":  "steps"
+                  },
+                  {
+                      "from":  "verify",
+                      "to":  "output",
+                      "label":  "approved"
+                  },
+                  {
+                      "from":  "owner",
+                      "to":  "logic",
+                      "label":  "diff"
+                  },
+                  {
+                      "from":  "owner",
+                      "to":  "perf",
+                      "label":  "diff"
+                  },
+                  {
+                      "from":  "owner",
+                      "to":  "security",
+                      "label":  "diff"
+                  },
+                  {
+                      "from":  "logic",
+                      "to":  "join",
+                      "label":  "findings"
+                  },
+                  {
+                      "from":  "perf",
+                      "to":  "join",
+                      "label":  "findings"
+                  },
+                  {
+                      "from":  "security",
+                      "to":  "join",
+                      "label":  "findings"
+                  },
+                  {
+                      "from":  "join",
+                      "to":  "verify",
+                      "label":  "report"
+                  }
+              ]
+}

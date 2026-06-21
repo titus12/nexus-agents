@@ -15,6 +15,10 @@ REQUIRED_FILES = [
     "serve.ps1",
     "pages/projects.html",
     "pages/project-detail.html",
+    "pages/project-agents.html",
+    "pages/project-rules.html",
+    "pages/project-skills.html",
+    "pages/project-workflows.html",
     "pages/agents.html",
     "pages/rules.html",
     "pages/skills.html",
@@ -28,6 +32,7 @@ REQUIRED_FILES = [
     "overlays/drawer-skill.html",
     "overlays/drawer-node-config.html",
     "overlays/drawer-workflow-run.html",
+    "overlays/drawer-project-copy.html",
     "overlays/drawer-route.html",
     "overlays/drawer-proxy-test.html",
     "js/mock-data.js",
@@ -38,9 +43,23 @@ REQUIRED_FILES = [
     "js/nav.js",
 ]
 
+REQUIRED_PLAN_FILES = [
+    "00-prototype-roadmap.md",
+    "01-design-shell-and-style.md",
+    "02-project-management-prototype.md",
+    "03-agent-rule-skill-prototype.md",
+    "04-workflow-editor-prototype.md",
+    "05-model-proxy-prototype.md",
+    "06-prototype-verification.md",
+]
+
 REQUIRED_PAGE_IDS = {
     "projects": "page-projects",
     "project-detail": "page-project-detail",
+    "project-agents": "page-project-agents",
+    "project-rules": "page-project-rules",
+    "project-skills": "page-project-skills",
+    "project-workflows": "page-project-workflows",
     "agents": "page-agents",
     "rules": "page-rules",
     "skills": "page-skills",
@@ -56,6 +75,7 @@ REQUIRED_OVERLAYS = {
     "drawer-skill": "drawer-skill",
     "drawer-node-config": "drawer-node-config",
     "drawer-workflow-run": "drawer-workflow-run",
+    "drawer-project-copy": "drawer-project-copy",
     "drawer-route": "drawer-route",
     "drawer-proxy-test": "drawer-proxy-test",
 }
@@ -71,6 +91,7 @@ REQUIRED_FUNCTIONS = [
     "openNodeConfig",
     "simulateWorkflowRun",
     "openWorkflowRun",
+    "openProjectCopyDrawer",
     "createWorkflow",
     "selectWorkflow",
     "editWorkflow",
@@ -87,6 +108,9 @@ REQUIRED_CARD_MOUNTS = {
     "agents": "agent-card-grid",
     "rules": "rule-card-grid",
     "skills": "skill-card-grid",
+    "project-agents": "project-agent-card-grid",
+    "project-rules": "project-rule-card-grid",
+    "project-skills": "project-skill-card-grid",
 }
 
 
@@ -130,6 +154,8 @@ def function_body(source: str, name: str) -> str:
 def main() -> None:
     for rel in REQUIRED_FILES:
         expect((DESIGN / rel).is_file(), f"missing required file: design/{rel}")
+    for rel in REQUIRED_PLAN_FILES:
+        expect((ROOT / "docs" / "plans" / rel).is_file(), f"missing required plan file: docs/plans/{rel}")
 
     demo = read(DESIGN / "demo.html")
     expect('href="shared.css' in demo, "demo.html must reference shared.css")
@@ -187,11 +213,35 @@ def main() -> None:
         expect(token in workflow_html, f"workflows.html missing workflow management token {token}")
     expect("Node Palette" not in workflow_html, "workflows.html must not show Node Palette before editing")
     expect("openWorkflowRun" not in workflow_html, "workflows page header must not show last run action")
-    expect("workflow-project-filter" in workflow_html, "workflows.html missing project filter mount")
+    expect("workflow-project-filter" not in workflow_html, "global workflows template page must not have a project filter")
     expect("openImportProject()" not in read(DESIGN / "pages" / "projects.html"), "projects page header must not show duplicate import action")
     expect("openProxyTest()" not in read(DESIGN / "pages" / "model-routes.html"), "model routes page header must not show duplicate proxy test action")
-    expect("rule-project-filter" in read(DESIGN / "pages" / "rules.html"), "rules.html missing project filter mount")
-    expect("skill-project-filter" in read(DESIGN / "pages" / "skills.html"), "skills.html missing project filter mount")
+    for rel in ["agents", "rules", "skills", "workflows"]:
+        html = read(DESIGN / "pages" / f"{rel}.html")
+        expect("project-filter" not in html, f"global {rel}.html must not expose a project filter")
+    for rel, mount in [
+        ("project-agents", "project-agent-card-grid"),
+        ("project-rules", "project-rule-card-grid"),
+        ("project-skills", "project-skill-card-grid"),
+    ]:
+        html = read(DESIGN / "pages" / f"{rel}.html")
+        expect(mount in html, f"{rel}.html missing project resource card grid")
+        expect("Project Config Set" in html, f"{rel}.html must be scoped to Project Config Set")
+    project_workflows_html = read(DESIGN / "pages" / "project-workflows.html")
+    for token in ["workflow-shell", "project-workflow-list", "project-workflow-canvas", "project-workflow-inspector", "project-workflow-palette"]:
+        expect(token in project_workflows_html, f"project-workflows.html must use workflow editor layout token {token}")
+    expect("project-workflow-card-grid" not in project_workflows_html, "project workflows must not use project copy card grid")
+    project_detail_html = read(DESIGN / "pages" / "project-detail.html")
+    expect("Project Config Set" in project_detail_html, "project detail must expose Project Config Set")
+    expect("project-config-set" in project_detail_html, "project detail missing Project Config Set mount")
+    for token in ["project-sources", "project-health"]:
+        expect(token not in project_detail_html, f"project detail must not keep empty legacy overview panel: {token}")
+    for token in ["project-sync-summary", "project-kind-summary", "project-recent-copies"]:
+        expect(token in project_detail_html, f"project detail missing V1 config overview mount: {token}")
+    expect("Template Library" in read(DESIGN / "pages" / "agents.html"), "agents page must be positioned as Template Library")
+    expect("Template Library" in read(DESIGN / "pages" / "rules.html"), "rules page must be positioned as Template Library")
+    expect("Template Library" in read(DESIGN / "pages" / "skills.html"), "skills page must be positioned as Template Library")
+    expect("global service" in read(DESIGN / "pages" / "model-routes.html"), "model routes page must say routes are global service config")
 
     for overlay_id, root_id in REQUIRED_OVERLAYS.items():
         html = read(DESIGN / "overlays" / f"{overlay_id}.html")
@@ -210,7 +260,7 @@ def main() -> None:
     for token in ["editWorkflow", "deleteWorkflow", "workflow.nodeCount", "workflow.edgeCount"]:
         expect(token in workflow_list, f"workflow cards missing V1 management field/action: {token}")
     for token in ["workflowProjectFilter", "renderWorkflowProjectFilter", "setWorkflowProjectFilter"]:
-        expect(token in workflow_js, f"workflow project filtering missing {token}")
+        expect(token not in workflow_js, f"global workflow template page must not keep project filtering: {token}")
     expect("workflowNodeCategory" in workflow_js, "workflow nodes must classify AI workflow node categories")
     expect("node-detail" in workflow_js, "workflow node renderer must expose a clampable detail area")
     for token in ["node-action", "node-control", "node-condition", "node-data", "node-human", "node-event", "node-decorator"]:
@@ -218,17 +268,38 @@ def main() -> None:
 
     pages_js = read(DESIGN / "js/pages.js")
     common_js = read(DESIGN / "js/common.js")
+    for token in ["renderProjectWorkflowCanvas", "renderProjectWorkflowList", "project-workflow-list", "project-workflow-canvas", "project-workflow-inspector"]:
+        expect(token in workflow_js + pages_js, f"project workflows must reuse workflow editor style: {token}")
     for token in ["asset-icon-employee", "asset-icon-handbook", "asset-icon-manual"]:
         expect(token in pages_js, f"pages.js missing semantic asset icon {token}")
+    for token in ["renderProjectConfigSet", "renderProjectResourcePage", "renderProjectResourceCard", "openProjectResource", "templateUsageCount", "templateMeta", "syncStatusChip"]:
+        expect(token in pages_js, f"template/project sync rendering missing {token}")
+    project_detail = function_body(pages_js, "renderProjectDetail")
+    for token in ["project.sources", "project.health", "project-sources", "project-health"]:
+        expect(token not in project_detail, f"project detail must derive overview from Project Config Set, not legacy empty data: {token}")
+    for token in ["renderProjectSyncSummary", "renderProjectKindSummary", "renderProjectRecentCopies"]:
+        expect(token in pages_js, f"project detail missing useful V1 overview renderer: {token}")
+    project_config_set = function_body(pages_js, "renderProjectConfigSet")
+    for token in ["syncTemplateToProject", "keepProjectVersion", "detachTemplateCopy"]:
+        expect(token not in project_config_set, f"project overview config list must keep manual sync actions in drawer: {token}")
+    project_resource_cards = function_body(pages_js, "renderProjectResourceCard")
+    for token in ["syncTemplateToProject", "keepProjectVersion", "detachTemplateCopy"]:
+        expect(token not in project_resource_cards, f"project resource cards must move sync actions into drawer: {token}")
+    for token in ["openProjectCopyDrawer", "asset-card-body", "asset-card-footer", "asset-chip-row"]:
+        expect(token in project_resource_cards, f"project resource cards must keep template-style card layout and drawer entry: {token}")
     for token in ["renderAgentProjectFilter", "renderRuleProjectFilter", "renderSkillProjectFilter", "setAgentProjectFilter", "setRuleProjectFilter", "setSkillProjectFilter"]:
-        expect(token in pages_js, f"rules/skills project filtering missing {token}")
-    expect("project-filter-chip" not in pages_js, "project filters must use dropdown selects, not many project chips")
-    expect("project-filter-select" in pages_js, "project filters must render dropdown selects")
+        expect(token not in pages_js, f"global template pages must not use project filtering: {token}")
+    for token in ["project-child", "project-agents", "project-rules", "project-skills", "project-workflows"]:
+        expect(token in pages_js + nav + demo, f"project sidebar tree missing {token}")
+    expect("project-filter-chip" not in pages_js, "project filters must not use project chips")
     agent_cards = function_body(pages_js, "renderAgentsPage")
     for token in ["agent.route", "agent.tools", "agent.mcp", "agent.source", "agent.projection"]:
         expect(token not in agent_cards, f"agent cards must move detailed field out of card: {token}")
     for token in ["agentDescription(agent)", "agent.model", "agent.rules", "agent.skills", "statusChip(agent.status"]:
         expect(token in agent_cards, f"agent cards missing compact V1 field: {token}")
+    for token in ["templateMeta(agent)"]:
+        expect(token in agent_cards, f"agent cards must show Template Library metadata: {token}")
+    expect("\u7f16\u8f91" not in agent_cards and "\u7f02\u6811\u7f02" not in agent_cards, "agent template cards must not expose an edit button")
     agent_body = re.search(r"<div class=\"asset-card-body\">(?P<body>.*?)<div class=\"asset-card-footer\">", agent_cards, re.S)
     expect(agent_body is not None, "agent cards missing body/footer structure")
     expect("asset-chip-row" not in agent_body.group("body"), "agent model/rule/skill chips must live in the footer")
@@ -236,8 +307,9 @@ def main() -> None:
         expect(token not in agent_cards, f"agent cards must not repeat role metadata in footer: {token}")
     rule_cards = function_body(pages_js, "renderRulesPage")
     expect("rule.projection" not in rule_cards, "rule cards must move Codex projection into drawer")
-    for token in ["rule.source", "rule.summary", "rule.content", "statusChip(rule.status"]:
+    for token in ["rule.source", "rule.summary", "rule.content", "templateMeta(rule)", "statusChip(rule.status"]:
         expect(token in rule_cards, f"rule cards missing compact V1 field: {token}")
+    expect("\u7f16\u8f91" not in rule_cards and "\u7f02\u6811\u7f02" not in rule_cards, "rule template cards must not expose an edit button")
     for token in ["员工手册", "${chip(rule.scope"]:
         expect(token not in rule_cards, f"rule cards must not repeat scope/category chips: {token}")
     expect("rule.scope" not in rule_cards, "rule cards must not repeat scope/category metadata")
@@ -245,8 +317,9 @@ def main() -> None:
     skill_cards = function_body(pages_js, "renderSkillsPage")
     for token in ["skill.trigger", "skill.module"]:
         expect(token not in skill_cards, f"skill cards must move detailed field out of card: {token}")
-    for token in ["skill.source", "skill.appliesTo", "skill.purpose", "statusChip(skill.status"]:
+    for token in ["skill.source", "skill.appliesTo", "skill.purpose", "skill.entry", "templateMeta(skill)", "statusChip(skill.status"]:
         expect(token in skill_cards, f"skill cards missing compact V1 field: {token}")
+    expect("\u7f16\u8f91" not in skill_cards and "\u7f02\u6811\u7f02" not in skill_cards, "skill template cards must not expose an edit button")
     skill_body = re.search(r"<div class=\"asset-card-body\">(?P<body>.*?)<div class=\"asset-card-footer\">", skill_cards, re.S)
     expect(skill_body is not None, "skill cards missing body/footer structure")
     expect("asset-chip-row" not in skill_body.group("body"), "skill appliesTo chips must live in the footer")
@@ -267,18 +340,59 @@ def main() -> None:
         expect("asset-edit-input" in body, f"{fn} must use editable inputs for metadata")
         expect("save" in body.lower(), f"{fn} must expose a save action for edited drawer information")
         expect("setDrawerFooter" in body, f"{fn} must use stale-safe drawer footer update")
+        expect("Template Metadata" in body, f"{fn} must show Template Metadata")
+    for token in ["origin.templateId", "baseVersion", "baseHash", "localVersion", "detachTemplateCopy", "keepProjectVersion", "syncTemplateToProject"]:
+        expect(token in common_js + pages_js, f"project copy manual sync missing {token}")
+    for token in ["function openProjectCopyDrawer", "function renderProjectCopyDrawerContent", "drawer-project-copy"]:
+        expect(token in common_js + nav, f"project copy drawer missing {token}")
+    project_copy_drawer = function_body(common_js, "renderProjectCopyDrawerContent")
+    for token in ["syncTemplateToProject", "origin.templateId", "baseVersion", "baseHash", "localVersion", "syncMode"]:
+        expect(token in project_copy_drawer, f"project copy drawer must expose detail/action token: {token}")
+    for token in ["keepProjectVersion", "detachTemplateCopy"]:
+        expect(token not in project_copy_drawer, f"project copy drawer must align with normal detail drawers and avoid extra decision action: {token}")
+    expect("promote" not in (common_js + pages_js).lower(), "V1 must not expose project-to-template promotion")
 
     mock_js = read(DESIGN / "js/mock-data.js")
-    for token in ["project: \"all\"", "project: \"btd-game-server\"", "content:"]:
+    for token in ["project: \"all\"", "project: \"btd-game-server\"", "content:", "templateId:", "baseVersion:", "baseHash:", "localVersion:", "syncMode: \"manual\"", "templates/skills/go-testing.md", "projectConfigSets", "status: \"diverged\"", "status: \"detached\""]:
         expect(token in mock_js, f"mock data missing project/content token {token}")
+
+    plan_docs = {
+        rel: read(ROOT / "docs" / "plans" / rel)
+        for rel in REQUIRED_PLAN_FILES
+    }
+    for rel, text in plan_docs.items():
+        expect("Design Baseline" in text, f"plan must treat design as accepted baseline: {rel}")
+        expect("design/" in text or "design\\" in text, f"plan must reference design source of truth: {rel}")
+    all_plan_text = "\n".join(plan_docs.values())
+    for token in [
+        "Template Library",
+        "Project Config Set",
+        "origin",
+        "manual sync",
+        "Global Agents, Rules, Skills, and Workflows do not have project dropdown filters",
+        "Project Overview does not show legacy empty panels",
+        "`保留项目` is not exposed",
+        "Project Workflows use the workflow editor layout",
+        "Model Proxy is global service configuration",
+    ]:
+        expect(token in all_plan_text, f"plans missing accepted design decision: {token}")
+    for token in [
+        "Project dropdown filters can show",
+        "Project item actions include sync template to project, keep project version",
+        "displayed discovered config sources",
+        "健康检查</div>",
+        "project-sources\"></div>",
+    ]:
+        expect(token not in all_plan_text, f"plans still contain outdated design direction: {token}")
 
     css = read(DESIGN / "shared.css")
     for token in ["asset-icon-employee", "asset-icon-handbook", "asset-icon-manual", "asset-icon-process"]:
         expect(token in css, f"shared.css missing icon style {token}")
-    expect("minmax(420px" in css or "minmax(430px" in css or "minmax(440px" in css, "asset cards must use wide card grid proportions")
-    for token in ["height: 212px;", ".asset-grid.compact { grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); }", "grid-template-columns: 46px minmax(0, 1fr) max-content;", ".asset-card-header > div:nth-child(2)", "-webkit-line-clamp: 3;", ".asset-chip-row { display: flex; flex-wrap: nowrap; gap: 6px; min-height: 26px; overflow: hidden; }", ".asset-card-footer .asset-chip-row"]:
+    expect("grid-template-columns: repeat(5, minmax(0, 1fr));" in css, "asset cards must use five-column desktop grid proportions")
+    for token in ["height: 212px;", ".asset-grid.compact { grid-template-columns: repeat(5, minmax(0, 1fr)); }", "grid-template-columns: 46px minmax(0, 1fr) max-content;", ".asset-card-header > div:nth-child(2)", "-webkit-line-clamp: 3;", ".asset-chip-row { display: flex; flex-wrap: nowrap; gap: 6px; min-height: 26px; overflow: hidden; }", ".asset-card-footer .asset-chip-row"]:
         expect(token in css, f"asset cards must align Rules/Skills with Agents sizing: {token}")
     expect(".asset-card-footer .asset-actions:only-child { margin-left: auto; }" in css, "asset footer actions must align right when stats are removed")
+    expect("height: 232px;" not in css, "project copy cards must not be taller than template cards")
     for token in ["page-description", "project-filter", "project-filter-select", "workflow-library .panel-header", "drawer-editor-layout", "asset-editor-textarea", "asset-meta-strip"]:
         expect(token in css, f"shared.css missing layout style {token}")
     expect("project-filter-chip" not in css, "shared.css must not keep project chip styles for V1 project selection")
@@ -286,6 +400,8 @@ def main() -> None:
         expect(token in css, f"workflow node cards must use fixed dimensions and truncation: {token}")
     for token in [".workflow-node.node-action", ".workflow-node.node-control", ".workflow-node.node-condition", ".workflow-node.node-data", ".workflow-node.node-human", ".workflow-node.node-event", ".workflow-node.node-decorator", ".node-type-badge"]:
         expect(token in css, f"shared.css missing workflow node category style {token}")
+    for token in [".workflow-list { display: grid; gap: 10px; margin-bottom: 16px; min-width: 0; overflow-x: hidden; }", ".workflow-card {\n  min-width: 0;", ".workflow-card-main {\n  min-width: 0;"]:
+        expect(token in css, f"workflow cards must not overflow project workflow library: {token}")
     for token in [
         "font-size: 16px;",
         ".page-description {\n  max-width: 780px",
