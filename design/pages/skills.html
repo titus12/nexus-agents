@@ -1,0 +1,16 @@
+<div id="page-skills" class="page">
+  <div class="page-header">
+    <div class="page-description">Template Library for reusable skill files. Btd skills are copied into templates/skills first, then Go-related files use a go- prefix; V1 supports manual template creation, while project edits stay local.</div>
+    <button class="btn-primary" type="button" onclick="openSkillDrawer('skill-standard')">新建 Skill</button>
+  </div>
+
+  <div class="toolbar">
+    <input type="search" placeholder="搜索 skill / 模块 / 触发条件" style="max-width:340px">
+    <select style="width:160px"><option>全部模块</option><option>config</option><option>review</option><option>safety</option></select>
+    <span class="chip chip-teal">12 imported</span>
+    <div class="toolbar-spacer"></div>
+    <button class="btn-secondary" type="button" onclick="showToast('已模拟同步 .claude/skills')">同步来源</button>
+  </div>
+
+  <div class="asset-grid" id="skill-card-grid"></div>
+</div>

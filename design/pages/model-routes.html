@@ -1,0 +1,38 @@
+<div id="page-model-routes" class="page">
+  <div class="page-description">Model Proxy is global service configuration. Projects and templates reference provider routes, but routes do not participate in Template Library sync.</div>
+
+  <div class="grid-3">
+    <section class="panel panel-pad">
+      <div class="section-title">LiteLLM Sidecar</div>
+      <div style="margin-top:10px"><span class="chip chip-green">Ready</span> <span class="chip chip-purple">9090</span></div>
+      <div class="form-hint mono">D:\workspace\src\litellm / v1.89.1</div>
+    </section>
+    <section class="panel panel-pad">
+      <div class="section-title">Responses Tool Patch</div>
+      <div style="margin-top:10px"><span class="chip chip-green">Checked</span> <span class="chip chip-teal">drop unknown tools</span></div>
+      <div class="form-hint">避免 namespace/custom/tool_search 透传给 DeepSeek。</div>
+    </section>
+    <section class="panel panel-pad">
+      <div class="section-title">Auth Policy</div>
+      <div style="margin-top:10px"><span class="chip chip-orange">Runtime env</span></div>
+      <div class="form-hint">API key 不写入仓库，只引用环境变量。</div>
+    </section>
+  </div>
+
+  <div class="section-header"><div class="section-title">Route Table</div></div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Client</th>
+          <th style="width:150px">Source</th>
+          <th style="width:190px">Target</th>
+          <th style="width:180px">Provider</th>
+          <th style="width:90px">状态</th>
+          <th style="width:120px;text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody id="route-rows"></tbody>
+    </table>
+  </div>
+</div>

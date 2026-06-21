@@ -1,0 +1,17 @@
+<div class="drawer-overlay" onclick="closeOverlay('drawer-route')"></div>
+<aside class="drawer" id="drawer-route">
+  <div class="drawer-header">
+    <div>
+      <div class="drawer-title" id="route-drawer-title">Route</div>
+      <div class="drawer-subtitle" id="route-drawer-subtitle">source -> target</div>
+    </div>
+    <div class="section-spacer"></div>
+    <button class="close-btn" type="button" onclick="closeOverlay('drawer-route')">x</button>
+  </div>
+  <div class="drawer-body" id="route-drawer-body"></div>
+  <div class="drawer-footer">
+    <button class="btn-secondary" type="button" onclick="closeOverlay('drawer-route')">关闭</button>
+    <button class="btn-primary" type="button" onclick="showToast('已模拟保存路由')">保存</button>
+  </div>
+</aside>
+

@@ -1,0 +1,93 @@
+{
+    "id":  "go-bugfix",
+    "name":  "go-bugfix",
+    "nodes":  [
+                  {
+                      "id":  "trigger",
+                      "type":  "input",
+                      "category":  "event",
+                      "label":  "--bug",
+                      "agent":  "-",
+                      "detail":  "User input starts this workflow.",
+                      "x":  48,
+                      "y":  210
+                  },
+                  {
+                      "id":  "route",
+                      "type":  "condition",
+                      "category":  "condition",
+                      "label":  "routing match",
+                      "agent":  "sisyphus",
+                      "detail":  "Match the command section in .claude/rules/go-00-routing.md.",
+                      "x":  300,
+                      "y":  210
+                  },
+                  {
+                      "id":  "owner",
+                      "type":  "agent",
+                      "category":  "action",
+                      "label":  "debugger",
+                      "agent":  "debugger",
+                      "detail":  "Investigate and fix a Go bug with root cause evidence and reproduction.",
+                      "x":  560,
+                      "y":  210
+                  },
+                  {
+                      "id":  "skills",
+                      "type":  "transform",
+                      "category":  "data",
+                      "label":  "load skills",
+                      "agent":  "skill resolver",
+                      "detail":  "Load required rules and skills for this workflow.",
+                      "x":  820,
+                      "y":  210
+                  },
+                  {
+                      "id":  "verify",
+                      "type":  "human_approval",
+                      "category":  "human",
+                      "label":  "checkpoint",
+                      "agent":  "owner",
+                      "detail":  "Report progress and wait when scope or risk is unclear.",
+                      "x":  1080,
+                      "y":  210
+                  },
+                  {
+                      "id":  "output",
+                      "type":  "output",
+                      "category":  "data",
+                      "label":  "deliver",
+                      "agent":  "debugger",
+                      "detail":  "Return result, evidence, and next action.",
+                      "x":  1340,
+                      "y":  210
+                  }
+              ],
+    "edges":  [
+                  {
+                      "from":  "trigger",
+                      "to":  "route",
+                      "label":  "command"
+                  },
+                  {
+                      "from":  "route",
+                      "to":  "owner",
+                      "label":  "matched"
+                  },
+                  {
+                      "from":  "owner",
+                      "to":  "skills",
+                      "label":  "context"
+                  },
+                  {
+                      "from":  "skills",
+                      "to":  "verify",
+                      "label":  "steps"
+                  },
+                  {
+                      "from":  "verify",
+                      "to":  "output",
+                      "label":  "approved"
+                  }
+              ]
+}

@@ -1,0 +1,22 @@
+<div id="page-project-agents" class="page">
+  <div class="page-header">
+    <div class="page-description">Project Config Set agents copied from the Template Library. Cards show local version, origin lineage, manual sync status, and project path.</div>
+  </div>
+
+  <div class="toolbar">
+    <input id="project-agent-search" type="search" placeholder="Search project agent / origin / path" style="max-width:340px" oninput="renderProjectAgentsPage()">
+    <select id="project-agent-status" style="width:180px" onchange="renderProjectAgentsPage()">
+      <option value="all">All sync status</option>
+      <option value="synced">Synced</option>
+      <option value="project_modified">Project Modified</option>
+      <option value="template_updated">Template Updated</option>
+      <option value="diverged">Diverged</option>
+      <option value="detached">Detached</option>
+    </select>
+    <div class="toolbar-spacer"></div>
+    <span class="chip chip-purple">Project Config Set</span>
+    <span class="chip chip-teal">Manual sync</span>
+  </div>
+
+  <div class="asset-grid" id="project-agent-card-grid"></div>
+</div>

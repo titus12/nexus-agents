@@ -1,0 +1,38 @@
+<div id="page-projects" class="page">
+  <div class="page-description">统一导入和管理项目内的 agents、rules、skills、MCP 和模型代理配置。</div>
+
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-icon purple">P</div><div><div class="stat-num">2</div><div class="stat-label">Managed projects</div></div></div>
+    <div class="stat-card"><div class="stat-icon teal">A</div><div><div class="stat-num">12</div><div class="stat-label">Imported agents</div></div></div>
+    <div class="stat-card"><div class="stat-icon orange">R</div><div><div class="stat-num">4</div><div class="stat-label">Active rules</div></div></div>
+    <div class="stat-card"><div class="stat-icon pink">S</div><div><div class="stat-num">12</div><div class="stat-label">Shared skills</div></div></div>
+  </div>
+
+  <div class="toolbar">
+    <input type="search" placeholder="搜索项目 / 路径" style="max-width:280px">
+    <select style="width:150px">
+      <option>全部状态</option>
+      <option>Ready</option>
+      <option>Draft</option>
+    </select>
+    <div class="toolbar-spacer"></div>
+    <button class="btn-secondary" type="button" onclick="showToast('已模拟刷新扫描结果')">刷新扫描</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>项目</th>
+          <th style="width:100px">状态</th>
+          <th style="width:80px">Agents</th>
+          <th style="width:80px">Rules</th>
+          <th style="width:80px">Skills</th>
+          <th style="width:150px">更新时间</th>
+          <th style="width:170px;text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody id="project-rows"></tbody>
+    </table>
+  </div>
+</div>

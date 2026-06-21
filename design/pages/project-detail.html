@@ -1,0 +1,57 @@
+<div id="page-project-detail" class="page">
+  <div class="page-header">
+    <div class="page-description mono" id="project-detail-description">D:\workspace\src\btd-game-server</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn-secondary" type="button" onclick="showToast('已模拟重新扫描')">重新扫描</button>
+      <button class="btn-primary" type="button" onclick="openSyncPreview()">同步预览</button>
+    </div>
+  </div>
+
+  <div class="stats-row" id="project-detail-stats"></div>
+
+  <div class="grid-2 project-overview-grid">
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">同步状态</div>
+          <div class="drawer-subtitle">按 Project Config Set 聚合，不依赖空的项目来源扫描。</div>
+        </div>
+        <div class="section-spacer"></div>
+        <span class="chip chip-purple">manual sync</span>
+      </div>
+      <div class="panel-body project-sync-summary" id="project-sync-summary"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">资源入口</div>
+          <div class="drawer-subtitle">进入项目自己的 Agents / Rules / Skills / Workflows 副本。</div>
+        </div>
+      </div>
+      <div class="panel-body project-kind-summary" id="project-kind-summary"></div>
+    </section>
+  </div>
+
+  <section class="panel project-focus-panel">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">同步关注项</div>
+        <div class="drawer-subtitle">优先展示模板更新、项目改动、双向分叉和解除关联的配置副本。</div>
+      </div>
+    </div>
+    <div class="panel-body project-focus-list" id="project-recent-copies"></div>
+  </section>
+
+  <section class="panel project-config-panel">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Project Config Set</div>
+        <div class="drawer-subtitle">项目自己的配置副本，保留 origin / baseVersion / baseHash 并手动同步。</div>
+      </div>
+      <div class="section-spacer"></div>
+      <span class="chip chip-teal">origin lineage</span>
+    </div>
+    <div class="panel-body config-copy-list" id="project-config-set"></div>
+  </section>
+</div>

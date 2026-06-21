@@ -1,0 +1,22 @@
+<div id="page-project-rules" class="page">
+  <div class="page-header">
+    <div class="page-description">Project Config Set rules are project-local copies of reusable rule templates. V1 only supports manual sync from template to project.</div>
+  </div>
+
+  <div class="toolbar">
+    <input id="project-rule-search" type="search" placeholder="Search project rule / origin / path" style="max-width:340px" oninput="renderProjectRulesPage()">
+    <select id="project-rule-status" style="width:180px" onchange="renderProjectRulesPage()">
+      <option value="all">All sync status</option>
+      <option value="synced">Synced</option>
+      <option value="project_modified">Project Modified</option>
+      <option value="template_updated">Template Updated</option>
+      <option value="diverged">Diverged</option>
+      <option value="detached">Detached</option>
+    </select>
+    <div class="toolbar-spacer"></div>
+    <span class="chip chip-purple">Project Config Set</span>
+    <span class="chip chip-teal">Origin tracked</span>
+  </div>
+
+  <div class="asset-grid compact" id="project-rule-card-grid"></div>
+</div>

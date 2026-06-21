@@ -1,0 +1,22 @@
+<div id="page-project-skills" class="page">
+  <div class="page-header">
+    <div class="page-description">Project Config Set skills keep origin metadata while pointing at copied template files. V1 sync compares the markdown content and template lineage, not a YAML manifest.</div>
+  </div>
+
+  <div class="toolbar">
+    <input id="project-skill-search" type="search" placeholder="Search project skill / file / origin" style="max-width:340px" oninput="renderProjectSkillsPage()">
+    <select id="project-skill-status" style="width:180px" onchange="renderProjectSkillsPage()">
+      <option value="all">All sync status</option>
+      <option value="synced">Synced</option>
+      <option value="project_modified">Project Modified</option>
+      <option value="template_updated">Template Updated</option>
+      <option value="diverged">Diverged</option>
+      <option value="detached">Detached</option>
+    </select>
+    <div class="toolbar-spacer"></div>
+    <span class="chip chip-purple">Project Config Set</span>
+    <span class="chip chip-teal">Copied files</span>
+  </div>
+
+  <div class="asset-grid" id="project-skill-card-grid"></div>
+</div>

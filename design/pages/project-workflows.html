@@ -1,0 +1,42 @@
+<div id="page-project-workflows" class="page">
+  <div class="page-header">
+    <div class="page-description">Project Config Set workflows use the same workflow canvas as the Template Library, scoped to local process copies and manual template sync metadata.</div>
+  </div>
+
+  <div class="toolbar">
+    <input id="project-workflow-search" type="search" placeholder="Search project workflow / origin / path" style="max-width:340px" oninput="renderProjectWorkflowList()">
+    <select id="project-workflow-status" style="width:180px" onchange="renderProjectWorkflowsPage()">
+      <option value="all">All sync status</option>
+      <option value="synced">Synced</option>
+      <option value="project_modified">Project Modified</option>
+      <option value="template_updated">Template Updated</option>
+      <option value="diverged">Diverged</option>
+      <option value="detached">Detached</option>
+    </select>
+    <div class="toolbar-spacer"></div>
+    <span class="chip chip-purple">Project Config Set</span>
+    <span class="chip chip-teal">Workflow package</span>
+  </div>
+
+  <div class="workflow-shell">
+    <aside class="panel workflow-library">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Project Workflows</div>
+          <div class="drawer-subtitle">Select a project workflow copy to preview and edit its node graph.</div>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="project-workflow-palette"></div>
+        <div class="workflow-list" id="project-workflow-list"></div>
+      </div>
+    </aside>
+
+    <section class="workflow-canvas" id="project-workflow-canvas"></section>
+
+    <aside class="panel" id="project-workflow-inspector">
+      <div class="panel-header"><div class="panel-title">Workflow Summary</div></div>
+      <div class="panel-body muted">Select a workflow copy to inspect its graph and sync metadata.</div>
+    </aside>
+  </div>
+</div>
