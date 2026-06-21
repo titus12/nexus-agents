@@ -258,6 +258,9 @@ func hydrateTemplateItemFromFiles(item TemplateItem) TemplateItem {
 		}
 		if projection := readFirstExistingText(pathsMatching(item, "templates/agents/codex/")); projection != "" {
 			item.CodexProjection = projection
+			if model := parseCodexAgentModel(projection); model != "" {
+				item.ModelTier = model
+			}
 		}
 		return item
 	}
@@ -370,6 +373,25 @@ func readFirstExistingText(paths []string) string {
 		data, err := os.ReadFile(resolveDataPath(path))
 		if err == nil {
 			return string(data)
+		}
+	}
+	return ""
+}
+
+func parseCodexAgentModel(projection string) string {
+	for _, line := range strings.Split(projection, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "model") || strings.HasPrefix(trimmed, "model_reasoning_effort") {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, "=")
+		if !ok || strings.TrimSpace(key) != "model" {
+			continue
+		}
+		model := strings.TrimSpace(value)
+		model = strings.Trim(model, `"`)
+		if model != "" {
+			return model
 		}
 	}
 	return ""

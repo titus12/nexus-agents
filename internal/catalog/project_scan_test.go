@@ -7,6 +7,31 @@ import (
 	"testing"
 )
 
+func TestHydrateTemplateItemFromFilesPrefersCodexTomlModel(t *testing.T) {
+	root := t.TempDir()
+	claudeRel := "templates/agents/claude/go-worker.md"
+	codexRel := "templates/agents/codex/go-worker.toml"
+	writeTestFile(t, root, claudeRel, "worker markdown")
+	writeTestFile(t, root, codexRel, "name = \"worker\"\nmodel = \"deepseek-v4-pro\"\nmodel_reasoning_effort = \"high\"\n")
+	claudePath := filepath.Join(root, filepath.FromSlash(claudeRel))
+	codexPath := filepath.Join(root, filepath.FromSlash(codexRel))
+
+	item := TemplateItem{
+		ID:          "worker",
+		Kind:        "agent",
+		ModelTier:   "gpt-5.4",
+		SourcePaths: []string{claudePath, codexPath},
+	}
+
+	hydrated := hydrateTemplateItemFromFiles(item)
+	if hydrated.ModelTier != "deepseek-v4-pro" {
+		t.Fatalf("expected model tier from codex toml, got %q", hydrated.ModelTier)
+	}
+	if !strings.Contains(hydrated.CodexProjection, "model = \"deepseek-v4-pro\"") {
+		t.Fatalf("expected codex projection to load template file, got %q", hydrated.CodexProjection)
+	}
+}
+
 func TestScanProjectConfigSetReadsProjectFiles(t *testing.T) {
 	root := t.TempDir()
 	templateRoot := t.TempDir()

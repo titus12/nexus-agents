@@ -142,72 +142,19 @@ func TestBootstrapEndpoint(t *testing.T) {
 			Skills    []struct{ ID string } `json:"skills"`
 			Workflows []struct{ ID string } `json:"workflows"`
 		} `json:"templateLibrary"`
-		Projects []struct {
-			ID            string `json:"id"`
-			ConfigSummary struct {
-				Agents    int `json:"agents"`
-				Rules     int `json:"rules"`
-				Skills    int `json:"skills"`
-				Workflows int `json:"workflows"`
-			} `json:"configSummary"`
-		} `json:"projects"`
-		ProjectConfigSets map[string][]struct {
-			ID           string `json:"id"`
-			Kind         string `json:"kind"`
-			Status       string `json:"status"`
-			SyncMode     string `json:"syncMode"`
-			LocalVersion int    `json:"localVersion"`
-			Origin       *struct {
-				TemplateID  string `json:"templateId"`
-				BaseVersion int    `json:"baseVersion"`
-				BaseHash    string `json:"baseHash"`
-			} `json:"origin"`
-		} `json:"projectConfigSets"`
+		Projects          []struct{ ID string }            `json:"projects"`
+		ProjectConfigSets map[string][]catalog.ProjectCopy `json:"projectConfigSets"`
 	}
 	getJSON(t, server, "/api/bootstrap", &body)
 
-	if len(body.TemplateLibrary.Agents) == 0 {
-		t.Fatal("expected template agents")
+	if len(body.TemplateLibrary.Agents) == 0 || len(body.TemplateLibrary.Rules) == 0 || len(body.TemplateLibrary.Skills) == 0 || len(body.TemplateLibrary.Workflows) == 0 {
+		t.Fatalf("expected template library to be populated, got %#v", body.TemplateLibrary)
 	}
-	if len(body.TemplateLibrary.Rules) == 0 {
-		t.Fatal("expected template rules")
+	if len(body.Projects) != 0 {
+		t.Fatalf("expected no default projects, got %#v", body.Projects)
 	}
-	if len(body.TemplateLibrary.Skills) == 0 {
-		t.Fatal("expected template skills")
-	}
-	if len(body.TemplateLibrary.Workflows) == 0 {
-		t.Fatal("expected template workflows")
-	}
-	if len(body.Projects) == 0 || body.Projects[0].ID != "btd-game-server" {
-		t.Fatalf("expected btd-game-server first project, got %#v", body.Projects)
-	}
-	if body.Projects[0].ConfigSummary.Agents != 12 {
-		t.Fatalf("expected 12 project agents, got %d", body.Projects[0].ConfigSummary.Agents)
-	}
-
-	copies := body.ProjectConfigSets["btd-game-server"]
-	if len(copies) == 0 {
-		t.Fatal("expected btd-game-server project config copies")
-	}
-
-	validStatuses := map[string]bool{
-		"synced":           true,
-		"project_modified": true,
-		"detached":         true,
-	}
-	for _, copy := range copies {
-		if copy.SyncMode != "manual" {
-			t.Fatalf("expected manual sync mode for %s, got %q", copy.ID, copy.SyncMode)
-		}
-		if copy.LocalVersion == 0 {
-			t.Fatalf("expected local version for %s", copy.ID)
-		}
-		if !validStatuses[copy.Status] {
-			t.Fatalf("expected real scan status for %s, got %q", copy.ID, copy.Status)
-		}
-		if copy.Status != "detached" && copy.Origin == nil {
-			t.Fatalf("expected origin for non-detached copy %s", copy.ID)
-		}
+	if len(body.ProjectConfigSets) != 0 {
+		t.Fatalf("expected no default project config sets, got %#v", body.ProjectConfigSets)
 	}
 }
 
@@ -215,46 +162,16 @@ func TestProjectEndpoints(t *testing.T) {
 	server := NewServer()
 
 	var projects []struct {
-		ID            string `json:"id"`
-		Name          string `json:"name"`
-		ConfigSummary struct {
-			Agents    int `json:"agents"`
-			Rules     int `json:"rules"`
-			Skills    int `json:"skills"`
-			Workflows int `json:"workflows"`
-		} `json:"configSummary"`
+		ID string `json:"id"`
 	}
 	getJSON(t, server, "/api/projects", &projects)
-
-	if len(projects) != 2 {
-		t.Fatalf("expected 2 projects, got %d", len(projects))
-	}
-	if projects[0].ID != "btd-game-server" {
-		t.Fatalf("expected first project btd-game-server, got %q", projects[0].ID)
+	if len(projects) != 0 {
+		t.Fatalf("expected no default projects, got %#v", projects)
 	}
 
-	var project struct {
-		ID   string `json:"id"`
-		Path string `json:"path"`
-	}
-	getJSON(t, server, "/api/projects/btd-game-server", &project)
-	if project.Path == "" {
-		t.Fatal("expected project path")
-	}
-
-	var ruleCopies []struct {
-		Kind   string `json:"kind"`
-		Status string `json:"status"`
-		Origin *struct {
-			TemplateID string `json:"templateId"`
-		} `json:"origin"`
-	}
-	getJSON(t, server, "/api/projects/btd-game-server/config?kind=rule", &ruleCopies)
-	if len(ruleCopies) != 4 {
-		t.Fatalf("expected 4 rule copies, got %d", len(ruleCopies))
-	}
-	if ruleCopies[0].Kind != "rule" || ruleCopies[0].Origin == nil {
-		t.Fatalf("expected rule copy with origin, got %#v", ruleCopies[0])
+	missing := requestJSON(t, server, http.MethodGet, "/api/projects/missing", "")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("expected missing project status 404, got %d", missing.Code)
 	}
 }
 
@@ -511,9 +428,13 @@ func TestTemplateCrudEndpoints(t *testing.T) {
 }
 
 func TestProjectCopySyncAndDetachEndpoints(t *testing.T) {
-	server := NewServer()
+	store := catalog.NewStoreFromData(catalog.BootstrapData{
+		Projects:          []catalog.Project{{ID: "sample", Name: "sample", Path: "D:/sample"}},
+		ProjectConfigSets: map[string][]catalog.ProjectCopy{"sample": {{ID: "copy-worker", Kind: "agent", Name: "worker", LocalVersion: 1, SyncMode: "manual", Status: "template_updated", Diff: "changed", Origin: &catalog.Origin{TemplateID: "worker", BaseVersion: 1, BaseHash: "sha256:test"}}}},
+	}, nil, nil)
+	server := NewServerWithStore(store)
 
-	syncResponse := requestJSON(t, server, http.MethodPost, "/api/projects/btd-game-server/config/proj_agent_btd_go_worker/sync", "")
+	syncResponse := requestJSON(t, server, http.MethodPost, "/api/projects/sample/config/copy-worker/sync", "")
 	if syncResponse.Code != http.StatusOK {
 		t.Fatalf("expected sync status 200, got %d", syncResponse.Code)
 	}
@@ -530,7 +451,7 @@ func TestProjectCopySyncAndDetachEndpoints(t *testing.T) {
 		t.Fatalf("unexpected synced copy: %#v", synced)
 	}
 
-	detachResponse := requestJSON(t, server, http.MethodPost, "/api/projects/btd-game-server/config/proj_agent_btd_go_worker/detach", "")
+	detachResponse := requestJSON(t, server, http.MethodPost, "/api/projects/sample/config/copy-worker/detach", "")
 	if detachResponse.Code != http.StatusOK {
 		t.Fatalf("expected detach status 200, got %d", detachResponse.Code)
 	}
@@ -546,7 +467,11 @@ func TestProjectCopySyncAndDetachEndpoints(t *testing.T) {
 }
 
 func TestProjectSyncPreviewEndpoint(t *testing.T) {
-	server := NewServer()
+	store := catalog.NewStoreFromData(catalog.BootstrapData{
+		Projects:          []catalog.Project{{ID: "sample", Name: "sample", Path: "D:/sample"}},
+		ProjectConfigSets: map[string][]catalog.ProjectCopy{"sample": {{ID: "copy-worker", Kind: "agent", Name: "worker", LocalVersion: 1, SyncMode: "manual", Status: "template_updated", Diff: "changed", Origin: &catalog.Origin{TemplateID: "worker", BaseVersion: 1, BaseHash: "sha256:test"}}}},
+	}, nil, nil)
+	server := NewServerWithStore(store)
 
 	var preview []struct {
 		ID           string `json:"id"`
@@ -560,21 +485,9 @@ func TestProjectSyncPreviewEndpoint(t *testing.T) {
 		} `json:"origin"`
 		Diff string `json:"diff"`
 	}
-	getJSON(t, server, "/api/projects/btd-game-server/sync-preview", &preview)
-	if len(preview) == 0 {
-		t.Fatal("expected sync preview entries")
-	}
-	foundOriginHash := false
-	for _, copy := range preview {
-		if copy.LocalVersion == 0 || copy.Diff == "" {
-			t.Fatalf("expected preview metadata for %s, got %#v", copy.ID, copy)
-		}
-		if copy.Origin != nil && strings.HasPrefix(copy.Origin.BaseHash, "sha256:") {
-			foundOriginHash = true
-		}
-	}
-	if !foundOriginHash {
-		t.Fatalf("expected real scan item with origin hash, got %#v", preview)
+	getJSON(t, server, "/api/projects/sample/sync-preview", &preview)
+	if len(preview) != 1 || preview[0].LocalVersion == 0 || preview[0].Diff == "" || preview[0].Origin == nil || !strings.HasPrefix(preview[0].Origin.BaseHash, "sha256:") {
+		t.Fatalf("expected sync preview metadata, got %#v", preview)
 	}
 }
 

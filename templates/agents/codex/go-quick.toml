@@ -1,6 +1,6 @@
 name = "quick"
 description = "快速修改 — 单文件修改、小 bug 修复、编译错误修复。适用于明确且范围小的任务。"
-model = "gpt-5.4-mini"
+model = "deepseek-v4-flash"
 model_reasoning_effort = "low"
 developer_instructions = """
 # Quick — 快速修改

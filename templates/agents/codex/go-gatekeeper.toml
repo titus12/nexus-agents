@@ -1,6 +1,6 @@
 name = "gatekeeper"
 description = "提交门禁 — 提交代码前扫描 diff 生成高风险清单，要求用户逐项确认。可由 hook 自动触发或手动调用。"
-model = "gpt-5.4-mini"
+model = "deepseek-v4-flash"
 model_reasoning_effort = "medium"
 developer_instructions = """
 # Gatekeeper — 提交门禁

@@ -1,6 +1,6 @@
 name = "worker"
 description = "任务执行工人 — 明确子任务执行。写函数、生成样板代码、重复性修改。用户明确允许 subagent 时可由 sisyphus 或 hephaestus 调用。"
-model = "gpt-5.4"
+model = "deepseek-v4-pro"
 model_reasoning_effort = "high"
 developer_instructions = """
 # Worker — 任务执行工人

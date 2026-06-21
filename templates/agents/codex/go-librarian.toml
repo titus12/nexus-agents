@@ -1,6 +1,6 @@
 name = "librarian"
 description = "文档查询 — 查 API 用法、框架文档、第三方库使用方式。用户明确允许 subagent 时可由 sisyphus 或 hephaestus 调用。"
-model = "gpt-5.4-mini"
+model = "deepseek-v4-flash"
 model_reasoning_effort = "medium"
 developer_instructions = """
 # Librarian — 文档查询

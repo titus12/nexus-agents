@@ -76,6 +76,8 @@ func NewService(config Config) *Service {
 }
 
 func DefaultConfig() Config {
+	deepSeekBaseURL := getenvDefault("NEXUS_DEEPSEEK_BASE_URL", "https://lumos.diandian.info/winky/deepseek/v1")
+	deepSeekProvider := getenvDefault("NEXUS_DEEPSEEK_PROVIDER", "Winky DeepSeek")
 	return Config{
 		DefaultModel: "gpt-5.5",
 		Routes: []Route{
@@ -115,11 +117,11 @@ func DefaultConfig() Config {
 			{
 				ID:          "deepseek-v4-pro",
 				DisplayName: "DeepSeek V4 Pro",
-				Description: "DeepSeek V4 Pro via Winky API.",
+				Description: getenvDefault("NEXUS_DEEPSEEK_PRO_DESCRIPTION", "DeepSeek V4 Pro via Winky API."),
 				API:         "chat_completions",
-				BaseURL:     "https://lumos.diandian.info/winky/deepseek/v1",
+				BaseURL:     deepSeekBaseURL,
 				Model:       "deepseek-v4-pro",
-				Provider:    "Winky DeepSeek",
+				Provider:    deepSeekProvider,
 				AuthMode:    "api_key",
 				APIKeyEnv:   "DEEPSEEK_API_KEY",
 				Priority:    3,
@@ -128,11 +130,11 @@ func DefaultConfig() Config {
 			{
 				ID:          "deepseek-v4-flash",
 				DisplayName: "DeepSeek V4 Flash",
-				Description: "DeepSeek V4 Flash via Winky API.",
+				Description: getenvDefault("NEXUS_DEEPSEEK_FLASH_DESCRIPTION", "DeepSeek V4 Flash via Winky API."),
 				API:         "chat_completions",
-				BaseURL:     "https://lumos.diandian.info/winky/deepseek/v1",
+				BaseURL:     deepSeekBaseURL,
 				Model:       "deepseek-v4-flash",
-				Provider:    "Winky DeepSeek",
+				Provider:    deepSeekProvider,
 				AuthMode:    "api_key",
 				APIKeyEnv:   "DEEPSEEK_API_KEY",
 				Priority:    4,
@@ -206,15 +208,21 @@ func (s *Service) ModelsList() map[string]any {
 }
 
 func (s *Service) handleResponses(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, openAIError("failed to read request body", http.StatusBadRequest))
+		return
+	}
 	var request responseRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := json.Unmarshal(body, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, openAIError("invalid json body", http.StatusBadRequest))
 		return
 	}
 	route := s.routeForModel(request.Model)
-	log.Printf("[codex] <- model=%s route=%s api=%s stream=%v previous_response_id=%s",
-		request.Model, route.ID, route.API, request.Stream,
-		stringOr(request.Raw["previous_response_id"], "-"),
+	reqStats := requestLogStats(request.Raw, len(body))
+	log.Printf("[codex] <- model=%s route=%s api=%s body_bytes=%d stream=%v tool_count=%d input_items_count=%d previous_response_id=%s",
+		request.Model, route.ID, route.API, reqStats.BodyBytes, request.Stream,
+		reqStats.ToolCount, reqStats.InputItemsCount, reqStats.PreviousResponseID,
 	)
 	switch route.API {
 	case "responses":
@@ -267,19 +275,26 @@ func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request
 	copyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	// 对 SSE 流必须逐块 flush，否则数据积压在缓冲区，客户端看到"一直处理中"。
-	flushWriter(w, response.Body)
-	log.Printf("[codex] -> route=%s done total=%dms", route.ID, time.Since(t0).Milliseconds())
+	usage := newResponseUsageTracker(request.Stream)
+	flushWriter(w, response.Body, usage)
+	usage.finish()
+	log.Printf("[codex] -> route=%s status=%d usage_input=%s cached=%s output=%s total=%dms",
+		route.ID, response.StatusCode, usage.inputTokens(), usage.cachedTokens(), usage.outputTokens(), time.Since(t0).Milliseconds())
 }
 
 // flushWriter 从 src 读取数据并逐块写入 dst，每写一块立即 flush。
 // 这对 SSE 流式响应至关重要：Codex Desktop 依赖每个事件的即时到达来更新 UI。
-func flushWriter(w http.ResponseWriter, src io.Reader) {
+func flushWriter(w http.ResponseWriter, src io.Reader, usage *responseUsageTracker) {
 	flusher, canFlush := w.(http.Flusher)
 	buf := make([]byte, 4096)
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
-			_, _ = w.Write(buf[:n])
+			chunk := buf[:n]
+			if usage != nil {
+				usage.observe(chunk)
+			}
+			_, _ = w.Write(chunk)
 			if canFlush {
 				flusher.Flush()
 			}
@@ -434,6 +449,170 @@ func (r *responseRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type requestStats struct {
+	BodyBytes          int
+	ToolCount          int
+	InputItemsCount    int
+	PreviousResponseID string
+}
+
+func requestLogStats(raw map[string]any, bodyBytes int) requestStats {
+	return requestStats{
+		BodyBytes:          bodyBytes,
+		ToolCount:          arrayLen(raw["tools"]),
+		InputItemsCount:    inputItemsCount(raw["input"]),
+		PreviousResponseID: stringOr(raw["previous_response_id"], "-"),
+	}
+}
+
+func arrayLen(value any) int {
+	items, ok := value.([]any)
+	if !ok {
+		return 0
+	}
+	return len(items)
+}
+
+func inputItemsCount(value any) int {
+	switch v := value.(type) {
+	case []any:
+		return len(v)
+	case nil:
+		return 0
+	default:
+		return 1
+	}
+}
+
+type upstreamResponseUsage struct {
+	InputTokens       *int
+	CachedInputTokens *int
+	OutputTokens      *int
+}
+
+type responseUsageTracker struct {
+	stream bool
+	buf    strings.Builder
+	usage  upstreamResponseUsage
+}
+
+func newResponseUsageTracker(stream bool) *responseUsageTracker {
+	return &responseUsageTracker{stream: stream}
+}
+
+func (t *responseUsageTracker) observe(chunk []byte) {
+	if t == nil || len(chunk) == 0 {
+		return
+	}
+	t.buf.Write(chunk)
+	if t.stream {
+		t.consumeSSE(false)
+	}
+}
+
+func (t *responseUsageTracker) finish() {
+	if t == nil {
+		return
+	}
+	if t.stream {
+		t.consumeSSE(true)
+		return
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(t.buf.String()), &body); err == nil {
+		t.updateFromObject(body)
+	}
+}
+
+func (t *responseUsageTracker) inputTokens() string {
+	return optionalInt(t.usage.InputTokens)
+}
+
+func (t *responseUsageTracker) cachedTokens() string {
+	return optionalInt(t.usage.CachedInputTokens)
+}
+
+func (t *responseUsageTracker) outputTokens() string {
+	return optionalInt(t.usage.OutputTokens)
+}
+
+func optionalInt(value *int) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprint(*value)
+}
+
+func (t *responseUsageTracker) consumeSSE(final bool) {
+	data := strings.ReplaceAll(t.buf.String(), "\r\n", "\n")
+	events := strings.Split(data, "\n\n")
+	keep := ""
+	if !final && !strings.HasSuffix(data, "\n\n") {
+		keep = events[len(events)-1]
+		events = events[:len(events)-1]
+	}
+	for _, event := range events {
+		for _, line := range strings.Split(event, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "" || payload == "[DONE]" {
+				continue
+			}
+			var item map[string]any
+			if err := json.Unmarshal([]byte(payload), &item); err == nil {
+				t.updateFromObject(item)
+			}
+		}
+	}
+	t.buf.Reset()
+	t.buf.WriteString(keep)
+}
+
+func (t *responseUsageTracker) updateFromObject(obj map[string]any) {
+	if obj == nil {
+		return
+	}
+	if usage, ok := obj["usage"].(map[string]any); ok {
+		t.updateFromUsage(usage)
+	}
+	if response, ok := obj["response"].(map[string]any); ok {
+		t.updateFromObject(response)
+	}
+}
+
+func (t *responseUsageTracker) updateFromUsage(usage map[string]any) {
+	setIntFromAny(&t.usage.InputTokens, firstDefined(usage["input_tokens"], usage["prompt_tokens"]))
+	setIntFromAny(&t.usage.OutputTokens, firstDefined(usage["output_tokens"], usage["completion_tokens"]))
+
+	if inputDetails, ok := firstDefined(usage["input_tokens_details"], usage["prompt_tokens_details"]).(map[string]any); ok {
+		setIntFromAny(&t.usage.CachedInputTokens, firstDefined(inputDetails["cached_tokens"], inputDetails["cached_input_tokens"]))
+	}
+}
+
+func setIntFromAny(target **int, value any) {
+	n, ok := intFromAny(value)
+	if !ok {
+		return
+	}
+	*target = &n
+}
+
+func intFromAny(value any) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case json.Number:
+		n, err := v.Int64()
+		return int(n), err == nil
+	default:
+		return 0, false
+	}
+}
 
 func modelCatalogEntry(route Route, index int) map[string]any {
 	contextWindow := 1000000
@@ -520,6 +699,13 @@ func setUpstreamAuth(header http.Header, route Route, incomingAuthorization stri
 }
 
 var getenv = os.Getenv
+
+func getenvDefault(name string, fallback string) string {
+	if value := strings.TrimSpace(getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")

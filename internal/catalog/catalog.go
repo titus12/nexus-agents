@@ -179,7 +179,7 @@ type Store struct {
 }
 
 func NewStore() *Store {
-	data := MockBootstrapData()
+	data := TemplateBootstrapData()
 	return &Store{
 		data:           cloneBootstrap(data),
 		workflows:      cloneWorkflowSummaries(mockWorkflows()),
@@ -906,70 +906,17 @@ func modelProxyAuth(route codexrouter.Route) string {
 	}
 }
 
-func MockBootstrapData() BootstrapData {
+func TemplateBootstrapData() BootstrapData {
 	library := hydrateTemplateLibraryFromFiles(TemplateLibrary{
 		Agents:    btdAgentTemplates(),
 		Rules:     btdRuleTemplates(),
 		Skills:    btdSkillTemplates(),
 		Workflows: btdWorkflowTemplates(),
 	})
-	btdProjectPath := `D:\workspace\src\btd-game-server`
-	btdCopies := btdProjectConfigCopies(library)
-	btdSummary := ConfigSummary{
-		Agents:    12,
-		Rules:     4,
-		Skills:    12,
-		Workflows: 9,
-	}
-	btdUpdatedAt := "2026-06-18 15:47"
-	if scannedCopies, err := scanProjectConfigSetForProject("btd", btdProjectPath, library); err == nil && len(scannedCopies) > 0 {
-		btdCopies = scannedCopies
-		btdSummary = summarizeProjectCopies(scannedCopies)
-		btdUpdatedAt = latestProjectConfigStamp(btdProjectPath)
-	}
-	btdProject := applyProjectLocalMetadata(Project{
-		ID:            "btd-game-server",
-		Name:          "btd-game-server",
-		Path:          btdProjectPath,
-		Status:        "ready",
-		UpdatedAt:     btdUpdatedAt,
-		ConfigSummary: btdSummary,
-	})
-	nexusProject := applyProjectLocalMetadata(Project{
-		ID:        "nexus-agents",
-		Name:      "nexus-agents",
-		Path:      `D:\workspace\src\nexus-agents`,
-		Status:    "draft",
-		UpdatedAt: "2026-06-19 10:12",
-		ConfigSummary: ConfigSummary{
-			Agents:    0,
-			Rules:     0,
-			Skills:    0,
-			Workflows: 1,
-		},
-	})
 	return BootstrapData{
-		TemplateLibrary: library,
-		Projects: []Project{
-			btdProject,
-			nexusProject,
-		},
-		ProjectConfigSets: map[string][]ProjectCopy{
-			"btd-game-server": btdCopies,
-			"nexus-agents": {
-				{
-					ID:           "proj_workflow_nexus_design",
-					Kind:         "workflow",
-					Name:         "prototype design workflow",
-					Origin:       nil,
-					LocalVersion: 1,
-					SyncMode:     "manual",
-					Status:       "detached",
-					Path:         "templates/workflows/design.md",
-					Diff:         "Project-only workflow. No template origin.",
-				},
-			},
-		},
+		TemplateLibrary:   library,
+		Projects:          []Project{},
+		ProjectConfigSets: map[string][]ProjectCopy{},
 	}
 }
 
@@ -990,7 +937,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "sisyphus",
 			summary:   "主编排者，负责复杂任务分析、拆解、多 agent 协调与最终综合。",
-			model:     "gpt-5.5",
+			model:     "gpt-5.4",
 			effort:    "high",
 			skills:    []string{"dev-workflow", "skill-standard", "review-feedback"},
 			tools:     []string{"shell", "rg", "git", "task-dispatch"},
@@ -1023,7 +970,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "quick",
 			summary:   "快速修改角色，处理单文件修改、小 bug 修复和编译错误修复。",
-			model:     "gpt-5.4-mini",
+			model:     "deepseek-v4-flash",
 			effort:    "low",
 			skills:    []string{"coding-rules", "testing"},
 			tools:     []string{"shell", "apply_patch", "rg"},
@@ -1056,7 +1003,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "librarian",
 			summary:   "文档查询角色，负责查 API 用法、框架文档和第三方库使用方式。",
-			model:     "gpt-5.4-mini",
+			model:     "deepseek-v4-flash",
 			effort:    "medium",
 			skills:    []string{"skill-standard", "cross-config", "cross-client"},
 			tools:     []string{"rg", "web", "context7"},
@@ -1067,7 +1014,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "worker",
 			summary:   "任务执行工人，接收明确子任务并完成函数、样板代码或重复性修改。",
-			model:     "gpt-5.4",
+			model:     "deepseek-v4-pro",
 			effort:    "high",
 			skills:    []string{"coding-rules", "testing", "quest-system", "pmconf-pattern"},
 			tools:     []string{"shell", "apply_patch", "rg"},
@@ -1078,7 +1025,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "reviewer-logic",
 			summary:   "逻辑正确性审核角色，聚焦空指针、边界条件、并发安全、事务完整性和错误处理。",
-			model:     "gpt-5.5",
+			model:     "deepseek-v4-pro",
 			effort:    "high",
 			skills:    []string{"coding-rules", "testing", "review-feedback"},
 			tools:     []string{"rg", "git", "codegraph"},
@@ -1089,7 +1036,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "reviewer-perf",
 			summary:   "性能审核角色，聚焦 N+1、goroutine 泄漏、内存分配、锁粒度和缓存缺失。",
-			model:     "gpt-5.4",
+			model:     "deepseek-v4-pro",
 			effort:    "medium",
 			skills:    []string{"coding-rules", "testing", "pmconf-pattern"},
 			tools:     []string{"rg", "git", "codegraph"},
@@ -1100,7 +1047,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "reviewer-security",
 			summary:   "安全审核角色，从攻击者视角检查越权、输入验证、耗尽、泄露、注入和重放风险。",
-			model:     "gpt-5.5",
+			model:     "deepseek-v4-pro",
 			effort:    "high",
 			skills:    []string{"high-risk-api", "coding-rules", "review-feedback"},
 			tools:     []string{"rg", "git", "codegraph"},
@@ -1111,7 +1058,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "gatekeeper",
 			summary:   "提交门禁角色，提交前扫描 diff 并生成高风险清单，必要时要求用户确认。",
-			model:     "gpt-5.4-mini",
+			model:     "deepseek-v4-flash",
 			effort:    "medium",
 			skills:    []string{"coding-rules", "high-risk-api", "review-feedback"},
 			tools:     []string{"git", "rg"},
@@ -1766,7 +1713,9 @@ func cloneBootstrap(data BootstrapData) BootstrapData {
 }
 
 func cloneProjects(projects []Project) []Project {
-	return append([]Project(nil), projects...)
+	cloned := make([]Project, len(projects))
+	copy(cloned, projects)
+	return cloned
 }
 
 func cloneProjectConfigSets(configSets map[string][]ProjectCopy) map[string][]ProjectCopy {

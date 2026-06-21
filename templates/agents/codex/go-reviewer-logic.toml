@@ -1,6 +1,6 @@
 name = "reviewer-logic"
 description = "逻辑正确性审核 — 聚焦空指针、边界条件、并发安全、事务完整性、错误处理。用户明确要求并行 reviewer 时可由 sisyphus 调用。"
-model = "gpt-5.5"
+model = "deepseek-v4-pro"
 model_reasoning_effort = "high"
 developer_instructions = """
 # Reviewer-Logic — 逻辑正确性审核

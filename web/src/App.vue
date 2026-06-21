@@ -108,9 +108,9 @@ const emptyLibrary: TemplateLibrary = {
 };
 
 const activePage = ref<Page>("projects");
-const selectedProjectId = ref("btd-game-server");
-const selectedWorkflowId = ref("feature-development");
-const selectedWorkflowCardKey = ref("feature-development");
+const selectedProjectId = ref("");
+const selectedWorkflowId = ref("");
+const selectedWorkflowCardKey = ref("");
 const selectedNodeId = ref("");
 const selectedEdgeKey = ref("");
 const workflowEditorMode = ref(false);
@@ -160,8 +160,8 @@ const nodeDragState = ref<{
 } | null>(null);
 
 const importForm = ref<ProjectInput>({
-  name: "imported-game",
-  path: "D:\\workspace\\src\\imported-game",
+  name: "",
+  path: "",
 });
 
 const syncOrder: SyncStatus[] = ["synced", "template_updated", "project_modified", "diverged", "detached"];
@@ -321,9 +321,7 @@ function projectCopyToWorkflowCard(copy: ProjectCopy): WorkflowCard {
 }
 
 function workflowGraphIdForCopy(copy: ProjectCopy): string {
-	if (copy.origin?.templateId) return copy.origin.templateId;
-	if (copy.name.toLowerCase().includes("review") || copy.name.includes("审核")) return "code-review";
-	return workflows.value[0]?.id ?? "feature-development";
+  return copy.origin?.templateId ?? workflows.value[0]?.id ?? "";
 }
 
 function templateUsageCount(templateId: string): number {
@@ -829,7 +827,7 @@ async function openDirectoryBrowser() {
 
 function applyProjectDirectory(path: string) {
   importForm.value.path = path;
-  if (!importForm.value.name || importForm.value.name === "imported-game") {
+  if (!importForm.value.name) {
     importForm.value.name = baseNameFromPath(path);
   }
 }
@@ -1142,42 +1140,75 @@ function showToast(message: string) {
 async function loadData() {
   loading.value = true;
   error.value = "";
-  try {
-    const [bootstrap, workflowList, routeList, infraList, infraCatalog] = await Promise.all([
-      fetchBootstrap(),
-      fetchWorkflows(),
-      fetchModelRoutes(),
-      fetchInfrastructure(),
-      fetchInfrastructureCatalog(),
-    ]);
-    applyBootstrap(bootstrap);
-    workflows.value = workflowList;
-    modelRoutes.value = routeList;
-    infrastructureItems.value = infraList;
-    availableInfrastructureItems.value = infraCatalog;
-    if (workflowList[0]) {
-      await selectWorkflowCard({
-        key: workflowList[0].id,
-        graphId: workflowList[0].id,
-        name: workflowList[0].name,
-        status: workflowList[0].status,
-        summary: workflowList[0].summary,
-        nodeCount: workflowList[0].nodeCount,
-        edgeCount: workflowList[0].edgeCount,
+  const failures: string[] = [];
+
+  const bootstrapResult = await Promise.allSettled([
+    fetchBootstrap(),
+    fetchWorkflows(),
+    fetchModelRoutes(),
+    fetchInfrastructure(),
+    fetchInfrastructureCatalog(),
+  ]);
+
+  const [bootstrap, workflowList, routeList, infraList, infraCatalog] = bootstrapResult;
+
+  if (bootstrap.status === "fulfilled") {
+    applyBootstrap(bootstrap.value);
+  } else {
+    failures.push(errorMessage(bootstrap.reason));
+  }
+
+  if (workflowList.status === "fulfilled") {
+    workflows.value = workflowList.value;
+    const firstWorkflow = workflowList.value[0];
+    if (firstWorkflow) {
+      selectedWorkflowCardKey.value = firstWorkflow.id;
+      selectedWorkflowId.value = firstWorkflow.id;
+      void selectWorkflowCard({
+        key: firstWorkflow.id,
+        graphId: firstWorkflow.id,
+        name: firstWorkflow.name,
+        status: firstWorkflow.status,
+        summary: firstWorkflow.summary,
+        nodeCount: firstWorkflow.nodeCount,
+        edgeCount: firstWorkflow.edgeCount,
       });
     }
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : "Failed to load Nexus Agents data.";
-  } finally {
-    loading.value = false;
+  } else {
+    failures.push(errorMessage(workflowList.reason));
   }
+
+  if (routeList.status === "fulfilled") {
+    modelRoutes.value = routeList.value;
+  } else {
+    failures.push(errorMessage(routeList.reason));
+  }
+
+  if (infraList.status === "fulfilled") {
+    infrastructureItems.value = infraList.value;
+  } else {
+    failures.push(errorMessage(infraList.reason));
+  }
+
+  if (infraCatalog.status === "fulfilled") {
+    availableInfrastructureItems.value = infraCatalog.value;
+  } else {
+    failures.push(errorMessage(infraCatalog.reason));
+  }
+
+  error.value = failures.length > 0 ? failures.join("; ") : "";
+  loading.value = false;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err || "Failed to load Nexus Agents data.");
 }
 
 function applyBootstrap(data: BootstrapData) {
-  templateLibrary.value = data.templateLibrary;
-  projects.value = data.projects;
-  projectConfigSets.value = data.projectConfigSets;
-  selectedProjectId.value = data.projects[0]?.id ?? selectedProjectId.value;
+  templateLibrary.value = data.templateLibrary ?? emptyLibrary;
+  projects.value = data.projects ?? [];
+  projectConfigSets.value = data.projectConfigSets ?? {};
+  selectedProjectId.value = projects.value[0]?.id ?? selectedProjectId.value;
 }
 
 onMounted(loadData);

@@ -82,13 +82,12 @@ function openModal(rootId) {
 async function openImportProject() {
   await loadOverlay("modal-import-project");
   const input = document.getElementById("import-project-path");
-  if (input) input.value = "D:\\workspace\\src\\btd-game-server";
+  if (input) input.value = "";
   openModal("modal-import-project");
 }
 
 function simulateImportProject() {
   closeOverlay("modal-import-project");
-  NEXUS.state.currentProjectId = "btd-game-server";
   showToast("项目已导入并完成静态扫描");
   navigate("project-detail");
 }

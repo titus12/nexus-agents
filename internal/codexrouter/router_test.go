@@ -160,3 +160,104 @@ func TestCodexOpenAIBaseURLRedirect(t *testing.T) {
 		t.Errorf("expected passthrough, got %q", got)
 	}
 }
+
+func TestRequestLogStats(t *testing.T) {
+	raw := map[string]any{
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "hello"},
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+		},
+		"tools": []any{
+			map[string]any{"type": "function", "name": "read_file"},
+			map[string]any{"type": "function", "name": "write_file"},
+		},
+		"previous_response_id": "resp_prev",
+	}
+
+	stats := requestLogStats(raw, 314730)
+
+	if stats.BodyBytes != 314730 {
+		t.Fatalf("expected body bytes, got %d", stats.BodyBytes)
+	}
+	if stats.ToolCount != 2 {
+		t.Fatalf("expected 2 tools, got %d", stats.ToolCount)
+	}
+	if stats.InputItemsCount != 2 {
+		t.Fatalf("expected 2 input items, got %d", stats.InputItemsCount)
+	}
+	if stats.PreviousResponseID != "resp_prev" {
+		t.Fatalf("expected previous response id, got %q", stats.PreviousResponseID)
+	}
+}
+
+func TestResponseUsageTrackerFromSSE(t *testing.T) {
+	tracker := newResponseUsageTracker(true)
+
+	tracker.observe([]byte("event: response.completed\n"))
+	tracker.observe([]byte(`data: {"response":{"usage":{"input_tokens":42,"output_tokens":7,"input_tokens_details":{"cached_tokens":13}}}}` + "\n\n"))
+	tracker.observe([]byte("data: [DONE]\n\n"))
+	tracker.finish()
+
+	if tracker.inputTokens() != "42" {
+		t.Fatalf("expected input tokens 42, got %s", tracker.inputTokens())
+	}
+	if tracker.cachedTokens() != "13" {
+		t.Fatalf("expected cached tokens 13, got %s", tracker.cachedTokens())
+	}
+	if tracker.outputTokens() != "7" {
+		t.Fatalf("expected output tokens 7, got %s", tracker.outputTokens())
+	}
+}
+
+func TestDefaultConfigDeepSeekUsesWinkyByDefault(t *testing.T) {
+	t.Setenv("NEXUS_DEEPSEEK_BASE_URL", "")
+	t.Setenv("NEXUS_DEEPSEEK_PROVIDER", "")
+	t.Setenv("NEXUS_DEEPSEEK_PRO_DESCRIPTION", "")
+
+	cfg := DefaultConfig()
+	route := findRouteForTest(t, cfg, "deepseek-v4-pro")
+
+	if route.BaseURL != "https://lumos.diandian.info/winky/deepseek/v1" {
+		t.Fatalf("expected default Winky base URL, got %q", route.BaseURL)
+	}
+	if route.Provider != "Winky DeepSeek" {
+		t.Fatalf("expected default Winky provider, got %q", route.Provider)
+	}
+	if !strings.Contains(route.Description, "Winky") {
+		t.Fatalf("expected default description to mention Winky, got %q", route.Description)
+	}
+}
+
+func TestDefaultConfigDeepSeekCanUsePersonalAPI(t *testing.T) {
+	t.Setenv("NEXUS_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+	t.Setenv("NEXUS_DEEPSEEK_PROVIDER", "DeepSeek Official")
+	t.Setenv("NEXUS_DEEPSEEK_PRO_DESCRIPTION", "DeepSeek V4 Pro via personal DeepSeek API.")
+	t.Setenv("NEXUS_DEEPSEEK_FLASH_DESCRIPTION", "DeepSeek V4 Flash via personal DeepSeek API.")
+
+	cfg := DefaultConfig()
+	pro := findRouteForTest(t, cfg, "deepseek-v4-pro")
+	flash := findRouteForTest(t, cfg, "deepseek-v4-flash")
+
+	for _, route := range []Route{pro, flash} {
+		if route.BaseURL != "https://api.deepseek.com/v1" {
+			t.Fatalf("expected personal DeepSeek base URL for %s, got %q", route.ID, route.BaseURL)
+		}
+		if route.Provider != "DeepSeek Official" {
+			t.Fatalf("expected personal DeepSeek provider for %s, got %q", route.ID, route.Provider)
+		}
+	}
+	if !strings.Contains(pro.Description, "personal DeepSeek API") {
+		t.Fatalf("expected personal API description, got %q", pro.Description)
+	}
+}
+
+func findRouteForTest(t *testing.T, cfg Config, id string) Route {
+	t.Helper()
+	for _, route := range cfg.Routes {
+		if route.ID == id {
+			return route
+		}
+	}
+	t.Fatalf("route %s not found", id)
+	return Route{}
+}

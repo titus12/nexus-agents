@@ -477,7 +477,7 @@ function renderSkillsPage() {
       </div>
       <div class="asset-card-footer">
         <div class="asset-chip-row">
-          ${chip(skill.appliesTo || "btd-game-server agents", "teal")}
+          ${chip(skill.appliesTo || "project agents", "teal")}
         </div>
         <div class="asset-actions">
           <button class="link-btn" type="button" onclick="openSkillDrawer('${skill.id}')">查看</button>
