@@ -1,31 +1,16 @@
 # 工作流与角色激活
 
-用户消息以 `--xxx` 开头时，按下表加载对应 workflow 文件，剩余内容作为输入。
+工作流入口由 `.agents/skills/wf-*` 目录中的 Codex skills 维护。
+每个 `wf-*` skill 自己声明对应的 `.claude/workflows/*.md` source of truth。
 
-本文件只维护项目级 **trigger → workflow** 索引；具体流程、阶段、验证和分工以对应 workflow 文件为准。
+本文件不维护 workflow 路由表，只保留通用路由原则与全局底线。
 
-## 路由表
+## 路由原则
 
-| Trigger | Workflow |
-|---|---|
-| `--feat` | `.claude/workflows/go-feature-development.md` |
-| `--mod` | `.claude/workflows/go-modify-existing.md` |
-| `--bug` | `.claude/workflows/go-bugfix.md` |
-| `--rev` | `.claude/workflows/go-code-review.md` |
-| `--design` | `.claude/workflows/design.md` |
-| `--ask` | `.claude/workflows/research.md` |
-| `--commit` | `.claude/workflows/commit-gate.md` |
-| `--refactor` | `.claude/workflows/go-refactor.md` |
-| `--lark` | `.claude/workflows/lark-integration.md` |
-| `--subagents` / `--parallel` | `.claude/workflows/subagent-driven-development.md` |
-
-## 路由规则
-
-1. 匹配到 trigger 后，加载路由表中的 workflow 文件并执行。
-2. workflow 的具体步骤、触发说明、适用场景、验证要求以 workflow 文件为准。
-3. 本文件不承载具体 workflow 内容，不从本文件展开 Project Workflow 副本。
-4. 无 `--xxx` 前缀时，按正常 agent / rule / skill 路由处理；任务模糊时先澄清。
-5. 新增 workflow 后，只有需要命令触发时才在本文件注册 trigger。
+1. 用户显式调用 `$wf-*` skill 时，按该 skill 指向的 workflow 文件执行。
+2. 未显式调用 `$wf-*` skill 时，Codex 根据可用 skills、AGENTS.md、rules 和用户请求自行选择合适流程。
+3. 任务模糊时先澄清；不要因为缺少 workflow 入口而猜测执行路径。
+4. 新增 workflow 时，优先新增对应 `.agents/skills/wf-*` 入口，而不是在本文件维护路由表。
 
 ## 全局底线
 
