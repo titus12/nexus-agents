@@ -118,6 +118,8 @@ Codex Desktop
 | `gpt-5.4-mini` | GPT-5.4 Mini | `chatgpt.com/backend-api/codex` | 订阅 token 透传 |
 | `deepseek-v4-pro` | DeepSeek V4 Pro | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` |
 | `deepseek-v4-flash` | DeepSeek V4 Flash | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` |
+| `glm-5.2` | GLM-5.2 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY`??? Winky key? |
+| `glm-5.1` | GLM-5.1 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY`??? Winky key? |
 
 ### 关键实现文件
 

@@ -360,7 +360,7 @@ function projectCopyModelClass(copy: ProjectCopy): string {
 function modelClassForTier(modelTier?: string): string {
   const normalized = (modelTier ?? "").toLowerCase();
   if (normalized.includes("mini") || normalized.includes("flash")) return "model-mini";
-  if (normalized.includes("5.4") || normalized.includes("pro") || normalized.includes("deepseek")) return "model-pro";
+  if (normalized.includes("5.4") || normalized.includes("pro") || normalized.includes("deepseek") || normalized.includes("glm")) return "model-pro";
   return "model-direct";
 }
 
@@ -1131,6 +1131,7 @@ function saveRouteMock() {
 function modelForRoute(route: ModelRoute): string {
   if (route.source === "claude-*") return "claude-sonnet-4";
   if (route.source === "deepseek-*") return "deepseek-v4-pro";
+  if (route.source === "glm-*") return "glm-5.2";
   return route.source;
 }
 
@@ -1646,20 +1647,20 @@ onMounted(loadData);
               </section>
               <section class="panel panel-pad">
                 <div class="section-title">Model Catalog</div>
-                <span class="chip chip-green">GPT + DeepSeek</span>
+                <span class="chip chip-green">GPT + DeepSeek + GLM</span>
                 <div class="form-hint mono">http://127.0.0.1:8766/proxy/codex/model-catalog.json</div>
               </section>
               <section class="panel panel-pad">
                 <div class="section-title">Auth Policy</div>
                 <span class="chip chip-orange">Runtime env</span>
-                <div class="form-hint">GPT routes reuse Codex bearer auth. DeepSeek routes use server-side API key env vars.</div>
+                <div class="form-hint">GPT routes reuse Codex bearer auth. DeepSeek and GLM routes share the server-side Winky API key env var.</div>
               </section>
             </div>
             <section class="panel panel-pad">
               <div class="section-title">Codex Config</div>
               <pre class="code-block">model_provider = "nexus-codex"
 model = "gpt-5.5"
-model_catalog_json = "http://127.0.0.1:8766/proxy/codex/model-catalog.json"
+model_catalog_json = "C:/Users/YOUR_USER/.codex/nexus-model-catalog.json"
 
 [model_providers.nexus-codex]
 name = "Nexus Codex"

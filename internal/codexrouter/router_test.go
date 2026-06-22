@@ -251,6 +251,30 @@ func TestDefaultConfigDeepSeekCanUsePersonalAPI(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigIncludesGLMViaWinky(t *testing.T) {
+	t.Setenv("NEXUS_GLM_BASE_URL", "")
+	t.Setenv("NEXUS_GLM_PROVIDER", "")
+	t.Setenv("NEXUS_GLM_51_DESCRIPTION", "")
+	t.Setenv("NEXUS_GLM_52_DESCRIPTION", "")
+
+	cfg := DefaultConfig()
+	for _, id := range []string{"glm-5.2", "glm-5.1"} {
+		route := findRouteForTest(t, cfg, id)
+		if route.BaseURL != "https://lumos.diandian.info/winky/glm/v1" {
+			t.Fatalf("expected default GLM Winky base URL for %s, got %q", id, route.BaseURL)
+		}
+		if route.Provider != "Winky GLM" {
+			t.Fatalf("expected default GLM provider for %s, got %q", id, route.Provider)
+		}
+		if route.Model != id || route.API != "chat_completions" {
+			t.Fatalf("expected GLM chat completions route for %s, got %#v", id, route)
+		}
+		if route.APIKeyEnv != "DEEPSEEK_API_KEY" {
+			t.Fatalf("expected GLM to reuse Winky API key env DEEPSEEK_API_KEY for %s, got %q", id, route.APIKeyEnv)
+		}
+	}
+}
+
 func findRouteForTest(t *testing.T, cfg Config, id string) Route {
 	t.Helper()
 	for _, route := range cfg.Routes {

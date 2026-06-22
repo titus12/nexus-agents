@@ -78,6 +78,8 @@ func NewService(config Config) *Service {
 func DefaultConfig() Config {
 	deepSeekBaseURL := getenvDefault("NEXUS_DEEPSEEK_BASE_URL", "https://lumos.diandian.info/winky/deepseek/v1")
 	deepSeekProvider := getenvDefault("NEXUS_DEEPSEEK_PROVIDER", "Winky DeepSeek")
+	glmBaseURL := getenvDefault("NEXUS_GLM_BASE_URL", "https://lumos.diandian.info/winky/glm/v1")
+	glmProvider := getenvDefault("NEXUS_GLM_PROVIDER", "Winky GLM")
 	return Config{
 		DefaultModel: "gpt-5.5",
 		Routes: []Route{
@@ -138,6 +140,32 @@ func DefaultConfig() Config {
 				AuthMode:    "api_key",
 				APIKeyEnv:   "DEEPSEEK_API_KEY",
 				Priority:    4,
+				DropParams:  []string{"response_format", "parallel_tool_calls"},
+			},
+			{
+				ID:          "glm-5.2",
+				DisplayName: "GLM-5.2",
+				Description: getenvDefault("NEXUS_GLM_52_DESCRIPTION", "GLM-5.2 via Winky API."),
+				API:         "chat_completions",
+				BaseURL:     glmBaseURL,
+				Model:       "glm-5.2",
+				Provider:    glmProvider,
+				AuthMode:    "api_key",
+				APIKeyEnv:   "DEEPSEEK_API_KEY",
+				Priority:    5,
+				DropParams:  []string{"response_format", "parallel_tool_calls"},
+			},
+			{
+				ID:          "glm-5.1",
+				DisplayName: "GLM-5.1",
+				Description: getenvDefault("NEXUS_GLM_51_DESCRIPTION", "GLM-5.1 via Winky API."),
+				API:         "chat_completions",
+				BaseURL:     glmBaseURL,
+				Model:       "glm-5.1",
+				Provider:    glmProvider,
+				AuthMode:    "api_key",
+				APIKeyEnv:   "DEEPSEEK_API_KEY",
+				Priority:    6,
 				DropParams:  []string{"response_format", "parallel_tool_calls"},
 			},
 		},
@@ -626,12 +654,19 @@ func modelCatalogEntry(route Route, index int) map[string]any {
 		{"effort": "high", "description": "Greater reasoning depth for complex tasks"},
 		{"effort": "xhigh", "description": "Extra high reasoning depth for complex tasks"},
 	}
-	if strings.Contains(strings.ToLower(route.Model), "deepseek") {
+	modelName := strings.ToLower(route.Model)
+	if strings.Contains(modelName, "deepseek") {
 		defaultReasoning = "high"
 		reasoningLevels = []map[string]string{
 			{"effort": "none", "description": "Disable reasoning"},
 			{"effort": "high", "description": "Use stronger reasoning"},
 			{"effort": "max", "description": "Use maximum reasoning"},
+		}
+	}
+	if strings.Contains(modelName, "glm") {
+		defaultReasoning = "none"
+		reasoningLevels = []map[string]string{
+			{"effort": "none", "description": "Use the model default reasoning behavior"},
 		}
 	}
 	description := route.Description
