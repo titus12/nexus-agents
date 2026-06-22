@@ -297,8 +297,11 @@ func TestStoreCreateAndDeleteProjectWorkflowWritesProjectFiles(t *testing.T) {
 	}
 }
 
-func TestImportProjectWritesRootNexusFileAndGitIgnore(t *testing.T) {
+func TestImportProjectWritesUserHomeNexusIndex(t *testing.T) {
 	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	writeTestFile(t, root, ".claude/rules/01-communication.md", "communication")
 
 	store := NewStoreFromData(BootstrapData{
@@ -319,38 +322,23 @@ func TestImportProjectWritesRootNexusFileAndGitIgnore(t *testing.T) {
 		t.Fatalf("import project: %v", err)
 	}
 
-	nexusPath := filepath.Join(root, ".nexus")
+	nexusPath := filepath.Join(home, ".nexus")
 	data, err := os.ReadFile(nexusPath)
 	if err != nil {
-		t.Fatalf("expected root .nexus file: %v", err)
+		t.Fatalf("expected user home .nexus file: %v", err)
 	}
 	content := string(data)
-	for _, token := range []string{`"schemaVersion": 1`, `"projectId": "btd-game-server"`, `"projectName": "btd-game-server"`, `"localPath": "`} {
+	for _, token := range []string{`"version": 1`, `"projectId": "btd-game-server"`, `"projectName": "btd-game-server"`, `"path": "`} {
 		if !strings.Contains(content, token) {
 			t.Fatalf("expected .nexus metadata token %s, got %s", token, content)
 		}
 	}
-	if project.LocalConfigPath != ".nexus" || !project.LocalConfigIgnored || project.LocalPath == "" || project.RepoKey == "" {
+	if project.LocalConfigPath != "" || project.LocalConfigIgnored || project.LocalPath == "" || project.RepoKey == "" {
 		t.Fatalf("expected project local import fields, got %#v", project)
-	}
-
-	gitignore, err := os.ReadFile(filepath.Join(root, ".gitignore"))
-	if err != nil {
-		t.Fatalf("expected .gitignore: %v", err)
-	}
-	if count := strings.Count(string(gitignore), ".nexus"); count != 1 {
-		t.Fatalf("expected one .nexus ignore rule, got %d in %q", count, string(gitignore))
 	}
 
 	if _, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root}); err != nil {
 		t.Fatalf("repeat import project: %v", err)
-	}
-	gitignore, err = os.ReadFile(filepath.Join(root, ".gitignore"))
-	if err != nil {
-		t.Fatalf("expected .gitignore after repeat import: %v", err)
-	}
-	if count := strings.Count(string(gitignore), ".nexus"); count != 1 {
-		t.Fatalf("expected repeat import to keep one .nexus ignore rule, got %d in %q", count, string(gitignore))
 	}
 
 	ok, err := store.DeleteProject(project.ID)
@@ -361,14 +349,7 @@ func TestImportProjectWritesRootNexusFileAndGitIgnore(t *testing.T) {
 		t.Fatal("expected delete project to remove imported project")
 	}
 	if _, err := os.Stat(nexusPath); !os.IsNotExist(err) {
-		t.Fatalf("expected delete project to remove root .nexus file, err=%v", err)
-	}
-	gitignore, err = os.ReadFile(filepath.Join(root, ".gitignore"))
-	if err != nil {
-		t.Fatalf("expected .gitignore after delete: %v", err)
-	}
-	if count := strings.Count(string(gitignore), ".nexus"); count != 1 {
-		t.Fatalf("expected delete to keep one .nexus ignore rule, got %d in %q", count, string(gitignore))
+		t.Fatalf("expected delete project to remove user home .nexus file when last project is removed, err=%v", err)
 	}
 }
 
@@ -383,8 +364,8 @@ func TestImportProjectMigratesLegacyNexusWorkflowDirectory(t *testing.T) {
 		t.Fatalf("import project: %v", err)
 	}
 
-	if stat, err := os.Stat(filepath.Join(root, ".nexus")); err != nil || stat.IsDir() {
-		t.Fatalf("expected .nexus root file after migration, stat=%#v err=%v", stat, err)
+	if _, err := os.Stat(filepath.Join(root, ".nexus")); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy .nexus path to be removed after migration, err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "go-feature-development.graph.json")); err != nil {
 		t.Fatalf("expected migrated workflow graph: %v", err)
@@ -394,8 +375,11 @@ func TestImportProjectMigratesLegacyNexusWorkflowDirectory(t *testing.T) {
 	}
 }
 
-func TestStoreRescanProjectRefreshesConfigSet(t *testing.T) {
+func TestStoreRescanProjectRefreshesUserHomeNexusIndex(t *testing.T) {
 	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	writeTestFile(t, root, ".claude/rules/01-communication.md", "communication")
 
 	store := NewStoreFromData(BootstrapData{
@@ -438,9 +422,9 @@ func TestStoreRescanProjectRefreshesConfigSet(t *testing.T) {
 		t.Fatalf("expected rescan summary to include skill, got %#v", rescanned.ConfigSummary)
 	}
 	assertProjectCopy(t, copies, "skill", "testing", "project_modified", ".claude/skills/testing.md")
-	metadata, ok := readProjectLocalMetadata(root)
-	if !ok || metadata.LastScannedAt == "" {
-		t.Fatalf("expected rescan to refresh .nexus metadata, got %#v ok=%v", metadata, ok)
+	metadata, ok := readUserProjectIndex()
+	if !ok || len(metadata.Projects) != 1 || metadata.Projects[0].LastScannedAt == "" {
+		t.Fatalf("expected rescan to refresh user .nexus metadata, got %#v ok=%v", metadata, ok)
 	}
 }
 
@@ -472,33 +456,37 @@ func TestTemplateHashPrefersDeclaredFilesOverSourcePaths(t *testing.T) {
 	}
 }
 
-func TestApplyProjectLocalMetadataReadsRootNexusFile(t *testing.T) {
+func TestNewStoreRestoresProjectsFromUserHomeNexusIndex(t *testing.T) {
 	root := t.TempDir()
-	writeTestFile(t, root, ".nexus", `{
-  "schemaVersion": 1,
-  "projectId": "btd-game-server",
-  "projectName": "btd-game-server",
-  "repoKey": "github.com/example/btd-game-server",
-  "localPath": "D:\\workspace\\src\\btd-game-server",
-  "importedAt": "2026-06-20T10:00:00+08:00",
-  "lastScannedAt": "2026-06-20T10:30:00+08:00"
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	writeTestFile(t, root, ".claude/rules/01-communication.md", "communication")
+	writeTestFile(t, home, ".nexus", `{
+  "version": 1,
+  "projects": [
+    {
+      "projectId": "btd-game-server",
+      "projectName": "btd-game-server",
+      "path": "`+filepath.ToSlash(root)+`",
+      "repoKey": "github.com/example/btd-game-server",
+      "importedAt": "2026-06-20T10:00:00Z",
+      "lastScannedAt": "2026-06-20T10:30:00Z"
+    }
+  ]
 }`)
-	writeTestFile(t, root, ".gitignore", "build/\n.nexus\n")
 
-	project := applyProjectLocalMetadata(Project{
-		ID:   "btd-game-server",
-		Name: "btd-game-server",
-		Path: root,
-	})
-
-	if project.RepoKey != "github.com/example/btd-game-server" {
-		t.Fatalf("expected repo key from .nexus metadata, got %#v", project)
+	store := NewStore()
+	bootstrap := store.Bootstrap()
+	if len(bootstrap.Projects) != 1 {
+		t.Fatalf("expected one restored project, got %#v", bootstrap.Projects)
 	}
-	if project.LocalPath != `D:\workspace\src\btd-game-server` {
-		t.Fatalf("expected local path from .nexus metadata, got %#v", project)
+	project := bootstrap.Projects[0]
+	if project.ID != "btd-game-server" || project.Name != "btd-game-server" || filepath.Clean(project.Path) != filepath.Clean(root) {
+		t.Fatalf("expected restored project identity and path, got %#v", project)
 	}
-	if project.LocalConfigPath != ".nexus" || !project.LocalConfigIgnored {
-		t.Fatalf("expected .nexus local config fields, got %#v", project)
+	if project.LocalConfigPath != "" || project.LocalConfigIgnored {
+		t.Fatalf("expected no project root .nexus config fields, got %#v", project)
 	}
 }
 

@@ -252,6 +252,7 @@ func hydrateTemplateItemsFromFiles(items []TemplateItem) []TemplateItem {
 }
 
 func hydrateTemplateItemFromFiles(item TemplateItem) TemplateItem {
+	item = applyTemplateFilenameDisplay(item)
 	if item.Kind == "agent" {
 		if content := readFirstExistingText(pathsMatching(item, "templates/agents/claude/")); content != "" {
 			item.Content = content
@@ -269,6 +270,38 @@ func hydrateTemplateItemFromFiles(item TemplateItem) TemplateItem {
 		item.Content = content
 	}
 	return item
+}
+
+func applyTemplateFilenameDisplay(item TemplateItem) TemplateItem {
+	displayName := templateFilenameStem(item)
+	if displayName == "" {
+		return item
+	}
+	item.Name = displayName
+	item.Slug = displayName
+	return item
+}
+
+func templateFilenameStem(item TemplateItem) string {
+	for _, path := range templateFileCandidates(item) {
+		candidate := filepath.ToSlash(path)
+		if !strings.HasPrefix(candidate, "templates/") {
+			continue
+		}
+		if item.Kind == "agent" && !strings.Contains(candidate, "/claude/") {
+			continue
+		}
+		if strings.HasSuffix(candidate, ".graph.json") {
+			continue
+		}
+		base := filepath.Base(filepath.FromSlash(candidate))
+		ext := filepath.Ext(base)
+		if ext == "" {
+			continue
+		}
+		return strings.TrimSuffix(base, ext)
+	}
+	return ""
 }
 
 func templateItemsByID(items []TemplateItem) map[string]TemplateItem {

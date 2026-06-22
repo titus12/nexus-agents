@@ -176,8 +176,11 @@ func TestProjectEndpoints(t *testing.T) {
 }
 
 func TestProjectImportAndDeleteEndpoints(t *testing.T) {
-	server := NewServer()
 	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	server := NewServer()
 
 	importResponse := requestJSON(t, server, http.MethodPost, "/api/projects/import", `{"name":"imported-game","path":"`+strings.ReplaceAll(root, `\`, `\\`)+`"}`)
 	if importResponse.Code != http.StatusCreated {
@@ -198,11 +201,11 @@ func TestProjectImportAndDeleteEndpoints(t *testing.T) {
 	if imported.ID != "imported-game" || imported.Status != "draft" {
 		t.Fatalf("unexpected imported project: %#v", imported)
 	}
-	if imported.RepoKey == "" || imported.LocalPath == "" || imported.LocalConfigPath != ".nexus" || !imported.LocalConfigIgnored {
+	if imported.RepoKey == "" || imported.LocalPath == "" || imported.LocalConfigPath != "" || imported.LocalConfigIgnored {
 		t.Fatalf("expected local import metadata fields, got %#v", imported)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".nexus")); err != nil {
-		t.Fatalf("expected imported project to contain .nexus file: %v", err)
+	if _, err := os.Stat(filepath.Join(home, ".nexus")); err != nil {
+		t.Fatalf("expected imported project to be indexed in user home .nexus file: %v", err)
 	}
 
 	var projects []struct {
@@ -221,15 +224,8 @@ func TestProjectImportAndDeleteEndpoints(t *testing.T) {
 	if deleteResponse.Code != http.StatusNoContent {
 		t.Fatalf("expected delete status 204, got %d", deleteResponse.Code)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".nexus")); !os.IsNotExist(err) {
-		t.Fatalf("expected delete endpoint to remove root .nexus file, err=%v", err)
-	}
-	gitignore, err := os.ReadFile(filepath.Join(root, ".gitignore"))
-	if err != nil {
-		t.Fatalf("expected .gitignore after delete: %v", err)
-	}
-	if count := strings.Count(string(gitignore), ".nexus"); count != 1 {
-		t.Fatalf("expected delete endpoint to keep one .nexus ignore rule, got %d in %q", count, string(gitignore))
+	if _, err := os.Stat(filepath.Join(home, ".nexus")); !os.IsNotExist(err) {
+		t.Fatalf("expected delete endpoint to remove user home .nexus file, err=%v", err)
 	}
 
 	missingResponse := requestJSON(t, server, http.MethodGet, "/api/projects/imported-game", "")
@@ -311,6 +307,8 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 
 	var agents []struct {
 		ID              string   `json:"id"`
+		Name            string   `json:"name"`
+		Slug            string   `json:"slug"`
 		ModelTier       string   `json:"modelTier"`
 		SourcePaths     []string `json:"sourcePaths"`
 		CodexProjection string   `json:"codexProjection"`
@@ -322,25 +320,35 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		"quick", "reviewer-logic", "reviewer-perf", "reviewer-security", "sisyphus", "worker",
 	})
 	for _, agent := range agents {
+		displayName := "go-" + agent.ID
+		if agent.Name != displayName || agent.Slug != displayName {
+			t.Fatalf("expected agent template identity to preserve go- filename prefix, got %#v", agent)
+		}
 		if agent.ModelTier == "" || agent.CodexProjection == "" || agent.ClaudeSource == "" {
 			t.Fatalf("expected btd agent model and source metadata, got %#v", agent)
 		}
-		if !containsString(agent.SourcePaths, "templates/agents/claude/go-"+agent.ID+".md") {
+		if !containsString(agent.SourcePaths, "templates/agents/claude/"+displayName+".md") {
 			t.Fatalf("expected copied agent markdown template for %s, got %#v", agent.ID, agent.SourcePaths)
 		}
-		if !containsString(agent.SourcePaths, "templates/agents/codex/go-"+agent.ID+".toml") {
+		if !containsString(agent.SourcePaths, "templates/agents/codex/"+displayName+".toml") {
 			t.Fatalf("expected copied agent toml template for %s, got %#v", agent.ID, agent.SourcePaths)
 		}
 	}
 
 	var rules []struct {
 		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Slug        string   `json:"slug"`
 		SourcePaths []string `json:"sourcePaths"`
 		Content     string   `json:"content"`
 	}
 	getJSON(t, server, "/api/templates/rules", &rules)
 	assertTemplateIDs(t, "rules", rules, []string{"00-routing", "01-communication", "02-safety", "03-project-model"})
 	for _, rule := range rules {
+		displayName := strings.TrimSuffix(strings.TrimPrefix(rule.SourcePaths[0], "templates/rules/"), ".md")
+		if rule.Name != displayName || rule.Slug != displayName {
+			t.Fatalf("expected rule template identity to preserve go- filename prefix, got %#v", rule)
+		}
 		if rule.Content == "" || !hasTemplateMarkdownPath(rule.SourcePaths, "templates/rules/") {
 			t.Fatalf("expected copied btd rule content and template path, got %#v", rule)
 		}
@@ -348,6 +356,8 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 
 	var skills []struct {
 		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Slug        string   `json:"slug"`
 		SourcePaths []string `json:"sourcePaths"`
 		Content     string   `json:"content"`
 	}
@@ -357,6 +367,12 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		"high-risk-api", "pmconf-pattern", "quest-system", "review-feedback", "skill-standard", "testing",
 	})
 	for _, skill := range skills {
+		if strings.HasPrefix(skill.SourcePaths[0], "templates/skills/go-") {
+			displayName := "go-" + skill.ID
+			if skill.Name != displayName || skill.Slug != displayName {
+				t.Fatalf("expected skill template identity to preserve go- filename prefix, got %#v", skill)
+			}
+		}
 		if skill.Content == "" || !hasTemplateMarkdownPath(skill.SourcePaths, "templates/skills/") {
 			t.Fatalf("expected copied btd skill content and template path, got %#v", skill)
 		}
@@ -364,6 +380,8 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 
 	var workflows []struct {
 		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Slug        string   `json:"slug"`
 		Entry       string   `json:"entry"`
 		Source      string   `json:"source"`
 		SourcePaths []string `json:"sourcePaths"`
@@ -375,6 +393,12 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		"research", "commit-gate", "refactor", "lark-integration",
 	})
 	for _, workflow := range workflows {
+		if strings.HasPrefix(workflow.Entry, "templates/workflows/go-") {
+			displayName := "go-" + workflow.ID
+			if workflow.Name != displayName || workflow.Slug != displayName {
+				t.Fatalf("expected workflow template identity to preserve go- filename prefix, got %#v", workflow)
+			}
+		}
 		if workflow.Entry == "" || !strings.HasPrefix(workflow.Entry, "templates/workflows/") || !strings.HasSuffix(workflow.Entry, ".md") {
 			t.Fatalf("expected workflow entry to be copied markdown under templates/workflows, got %#v", workflow)
 		}

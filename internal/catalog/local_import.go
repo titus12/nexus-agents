@@ -10,14 +10,18 @@ import (
 	"time"
 )
 
-type ProjectLocalMetadata struct {
-	SchemaVersion int    `json:"schemaVersion"`
+type UserProjectRecord struct {
 	ProjectID     string `json:"projectId"`
 	ProjectName   string `json:"projectName"`
+	Path          string `json:"path"`
 	RepoKey       string `json:"repoKey"`
-	LocalPath     string `json:"localPath"`
 	ImportedAt    string `json:"importedAt"`
 	LastScannedAt string `json:"lastScannedAt"`
+}
+
+type UserProjectIndex struct {
+	Version  int                 `json:"version"`
+	Projects []UserProjectRecord `json:"projects"`
 }
 
 func prepareImportedProject(name string, projectPath string) (string, string, error) {
@@ -41,123 +45,148 @@ func prepareImportedProject(name string, projectPath string) (string, string, er
 	return localPath, detectRepoKey(localPath, name), nil
 }
 
-func writeProjectLocalMetadata(projectRoot string, metadata ProjectLocalMetadata) error {
-	now := time.Now().Format(time.RFC3339)
-	existing, _ := readProjectLocalMetadata(projectRoot)
-	if metadata.ImportedAt == "" {
-		metadata.ImportedAt = existing.ImportedAt
-	}
-	if metadata.ImportedAt == "" {
-		metadata.ImportedAt = now
-	}
-	metadata.LastScannedAt = now
-
-	data, err := json.MarshalIndent(metadata, "", "  ")
+func readUserProjectIndex() (UserProjectIndex, bool) {
+	data, err := os.ReadFile(userNexusPath())
 	if err != nil {
-		return fmt.Errorf("marshal .nexus metadata: %w", err)
+		return UserProjectIndex{}, false
+	}
+	var index UserProjectIndex
+	if err := json.Unmarshal(stripUTF8BOM(data), &index); err != nil {
+		return UserProjectIndex{}, false
+	}
+	if index.Version == 0 {
+		index.Version = 1
+	}
+	if index.Projects == nil {
+		index.Projects = []UserProjectRecord{}
+	}
+	return index, true
+}
+
+func writeUserProjectIndex(index UserProjectIndex) error {
+	if index.Version == 0 {
+		index.Version = 1
+	}
+	if len(index.Projects) == 0 {
+		if err := os.Remove(userNexusPath()); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove user .nexus: %w", err)
+		}
+		return nil
+	}
+	data, err := json.MarshalIndent(index, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal user .nexus: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(filepath.Join(projectRoot, ".nexus"), data, 0o644); err != nil {
-		return fmt.Errorf("write .nexus metadata: %w", err)
+	if err := os.WriteFile(userNexusPath(), data, 0o644); err != nil {
+		return fmt.Errorf("write user .nexus: %w", err)
 	}
 	return nil
 }
 
-func readProjectLocalMetadata(projectRoot string) (ProjectLocalMetadata, bool) {
-	data, err := os.ReadFile(filepath.Join(projectRoot, ".nexus"))
-	if err != nil {
-		return ProjectLocalMetadata{}, false
+func upsertUserProjectRecord(record UserProjectRecord) error {
+	index, _ := readUserProjectIndex()
+	now := time.Now().Format(time.RFC3339)
+	if record.ImportedAt == "" {
+		record.ImportedAt = now
 	}
-	var metadata ProjectLocalMetadata
-	if err := json.Unmarshal(stripUTF8BOM(data), &metadata); err != nil {
-		return ProjectLocalMetadata{}, false
+	if record.LastScannedAt == "" {
+		record.LastScannedAt = now
 	}
-	return metadata, true
+	replaced := false
+	for i := range index.Projects {
+		if sameProjectPath(index.Projects[i].Path, record.Path) {
+			if record.ImportedAt == "" {
+				record.ImportedAt = index.Projects[i].ImportedAt
+			}
+			index.Projects[i] = record
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		index.Projects = append(index.Projects, record)
+	}
+	return writeUserProjectIndex(index)
+}
+
+func removeUserProjectRecord(projectPath string) error {
+	index, ok := readUserProjectIndex()
+	if !ok {
+		return nil
+	}
+	filtered := index.Projects[:0]
+	for _, item := range index.Projects {
+		if sameProjectPath(item.Path, projectPath) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	index.Projects = filtered
+	return writeUserProjectIndex(index)
+}
+
+func restoreProjectsFromUserIndex(library TemplateLibrary) ([]Project, map[string][]ProjectCopy) {
+	index, ok := readUserProjectIndex()
+	if !ok || len(index.Projects) == 0 {
+		return nil, map[string][]ProjectCopy{}
+	}
+	projects := make([]Project, 0, len(index.Projects))
+	configSets := make(map[string][]ProjectCopy, len(index.Projects))
+	filtered := make([]UserProjectRecord, 0, len(index.Projects))
+	for _, record := range index.Projects {
+		localPath := strings.TrimSpace(record.Path)
+		if localPath == "" {
+			continue
+		}
+		if stat, err := os.Stat(localPath); err != nil || !stat.IsDir() {
+			continue
+		}
+		copies, err := scanProjectConfigSetForProject(projectTokenFromID(record.ProjectID), localPath, library)
+		if err != nil {
+			continue
+		}
+		project := Project{
+			ID:            record.ProjectID,
+			Name:          record.ProjectName,
+			Path:          localPath,
+			Status:        "draft",
+			UpdatedAt:     latestProjectConfigStamp(localPath),
+			ConfigSummary: summarizeProjectCopies(copies),
+			RepoKey:       record.RepoKey,
+			LocalPath:     localPath,
+		}
+		projects = append(projects, project)
+		configSets[project.ID] = copies
+		record.LastScannedAt = time.Now().Format(time.RFC3339)
+		filtered = append(filtered, record)
+	}
+	index.Projects = filtered
+	_ = writeUserProjectIndex(index)
+	return projects, configSets
+}
+
+func userNexusPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ".nexus"
+	}
+	return filepath.Join(home, ".nexus")
+}
+
+func sameProjectPath(left string, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func projectTokenFromID(projectID string) string {
+	if projectID == "" {
+		return "project"
+	}
+	return strings.ReplaceAll(slugify(projectID), "-", "_")
 }
 
 func stripUTF8BOM(data []byte) []byte {
 	return bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
-}
-
-func applyProjectLocalMetadata(project Project) Project {
-	if strings.TrimSpace(project.Path) == "" {
-		return project
-	}
-	metadata, hasMetadata := readProjectLocalMetadata(project.Path)
-	if hasMetadata {
-		if strings.TrimSpace(metadata.RepoKey) != "" {
-			project.RepoKey = metadata.RepoKey
-		}
-		if strings.TrimSpace(metadata.LocalPath) != "" {
-			project.LocalPath = metadata.LocalPath
-		}
-	}
-	if stat, err := os.Stat(filepath.Join(project.Path, ".nexus")); err == nil && !stat.IsDir() {
-		project.LocalConfigPath = ".nexus"
-		project.LocalConfigIgnored = gitIgnoreRulePresent(project.Path, ".nexus")
-	}
-	return project
-}
-
-func removeProjectLocalMetadata(project Project) error {
-	projectRoot := strings.TrimSpace(project.LocalPath)
-	if projectRoot == "" {
-		projectRoot = strings.TrimSpace(project.Path)
-	}
-	if projectRoot == "" {
-		return nil
-	}
-
-	nexusPath := filepath.Join(projectRoot, ".nexus")
-	stat, err := os.Stat(nexusPath)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("stat .nexus metadata: %w", err)
-	}
-	if stat.IsDir() {
-		return fmt.Errorf(".nexus is a directory; Nexus will not recursively remove it")
-	}
-	if err := os.Remove(nexusPath); err != nil {
-		return fmt.Errorf("remove .nexus metadata: %w", err)
-	}
-	return nil
-}
-
-func gitIgnoreRulePresent(projectRoot string, rule string) bool {
-	data, err := os.ReadFile(filepath.Join(projectRoot, ".gitignore"))
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == rule {
-			return true
-		}
-	}
-	return false
-}
-
-func ensureGitIgnoreRule(projectRoot string, rule string) (bool, error) {
-	gitignorePath := filepath.Join(projectRoot, ".gitignore")
-	data, err := os.ReadFile(gitignorePath)
-	if err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("read .gitignore: %w", err)
-	}
-	content := string(data)
-	for _, line := range strings.Split(content, "\n") {
-		if strings.TrimSpace(line) == rule {
-			return true, nil
-		}
-	}
-	if content != "" && !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-	content += rule + "\n"
-	if err := os.WriteFile(gitignorePath, []byte(content), 0o644); err != nil {
-		return false, fmt.Errorf("write .gitignore: %w", err)
-	}
-	return true, nil
 }
 
 func migrateLegacyNexusDirectory(projectRoot string) error {
@@ -260,12 +289,5 @@ func normalizeRepoKey(remote string) string {
 	value = strings.ReplaceAll(value, ":", "/")
 	value = strings.TrimPrefix(value, "https://")
 	value = strings.TrimPrefix(value, "http://")
-	return strings.ToLower(value)
-}
-
-func projectTokenFromID(projectID string) string {
-	if strings.HasSuffix(projectID, "-game-server") {
-		return strings.TrimSuffix(projectID, "-game-server")
-	}
-	return slugify(projectID)
+	return value
 }

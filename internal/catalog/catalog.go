@@ -180,6 +180,9 @@ type Store struct {
 
 func NewStore() *Store {
 	data := TemplateBootstrapData()
+	restoredProjects, restoredConfigSets := restoreProjectsFromUserIndex(data.TemplateLibrary)
+	data.Projects = restoredProjects
+	data.ProjectConfigSets = restoredConfigSets
 	return &Store{
 		data:           cloneBootstrap(data),
 		workflows:      cloneWorkflowSummaries(mockWorkflows()),
@@ -244,17 +247,14 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 		}
 	}
 
-	if err := writeProjectLocalMetadata(localPath, ProjectLocalMetadata{
-		SchemaVersion: 1,
+	if err := upsertUserProjectRecord(UserProjectRecord{
 		ProjectID:     id,
 		ProjectName:   name,
+		Path:          localPath,
 		RepoKey:       repoKey,
-		LocalPath:     localPath,
+		ImportedAt:    time.Now().Format(time.RFC3339),
+		LastScannedAt: time.Now().Format(time.RFC3339),
 	}); err != nil {
-		return Project{}, err
-	}
-	localConfigIgnored, err := ensureGitIgnoreRule(localPath, ".nexus")
-	if err != nil {
 		return Project{}, err
 	}
 
@@ -263,16 +263,14 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 		return Project{}, err
 	}
 	project := Project{
-		ID:                 id,
-		Name:               name,
-		Path:               localPath,
-		Status:             "draft",
-		UpdatedAt:          nowStamp(),
-		ConfigSummary:      summarizeProjectCopies(copies),
-		RepoKey:            repoKey,
-		LocalPath:          localPath,
-		LocalConfigPath:    ".nexus",
-		LocalConfigIgnored: localConfigIgnored,
+		ID:            id,
+		Name:          name,
+		Path:          localPath,
+		Status:        "draft",
+		UpdatedAt:     nowStamp(),
+		ConfigSummary: summarizeProjectCopies(copies),
+		RepoKey:       repoKey,
+		LocalPath:     localPath,
 	}
 	for index := range s.data.Projects {
 		if s.data.Projects[index].ID == id {
@@ -316,25 +314,19 @@ func (s *Store) RescanProject(projectID string) (Project, []ProjectCopy, bool, e
 	if repoKey == "" {
 		repoKey = detectRepoKey(localPath, project.Name)
 	}
-	if err := writeProjectLocalMetadata(localPath, ProjectLocalMetadata{
-		SchemaVersion: 1,
+	if err := upsertUserProjectRecord(UserProjectRecord{
 		ProjectID:     project.ID,
 		ProjectName:   project.Name,
+		Path:          localPath,
 		RepoKey:       repoKey,
-		LocalPath:     localPath,
+		LastScannedAt: time.Now().Format(time.RFC3339),
 	}); err != nil {
-		return Project{}, nil, true, err
-	}
-	localConfigIgnored, err := ensureGitIgnoreRule(localPath, ".nexus")
-	if err != nil {
 		return Project{}, nil, true, err
 	}
 
 	project.Path = localPath
 	project.LocalPath = localPath
 	project.RepoKey = repoKey
-	project.LocalConfigPath = ".nexus"
-	project.LocalConfigIgnored = localConfigIgnored
 	project.ConfigSummary = summarizeProjectCopies(copies)
 	project.UpdatedAt = latestProjectConfigStamp(localPath)
 
@@ -356,7 +348,7 @@ func (s *Store) DeleteProject(projectID string) (bool, error) {
 
 	for index, project := range s.data.Projects {
 		if project.ID == projectID {
-			if err := removeProjectLocalMetadata(project); err != nil {
+			if err := removeUserProjectRecord(strings.TrimSpace(project.LocalPath)); err != nil {
 				return true, err
 			}
 			s.data.Projects = append(s.data.Projects[:index], s.data.Projects[index+1:]...)

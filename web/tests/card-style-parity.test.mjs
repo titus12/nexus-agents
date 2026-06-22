@@ -59,6 +59,12 @@ test("template and project resource cards share card classes and keep bulky sync
   assert.match(body, /projectCopyMeta\(copy\)/);
 });
 
+test("project agent rule and skill cards reuse source template footer chips", () => {
+  assert.match(app, /function projectCopyFooterChips\(copy: ProjectCopy\): string\[\]\s*\{[\s\S]*const template = templateForProjectCopy\(copy\)/);
+  assert.match(app, /copy\.kind !== "workflow"[\s\S]*templateFooterChips\(template\)/);
+  assert.match(app, /return \[`local v\$\{copy\.localVersion\}`, copy\.syncMode\];/);
+});
+
 test("import directory picker opens as a separate modal overlay", () => {
   assert.match(app, /@click="chooseProjectDirectory\(\)"/);
   assert.match(app, /async function chooseProjectDirectory\(\)/);

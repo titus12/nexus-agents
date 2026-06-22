@@ -392,6 +392,10 @@ function projectCopyMeta(copy: ProjectCopy): string[] {
 }
 
 function projectCopyFooterChips(copy: ProjectCopy): string[] {
+  const template = templateForProjectCopy(copy);
+  if (template && copy.kind !== "workflow") {
+    return templateFooterChips(template);
+  }
   return [`local v${copy.localVersion}`, copy.syncMode];
 }
 
