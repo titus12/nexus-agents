@@ -502,6 +502,44 @@ func TestProjectCopySyncAndDetachEndpoints(t *testing.T) {
 	}
 }
 
+func TestProjectCopyFromTemplateEndpoint(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+	templateMarkdown := filepath.Join(templateRoot, "workflows", "go-bugfix.md")
+	templateGraph := filepath.Join(templateRoot, "workflows", "go-bugfix.graph.json")
+	writeHTTPTestFile(t, templateRoot, "workflows/go-bugfix.md", "# go-bugfix\n")
+	writeHTTPTestFile(t, templateRoot, "workflows/go-bugfix.graph.json", `{"id":"bugfix","name":"bugfix","nodes":[],"edges":[]}`+"\n")
+
+	store := catalog.NewStoreFromData(catalog.BootstrapData{
+		TemplateLibrary: catalog.TemplateLibrary{
+			Workflows: []catalog.TemplateItem{{
+				ID:      "bugfix",
+				Kind:    "workflow",
+				Name:    "bugfix",
+				Version: 1,
+				Entry:   templateMarkdown,
+				Files:   []string{templateMarkdown, templateGraph},
+			}},
+		},
+		Projects:          []catalog.Project{{ID: "sample", Name: "sample", Path: root, LocalPath: root}},
+		ProjectConfigSets: map[string][]catalog.ProjectCopy{"sample": {}},
+	}, nil, nil)
+	server := NewServerWithStore(store)
+
+	response := requestJSON(t, server, http.MethodPost, "/api/projects/sample/config/from-template", `{"kind":"workflow","templateId":"bugfix"}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected add from template status 201, got %d", response.Code)
+	}
+	var copy catalog.ProjectCopy
+	decodeJSON(t, response, &copy)
+	if copy.Kind != "workflow" || copy.Status != "synced" || copy.Path != ".claude/workflows/go-bugfix.md" {
+		t.Fatalf("unexpected project copy from template: %#v", copy)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "go-bugfix.graph.json")); err != nil {
+		t.Fatalf("expected workflow graph to be written: %v", err)
+	}
+}
+
 func TestProjectSyncPreviewEndpoint(t *testing.T) {
 	store := catalog.NewStoreFromData(catalog.BootstrapData{
 		Projects:          []catalog.Project{{ID: "sample", Name: "sample", Path: "D:/sample"}},

@@ -535,6 +535,27 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 3 && parts[2] == "from-template" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		var input catalog.ProjectTemplateInput
+		if !decodeRequest(w, r, &input) {
+			return
+		}
+		copy, ok, err := s.store.AddProjectCopyFromTemplate(projectID, input.Kind, input.TemplateID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusCreated, copy)
+		return
+	}
+
 	if len(parts) == 3 {
 		if !allowMethods(w, r, http.MethodDelete) {
 			return

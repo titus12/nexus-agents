@@ -103,6 +103,8 @@ export type ProjectCopy = {
   status: SyncStatus;
   path: string;
   diff: string;
+  content?: string;
+  sourcePaths?: string[];
 };
 
 export type ProjectConfigSet = Record<string, ProjectCopy[]>;

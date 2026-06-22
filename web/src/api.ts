@@ -7,6 +7,7 @@ import type {
   ModelRouteResolution,
   Project,
   ProjectCopy,
+  ProjectCopyKind,
   ProjectInput,
   ProjectRescanResult,
   ProjectWorkflowCreateResult,
@@ -105,6 +106,13 @@ export function syncProjectCopy(projectId: string, copyId: string): Promise<Proj
 export function detachProjectCopy(projectId: string, copyId: string): Promise<ProjectCopy> {
   return fetchJSON<ProjectCopy>(`/api/projects/${encodeURIComponent(projectId)}/config/${encodeURIComponent(copyId)}/detach`, {
     method: "POST",
+  });
+}
+
+export function addProjectCopyFromTemplate(projectId: string, kind: ProjectCopyKind, templateId: string): Promise<ProjectCopy> {
+  return fetchJSON<ProjectCopy>(`/api/projects/${encodeURIComponent(projectId)}/config/from-template`, {
+    method: "POST",
+    body: JSON.stringify({ kind, templateId }),
   });
 }
 

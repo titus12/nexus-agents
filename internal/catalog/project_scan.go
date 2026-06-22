@@ -93,40 +93,26 @@ func scanWorkflowCopies(projectToken string, projectRoot string, workflows []Tem
 	for id := range graphFiles {
 		ids[id] = true
 	}
-	if len(ids) > 0 {
-		templateByID := templateItemsByID(workflows)
-		candidates := make(map[string]projectCopyCandidate, len(ids))
-		for _, id := range sortedKeys(ids) {
-			paths := []string{}
-			displayPath := ""
-			if path := workflowFiles[id]; path != "" {
-				paths = append(paths, path)
-				displayPath = displayProjectPath(projectRoot, path)
-			}
-			if path := graphFiles[id]; path != "" {
-				paths = append(paths, path)
-			}
-			if displayPath == "" {
-				displayPath = displayProjectPath(projectRoot, graphFiles[id])
-			}
-			template, ok := templateByID[id]
-			copy := projectCopyFromScan(projectToken, "workflow", id, displayPath, paths, template, ok)
-			addProjectCopyCandidate(candidates, id, template, ok, copy)
+	templateByID := templateItemsByID(workflows)
+	candidates := make(map[string]projectCopyCandidate, len(ids))
+	for _, id := range sortedKeys(ids) {
+		paths := []string{}
+		displayPath := ""
+		if path := workflowFiles[id]; path != "" {
+			paths = append(paths, path)
+			displayPath = displayProjectPath(projectRoot, path)
 		}
-		return projectCopiesFromCandidates(candidates)
+		if path := graphFiles[id]; path != "" {
+			paths = append(paths, path)
+		}
+		if displayPath == "" {
+			displayPath = displayProjectPath(projectRoot, graphFiles[id])
+		}
+		template, ok := templateByID[id]
+		copy := projectCopyFromScan(projectToken, "workflow", id, displayPath, paths, template, ok)
+		addProjectCopyCandidate(candidates, id, template, ok, copy)
 	}
-
-	routingPath := filepath.Join(projectRoot, ".claude", "rules", "go-00-routing.md")
-	if _, err := os.Stat(routingPath); err != nil {
-		return nil
-	}
-
-	copies := make([]ProjectCopy, 0, len(workflows))
-	for _, workflow := range workflows {
-		displayPath := displayProjectPath(projectRoot, routingPath) + "#" + workflow.ID
-		copies = append(copies, projectCopyFromScan(projectToken, "workflow", workflow.ID, displayPath, []string{routingPath}, workflowTemplateFromRouting(workflow), true))
-	}
-	return copies
+	return projectCopiesFromCandidates(candidates)
 }
 
 type projectCopyCandidate struct {
@@ -192,6 +178,8 @@ func projectCopyFromScan(projectToken string, kind string, id string, displayPat
 		Status:       "detached",
 		Path:         displayPath,
 		Diff:         "Project file has no matching Template Library item.",
+		Content:      readProjectCopyContent(projectFiles),
+		SourcePaths:  displayProjectPaths(projectFiles),
 	}
 	if template.Name != "" {
 		copy.Name = template.Name
@@ -216,6 +204,30 @@ func projectCopyFromScan(projectToken string, kind string, id string, displayPat
 	copy.Status = "project_modified"
 	copy.Diff = fmt.Sprintf("Project file differs from template. Manual sync should show a diff before overwriting.\nprojectHash: %s\ntemplateHash: %s", projectHash, templateHash)
 	return copy
+}
+
+func readProjectCopyContent(paths []string) string {
+	for _, path := range paths {
+		if strings.HasSuffix(strings.ToLower(path), ".graph.json") {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return string(data)
+		}
+	}
+	return ""
+}
+
+func displayProjectPaths(paths []string) []string {
+	display := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		display = append(display, filepath.ToSlash(path))
+	}
+	return display
 }
 
 func summarizeProjectCopies(copies []ProjectCopy) ConfigSummary {
@@ -381,24 +393,6 @@ func pathsMatching(item TemplateItem, needle string) []string {
 		}
 	}
 	return matches
-}
-
-func workflowTemplateFromRouting(item TemplateItem) TemplateItem {
-	routingPaths := []string{}
-	for _, path := range templateFileCandidates(item) {
-		slashed := filepath.ToSlash(path)
-		if strings.Contains(slashed, "rules/") && strings.Contains(slashed, "00-routing") {
-			routingPaths = append(routingPaths, path)
-		}
-	}
-	if len(routingPaths) == 0 {
-		return item
-	}
-	item.Entry = ""
-	item.Files = nil
-	item.SourcePaths = routingPaths
-	item.Content = ""
-	return item
 }
 
 func readFirstExistingText(paths []string) string {

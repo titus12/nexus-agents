@@ -607,6 +607,52 @@ tr:last-child td { border-bottom: none; }
 }
 .detail-list span { color: var(--text-dim); font-size: 13px; }
 .detail-list strong { min-width: 0; color: var(--text-primary); font-size: 14px; overflow-wrap: anywhere; }
+.template-drawer-body,
+.project-copy-drawer-body {
+  gap: 10px;
+}
+.template-summary-textarea {
+  min-height: 72px;
+  max-height: 112px;
+}
+.template-detail-list,
+.compact-detail-list {
+  gap: 0;
+  margin-top: 2px;
+}
+.template-detail-list > div,
+.compact-detail-list > div {
+  grid-template-columns: minmax(98px, 0.32fr) minmax(0, 1fr);
+  gap: 10px;
+  padding: 6px 0;
+}
+.template-detail-list span,
+.compact-detail-list span {
+  font-size: 12px;
+}
+.template-detail-list strong,
+.compact-detail-list strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+.drawer-preview-stack {
+  min-height: 0;
+  display: grid;
+  gap: 9px;
+}
+.drawer-preview-block {
+  min-height: 152px;
+  max-height: 32vh;
+  margin-top: 0;
+}
+.drawer-preview-block.compact {
+  min-height: 78px;
+  max-height: 18vh;
+}
+.template-drawer-body .drawer-preview-stack,
+.project-copy-drawer-body .drawer-preview-stack {
+  margin-top: 2px;
+}
 .notice {
   margin-top: 12px;
   padding: 10px 12px;

@@ -82,6 +82,11 @@ type ProjectRescanResult struct {
 	Copies  []ProjectCopy `json:"copies"`
 }
 
+type ProjectTemplateInput struct {
+	Kind       string `json:"kind"`
+	TemplateID string `json:"templateId"`
+}
+
 type ConfigSummary struct {
 	Agents    int `json:"agents"`
 	Rules     int `json:"rules"`
@@ -90,15 +95,17 @@ type ConfigSummary struct {
 }
 
 type ProjectCopy struct {
-	ID           string  `json:"id"`
-	Kind         string  `json:"kind"`
-	Name         string  `json:"name"`
-	Origin       *Origin `json:"origin"`
-	LocalVersion int     `json:"localVersion"`
-	SyncMode     string  `json:"syncMode"`
-	Status       string  `json:"status"`
-	Path         string  `json:"path"`
-	Diff         string  `json:"diff"`
+	ID           string   `json:"id"`
+	Kind         string   `json:"kind"`
+	Name         string   `json:"name"`
+	Origin       *Origin  `json:"origin"`
+	LocalVersion int      `json:"localVersion"`
+	SyncMode     string   `json:"syncMode"`
+	Status       string   `json:"status"`
+	Path         string   `json:"path"`
+	Diff         string   `json:"diff"`
+	Content      string   `json:"content,omitempty"`
+	SourcePaths  []string `json:"sourcePaths,omitempty"`
 }
 
 type Origin struct {
@@ -386,6 +393,55 @@ func (s *Store) SyncPreview(projectID string) ([]ProjectCopy, bool) {
 	return s.ProjectConfigSet(projectID, "")
 }
 
+func (s *Store) AddProjectCopyFromTemplate(projectID string, kind string, templateID string) (ProjectCopy, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.projectByIDLocked(projectID)
+	if !ok {
+		return ProjectCopy{}, false, nil
+	}
+	collection, ok := collectionKind(kind)
+	if !ok {
+		return ProjectCopy{}, false, fmt.Errorf("unsupported template kind %q", kind)
+	}
+	itemKind, _ := singularKind(collection)
+	template, ok := s.templateByIDLocked(collection, templateID)
+	if !ok {
+		return ProjectCopy{}, false, nil
+	}
+	copy := ProjectCopy{
+		ID:           s.uniqueProjectCopyIDLocked(projectID, itemKind, projectTemplateStem(ProjectCopy{}, template)),
+		Kind:         itemKind,
+		Name:         template.Name,
+		Origin:       &Origin{TemplateID: template.ID, BaseVersion: template.Version, BaseHash: templateContentHash(template)},
+		LocalVersion: 1,
+		SyncMode:     "manual",
+		Status:       "synced",
+		Path:         defaultProjectCopyPath(itemKind, template),
+		Diff:         "Project file written from Template Library.",
+	}
+	if copy.Name == "" {
+		copy.Name = template.ID
+	}
+	if err := s.writeTemplateToProjectCopyLocked(project, copy); err != nil {
+		return ProjectCopy{}, true, err
+	}
+
+	copies, err := scanProjectConfigSetForProject(projectTokenFromID(project.ID), projectLocalPath(project), s.data.TemplateLibrary)
+	if err != nil {
+		return ProjectCopy{}, true, err
+	}
+	s.data.ProjectConfigSets[projectID] = copies
+	s.updateProjectSummaryLocked(projectID)
+	for _, scanned := range copies {
+		if scanned.Kind == itemKind && scanned.Origin != nil && scanned.Origin.TemplateID == template.ID {
+			return cloneProjectCopy(scanned), true, nil
+		}
+	}
+	return cloneProjectCopy(copy), true, nil
+}
+
 func (s *Store) SyncProjectCopy(projectID string, copyID string) (ProjectCopy, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -415,6 +471,51 @@ func (s *Store) SyncProjectCopy(projectID string, copyID string) (ProjectCopy, b
 		}
 	}
 	return ProjectCopy{}, false, nil
+}
+
+func (s *Store) templateByIDLocked(collection string, templateID string) (TemplateItem, bool) {
+	var items []TemplateItem
+	switch collection {
+	case "agents":
+		items = s.data.TemplateLibrary.Agents
+	case "rules":
+		items = s.data.TemplateLibrary.Rules
+	case "skills":
+		items = s.data.TemplateLibrary.Skills
+	case "workflows":
+		items = s.data.TemplateLibrary.Workflows
+	default:
+		return TemplateItem{}, false
+	}
+	for _, item := range items {
+		if item.ID == templateID || item.Slug == templateID {
+			return item, true
+		}
+	}
+	return TemplateItem{}, false
+}
+
+func projectLocalPath(project Project) string {
+	if strings.TrimSpace(project.LocalPath) != "" {
+		return strings.TrimSpace(project.LocalPath)
+	}
+	return strings.TrimSpace(project.Path)
+}
+
+func defaultProjectCopyPath(kind string, template TemplateItem) string {
+	stem := projectTemplateStem(ProjectCopy{}, template)
+	switch kind {
+	case "agent":
+		return filepath.ToSlash(filepath.Join(".claude", "agents", stem+".md"))
+	case "rule":
+		return filepath.ToSlash(filepath.Join(".claude", "rules", stem+".md"))
+	case "skill":
+		return filepath.ToSlash(filepath.Join(".claude", "skills", stem+".md"))
+	case "workflow":
+		return filepath.ToSlash(filepath.Join(".claude", "workflows", stem+".md"))
+	default:
+		return stem
+	}
 }
 
 func (s *Store) templateForProjectCopyLocked(copy ProjectCopy) (TemplateItem, bool) {
@@ -498,10 +599,26 @@ func projectTemplateStem(copy ProjectCopy, template TemplateItem) string {
 	if stem := templateFilenameStem(template); stem != "" {
 		return stem
 	}
+	if stem := templateFileStem(template); stem != "" {
+		return stem
+	}
 	if copy.Name != "" {
 		return slugify(copy.Name)
 	}
 	return slugify(template.ID)
+}
+
+func templateFileStem(template TemplateItem) string {
+	for _, path := range templateFileCandidates(template) {
+		base := filepath.Base(filepath.FromSlash(path))
+		if strings.HasSuffix(strings.ToLower(base), ".graph.json") {
+			continue
+		}
+		if ext := filepath.Ext(base); ext != "" {
+			return strings.TrimSuffix(base, ext)
+		}
+	}
+	return ""
 }
 
 func stemFromProjectPath(path string) string {
@@ -1930,6 +2047,7 @@ func cloneProjectCopy(copy ProjectCopy) ProjectCopy {
 		origin := *copy.Origin
 		copy.Origin = &origin
 	}
+	copy.SourcePaths = append([]string(nil), copy.SourcePaths...)
 	return copy
 }
 

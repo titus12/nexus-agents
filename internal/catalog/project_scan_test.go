@@ -87,10 +87,22 @@ func TestScanProjectConfigSetReadsProjectFiles(t *testing.T) {
 		t.Fatalf("scan project config set: %v", err)
 	}
 
-	assertProjectCopy(t, copies, "agent", "worker", "synced", ".claude/agents/worker.md")
-	assertProjectCopy(t, copies, "rule", "00-routing", "synced", ".claude/rules/go-00-routing.md")
-	assertProjectCopy(t, copies, "skill", "testing", "synced", ".claude/skills/testing.md")
-	assertProjectCopy(t, copies, "workflow", "feature-development", "synced", ".claude/workflows/go-feature-development.md")
+	agent := assertProjectCopy(t, copies, "agent", "worker", "synced", ".claude/agents/worker.md")
+	if agent.Content != "worker markdown" || len(agent.SourcePaths) != 2 {
+		t.Fatalf("expected agent project content and source paths, got %#v", agent)
+	}
+	rule := assertProjectCopy(t, copies, "rule", "00-routing", "synced", ".claude/rules/go-00-routing.md")
+	if rule.Content != "routing markdown" || len(rule.SourcePaths) != 1 {
+		t.Fatalf("expected rule project content and source paths, got %#v", rule)
+	}
+	skill := assertProjectCopy(t, copies, "skill", "testing", "synced", ".claude/skills/testing.md")
+	if skill.Content != "testing markdown" || len(skill.SourcePaths) != 1 {
+		t.Fatalf("expected skill project content and source paths, got %#v", skill)
+	}
+	workflow := assertProjectCopy(t, copies, "workflow", "feature-development", "synced", ".claude/workflows/go-feature-development.md")
+	if workflow.Content != "workflow markdown" || len(workflow.SourcePaths) != 2 {
+		t.Fatalf("expected workflow project content and source paths, got %#v", workflow)
+	}
 }
 
 func TestScanProjectConfigSetReadsWorkflowFilesAndNexusGraphs(t *testing.T) {
@@ -124,6 +136,34 @@ func TestScanProjectConfigSetReadsWorkflowFilesAndNexusGraphs(t *testing.T) {
 	}
 	if copy.Origin == nil || copy.Origin.TemplateID != "feature-development" {
 		t.Fatalf("expected workflow copy origin to point at logical template, got %#v", copy.Origin)
+	}
+}
+
+func TestScanProjectConfigSetDoesNotExpandWorkflowsFromRoutingRule(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+
+	writeTestFile(t, root, ".claude/rules/go-00-routing.md", "routing markdown")
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.md", "workflow markdown")
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.graph.json", `{"id":"go-feature-development","name":"feature graph","nodes":[],"edges":[]}`)
+
+	copies, err := ScanProjectConfigSet(root, TemplateLibrary{
+		Workflows: []TemplateItem{{
+			ID:      "feature-development",
+			Kind:    "workflow",
+			Name:    "feature-development",
+			Version: 1,
+			Entry:   filepath.Join(templateRoot, "workflows/go-feature-development.md"),
+			Files:   []string{filepath.Join(templateRoot, "workflows/go-feature-development.md"), filepath.Join(templateRoot, "workflows/go-feature-development.graph.json")},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("scan project config set: %v", err)
+	}
+	for _, copy := range copies {
+		if copy.Kind == "workflow" {
+			t.Fatalf("expected routing rule not to create virtual workflow copies, got %#v", copies)
+		}
 	}
 }
 
@@ -539,6 +579,55 @@ func TestSyncProjectWorkflowCopyWritesMarkdownAndGraph(t *testing.T) {
 	}
 	if string(graph) != `{"id":"feature","name":"template","nodes":[],"edges":[]}`+"\n" {
 		t.Fatalf("expected workflow graph from template, got %q", string(graph))
+	}
+}
+
+func TestAddProjectCopyFromWorkflowTemplateWritesMarkdownAndGraph(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+
+	templateMarkdown := filepath.Join(templateRoot, "workflows", "go-bugfix.md")
+	templateGraph := filepath.Join(templateRoot, "workflows", "go-bugfix.graph.json")
+	writeTestFile(t, templateRoot, "workflows/go-bugfix.md", "# go-bugfix\n\nTrigger: `--bug`\n")
+	writeTestFile(t, templateRoot, "workflows/go-bugfix.graph.json", `{"id":"bugfix","name":"bugfix","nodes":[],"edges":[]}`+"\n")
+
+	store := NewStoreFromData(BootstrapData{
+		TemplateLibrary: TemplateLibrary{
+			Workflows: []TemplateItem{{
+				ID:      "bugfix",
+				Kind:    "workflow",
+				Name:    "bugfix",
+				Version: 1,
+				Entry:   templateMarkdown,
+				Files:   []string{templateMarkdown, templateGraph},
+			}},
+		},
+		ProjectConfigSets: map[string][]ProjectCopy{},
+	}, nil, nil)
+
+	project, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+	copy, ok, err := store.AddProjectCopyFromTemplate(project.ID, "workflow", "bugfix")
+	if err != nil {
+		t.Fatalf("add project copy from template: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected add project copy from template to find project and template")
+	}
+	if copy.Kind != "workflow" || copy.Status != "synced" || copy.Origin == nil || copy.Origin.TemplateID != "bugfix" {
+		t.Fatalf("unexpected workflow copy: %#v", copy)
+	}
+	assertProjectCopy(t, store.data.ProjectConfigSets[project.ID], "workflow", "bugfix", "synced", ".claude/workflows/go-bugfix.md")
+	if data, err := os.ReadFile(filepath.Join(root, ".claude", "workflows", "go-bugfix.md")); err != nil || string(data) != "# go-bugfix\n\nTrigger: `--bug`\n" {
+		t.Fatalf("expected workflow markdown from template, data=%q err=%v", string(data), err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, ".claude", "workflows", "go-bugfix.graph.json")); err != nil || string(data) != `{"id":"bugfix","name":"bugfix","nodes":[],"edges":[]}`+"\n" {
+		t.Fatalf("expected workflow graph from template, data=%q err=%v", string(data), err)
 	}
 }
 

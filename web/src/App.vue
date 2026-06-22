@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import {
+  addProjectCopyFromTemplate,
   createTemplate,
   createProjectWorkflow,
   createWorkflow as createWorkflowApi,
@@ -109,6 +110,7 @@ const emptyLibrary: TemplateLibrary = {
 
 const activePage = ref<Page>("projects");
 const selectedProjectId = ref("");
+const selectedWorkflowTemplateId = ref("");
 const selectedWorkflowId = ref("");
 const selectedWorkflowCardKey = ref("");
 const selectedNodeId = ref("");
@@ -954,6 +956,24 @@ async function detachSelectedProjectCopy() {
   showToast(`已解除模板关联：${copy.name}`);
 }
 
+async function addWorkflowTemplateToProject() {
+  if (!currentProject.value) return;
+  const templateId = selectedWorkflowTemplateId.value || templateLibrary.value.workflows[0]?.id;
+  if (!templateId) {
+    showToast("没有可添加的工作流模板。");
+    return;
+  }
+  const copy = await addProjectCopyFromTemplate(currentProject.value.id, "workflow", templateId);
+  const copies = await fetchProjectConfig(currentProject.value.id);
+  projectConfigSets.value = {
+    ...projectConfigSets.value,
+    [currentProject.value.id]: copies,
+  };
+  const next = copies.find((item) => item.id === copy.id) ?? copy;
+  await selectWorkflowCard(projectCopyToWorkflowCard(next));
+  showToast(`已添加模板工作流到项目：${next.name}`);
+}
+
 async function createWorkflow() {
   if (activePage.value === "project-workflows") {
     if (!currentProject.value) return;
@@ -1437,6 +1457,11 @@ onMounted(loadData);
               <div class="page-description">{{ activePage === 'workflows' ? '全局工作流模板库，用来沉淀可复用的 AI 开发工序。' : '项目工作流展示该项目的 Project Config Set 副本和同步状态。' }}</div>
               <div class="page-actions">
                 <button v-if="activePage === 'workflows'" class="btn-secondary" type="button" @click="runWorkflow">模拟运行</button>
+                <select v-if="activePage === 'project-workflows'" v-model="selectedWorkflowTemplateId" class="field-input compact-select" aria-label="选择工作流模板">
+                  <option value="">选择模板工作流</option>
+                  <option v-for="workflow in templateLibrary.workflows" :key="workflow.id" :value="workflow.id">{{ workflow.name }}</option>
+                </select>
+                <button v-if="activePage === 'project-workflows'" class="btn-secondary" type="button" @click="addWorkflowTemplateToProject">从模板添加</button>
                 <button class="btn-primary" type="button" @click="createWorkflow">新建工作流</button>
               </div>
             </div>
@@ -1475,6 +1500,7 @@ onMounted(loadData);
                       </button>
                       <div class="workflow-card-actions">
                         <button class="link-btn" type="button" @click="editWorkflow(card)">编辑</button>
+                        <button v-if="activePage === 'project-workflows' && card.copy" class="link-btn" type="button" @click="openProjectCopyDrawer(card.copy)">同步</button>
                         <button v-if="activePage === 'workflows'" class="link-btn" type="button" @click="duplicateWorkflow(card)">复制</button>
                         <button class="link-btn danger" type="button" @click="deleteWorkflow(card)">删除</button>
                       </div>
@@ -1817,10 +1843,10 @@ requires_openai_auth = true</pre>
             <div><div class="drawer-title">{{ selectedTemplate.name }}</div><div class="drawer-subtitle">{{ kindLabel(selectedTemplate.kind) }} Template / {{ selectedTemplate.id }}</div></div>
             <button class="icon-btn" type="button" @click="closeDrawer">×</button>
           </div>
-          <div class="drawer-body">
+          <div class="drawer-body template-drawer-body">
             <label class="field-label">Name<input v-model="templateForm.name" class="field-input" :readonly="templateDrawerReadOnly" /></label>
-            <label class="field-label">Summary<textarea v-model="templateForm.summary" class="field-textarea" :readonly="templateDrawerReadOnly"></textarea></label>
-            <div class="detail-list">
+            <label class="field-label">Summary<textarea v-model="templateForm.summary" class="field-textarea template-summary-textarea" :readonly="templateDrawerReadOnly"></textarea></label>
+            <div class="detail-list template-detail-list">
               <div><span>slug</span><strong>{{ selectedTemplate.slug }}</strong></div>
               <div><span>version</span><strong>v{{ selectedTemplate.version }}</strong></div>
               <div><span>entry</span><strong>{{ selectedTemplate.entry || '-' }}</strong></div>
@@ -1833,9 +1859,11 @@ requires_openai_auth = true</pre>
               <div v-if="selectedTemplate.mcp?.length"><span>MCP</span><strong>{{ selectedTemplate.mcp.join(', ') }}</strong></div>
               <div v-if="selectedTemplate.claudeSource"><span>Claude source</span><strong>{{ selectedTemplate.claudeSource }}</strong></div>
             </div>
-            <pre class="code-block">{{ selectedTemplate.content || selectedTemplate.files?.join('\n') || 'single-file template' }}</pre>
-            <pre v-if="selectedTemplate.codexProjection" class="code-block">{{ selectedTemplate.codexProjection }}</pre>
-            <pre v-if="selectedTemplate.sourcePaths?.length" class="code-block">{{ selectedTemplate.sourcePaths.join('\n') }}</pre>
+            <div class="drawer-preview-stack">
+              <pre class="code-block drawer-preview-block">{{ selectedTemplate.content || selectedTemplate.files?.join('\n') || 'single-file template' }}</pre>
+              <pre v-if="selectedTemplate.codexProjection" class="code-block drawer-preview-block">{{ selectedTemplate.codexProjection }}</pre>
+              <pre v-if="selectedTemplate.sourcePaths?.length" class="code-block drawer-preview-block compact">{{ selectedTemplate.sourcePaths.join('\n') }}</pre>
+            </div>
             <div v-if="templateDrawerReadOnly" class="notice">Rule / Skill 内容在 V1 抽屉中只读；需要沉淀新版本时，请在模板库手动新建模板。</div>
           </div>
           <div class="drawer-footer">
@@ -1849,8 +1877,8 @@ requires_openai_auth = true</pre>
             <div><div class="drawer-title">{{ selectedProjectCopy.name }}</div><div class="drawer-subtitle">{{ selectedProjectCopy.kind }} copy / {{ currentProject?.name }}</div></div>
             <button class="icon-btn" type="button" @click="closeDrawer">×</button>
           </div>
-          <div class="drawer-body">
-            <div class="detail-list">
+          <div class="drawer-body project-copy-drawer-body">
+            <div class="detail-list compact-detail-list">
               <div><span>status</span><strong>{{ selectedProjectCopy.status }}</strong></div>
               <div><span>path</span><strong>{{ selectedProjectCopy.path }}</strong></div>
               <div><span>origin.templateId</span><strong>{{ selectedProjectCopy.origin?.templateId || 'project-only' }}</strong></div>
@@ -1859,7 +1887,11 @@ requires_openai_auth = true</pre>
               <div><span>localVersion</span><strong>{{ selectedProjectCopy.localVersion }}</strong></div>
               <div><span>syncMode</span><strong>{{ selectedProjectCopy.syncMode }}</strong></div>
             </div>
-            <pre class="code-block">{{ selectedProjectCopy.diff }}</pre>
+            <div class="drawer-preview-stack">
+              <pre class="code-block drawer-preview-block">{{ selectedProjectCopy.content || selectedProjectCopy.diff || 'No project content loaded.' }}</pre>
+              <pre v-if="selectedProjectCopy.diff" class="code-block drawer-preview-block compact">{{ selectedProjectCopy.diff }}</pre>
+              <pre v-if="selectedProjectCopy.sourcePaths?.length" class="code-block drawer-preview-block compact">{{ selectedProjectCopy.sourcePaths.join('\n') }}</pre>
+            </div>
           </div>
           <div class="drawer-footer">
             <button class="btn-secondary" type="button" @click="detachSelectedProjectCopy">解除关联</button>
