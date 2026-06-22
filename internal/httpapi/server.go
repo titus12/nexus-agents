@@ -591,7 +591,11 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 		action := parts[3]
 		switch action {
 		case "sync":
-			copy, ok := s.store.SyncProjectCopy(projectID, copyID)
+			copy, ok, err := s.store.SyncProjectCopy(projectID, copyID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			if !ok {
 				http.NotFound(w, r)
 				return

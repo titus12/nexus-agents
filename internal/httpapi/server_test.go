@@ -364,7 +364,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	getJSON(t, server, "/api/templates/skills", &skills)
 	assertTemplateIDs(t, "skills", skills, []string{
 		"coding-rules", "cross-client", "cross-config", "cross-gate", "cross-social", "dev-workflow",
-		"high-risk-api", "pmconf-pattern", "quest-system", "review-feedback", "skill-standard", "testing",
+		"high-risk-api", "pmconf-pattern", "quest-system", "review-feedback", "skill-standard", "test-first-and-worktree", "testing",
 	})
 	for _, skill := range skills {
 		if strings.HasPrefix(skill.SourcePaths[0], "templates/skills/go-") {
@@ -390,7 +390,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	getJSON(t, server, "/api/templates/workflows", &workflows)
 	assertTemplateIDs(t, "workflows", workflows, []string{
 		"feature-development", "modify-existing", "bugfix", "code-review", "design",
-		"research", "commit-gate", "refactor", "lark-integration",
+		"research", "commit-gate", "refactor", "lark-integration", "subagent-driven-development",
 	})
 	for _, workflow := range workflows {
 		if strings.HasPrefix(workflow.Entry, "templates/workflows/go-") {
@@ -452,15 +452,27 @@ func TestTemplateCrudEndpoints(t *testing.T) {
 }
 
 func TestProjectCopySyncAndDetachEndpoints(t *testing.T) {
+	root := t.TempDir()
+	writeHTTPTestFile(t, root, ".claude/skills/testing.md", "project testing skill")
 	store := catalog.NewStoreFromData(catalog.BootstrapData{
-		Projects:          []catalog.Project{{ID: "sample", Name: "sample", Path: "D:/sample"}},
-		ProjectConfigSets: map[string][]catalog.ProjectCopy{"sample": {{ID: "copy-worker", Kind: "agent", Name: "worker", LocalVersion: 1, SyncMode: "manual", Status: "template_updated", Diff: "changed", Origin: &catalog.Origin{TemplateID: "worker", BaseVersion: 1, BaseHash: "sha256:test"}}}},
+		TemplateLibrary: catalog.TemplateLibrary{
+			Skills: []catalog.TemplateItem{{ID: "testing", Kind: "skill", Name: "testing", Version: 1, Content: "template testing skill"}},
+		},
+		Projects:          []catalog.Project{{ID: "sample", Name: "sample", Path: root, LocalPath: root}},
+		ProjectConfigSets: map[string][]catalog.ProjectCopy{"sample": {{ID: "copy-testing", Kind: "skill", Name: "testing", Path: ".claude/skills/testing.md", LocalVersion: 1, SyncMode: "manual", Status: "template_updated", Diff: "changed", Origin: &catalog.Origin{TemplateID: "testing", BaseVersion: 1, BaseHash: "sha256:test"}}}},
 	}, nil, nil)
 	server := NewServerWithStore(store)
 
-	syncResponse := requestJSON(t, server, http.MethodPost, "/api/projects/sample/config/copy-worker/sync", "")
+	syncResponse := requestJSON(t, server, http.MethodPost, "/api/projects/sample/config/copy-testing/sync", "")
 	if syncResponse.Code != http.StatusOK {
 		t.Fatalf("expected sync status 200, got %d", syncResponse.Code)
+	}
+	syncedContent, err := os.ReadFile(filepath.Join(root, ".claude", "skills", "testing.md"))
+	if err != nil {
+		t.Fatalf("expected synced skill file: %v", err)
+	}
+	if string(syncedContent) != "template testing skill" {
+		t.Fatalf("expected sync endpoint to write project file, got %q", string(syncedContent))
 	}
 
 	var synced struct {
@@ -475,7 +487,7 @@ func TestProjectCopySyncAndDetachEndpoints(t *testing.T) {
 		t.Fatalf("unexpected synced copy: %#v", synced)
 	}
 
-	detachResponse := requestJSON(t, server, http.MethodPost, "/api/projects/sample/config/copy-worker/detach", "")
+	detachResponse := requestJSON(t, server, http.MethodPost, "/api/projects/sample/config/copy-testing/detach", "")
 	if detachResponse.Code != http.StatusOK {
 		t.Fatalf("expected detach status 200, got %d", detachResponse.Code)
 	}

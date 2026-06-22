@@ -48,6 +48,7 @@ func setupLogger() {
 
 // writeCatalogFile writes the Codex model catalog to the local .codex directory
 // so that model_catalog_json in config.toml can point to a local file path.
+// The file is set read-only after writing to prevent Codex from overwriting it.
 func writeCatalogFile(router *codexrouter.Service) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -61,9 +62,11 @@ func writeCatalogFile(router *codexrouter.Service) {
 		log.Printf("catalog: marshal error: %v", err)
 		return
 	}
-	if err := os.WriteFile(dest, data, 0644); err != nil {
+	// 先取消只读（如果存在），写完再恢复只读，防止 Codex 覆盖
+	_ = os.Chmod(dest, 0644)
+	if err := os.WriteFile(dest, data, 0444); err != nil {
 		log.Printf("catalog: write %s error: %v", dest, err)
 		return
 	}
-	log.Printf("catalog: wrote %s (%d models)", dest, len(catalog["models"].([]map[string]any)))
+	log.Printf("catalog: wrote %s (%d models, read-only)", dest, len(catalog["models"].([]map[string]any)))
 }

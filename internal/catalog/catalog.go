@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -384,24 +386,203 @@ func (s *Store) SyncPreview(projectID string) ([]ProjectCopy, bool) {
 	return s.ProjectConfigSet(projectID, "")
 }
 
-func (s *Store) SyncProjectCopy(projectID string, copyID string) (ProjectCopy, bool) {
+func (s *Store) SyncProjectCopy(projectID string, copyID string) (ProjectCopy, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	project, ok := s.projectByIDLocked(projectID)
+	if !ok {
+		return ProjectCopy{}, false, nil
+	}
 	copies := s.data.ProjectConfigSets[projectID]
 	for index := range copies {
 		if copies[index].ID == copyID {
+			if err := s.writeTemplateToProjectCopyLocked(project, copies[index]); err != nil {
+				return ProjectCopy{}, true, err
+			}
 			copies[index].Status = "synced"
 			copies[index].LocalVersion++
 			if copies[index].Origin != nil {
-				copies[index].Origin.BaseHash = contentHash(copies[index].Origin.TemplateID, copies[index].LocalVersion)
+				if template, ok := s.templateForProjectCopyLocked(copies[index]); ok {
+					copies[index].Origin.BaseVersion = template.Version
+					copies[index].Origin.BaseHash = templateContentHash(template)
+				}
 			}
-			copies[index].Diff = "Synced from Template Library. Project copy keeps manual sync mode."
+			copies[index].Diff = "Project file written from Template Library."
 			s.data.ProjectConfigSets[projectID] = copies
-			return cloneProjectCopy(copies[index]), true
+			s.updateProjectSummaryLocked(projectID)
+			return cloneProjectCopy(copies[index]), true, nil
 		}
 	}
-	return ProjectCopy{}, false
+	return ProjectCopy{}, false, nil
+}
+
+func (s *Store) templateForProjectCopyLocked(copy ProjectCopy) (TemplateItem, bool) {
+	if copy.Origin == nil || strings.TrimSpace(copy.Origin.TemplateID) == "" {
+		return TemplateItem{}, false
+	}
+	var items []TemplateItem
+	switch copy.Kind {
+	case "agent":
+		items = s.data.TemplateLibrary.Agents
+	case "rule":
+		items = s.data.TemplateLibrary.Rules
+	case "skill":
+		items = s.data.TemplateLibrary.Skills
+	case "workflow":
+		items = s.data.TemplateLibrary.Workflows
+	default:
+		return TemplateItem{}, false
+	}
+	for _, item := range items {
+		if item.ID == copy.Origin.TemplateID {
+			return item, true
+		}
+	}
+	return TemplateItem{}, false
+}
+
+func (s *Store) writeTemplateToProjectCopyLocked(project Project, copy ProjectCopy) error {
+	template, ok := s.templateForProjectCopyLocked(copy)
+	if !ok {
+		return fmt.Errorf("copy %s has no template origin", copy.ID)
+	}
+	projectRoot := strings.TrimSpace(project.LocalPath)
+	if projectRoot == "" {
+		projectRoot = strings.TrimSpace(project.Path)
+	}
+	if projectRoot == "" {
+		return fmt.Errorf("project %s has no local path", project.ID)
+	}
+	writes, err := projectTemplateWrites(copy, template)
+	if err != nil {
+		return err
+	}
+	for _, write := range writes {
+		target := filepath.Join(projectRoot, filepath.FromSlash(write.relativePath))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("create sync target directory: %w", err)
+		}
+		if err := os.WriteFile(target, write.data, 0o644); err != nil {
+			return fmt.Errorf("write synced template %s: %w", write.relativePath, err)
+		}
+	}
+	return nil
+}
+
+type projectTemplateWrite struct {
+	relativePath string
+	data         []byte
+}
+
+func projectTemplateWrites(copy ProjectCopy, template TemplateItem) ([]projectTemplateWrite, error) {
+	stem := projectTemplateStem(copy, template)
+	switch copy.Kind {
+	case "agent":
+		return agentTemplateWrites(stem, template)
+	case "rule":
+		return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "rules", stem+".md")), template)
+	case "skill":
+		return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "skills", stem+".md")), template)
+	case "workflow":
+		return workflowTemplateWrites(stem, template)
+	default:
+		return nil, fmt.Errorf("unsupported project copy kind %q", copy.Kind)
+	}
+}
+
+func projectTemplateStem(copy ProjectCopy, template TemplateItem) string {
+	if stem := stemFromProjectPath(copy.Path); stem != "" {
+		return stem
+	}
+	if stem := templateFilenameStem(template); stem != "" {
+		return stem
+	}
+	if copy.Name != "" {
+		return slugify(copy.Name)
+	}
+	return slugify(template.ID)
+}
+
+func stemFromProjectPath(path string) string {
+	before, _, _ := strings.Cut(path, "#")
+	base := filepath.Base(filepath.FromSlash(strings.TrimSpace(before)))
+	ext := filepath.Ext(base)
+	if ext == "" {
+		return ""
+	}
+	return strings.TrimSuffix(base, ext)
+}
+
+func agentTemplateWrites(stem string, template TemplateItem) ([]projectTemplateWrite, error) {
+	writes := []projectTemplateWrite{}
+	for _, path := range pathsMatching(template, "templates/agents/claude/") {
+		data, err := os.ReadFile(resolveDataPath(path))
+		if err == nil {
+			writes = append(writes, projectTemplateWrite{relativePath: filepath.ToSlash(filepath.Join(".claude", "agents", stem+".md")), data: data})
+			break
+		}
+	}
+	for _, path := range pathsMatching(template, "templates/agents/codex/") {
+		data, err := os.ReadFile(resolveDataPath(path))
+		if err == nil {
+			writes = append(writes, projectTemplateWrite{relativePath: filepath.ToSlash(filepath.Join(".codex", "agents", stem+".toml")), data: data})
+			break
+		}
+	}
+	if len(writes) == 0 {
+		return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "agents", stem+".md")), template)
+	}
+	return writes, nil
+}
+
+func markdownTemplateWrites(relativePath string, template TemplateItem) ([]projectTemplateWrite, error) {
+	data, err := templatePrimaryContent(template)
+	if err != nil {
+		return nil, err
+	}
+	return []projectTemplateWrite{{relativePath: relativePath, data: data}}, nil
+}
+
+func workflowTemplateWrites(stem string, template TemplateItem) ([]projectTemplateWrite, error) {
+	writes := []projectTemplateWrite{}
+	for _, path := range templateFileCandidates(template) {
+		resolved := resolveDataPath(path)
+		data, err := os.ReadFile(resolved)
+		if err != nil {
+			continue
+		}
+		slashed := filepath.ToSlash(path)
+		switch {
+		case strings.HasSuffix(strings.ToLower(slashed), ".graph.json"):
+			writes = append(writes, projectTemplateWrite{relativePath: filepath.ToSlash(filepath.Join(".claude", "workflows", stem+".graph.json")), data: data})
+		case strings.HasSuffix(strings.ToLower(slashed), ".md"):
+			writes = append(writes, projectTemplateWrite{relativePath: filepath.ToSlash(filepath.Join(".claude", "workflows", stem+".md")), data: data})
+		}
+	}
+	if len(writes) == 0 && template.Content != "" {
+		writes = append(writes, projectTemplateWrite{relativePath: filepath.ToSlash(filepath.Join(".claude", "workflows", stem+".md")), data: []byte(template.Content)})
+	}
+	if len(writes) == 0 {
+		return nil, fmt.Errorf("template %s has no workflow files to sync", template.ID)
+	}
+	return writes, nil
+}
+
+func templatePrimaryContent(template TemplateItem) ([]byte, error) {
+	for _, path := range templateFileCandidates(template) {
+		if strings.HasSuffix(strings.ToLower(filepath.ToSlash(path)), ".graph.json") {
+			continue
+		}
+		data, err := os.ReadFile(resolveDataPath(path))
+		if err == nil {
+			return data, nil
+		}
+	}
+	if template.Content != "" {
+		return []byte(template.Content), nil
+	}
+	return nil, fmt.Errorf("template %s has no content to sync", template.ID)
 }
 
 func (s *Store) DetachProjectCopy(projectID string, copyID string) (ProjectCopy, bool) {

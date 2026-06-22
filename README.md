@@ -111,15 +111,17 @@ Codex Desktop
 
 ### 模型路由表
 
-| Slug | 显示名称 | 后端地址 | 认证方式 |
-|------|---------|---------|---------|
-| `gpt-5.5` | GPT-5.5 | `chatgpt.com/backend-api/codex` | 订阅 token 透传 |
-| `gpt-5.4` | GPT-5.4 | `chatgpt.com/backend-api/codex` | 订阅 token 透传 |
-| `gpt-5.4-mini` | GPT-5.4 Mini | `chatgpt.com/backend-api/codex` | 订阅 token 透传 |
-| `deepseek-v4-pro` | DeepSeek V4 Pro | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` |
-| `deepseek-v4-flash` | DeepSeek V4 Flash | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` |
-| `glm-5.2` | GLM-5.2 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY`??? Winky key? |
-| `glm-5.1` | GLM-5.1 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY`??? Winky key? |
+| Slug | 显示名称 | 后端地址 | 认证方式 | 图片支持 |
+|------|---------|---------|---------|---------|
+| `gpt-5.5` | GPT-5.5 | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
+| `gpt-5.4` | GPT-5.4 | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
+| `gpt-5.4-mini` | GPT-5.4 Mini | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
+| `deepseek-v4-pro` | DeepSeek V4 Pro | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` | — |
+| `deepseek-v4-flash` | DeepSeek V4 Flash | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` | — |
+| `glm-5.2` | GLM-5.2 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY` | — |
+| `glm-5.1` | GLM-5.1 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY` | — |
+
+> GPT 路由（`api = "responses"`）走 ChatGPT 官方 Codex 后端，支持图片输入。DeepSeek / GLM 路由（`api = "chat_completions"`）走 Winky 代理，`DEEPSEEK_API_KEY` 是 Winky 统一 key，目前仅支持文本。
 
 ### 关键实现文件
 
@@ -136,9 +138,10 @@ internal/codexrouter/
 ### Codex Desktop 配置（`~/.codex/config.toml`）
 
 ```toml
+# IMPORTANT: Do not modify nexus-codex config. Managed by restart_local.ps1.
 model_provider = "nexus-codex"
 model = "gpt-5.5"
-model_catalog_json = "C:/Users/<你的用户名>/.codex/nexus-model-catalog.json"
+model_catalog_json = "C:/Users/Administrator/.codex/nexus-model-catalog.json"
 
 [model_providers.nexus-codex]
 name = "Nexus Codex"
@@ -152,11 +155,13 @@ sandbox = "unelevated"
 
 **各配置项说明：**
 
-- `requires_openai_auth = true`：让 Codex 把 ChatGPT 订阅 bearer token 带在请求头里。GPT 路由会原样转发这个 token 到 `chatgpt.com`；DeepSeek 路由忽略它，改用服务端的 `DEEPSEEK_API_KEY`。
+- `requires_openai_auth = true`：让 Codex 把 ChatGPT 订阅 bearer token 带在请求头里。GPT 路由会原样转发这个 token 到 `chatgpt.com`；DeepSeek / GLM 路由忽略它，改用服务端的 `DEEPSEEK_API_KEY`（Winky 统一 key）。
 
-- `model_catalog_json`：必须填**本地文件路径**，不能填 HTTP URL（Codex Desktop 不会请求远程 URL 拉取模型目录）。服务每次启动时自动写入该文件，修改路由配置后重启服务即可更新。
+- `model_catalog_json`：必须填**本地文件路径**，不能填 HTTP URL（Codex Desktop 不读远程 URL）。服务每次启动时自动写入该文件并设为**只读**，防止 Codex 在工作时覆盖。若需更新，重启服务即可。
 
 - `sandbox = "unelevated"`：Windows 下以 Administrator 账户运行时，`elevated` 模式因无法创建独立沙盒用户而失败，改为 `unelevated` 可绕过该限制。
+
+- 关键配置行（`model_provider`、`model_catalog_json`、`[model_providers.nexus-codex]`）由 `restart_local.ps1` 在每次启动时自动校验和修复，防止 Codex 在工作时意外覆盖。
 
 ### SSE 完整事件序列（关键）
 

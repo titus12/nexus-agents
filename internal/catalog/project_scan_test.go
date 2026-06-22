@@ -428,6 +428,120 @@ func TestStoreRescanProjectRefreshesUserHomeNexusIndex(t *testing.T) {
 	}
 }
 
+func TestSyncProjectCopyWritesTemplateContentToProject(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+
+	templateSkill := filepath.Join(templateRoot, "skills", "testing.md")
+	writeTestFile(t, templateRoot, "skills/testing.md", "template testing skill\n")
+	writeTestFile(t, root, ".claude/skills/testing.md", "project testing skill\n")
+
+	store := NewStoreFromData(BootstrapData{
+		TemplateLibrary: TemplateLibrary{
+			Skills: []TemplateItem{{
+				ID:      "testing",
+				Kind:    "skill",
+				Name:    "testing",
+				Version: 1,
+				Entry:   templateSkill,
+			}},
+		},
+		ProjectConfigSets: map[string][]ProjectCopy{},
+	}, nil, nil)
+
+	project, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+	copy := assertProjectCopy(t, store.data.ProjectConfigSets[project.ID], "skill", "testing", "project_modified", ".claude/skills/testing.md")
+
+	synced, ok, err := store.SyncProjectCopy(project.ID, copy.ID)
+	if err != nil {
+		t.Fatalf("sync project copy: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected sync project copy to find copy")
+	}
+	if synced.Status != "synced" {
+		t.Fatalf("expected synced copy, got %#v", synced)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".claude", "skills", "testing.md"))
+	if err != nil {
+		t.Fatalf("read synced skill: %v", err)
+	}
+	if string(data) != "template testing skill\n" {
+		t.Fatalf("expected project skill to be overwritten from template, got %q", string(data))
+	}
+
+	_, copies, ok, err := store.RescanProject(project.ID)
+	if err != nil {
+		t.Fatalf("rescan project: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected rescan project to find project")
+	}
+	assertProjectCopy(t, copies, "skill", "testing", "synced", ".claude/skills/testing.md")
+}
+
+func TestSyncProjectWorkflowCopyWritesMarkdownAndGraph(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+
+	templateMarkdown := filepath.Join(templateRoot, "workflows", "feature.md")
+	templateGraph := filepath.Join(templateRoot, "workflows", "feature.graph.json")
+	writeTestFile(t, templateRoot, "workflows/feature.md", "# template workflow\n")
+	writeTestFile(t, templateRoot, "workflows/feature.graph.json", `{"id":"feature","name":"template","nodes":[],"edges":[]}`+"\n")
+	writeTestFile(t, root, ".claude/workflows/feature.md", "# project workflow\n")
+	writeTestFile(t, root, ".claude/workflows/feature.graph.json", `{"id":"feature","name":"project","nodes":[],"edges":[]}`+"\n")
+
+	store := NewStoreFromData(BootstrapData{
+		TemplateLibrary: TemplateLibrary{
+			Workflows: []TemplateItem{{
+				ID:      "feature",
+				Kind:    "workflow",
+				Name:    "feature",
+				Version: 1,
+				Entry:   templateMarkdown,
+				Files:   []string{templateMarkdown, templateGraph},
+			}},
+		},
+		ProjectConfigSets: map[string][]ProjectCopy{},
+	}, nil, nil)
+
+	project, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+	copy := assertProjectCopy(t, store.data.ProjectConfigSets[project.ID], "workflow", "feature", "project_modified", ".claude/workflows/feature.md")
+
+	if _, ok, err := store.SyncProjectCopy(project.ID, copy.ID); err != nil {
+		t.Fatalf("sync project workflow: %v", err)
+	} else if !ok {
+		t.Fatal("expected sync project workflow to find copy")
+	}
+
+	markdown, err := os.ReadFile(filepath.Join(root, ".claude", "workflows", "feature.md"))
+	if err != nil {
+		t.Fatalf("read workflow markdown: %v", err)
+	}
+	if string(markdown) != "# template workflow\n" {
+		t.Fatalf("expected workflow markdown from template, got %q", string(markdown))
+	}
+	graph, err := os.ReadFile(filepath.Join(root, ".claude", "workflows", "feature.graph.json"))
+	if err != nil {
+		t.Fatalf("read workflow graph: %v", err)
+	}
+	if string(graph) != `{"id":"feature","name":"template","nodes":[],"edges":[]}`+"\n" {
+		t.Fatalf("expected workflow graph from template, got %q", string(graph))
+	}
+}
+
 func TestTemplateHashPrefersDeclaredFilesOverSourcePaths(t *testing.T) {
 	root := t.TempDir()
 	templateMarkdown := filepath.Join(root, "workflow.md")

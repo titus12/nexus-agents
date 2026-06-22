@@ -677,6 +677,13 @@ func modelCatalogEntry(route Route, index int) map[string]any {
 	if priority == 0 && index > 0 {
 		priority = index
 	}
+	// input_modalities: responses API (GPT subscription) 支持图片；
+	// chat_completions 路由只支持 text，除非 Route 上明确声明了 image。
+	inputModalities := []string{"text"}
+	if route.API == "responses" {
+		inputModalities = []string{"text", "image"}
+	}
+
 	return map[string]any{
 		"slug":                             route.ID,
 		"display_name":                     route.DisplayName,
@@ -704,7 +711,7 @@ func modelCatalogEntry(route Route, index int) map[string]any {
 		"effective_context_window_percent": 95,
 		"auto_compact_token_limit":         int(float64(contextWindow) * 0.8),
 		"experimental_supported_tools":     []string{},
-		"input_modalities":                 []string{"text"},
+		"input_modalities":                 inputModalities,
 		"supports_search_tool":             false,
 		"default_reasoning_level":          defaultReasoning,
 		"supported_reasoning_levels":       reasoningLevels,
