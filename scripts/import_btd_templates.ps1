@@ -68,7 +68,7 @@ $workflowFiles = @{
 Source: ``templates/rules/go-00-routing.md``
 Stack: ``go``
 
-Trigger: ``--feat``
+Entry skill: ``$wf-go-feat``
 
 Use for new features or substantial modules. Load ``go-dev-workflow.md``, move through the nine-step development flow, and report after each step for user review before continuing.
 
@@ -86,7 +86,7 @@ Workflow:
 Source: ``templates/rules/go-00-routing.md``
 Stack: ``go``
 
-Trigger: ``--mod``
+Entry skill: ``$wf-go-mod``
 
 Use for changes to existing Go features.
 
@@ -105,7 +105,7 @@ Workflow:
 Source: ``templates/rules/go-00-routing.md``
 Stack: ``go``
 
-Trigger: ``--bug``
+Entry skill: ``$wf-go-bugfix``
 
 Use for Go runtime errors, crashes, and behavioral bugs.
 
@@ -123,7 +123,7 @@ Workflow:
 Source: ``templates/rules/go-00-routing.md``
 Stack: ``go``
 
-Trigger: ``--rev``
+Entry skill: ``$wf-go-review``
 
 Use for review of the current change set.
 
@@ -143,7 +143,7 @@ Workflow:
 
 Source: ``templates/rules/go-00-routing.md``
 
-Trigger: ``--design``
+Entry skill: ``$wf-design``
 
 Use for architecture or implementation design without code changes.
 
@@ -159,7 +159,7 @@ Workflow:
 
 Source: ``templates/rules/go-00-routing.md``
 
-Trigger: ``--ask``
+Entry skill: ``$wf-research``
 
 Use for read-only understanding, investigation, or external documentation research.
 
@@ -174,7 +174,7 @@ Workflow:
 
 Source: ``templates/rules/go-00-routing.md``
 
-Trigger: ``--commit``
+Entry skill: ``$wf-commit``
 
 Use as a pre-commit gate.
 
@@ -191,7 +191,7 @@ Workflow:
 Source: ``templates/rules/go-00-routing.md``
 Stack: ``go``
 
-Trigger: ``--refactor``
+Entry skill: ``$wf-go-refactor``
 
 Use for broad Go structural changes where external behavior should remain unchanged.
 
@@ -208,7 +208,7 @@ Workflow:
 
 Source: ``templates/rules/go-00-routing.md``
 
-Trigger: ``--lark``
+Entry skill: ``$wf-lark``
 
 Use for Feishu/Lark documents, messages, sheets, Base, and related operations.
 

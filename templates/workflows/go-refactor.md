@@ -3,7 +3,7 @@
 Source: `.claude/rules/go-00-routing.md`
 Stack: `go`
 
-Trigger: `--refactor`
+Entry skill: `$wf-go-refactor`
 
 Use for broad Go structural changes where external behavior should remain unchanged.
 

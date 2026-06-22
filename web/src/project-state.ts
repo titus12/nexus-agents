@@ -20,7 +20,7 @@ export function projectDeleteImpactMessage(project: Project): string {
     "",
     "不会发生：",
     "1. 不删除项目源码或 Git 仓库。",
-    "2. 不删除 .claude / .codex / .proxy / .mcp.json。",
+    "2. 不删除 .claude / .codex / .agents / .mcp.json。",
     "3. 不删除 workflow 的 .md 或 .graph.json 文件。",
     "",
     `本地路径：${localPath}`,

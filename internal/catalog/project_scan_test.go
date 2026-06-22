@@ -591,7 +591,7 @@ func TestAddProjectCopyFromWorkflowTemplateWritesMarkdownAndGraph(t *testing.T) 
 
 	templateMarkdown := filepath.Join(templateRoot, "workflows", "go-bugfix.md")
 	templateGraph := filepath.Join(templateRoot, "workflows", "go-bugfix.graph.json")
-	writeTestFile(t, templateRoot, "workflows/go-bugfix.md", "# go-bugfix\n\nTrigger: `--bug`\n")
+	writeTestFile(t, templateRoot, "workflows/go-bugfix.md", "# go-bugfix\n\nEntry skill: `$wf-go-bugfix`\n")
 	writeTestFile(t, templateRoot, "workflows/go-bugfix.graph.json", `{"id":"bugfix","name":"bugfix","nodes":[],"edges":[]}`+"\n")
 
 	store := NewStoreFromData(BootstrapData{
@@ -623,7 +623,7 @@ func TestAddProjectCopyFromWorkflowTemplateWritesMarkdownAndGraph(t *testing.T) 
 		t.Fatalf("unexpected workflow copy: %#v", copy)
 	}
 	assertProjectCopy(t, store.data.ProjectConfigSets[project.ID], "workflow", "bugfix", "synced", ".claude/workflows/go-bugfix.md")
-	if data, err := os.ReadFile(filepath.Join(root, ".claude", "workflows", "go-bugfix.md")); err != nil || string(data) != "# go-bugfix\n\nTrigger: `--bug`\n" {
+	if data, err := os.ReadFile(filepath.Join(root, ".claude", "workflows", "go-bugfix.md")); err != nil || string(data) != "# go-bugfix\n\nEntry skill: `$wf-go-bugfix`\n" {
 		t.Fatalf("expected workflow markdown from template, data=%q err=%v", string(data), err)
 	}
 	if data, err := os.ReadFile(filepath.Join(root, ".claude", "workflows", "go-bugfix.graph.json")); err != nil || string(data) != `{"id":"bugfix","name":"bugfix","nodes":[],"edges":[]}`+"\n" {

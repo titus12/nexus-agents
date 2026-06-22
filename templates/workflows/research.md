@@ -2,7 +2,7 @@
 
 Source: `.claude/rules/go-00-routing.md`
 
-Trigger: `--ask`
+Entry skill: `$wf-research`
 
 Use for read-only understanding, investigation, or external documentation research.
 

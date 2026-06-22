@@ -3,7 +3,7 @@
 Source: .claude/rules/go-00-routing.md
 Stack: go
 
-Trigger: --bug
+Entry skill: $wf-go-bugfix
 
 Use for Go runtime errors, crashes, and behavioral bugs.
 

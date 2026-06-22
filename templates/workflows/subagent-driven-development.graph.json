@@ -6,7 +6,7 @@
       "id": "trigger",
       "type": "input",
       "category": "event",
-      "label": "--subagents / --parallel",
+      "label": "$wf-subagents",
       "agent": "-",
       "detail": "User explicitly requests subagent, parallel, or delegated execution.",
       "x": 48,

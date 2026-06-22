@@ -3,7 +3,7 @@
 Source: `.claude/rules/go-00-routing.md`
 Stack: `go`
 
-Trigger: `--feat`
+Entry skill: `$wf-go-feat`
 
 Use for new features or substantial modules. Load `go-dev-workflow.md`, move through the nine-step development flow, and report after each step for user review before continuing.
 

@@ -2,7 +2,7 @@
 
 Source: `.claude/rules/go-00-routing.md`
 
-Trigger: `--design`
+Entry skill: `$wf-design`
 
 Use for architecture or implementation design without code changes.
 

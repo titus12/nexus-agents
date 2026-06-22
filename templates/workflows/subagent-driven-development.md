@@ -1,6 +1,6 @@
 # subagent-driven-development
 
-Trigger: `--subagents` / `--parallel` / 用户明确要求 subagent、并行、分工执行
+Entry skill: `$wf-subagents` / 用户明确要求 subagent、并行、分工执行
 
 Use for executing an implementation plan with independent tasks in the current session.
 

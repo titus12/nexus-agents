@@ -309,11 +309,12 @@ function kindLabel(kind: string): string {
 function projectCopyToWorkflowCard(copy: ProjectCopy): WorkflowCard {
   const graphId = workflowGraphIdForCopy(copy);
   const summary = workflows.value.find((workflow) => workflow.id === graphId);
+  const template = templateLibrary.value.workflows.find((workflow) => workflow.id === graphId);
   const isSelectedProjectGraph = activePage.value === "project-workflows" && selectedWorkflowCardKey.value === copy.id;
   return {
     key: copy.id,
     graphId,
-    name: copy.name,
+    name: summary?.name ?? template?.name ?? copy.name,
     status: copy.status,
     summary: summary?.summary ?? "Project workflow copy with manual sync metadata.",
     nodeCount: isSelectedProjectGraph && workflowGraph.value ? workflowGraph.value.nodes.length : summary?.nodeCount ?? 0,
@@ -323,7 +324,22 @@ function projectCopyToWorkflowCard(copy: ProjectCopy): WorkflowCard {
 }
 
 function workflowGraphIdForCopy(copy: ProjectCopy): string {
-  return copy.origin?.templateId ?? workflows.value[0]?.id ?? "";
+  return copy.origin?.templateId ?? workflowTemplateIdForProjectCopy(copy) ?? "";
+}
+
+function workflowTemplateIdForProjectCopy(copy: ProjectCopy): string | undefined {
+  if (copy.kind !== "workflow") return undefined;
+  const candidates = new Set(
+    [copy.id, copy.name, copy.path.split(/[\\/]/).pop() ?? ""]
+      .map((value) => value.replace(/\.md$/i, "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return templateLibrary.value.workflows.find((workflow) => {
+    const values = [workflow.id, workflow.slug, workflow.name]
+      .map((value) => value.replace(/\.md$/i, "").trim().toLowerCase())
+      .filter(Boolean);
+    return values.some((value) => candidates.has(value));
+  })?.id;
 }
 
 function templateUsageCount(templateId: string): number {
@@ -367,14 +383,15 @@ function modelClassForTier(modelTier?: string): string {
 }
 
 function templateForProjectCopy(copy: ProjectCopy): TemplateItem | undefined {
-  if (!copy.origin?.templateId) return undefined;
   const kindMap: Record<ProjectCopyKind, TemplateKind> = {
     agent: "agents",
     rule: "rules",
     skill: "skills",
     workflow: "workflows",
   };
-  return templateLibrary.value[kindMap[copy.kind]].find((item) => item.id === copy.origin?.templateId);
+  const templateId = copy.origin?.templateId ?? (copy.kind === "workflow" ? workflowTemplateIdForProjectCopy(copy) : undefined);
+  if (!templateId) return undefined;
+  return templateLibrary.value[kindMap[copy.kind]].find((item) => item.id === templateId);
 }
 
 function projectCopySummary(copy: ProjectCopy): string {
@@ -1455,13 +1472,8 @@ onMounted(loadData);
           <section v-else-if="activePage === 'workflows' || activePage === 'project-workflows'" class="page active">
             <div class="page-header">
               <div class="page-description">{{ activePage === 'workflows' ? '全局工作流模板库，用来沉淀可复用的 AI 开发工序。' : '项目工作流展示该项目的 Project Config Set 副本和同步状态。' }}</div>
-              <div class="page-actions">
-                <button v-if="activePage === 'workflows'" class="btn-secondary" type="button" @click="runWorkflow">模拟运行</button>
-                <select v-if="activePage === 'project-workflows'" v-model="selectedWorkflowTemplateId" class="field-input compact-select" aria-label="选择工作流模板">
-                  <option value="">选择模板工作流</option>
-                  <option v-for="workflow in templateLibrary.workflows" :key="workflow.id" :value="workflow.id">{{ workflow.name }}</option>
-                </select>
-                <button v-if="activePage === 'project-workflows'" class="btn-secondary" type="button" @click="addWorkflowTemplateToProject">从模板添加</button>
+              <div v-if="activePage === 'workflows'" class="page-actions">
+                <button class="btn-secondary" type="button" @click="runWorkflow">模拟运行</button>
                 <button class="btn-primary" type="button" @click="createWorkflow">新建工作流</button>
               </div>
             </div>
@@ -1508,8 +1520,17 @@ onMounted(loadData);
                   </div>
                 </div>
               </aside>
-              <section class="workflow-canvas">
-                <div v-if="workflowGraph" ref="workflowStageRef" class="workflow-stage">
+              <section class="workflow-canvas-shell">
+                <div v-if="activePage === 'project-workflows'" class="workflow-canvas-toolbar">
+                  <select v-model="selectedWorkflowTemplateId" class="field-input compact-select workflow-template-select" aria-label="选择工作流模板">
+                    <option value="">选择模板工作流</option>
+                    <option v-for="workflow in templateLibrary.workflows" :key="workflow.id" :value="workflow.id">{{ workflow.name }}</option>
+                  </select>
+                  <button class="btn-secondary" type="button" @click="addWorkflowTemplateToProject">从模板添加</button>
+                  <button class="btn-primary" type="button" @click="createWorkflow">新建工作流</button>
+                </div>
+                <div class="workflow-canvas">
+                  <div v-if="workflowGraph" ref="workflowStageRef" class="workflow-stage">
                   <svg class="workflow-edges" viewBox="0 0 1500 620" aria-hidden="true">
                     <defs>
                       <marker id="workflow-edge-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
@@ -1555,7 +1576,8 @@ onMounted(loadData);
                     <div class="node-body"><div class="node-detail">{{ node.detail }}</div><div class="node-role">{{ node.agent }}</div></div>
                   </button>
                 </div>
-                <div v-else class="empty-state">当前工作流没有可预览的画布。</div>
+                  <div v-else class="empty-state">当前工作流没有可预览的画布。</div>
+                </div>
               </section>
               <aside class="panel workflow-inspector">
                 <div class="panel-header"><div class="panel-title">{{ selectedNode ? 'Node Config' : selectedEdge ? 'Edge Config' : 'Selected Workflow' }}</div></div>
@@ -1732,8 +1754,7 @@ requires_openai_auth = true</pre>
             <span class="chip chip-green">.claude</span>
             <span class="chip chip-green">.codex</span>
             <span class="chip chip-green">.mcp.json</span>
-            <span class="chip chip-purple">.proxy</span>
-            <span class="chip chip-orange">LiteLLM patch</span>
+            <span class="chip chip-orange">.agents</span>
           </div>
         </div>
         <div class="modal-footer"><button class="btn-secondary" type="button" @click="showImportModal = false">取消</button><button class="btn-primary" type="button" @click="importProjectAction">导入</button></div>

@@ -3,7 +3,7 @@
 Source: `.claude/rules/go-00-routing.md`
 Stack: `go`
 
-Trigger: `--mod`
+Entry skill: `$wf-go-mod`
 
 Use for changes to existing Go features.
 

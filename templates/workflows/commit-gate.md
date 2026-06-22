@@ -2,7 +2,7 @@
 
 Source: .claude/rules/go-00-routing.md
 
-Trigger: --commit
+Entry skill: $wf-commit
 
 Use as a pre-commit gate.
 

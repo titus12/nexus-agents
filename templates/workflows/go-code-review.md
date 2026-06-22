@@ -3,7 +3,7 @@
 Source: .claude/rules/go-00-routing.md
 Stack: go
 
-Trigger: --rev
+Entry skill: $wf-go-review
 
 Use for review of the current change set.
 

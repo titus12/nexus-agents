@@ -1,6 +1,6 @@
 ---
 name: reviewer-perf
-description: "性能与质量审核 — 聚焦 N+1 查询、goroutine 泄漏、内存分配、锁粒度、缓存缺失、可读性、过度设计。作为 subagent 被 --rev 工作流并行派发。"
+description: "性能与质量审核 — 聚焦 N+1 查询、goroutine 泄漏、内存分配、锁粒度、缓存缺失、可读性、过度设计。作为 subagent 被 $wf-go-review 工作流并行派发。"
 model: deepseek-v4-pro
 effort: medium
 maxTurns: 15
@@ -11,7 +11,7 @@ disallowedTools:
 
 # Reviewer-Perf — 性能与质量审核
 
-> 角色: 性能+质量审核 subagent，报性能和代码质量问题 | 模型: deepseek-v4-pro | 调用方: --rev 工作流(与logic/security并行)
+> 角色: 性能+质量审核 subagent，报性能和代码质量问题 | 模型: deepseek-v4-pro | 调用方: $wf-go-review 工作流(与logic/security并行)
 >
 > §1 审核流程 §2 阅读规则 §3 检查清单 §4 输出格式
 

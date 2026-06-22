@@ -703,9 +703,9 @@ func TestWorkflowGraphUpdateEndpoint(t *testing.T) {
 
 	graphBody := `{
 		"id":"code-review",
-		"name":"--rev 代码审核",
+		"name":"$wf-go-review 代码审核",
 		"nodes":[
-			{"id":"trigger","type":"input","category":"event","label":"--rev","agent":"-","detail":"start","x":80,"y":120},
+			{"id":"trigger","type":"input","category":"event","label":"$wf-go-review","agent":"-","detail":"start","x":80,"y":120},
 			{"id":"review","type":"agent","category":"action","label":"reviewer","agent":"reviewer-logic","detail":"review diff","x":360,"y":120}
 		],
 		"edges":[{"from":"trigger","to":"review","label":"diff"}]
@@ -899,7 +899,7 @@ func TestWorkflowDuplicateEndpoint(t *testing.T) {
 	if duplicated.ID == "code-review" || duplicated.NodeCount != 10 || duplicated.EdgeCount != 12 {
 		t.Fatalf("unexpected duplicated workflow: %#v", duplicated)
 	}
-	if duplicated.Name == "" || duplicated.Name == "--rev 代码审核" {
+	if duplicated.Name == "" || duplicated.Name == "$wf-go-review 代码审核" {
 		t.Fatalf("expected duplicate name to identify copy, got %#v", duplicated)
 	}
 

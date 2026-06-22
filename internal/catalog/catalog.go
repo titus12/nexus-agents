@@ -1550,8 +1550,8 @@ func btdRuleTemplates() []TemplateItem {
 	}{
 		{
 			id:        "00-routing",
-			summary:   "定义 --feat、--mod、--bug、--rev、--design 等工作流入口与角色激活规则。",
-			content:   "多步流程必须按阶段推进；复杂任务先拆解，代码审核可并行派发 reviewer，高风险改动走 high-risk-api。",
+			summary:   "定义 $wf-* 工作流 skill 入口、通用路由原则与角色激活底线。",
+			content:   "工作流入口由 .agents/skills/wf-* 维护；具体流程以 .claude/workflows/*.md 为准；高风险改动走 high-risk-api。",
 			updatedAt: "2026-06-20 10:24",
 		},
 		{
@@ -1876,8 +1876,8 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 	return []btdWorkflowSpec{
 		{
 			id:        "feature-development",
-			name:      "--feat 新功能开发",
-			trigger:   "--feat",
+			name:      "$wf-go-feat 新功能开发",
+			trigger:   "$wf-go-feat",
 			owner:     "sisyphus",
 			summary:   "全新功能或较大模块开发，加载 dev-workflow 并按九步流程推进。",
 			content:   "步骤 1 前澄清需求边界；实现阶段加载 coding-rules；写测试时遵循先失败、再实现、再通过。",
@@ -1887,8 +1887,8 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "modify-existing",
-			name:      "--mod 功能调整",
-			trigger:   "--mod",
+			name:      "$wf-go-mod 功能调整",
+			trigger:   "$wf-go-mod",
 			owner:     "hephaestus",
 			summary:   "已有功能调整，先摸清影响范围，再按单文件或多文件路径执行。",
 			content:   "codegraph/Grep 定位影响范围；读模块 skill；多文件交给 hephaestus，单文件交给 quick；最后 build 和相关 test。",
@@ -1898,8 +1898,8 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "bugfix",
-			name:      "--bug Bug 排查修复",
-			trigger:   "--bug",
+			name:      "$wf-go-bugfix Bug 排查修复",
+			trigger:   "$wf-go-bugfix",
 			owner:     "debugger",
 			summary:   "报错、异常或 crash 排查，先定位根因再修复，禁止猜测性修改。",
 			content:   "debugger 日志优先排查；复杂或跨模块升级 oracle；定位根因后加载 coding-rules 修复；用复现路径和 build 验证。",
@@ -1909,8 +1909,8 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "code-review",
-			name:      "--rev 代码审核",
-			trigger:   "--rev",
+			name:      "$wf-go-review 代码审核",
+			trigger:   "$wf-go-review",
 			owner:     "sisyphus",
 			summary:   "当前改动审核，logic、perf、security 三个 reviewer 并行后汇总去重。",
 			content:   "并行派发 reviewer-logic、reviewer-perf、reviewer-security，再合并 findings 并按严重度分级。",
@@ -1920,8 +1920,8 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "design",
-			name:      "--design 方案设计",
-			trigger:   "--design",
+			name:      "$wf-design 方案设计",
+			trigger:   "$wf-design",
 			owner:     "prometheus",
 			summary:   "只出方案不写代码，适合架构决策、技术选型和复杂实现前置设计。",
 			content:   "先问 2-3 个澄清问题；prometheus 读 skill 和 codegraph 摸底；提出方案对比、推荐方案并落盘 docs/dev-plans。",
@@ -1931,8 +1931,8 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "research",
-			name:      "--ask 理解/调研",
-			trigger:   "--ask",
+			name:      "$wf-research 理解/调研",
+			trigger:   "$wf-research",
 			owner:     "oracle",
 			summary:   "只读不改，用于代码理解、调用链追踪和外部文档调研。",
 			content:   "代码理解走 oracle + codegraph；外部文档走 librarian + context7；输出结论、关键路径和参考代码位置。",
@@ -1942,8 +1942,8 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "commit-gate",
-			name:      "--commit 提交检查",
-			trigger:   "--commit",
+			name:      "$wf-commit 提交检查",
+			trigger:   "$wf-commit",
 			owner:     "gatekeeper",
 			summary:   "提交前门禁，扫描 git diff 并生成风险清单，高风险逐项确认。",
 			content:   "gatekeeper 扫描 diff；有高风险项则逐项向用户确认；全部确认后 commit，不自动 push。",
@@ -1953,8 +1953,8 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "refactor",
-			name:      "--refactor 重构",
-			trigger:   "--refactor",
+			name:      "$wf-go-refactor 重构",
+			trigger:   "$wf-go-refactor",
 			owner:     "prometheus",
 			summary:   "大范围结构调整但外部行为不变，按影响面分析、分步方案和分阶段验证推进。",
 			content:   "codegraph_impact 分析影响面；prometheus 设计可编译分步方案；hephaestus 分阶段实现；3 reviewer 并行审核。",
@@ -1964,19 +1964,19 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "lark-integration",
-			name:      "--lark 飞书操作",
-			trigger:   "--lark",
+			name:      "$wf-lark 飞书操作",
+			trigger:   "$wf-lark",
 			owner:     "librarian",
 			summary:   "飞书文档、消息、多维表格等操作入口，路由到具体 lark-* skill。",
-			content:   "查飞书文档、发消息或操作多维表格时触发 feishu skill；--feat 阅读飞书需求文档时也可自动触发。",
+			content:   "查飞书文档、发消息或操作多维表格时触发 feishu skill；$wf-go-feat 阅读飞书需求文档时也可触发。",
 			tags:      []string{"routing", "lark", "integration"},
 			status:    "ready",
 			updatedAt: "2026-06-20 11:08",
 		},
 		{
 			id:        "subagent-driven-development",
-			name:      "--subagents 并行分工开发",
-			trigger:   "--subagents",
+			name:      "$wf-subagents 并行分工开发",
+			trigger:   "$wf-subagents",
 			owner:     "sisyphus",
 			summary:   "用户明确要求 subagent、并行或分工执行时，按独立任务边界派发并由主会话集成验证。",
 			content:   "先拆分独立任务和 ownership；只派发非重叠写入范围；主会话检查 diff、集成结果并做最终验证。",
@@ -2049,9 +2049,9 @@ func btdCopyDiff(templateID string) string {
 	case "worker":
 		return "- project: model_reasoning_effort = \"medium\"\n+ template: model_reasoning_effort = \"high\""
 	case "00-routing":
-		return "+ template: expanded --rev reviewer routing and workflow phase checkpoints."
+		return "+ template: expanded $wf-go-review reviewer routing and workflow phase checkpoints."
 	case "feature-development":
-		return "+ template: align --feat workflow with latest dev-workflow and testing rules."
+		return "+ template: align $wf-go-feat workflow with latest dev-workflow and testing rules."
 	case "code-review":
 		return "+ template: route review through logic / perf / security reviewer fan-out."
 	case "quick":
@@ -2107,8 +2107,8 @@ func btdWorkflowGraphs() map[string]WorkflowGraph {
 
 func workflowGraphFromRoutingSpec(spec btdWorkflowSpec) WorkflowGraph {
 	nodes := []WorkflowNode{
-		{ID: "trigger", Type: "input", Category: "event", Label: spec.trigger, Agent: "-", Detail: "User message starts with " + spec.trigger + " and the rest becomes workflow input.", X: 48, Y: 210},
-		{ID: "route", Type: "condition", Category: "condition", Label: "routing match", Agent: "sisyphus", Detail: "Match the command section in .claude/rules/go-00-routing.md.", X: 300, Y: 210},
+		{ID: "trigger", Type: "input", Category: "event", Label: spec.trigger, Agent: "-", Detail: "Workflow skill " + spec.trigger + " receives the request and forwards the rest as workflow input.", X: 48, Y: 210},
+		{ID: "route", Type: "condition", Category: "condition", Label: "workflow skill", Agent: "sisyphus", Detail: "The wf-* skill points to this workflow file as the source of truth.", X: 300, Y: 210},
 		{ID: "owner", Type: "agent", Category: "action", Label: spec.owner, Agent: spec.owner, Detail: spec.summary, X: 560, Y: 210},
 		{ID: "skills", Type: "transform", Category: "data", Label: "load skills", Agent: "skill resolver", Detail: spec.content, X: 820, Y: 210},
 		{ID: "verify", Type: "human_approval", Category: "human", Label: "checkpoint", Agent: "owner", Detail: "Each phase reports progress; risky or ambiguous work waits for confirmation.", X: 1080, Y: 210},

@@ -2,7 +2,7 @@
 
 Source: `.claude/rules/go-00-routing.md`
 
-Trigger: `--lark`
+Entry skill: `$wf-lark`
 
 Use for Feishu/Lark documents, messages, sheets, Base, and related operations.
 
