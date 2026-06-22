@@ -912,11 +912,11 @@ function baseNameFromPath(path: string): string {
 
 async function importProjectAction() {
   const project = await importProject(importForm.value);
-  const copies = await fetchProjectConfig(project.id);
-  projects.value = upsertProject(projects.value, project);
+  const rescanned = await rescanProject(project.id);
+  projects.value = upsertProject(projects.value, rescanned.project);
   projectConfigSets.value = {
     ...projectConfigSets.value,
-    [project.id]: copies,
+    [project.id]: rescanned.copies,
   };
   selectedProjectId.value = project.id;
   activePage.value = "project-detail";

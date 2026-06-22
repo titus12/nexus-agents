@@ -490,6 +490,42 @@ func TestNewStoreRestoresProjectsFromUserHomeNexusIndex(t *testing.T) {
 	}
 }
 
+func TestImportProjectRefreshesConfigSetWhenUserIndexAlreadyContainsProject(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	writeTestFile(t, root, ".claude/agents/go-worker.md", "worker markdown")
+	writeTestFile(t, root, ".codex/agents/go-worker.toml", "name = \"worker\"")
+	writeTestFile(t, root, ".claude/rules/go-00-routing.md", "routing markdown")
+	writeTestFile(t, home, ".nexus", `{
+  "version": 1,
+  "projects": [
+    {
+      "projectId": "btd-game-server",
+      "projectName": "btd-game-server",
+      "path": "`+filepath.ToSlash(root)+`",
+      "repoKey": "local:btd-game-server",
+      "importedAt": "2026-06-20T10:00:00Z",
+      "lastScannedAt": "2026-06-20T10:30:00Z"
+    }
+  ]
+}`)
+
+	store := NewStore()
+	project, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+	copies, ok := store.ProjectConfigSet(project.ID, "")
+	if !ok {
+		t.Fatal("expected imported project config set")
+	}
+	if len(copies) == 0 {
+		t.Fatalf("expected imported project config copies to be preserved, got %#v", copies)
+	}
+}
+
 func TestReadProjectWorkflowGraphAcceptsUTF8BOM(t *testing.T) {
 	root := t.TempDir()
 	graphPath := filepath.Join(root, ".claude", "workflows", "go-feature-development.graph.json")
