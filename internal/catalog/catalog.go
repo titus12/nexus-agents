@@ -216,7 +216,7 @@ func NewStoreFromData(data BootstrapData, workflows []WorkflowSummary, workflowG
 func (s *Store) Bootstrap() BootstrapData {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneBootstrap(s.data)
+	return publicBootstrap(cloneBootstrap(s.data))
 }
 
 func (s *Store) Projects() []Project {
@@ -546,6 +546,53 @@ func (s *Store) templateForProjectCopyLocked(copy ProjectCopy) (TemplateItem, bo
 	return TemplateItem{}, false
 }
 
+func (s *Store) workflowSkillTemplateForWorkflowLocked(workflowID string) (TemplateItem, bool) {
+	skillID, ok := workflowSkillTemplateID(workflowID)
+	if !ok {
+		return TemplateItem{}, false
+	}
+	for _, item := range s.data.TemplateLibrary.Skills {
+		if item.ID == skillID {
+			return item, true
+		}
+	}
+	return TemplateItem{}, false
+}
+
+func workflowSkillTemplateID(workflowID string) (string, bool) {
+	switch workflowID {
+	case "feature-development":
+		return "wf-go-feat", true
+	case "modify-existing":
+		return "wf-go-mod", true
+	case "bugfix":
+		return "wf-go-bugfix", true
+	case "code-review":
+		return "wf-go-review", true
+	case "refactor":
+		return "wf-go-refactor", true
+	case "design":
+		return "wf-design", true
+	case "research":
+		return "wf-research", true
+	case "commit-gate":
+		return "wf-commit", true
+	case "lark-integration":
+		return "wf-lark", true
+	case "subagent-driven-development":
+		return "wf-subagents", true
+	default:
+		return "", false
+	}
+}
+
+func isWorkflowSkillTemplate(item TemplateItem) bool {
+	if item.Kind != "skill" {
+		return false
+	}
+	return strings.HasPrefix(item.ID, "wf-") && isCodexSkillTemplate(item)
+}
+
 func (s *Store) writeTemplateToProjectCopyLocked(project Project, copy ProjectCopy) error {
 	template, ok := s.templateForProjectCopyLocked(copy)
 	if !ok {
@@ -561,6 +608,15 @@ func (s *Store) writeTemplateToProjectCopyLocked(project Project, copy ProjectCo
 	writes, err := projectTemplateWrites(copy, template)
 	if err != nil {
 		return err
+	}
+	if copy.Kind == "workflow" {
+		if skill, ok := s.workflowSkillTemplateForWorkflowLocked(template.ID); ok {
+			skillWrites, err := projectTemplateWrites(ProjectCopy{Kind: "skill"}, skill)
+			if err != nil {
+				return err
+			}
+			writes = append(writes, skillWrites...)
+		}
 	}
 	for _, write := range writes {
 		target := filepath.Join(projectRoot, filepath.FromSlash(write.relativePath))
@@ -788,6 +844,9 @@ func (s *Store) Templates(kind string) ([]TemplateItem, bool) {
 	items, ok := s.templateItemsLocked(kind)
 	if !ok {
 		return nil, false
+	}
+	if kind == "skills" {
+		return cloneTemplateItems(publicSkillTemplates(*items)), true
 	}
 	return cloneTemplateItems(*items), true
 }
@@ -2158,6 +2217,44 @@ func cloneBootstrap(data BootstrapData) BootstrapData {
 		Projects:          cloneProjects(data.Projects),
 		ProjectConfigSets: cloneProjectConfigSets(data.ProjectConfigSets),
 	}
+}
+
+func publicBootstrap(data BootstrapData) BootstrapData {
+	data.TemplateLibrary.Skills = publicSkillTemplates(data.TemplateLibrary.Skills)
+	for projectID, copies := range data.ProjectConfigSets {
+		data.ProjectConfigSets[projectID] = publicProjectCopies(copies)
+	}
+	for index := range data.Projects {
+		if copies, ok := data.ProjectConfigSets[data.Projects[index].ID]; ok {
+			data.Projects[index].ConfigSummary = summarizeProjectCopies(copies)
+		}
+	}
+	return data
+}
+
+func publicSkillTemplates(items []TemplateItem) []TemplateItem {
+	filtered := make([]TemplateItem, 0, len(items))
+	for _, item := range items {
+		if isWorkflowSkillTemplate(item) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func publicProjectCopies(copies []ProjectCopy) []ProjectCopy {
+	filtered := make([]ProjectCopy, 0, len(copies))
+	for _, copy := range copies {
+		if copy.Kind == "skill" && strings.HasPrefix(copy.Name, "wf-") {
+			continue
+		}
+		if copy.Kind == "skill" && copy.Origin != nil && strings.HasPrefix(copy.Origin.TemplateID, "wf-") {
+			continue
+		}
+		filtered = append(filtered, copy)
+	}
+	return filtered
 }
 
 func cloneProjects(projects []Project) []Project {

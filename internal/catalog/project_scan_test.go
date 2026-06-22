@@ -631,7 +631,7 @@ func TestAddProjectCopyFromWorkflowTemplateWritesMarkdownAndGraph(t *testing.T) 
 	}
 }
 
-func TestAddProjectCopyFromCodexSkillTemplateWritesSkillFolder(t *testing.T) {
+func TestAddProjectCopyFromWorkflowTemplateWritesCodexWorkflowSkillFolder(t *testing.T) {
 	root := t.TempDir()
 	templateRoot := t.TempDir()
 	home := t.TempDir()
@@ -640,11 +640,23 @@ func TestAddProjectCopyFromCodexSkillTemplateWritesSkillFolder(t *testing.T) {
 
 	templateSkill := filepath.Join(templateRoot, "skills", "codex", "wf-go-feat", "SKILL.md")
 	templateMetadata := filepath.Join(templateRoot, "skills", "codex", "wf-go-feat", "agents", "openai.yaml")
+	templateWorkflow := filepath.Join(templateRoot, "workflows", "go-feature-development.md")
+	templateGraph := filepath.Join(templateRoot, "workflows", "go-feature-development.graph.json")
 	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/SKILL.md", "---\nname: wf-go-feat\ndescription: Go feature workflow.\n---\n\n# wf-go-feat\n")
 	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/agents/openai.yaml", "interface:\n  display_name: \"WF Go Feature\"\n")
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.md", "# go-feature-development\n")
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.graph.json", `{"id":"feature-development","name":"feature","nodes":[],"edges":[]}`+"\n")
 
 	store := NewStoreFromData(BootstrapData{
 		TemplateLibrary: TemplateLibrary{
+			Workflows: []TemplateItem{{
+				ID:      "feature-development",
+				Kind:    "workflow",
+				Name:    "feature-development",
+				Version: 1,
+				Entry:   templateWorkflow,
+				Files:   []string{templateWorkflow, templateGraph},
+			}},
 			Skills: []TemplateItem{{
 				ID:      "wf-go-feat",
 				Kind:    "skill",
@@ -661,22 +673,60 @@ func TestAddProjectCopyFromCodexSkillTemplateWritesSkillFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import project: %v", err)
 	}
-	copy, ok, err := store.AddProjectCopyFromTemplate(project.ID, "skill", "wf-go-feat")
+	copy, ok, err := store.AddProjectCopyFromTemplate(project.ID, "workflow", "feature-development")
 	if err != nil {
-		t.Fatalf("add project copy from template: %v", err)
+		t.Fatalf("add project workflow copy from template: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected add project copy from template to find project and template")
 	}
-	if copy.Kind != "skill" || copy.Status != "synced" || copy.Origin == nil || copy.Origin.TemplateID != "wf-go-feat" {
-		t.Fatalf("unexpected skill copy: %#v", copy)
+	if copy.Kind != "workflow" || copy.Status != "synced" || copy.Origin == nil || copy.Origin.TemplateID != "feature-development" {
+		t.Fatalf("unexpected workflow copy: %#v", copy)
 	}
-	assertProjectCopy(t, store.data.ProjectConfigSets[project.ID], "skill", "wf-go-feat", "synced", ".agents/skills/wf-go-feat/SKILL.md")
+	assertProjectCopy(t, store.data.ProjectConfigSets[project.ID], "workflow", "feature-development", "synced", ".claude/workflows/go-feature-development.md")
+	for _, projectCopy := range store.data.ProjectConfigSets[project.ID] {
+		if projectCopy.Kind == "skill" && projectCopy.Name == "wf-go-feat" {
+			t.Fatalf("workflow skill should be hidden from project config copies: %#v", projectCopy)
+		}
+	}
 	if data, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "wf-go-feat", "SKILL.md")); err != nil || string(data) != "---\nname: wf-go-feat\ndescription: Go feature workflow.\n---\n\n# wf-go-feat\n" {
 		t.Fatalf("expected codex skill markdown from template, data=%q err=%v", string(data), err)
 	}
 	if data, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "wf-go-feat", "agents", "openai.yaml")); err != nil || string(data) != "interface:\n  display_name: \"WF Go Feature\"\n" {
 		t.Fatalf("expected codex skill metadata from template, data=%q err=%v", string(data), err)
+	}
+}
+
+func TestBootstrapFiltersWorkflowSkillTemplates(t *testing.T) {
+	store := NewStoreFromData(BootstrapData{
+		TemplateLibrary: TemplateLibrary{
+			Skills: []TemplateItem{
+				{ID: "go-testing", Kind: "skill", Name: "go-testing", Version: 1, Entry: "templates/skills/go-testing.md", Files: []string{"templates/skills/go-testing.md"}},
+				{ID: "wf-go-feat", Kind: "skill", Name: "wf-go-feat", Version: 1, Entry: "templates/skills/codex/wf-go-feat/SKILL.md", Files: []string{"templates/skills/codex/wf-go-feat/SKILL.md"}},
+			},
+		},
+		ProjectConfigSets: map[string][]ProjectCopy{
+			"sample": {
+				{Kind: "skill", Name: "go-testing", Origin: &Origin{TemplateID: "go-testing"}},
+				{Kind: "skill", Name: "wf-go-feat", Origin: &Origin{TemplateID: "wf-go-feat"}},
+				{Kind: "workflow", Name: "feature-development", Origin: &Origin{TemplateID: "feature-development"}},
+			},
+		},
+		Projects: []Project{{ID: "sample", Name: "Sample"}},
+	}, nil, nil)
+
+	data := store.Bootstrap()
+	if len(data.TemplateLibrary.Skills) != 1 || data.TemplateLibrary.Skills[0].ID != "go-testing" {
+		t.Fatalf("expected bootstrap to hide wf skill templates, got %#v", data.TemplateLibrary.Skills)
+	}
+	copies := data.ProjectConfigSets["sample"]
+	for _, copy := range copies {
+		if copy.Kind == "skill" && strings.HasPrefix(copy.Name, "wf-") {
+			t.Fatalf("expected bootstrap to hide wf skill project copies, got %#v", copies)
+		}
+	}
+	if len(copies) != 2 {
+		t.Fatalf("expected public project copies to keep normal skill and workflow only, got %#v", copies)
 	}
 }
 

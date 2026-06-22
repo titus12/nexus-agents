@@ -30,8 +30,8 @@ func scanProjectConfigSetForProject(projectToken string, projectRoot string, lib
 	var copies []ProjectCopy
 	copies = append(copies, scanAgentCopies(projectToken, projectRoot, library.Agents)...)
 	copies = append(copies, scanMarkdownCopies(projectToken, projectRoot, "rule", ".claude/rules", library.Rules)...)
-	copies = append(copies, scanMarkdownCopies(projectToken, projectRoot, "skill", ".claude/skills", library.Skills)...)
-	copies = append(copies, scanCodexSkillCopies(projectToken, projectRoot, library.Skills)...)
+	copies = append(copies, scanMarkdownCopies(projectToken, projectRoot, "skill", ".claude/skills", publicSkillTemplates(library.Skills))...)
+	copies = append(copies, scanCodexSkillCopies(projectToken, projectRoot, publicSkillTemplates(library.Skills))...)
 	copies = append(copies, scanWorkflowCopies(projectToken, projectRoot, library.Workflows)...)
 
 	sort.SliceStable(copies, func(left, right int) bool {
@@ -48,6 +48,9 @@ func scanCodexSkillCopies(projectToken string, projectRoot string, templates []T
 	templateByID := templateItemsByID(templates)
 	candidates := make(map[string]projectCopyCandidate, len(skillFiles))
 	for _, id := range sortedKeys(skillFiles) {
+		if strings.HasPrefix(id, "wf-") {
+			continue
+		}
 		projectPath := skillFiles[id]
 		template, ok := templateByID[id]
 		copy := projectCopyFromScan(projectToken, "skill", id, displayProjectPath(projectRoot, projectPath), codexSkillProjectFiles(projectPath), template, ok)
