@@ -1235,6 +1235,13 @@ func btdSkillTemplates() []TemplateItem {
 			updatedAt:        "2026-06-20 10:40",
 		},
 		{
+			id:               "test-first-and-worktree",
+			summary:          "测试优先与隔离工作区规范，用于核心逻辑、bugfix、重构和中大型改动前置检查。",
+			content:          "核心逻辑优先 test-first；bugfix 优先补回归测试；中大型改动前检查隔离分支或 worktree。",
+			applicableAgents: []string{"hephaestus", "quick", "worker", "debugger", "gatekeeper"},
+			updatedAt:        "2026-06-22 15:10",
+		},
+		{
 			id:               "testing",
 			summary:          "测试编写规范，覆盖必须写测试的场景、固定命令、mock、gomonkey 和断言规则。",
 			content:          "修复 bug 必须先写复现测试；Go 测试带 actor_id_uint64；gomonkey 需 -gcflags=all=-l 防止内联。",
@@ -1437,6 +1444,17 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 			tags:      []string{"routing", "lark", "integration"},
 			status:    "ready",
 			updatedAt: "2026-06-20 11:08",
+		},
+		{
+			id:        "subagent-driven-development",
+			name:      "--subagents 并行分工开发",
+			trigger:   "--subagents",
+			owner:     "sisyphus",
+			summary:   "用户明确要求 subagent、并行或分工执行时，按独立任务边界派发并由主会话集成验证。",
+			content:   "先拆分独立任务和 ownership；只派发非重叠写入范围；主会话检查 diff、集成结果并做最终验证。",
+			tags:      []string{"routing", "subagent", "parallel", "delegation"},
+			status:    "ready",
+			updatedAt: "2026-06-22 15:11",
 		},
 	}
 }

@@ -1,0 +1,93 @@
+{
+  "id": "subagent-driven-development",
+  "name": "subagent-driven-development",
+  "nodes": [
+    {
+      "id": "trigger",
+      "type": "input",
+      "category": "event",
+      "label": "--subagents / --parallel",
+      "agent": "-",
+      "detail": "User explicitly requests subagent, parallel, or delegated execution.",
+      "x": 48,
+      "y": 210
+    },
+    {
+      "id": "decompose",
+      "type": "transform",
+      "category": "data",
+      "label": "decompose tasks",
+      "agent": "owner",
+      "detail": "Extract independent tasks and define ownership boundaries.",
+      "x": 300,
+      "y": 210
+    },
+    {
+      "id": "dispatch",
+      "type": "agent",
+      "category": "action",
+      "label": "dispatch workers",
+      "agent": "worker agents",
+      "detail": "Run non-overlapping tasks in parallel with explicit edit scopes.",
+      "x": 560,
+      "y": 210
+    },
+    {
+      "id": "review",
+      "type": "agent",
+      "category": "action",
+      "label": "review results",
+      "agent": "owner",
+      "detail": "Inspect diffs, check scope, and integrate accepted changes.",
+      "x": 820,
+      "y": 210
+    },
+    {
+      "id": "verify",
+      "type": "transform",
+      "category": "data",
+      "label": "final verification",
+      "agent": "owner",
+      "detail": "Run final tests/builds in the main session.",
+      "x": 1080,
+      "y": 210
+    },
+    {
+      "id": "output",
+      "type": "output",
+      "category": "data",
+      "label": "deliver",
+      "agent": "owner",
+      "detail": "Return completed tasks, changed files, verification, and risks.",
+      "x": 1340,
+      "y": 210
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "decompose",
+      "label": "request"
+    },
+    {
+      "from": "decompose",
+      "to": "dispatch",
+      "label": "independent scopes"
+    },
+    {
+      "from": "dispatch",
+      "to": "review",
+      "label": "results"
+    },
+    {
+      "from": "review",
+      "to": "verify",
+      "label": "integrated diff"
+    },
+    {
+      "from": "verify",
+      "to": "output",
+      "label": "evidence"
+    }
+  ]
+}

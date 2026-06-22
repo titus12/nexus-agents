@@ -1,8 +1,8 @@
 # commit-gate
 
-Source: `.claude/rules/go-00-routing.md`
+Source: .claude/rules/go-00-routing.md
 
-Trigger: `--commit`
+Trigger: --commit
 
 Use as a pre-commit gate.
 
@@ -16,7 +16,20 @@ Codex execution notes:
 
 Workflow:
 
-1. Use `go-gatekeeper` to inspect the current diff.
+1. Use go-gatekeeper to inspect the current diff.
 2. Produce a risk list.
 3. Ask for confirmation on high-risk items.
-4. Commit only after verification and explicit approval.
+4. Run the verification gate below.
+5. Commit only after verification and explicit approval.
+
+## Verification Gate
+
+Before commit / PR / handoff:
+
+- [ ] Inspect git diff and list changed files.
+- [ ] Run go build -tags actor_id_uint64 ./cmd/server/ for code changes.
+- [ ] Run targeted tests for changed logic or bug fixes.
+- [ ] Run go vet for broad or risky changes when practical.
+- [ ] Confirm generated files are either intentionally regenerated or untouched.
+- [ ] Document any skipped verification with the exact reason.
+- [ ] Final response reports evidence, not assumptions.

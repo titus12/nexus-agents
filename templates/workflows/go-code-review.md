@@ -1,9 +1,9 @@
 # go-code-review
 
-Source: `.claude/rules/go-00-routing.md`
-Stack: `go`
+Source: .claude/rules/go-00-routing.md
+Stack: go
 
-Trigger: `--rev`
+Trigger: --rev
 
 Use for review of the current change set.
 
@@ -17,11 +17,42 @@ Codex execution notes:
 
 Workflow:
 
-1. Dispatch reviewers in parallel:
-   - `go-reviewer-logic`
-   - `go-reviewer-perf`
-   - `go-reviewer-security`
-2. Merge findings.
-3. Deduplicate repeated issues.
-4. Sort by severity.
-5. Report concrete file and line references when available.
+1. Decide whether a full review or self-review checklist is appropriate.
+2. For full review, dispatch reviewers in parallel:
+   - go-reviewer-logic
+   - go-reviewer-perf
+   - go-reviewer-security
+3. Merge findings.
+4. Deduplicate repeated issues.
+5. Sort by severity.
+6. Report concrete file and line references when available.
+
+## When to Request Review
+
+Request or perform review when:
+
+- A feature, bugfix, or refactor changes multiple files.
+- Behavior, data flow, concurrency, persistence, permissions, economy, or security changes.
+- The implementation is ready for merge or commit.
+- A previous bug was subtle, high-impact, or hard to reproduce.
+- The agent is uncertain about design trade-offs.
+
+For small mechanical changes, a self-review checklist may be enough.
+
+## Review Context Template
+
+Provide reviewers with:
+
+- Goal / requirement
+- Files changed and important diffs
+- Base and head revision if available
+- Commands already run and their results
+- Known risks or intentional trade-offs
+- Areas where feedback is specifically requested
+
+## Review Result Handling
+
+- Critical: fix before proceeding.
+- Important: fix before merge or explicitly defer with reason.
+- Minor: fix if cheap, otherwise track as follow-up.
+- Incorrect: respond with concise technical evidence.
