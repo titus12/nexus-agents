@@ -644,6 +644,7 @@ func TestAddProjectCopyFromWorkflowTemplateWritesCodexWorkflowSkillFolder(t *tes
 	templateGraph := filepath.Join(templateRoot, "workflows", "go-feature-development.graph.json")
 	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/SKILL.md", "---\nname: wf-go-feat\ndescription: Go feature workflow.\n---\n\n# wf-go-feat\n")
 	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/agents/openai.yaml", "interface:\n  display_name: \"WF Go Feature\"\n")
+	writeTestFile(t, templateRoot, "commands/claude/wf-go-feat.md", "---\ndescription: Run the Go feature-development workflow\n---\n\n# /wf-go-feat\n")
 	writeTestFile(t, templateRoot, "workflows/go-feature-development.md", "# go-feature-development\n")
 	writeTestFile(t, templateRoot, "workflows/go-feature-development.graph.json", `{"id":"feature-development","name":"feature","nodes":[],"edges":[]}`+"\n")
 
@@ -694,6 +695,9 @@ func TestAddProjectCopyFromWorkflowTemplateWritesCodexWorkflowSkillFolder(t *tes
 	}
 	if data, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "wf-go-feat", "agents", "openai.yaml")); err != nil || string(data) != "interface:\n  display_name: \"WF Go Feature\"\n" {
 		t.Fatalf("expected codex skill metadata from template, data=%q err=%v", string(data), err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, ".claude", "commands", "wf-go-feat.md")); err != nil || !strings.Contains(string(data), ".claude/workflows/go-feature-development.md") {
+		t.Fatalf("expected claude workflow command from template, data=%q err=%v", string(data), err)
 	}
 }
 

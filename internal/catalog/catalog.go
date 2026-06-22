@@ -586,6 +586,32 @@ func workflowSkillTemplateID(workflowID string) (string, bool) {
 	}
 }
 
+func workflowCommandTemplatePath(workflowID string) (string, bool) {
+	skillID, ok := workflowSkillTemplateID(workflowID)
+	if !ok {
+		return "", false
+	}
+	return "templates/commands/claude/" + skillID + ".md", true
+}
+
+func workflowCommandTemplateWrites(workflowID string) ([]projectTemplateWrite, error) {
+	path, ok := workflowCommandTemplatePath(workflowID)
+	if !ok {
+		return nil, nil
+	}
+	data, err := os.ReadFile(resolveDataPath(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read workflow command template %s: %w", path, err)
+	}
+	return []projectTemplateWrite{{
+		relativePath: filepath.ToSlash(filepath.Join(".claude", "commands", filepath.Base(path))),
+		data:         data,
+	}}, nil
+}
+
 func isWorkflowSkillTemplate(item TemplateItem) bool {
 	if item.Kind != "skill" {
 		return false
@@ -617,6 +643,11 @@ func (s *Store) writeTemplateToProjectCopyLocked(project Project, copy ProjectCo
 			}
 			writes = append(writes, skillWrites...)
 		}
+		commandWrites, err := workflowCommandTemplateWrites(template.ID)
+		if err != nil {
+			return err
+		}
+		writes = append(writes, commandWrites...)
 	}
 	for _, write := range writes {
 		target := filepath.Join(projectRoot, filepath.FromSlash(write.relativePath))
