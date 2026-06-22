@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "WF Go Review"
+  short_description: "Run the Go code-review workflow."
+  default_prompt: "$wf-go-review Review the current Go changes."

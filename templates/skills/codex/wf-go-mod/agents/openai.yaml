@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "WF Go Modify"
+  short_description: "Run the Go existing-feature modification workflow."
+  default_prompt: "$wf-go-mod Modify an existing Go feature."

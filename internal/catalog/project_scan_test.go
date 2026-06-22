@@ -631,6 +631,55 @@ func TestAddProjectCopyFromWorkflowTemplateWritesMarkdownAndGraph(t *testing.T) 
 	}
 }
 
+func TestAddProjectCopyFromCodexSkillTemplateWritesSkillFolder(t *testing.T) {
+	root := t.TempDir()
+	templateRoot := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+
+	templateSkill := filepath.Join(templateRoot, "skills", "codex", "wf-go-feat", "SKILL.md")
+	templateMetadata := filepath.Join(templateRoot, "skills", "codex", "wf-go-feat", "agents", "openai.yaml")
+	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/SKILL.md", "---\nname: wf-go-feat\ndescription: Go feature workflow.\n---\n\n# wf-go-feat\n")
+	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/agents/openai.yaml", "interface:\n  display_name: \"WF Go Feature\"\n")
+
+	store := NewStoreFromData(BootstrapData{
+		TemplateLibrary: TemplateLibrary{
+			Skills: []TemplateItem{{
+				ID:      "wf-go-feat",
+				Kind:    "skill",
+				Name:    "wf-go-feat",
+				Version: 1,
+				Entry:   templateSkill,
+				Files:   []string{templateSkill, templateMetadata},
+			}},
+		},
+		ProjectConfigSets: map[string][]ProjectCopy{},
+	}, nil, nil)
+
+	project, err := store.ImportProject(ProjectInput{Name: "btd-game-server", Path: root})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+	copy, ok, err := store.AddProjectCopyFromTemplate(project.ID, "skill", "wf-go-feat")
+	if err != nil {
+		t.Fatalf("add project copy from template: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected add project copy from template to find project and template")
+	}
+	if copy.Kind != "skill" || copy.Status != "synced" || copy.Origin == nil || copy.Origin.TemplateID != "wf-go-feat" {
+		t.Fatalf("unexpected skill copy: %#v", copy)
+	}
+	assertProjectCopy(t, store.data.ProjectConfigSets[project.ID], "skill", "wf-go-feat", "synced", ".agents/skills/wf-go-feat/SKILL.md")
+	if data, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "wf-go-feat", "SKILL.md")); err != nil || string(data) != "---\nname: wf-go-feat\ndescription: Go feature workflow.\n---\n\n# wf-go-feat\n" {
+		t.Fatalf("expected codex skill markdown from template, data=%q err=%v", string(data), err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "wf-go-feat", "agents", "openai.yaml")); err != nil || string(data) != "interface:\n  display_name: \"WF Go Feature\"\n" {
+		t.Fatalf("expected codex skill metadata from template, data=%q err=%v", string(data), err)
+	}
+}
+
 func TestTemplateHashPrefersDeclaredFilesOverSourcePaths(t *testing.T) {
 	root := t.TempDir()
 	templateMarkdown := filepath.Join(root, "workflow.md")

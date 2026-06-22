@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "WF Go Bugfix"
+  short_description: "Run the Go bugfix workflow."
+  default_prompt: "$wf-go-bugfix Diagnose and fix a Go bug."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "WF Research"
+  short_description: "Run the research workflow."
+  default_prompt: "$wf-research Investigate code or external documentation."

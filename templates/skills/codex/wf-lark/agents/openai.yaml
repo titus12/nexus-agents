@@ -1,0 +1,4 @@
+interface:
+  display_name: "WF Lark"
+  short_description: "Run the Lark integration workflow."
+  default_prompt: "$wf-lark Handle a Lark or Feishu task."

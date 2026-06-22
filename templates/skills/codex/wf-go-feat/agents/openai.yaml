@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "WF Go Feature"
+  short_description: "Run the Go feature-development workflow."
+  default_prompt: "$wf-go-feat Add a Go feature or substantial module."

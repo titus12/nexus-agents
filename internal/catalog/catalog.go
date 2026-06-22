@@ -510,6 +510,9 @@ func defaultProjectCopyPath(kind string, template TemplateItem) string {
 	case "rule":
 		return filepath.ToSlash(filepath.Join(".claude", "rules", stem+".md"))
 	case "skill":
+		if isCodexSkillTemplate(template) {
+			return filepath.ToSlash(filepath.Join(".agents", "skills", template.ID, "SKILL.md"))
+		}
 		return filepath.ToSlash(filepath.Join(".claude", "skills", stem+".md"))
 	case "workflow":
 		return filepath.ToSlash(filepath.Join(".claude", "workflows", stem+".md"))
@@ -584,12 +587,70 @@ func projectTemplateWrites(copy ProjectCopy, template TemplateItem) ([]projectTe
 	case "rule":
 		return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "rules", stem+".md")), template)
 	case "skill":
+		if isCodexSkillTemplate(template) {
+			return codexSkillTemplateWrites(template)
+		}
 		return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "skills", stem+".md")), template)
 	case "workflow":
 		return workflowTemplateWrites(stem, template)
 	default:
 		return nil, fmt.Errorf("unsupported project copy kind %q", copy.Kind)
 	}
+}
+
+func isCodexSkillTemplate(template TemplateItem) bool {
+	for _, path := range templateFileCandidates(template) {
+		slashed := filepath.ToSlash(path)
+		if strings.HasPrefix(slashed, "templates/skills/codex/") {
+			return true
+		}
+		if strings.EqualFold(filepath.Base(filepath.FromSlash(slashed)), "SKILL.md") &&
+			filepath.Base(filepath.Dir(filepath.FromSlash(slashed))) == template.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func codexSkillTemplateWrites(template TemplateItem) ([]projectTemplateWrite, error) {
+	writes := []projectTemplateWrite{}
+	root := codexSkillTemplateRoot(template)
+	if root == "" {
+		return nil, fmt.Errorf("template %s has no codex skill root", template.ID)
+	}
+	for _, path := range templateFileCandidates(template) {
+		slashed := filepath.ToSlash(path)
+		data, err := os.ReadFile(resolveDataPath(path))
+		if err != nil {
+			continue
+		}
+		relative, err := filepath.Rel(root, filepath.FromSlash(slashed))
+		if err != nil || strings.HasPrefix(relative, "..") {
+			continue
+		}
+		relative = filepath.ToSlash(relative)
+		if relative == "" {
+			continue
+		}
+		writes = append(writes, projectTemplateWrite{
+			relativePath: filepath.ToSlash(filepath.Join(".agents", "skills", template.ID, filepath.FromSlash(relative))),
+			data:         data,
+		})
+	}
+	if len(writes) == 0 {
+		return nil, fmt.Errorf("template %s has no codex skill files to sync", template.ID)
+	}
+	return writes, nil
+}
+
+func codexSkillTemplateRoot(template TemplateItem) string {
+	for _, path := range templateFileCandidates(template) {
+		slashed := filepath.ToSlash(path)
+		if strings.EqualFold(filepath.Base(filepath.FromSlash(slashed)), "SKILL.md") {
+			return filepath.Dir(filepath.FromSlash(slashed))
+		}
+	}
+	return ""
 }
 
 func projectTemplateStem(copy ProjectCopy, template TemplateItem) string {
@@ -1546,6 +1607,76 @@ func btdSkillTemplates() []TemplateItem {
 			applicableAgents: []string{"hephaestus", "quick", "worker", "reviewer-logic", "reviewer-perf"},
 			updatedAt:        "2026-06-20 10:41",
 		},
+		{
+			id:               "wf-design",
+			summary:          "Codex skill entry for the design workflow.",
+			content:          "Invoke with $wf-design to load templates/workflows/design.md and follow the design workflow.",
+			applicableAgents: []string{"prometheus", "sisyphus"},
+			updatedAt:        "2026-06-22 16:45",
+		},
+		{
+			id:               "wf-research",
+			summary:          "Codex skill entry for the research workflow.",
+			content:          "Invoke with $wf-research to load templates/workflows/research.md and follow the research workflow.",
+			applicableAgents: []string{"oracle", "librarian"},
+			updatedAt:        "2026-06-22 16:45",
+		},
+		{
+			id:               "wf-commit",
+			summary:          "Codex skill entry for the commit-gate workflow.",
+			content:          "Invoke with $wf-commit to load templates/workflows/commit-gate.md and follow the commit-gate workflow.",
+			applicableAgents: []string{"gatekeeper", "reviewer-security"},
+			updatedAt:        "2026-06-22 16:45",
+		},
+		{
+			id:               "wf-lark",
+			summary:          "Codex skill entry for the Lark integration workflow.",
+			content:          "Invoke with $wf-lark to load templates/workflows/lark-integration.md and follow the Lark integration workflow.",
+			applicableAgents: []string{"librarian"},
+			updatedAt:        "2026-06-22 16:45",
+		},
+		{
+			id:               "wf-subagents",
+			summary:          "Codex skill entry for the subagent-driven development workflow.",
+			content:          "Invoke with $wf-subagents to load templates/workflows/subagent-driven-development.md and follow the subagent workflow.",
+			applicableAgents: []string{"sisyphus"},
+			updatedAt:        "2026-06-22 16:45",
+		},
+		{
+			id:               "wf-go-feat",
+			summary:          "Codex skill entry for the Go feature-development workflow.",
+			content:          "Invoke with $wf-go-feat to load templates/workflows/go-feature-development.md and follow the Go development workflow.",
+			applicableAgents: []string{"sisyphus", "prometheus", "hephaestus"},
+			updatedAt:        "2026-06-22 16:30",
+		},
+		{
+			id:               "wf-go-mod",
+			summary:          "Codex skill entry for the Go existing-feature modification workflow.",
+			content:          "Invoke with $wf-go-mod to load templates/workflows/go-modify-existing.md and follow the scoped Go modification workflow.",
+			applicableAgents: []string{"hephaestus", "quick", "worker"},
+			updatedAt:        "2026-06-22 16:30",
+		},
+		{
+			id:               "wf-go-bugfix",
+			summary:          "Codex skill entry for the Go bugfix workflow.",
+			content:          "Invoke with $wf-go-bugfix to load templates/workflows/go-bugfix.md and follow the Go root-cause bugfix workflow.",
+			applicableAgents: []string{"debugger", "oracle", "hephaestus"},
+			updatedAt:        "2026-06-22 16:30",
+		},
+		{
+			id:               "wf-go-review",
+			summary:          "Codex skill entry for the Go code-review workflow.",
+			content:          "Invoke with $wf-go-review to load templates/workflows/go-code-review.md and follow the Go review workflow.",
+			applicableAgents: []string{"sisyphus", "reviewer-logic", "reviewer-perf", "reviewer-security"},
+			updatedAt:        "2026-06-22 16:30",
+		},
+		{
+			id:               "wf-go-refactor",
+			summary:          "Codex skill entry for the Go refactor workflow.",
+			content:          "Invoke with $wf-go-refactor to load templates/workflows/go-refactor.md and follow the staged Go refactor workflow.",
+			applicableAgents: []string{"prometheus", "hephaestus", "reviewer-logic", "reviewer-perf", "reviewer-security"},
+			updatedAt:        "2026-06-22 16:30",
+		},
 	}
 
 	items := make([]TemplateItem, 0, len(specs))
@@ -1559,7 +1690,7 @@ func btdSkillTemplates() []TemplateItem {
 			Version:          1,
 			Summary:          spec.summary,
 			Entry:            path,
-			Files:            []string{path},
+			Files:            skillTemplateFiles(spec.id, path),
 			UpdatedAt:        spec.updatedAt,
 			Status:           "ready",
 			Source:           "Copied skill markdown",
@@ -1570,6 +1701,13 @@ func btdSkillTemplates() []TemplateItem {
 		})
 	}
 	return items
+}
+
+func skillTemplateFiles(id string, path string) []string {
+	if strings.HasPrefix(filepath.ToSlash(path), "templates/skills/codex/") {
+		return []string{path, "templates/skills/codex/" + id + "/agents/openai.yaml"}
+	}
+	return []string{path}
 }
 
 func btdRuleTemplatePath(id string) string {
@@ -1589,6 +1727,8 @@ func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "dev-workflow", "coding-rules", "testing", "pmconf-pattern", "quest-system", "cross-config":
 		return "templates/skills/go-" + id + ".md"
+	case "wf-go-feat", "wf-go-mod", "wf-go-bugfix", "wf-go-review", "wf-go-refactor", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents":
+		return "templates/skills/codex/" + id + "/SKILL.md"
 	default:
 		return "templates/skills/" + id + ".md"
 	}

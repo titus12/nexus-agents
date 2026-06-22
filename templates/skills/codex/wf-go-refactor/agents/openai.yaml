@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "WF Go Refactor"
+  short_description: "Run the Go refactor workflow."
+  default_prompt: "$wf-go-refactor Refactor Go code without changing behavior."

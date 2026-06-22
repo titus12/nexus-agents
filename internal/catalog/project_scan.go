@@ -31,6 +31,7 @@ func scanProjectConfigSetForProject(projectToken string, projectRoot string, lib
 	copies = append(copies, scanAgentCopies(projectToken, projectRoot, library.Agents)...)
 	copies = append(copies, scanMarkdownCopies(projectToken, projectRoot, "rule", ".claude/rules", library.Rules)...)
 	copies = append(copies, scanMarkdownCopies(projectToken, projectRoot, "skill", ".claude/skills", library.Skills)...)
+	copies = append(copies, scanCodexSkillCopies(projectToken, projectRoot, library.Skills)...)
 	copies = append(copies, scanWorkflowCopies(projectToken, projectRoot, library.Workflows)...)
 
 	sort.SliceStable(copies, func(left, right int) bool {
@@ -40,6 +41,47 @@ func scanProjectConfigSetForProject(projectToken string, projectRoot string, lib
 		return copies[left].Name < copies[right].Name
 	})
 	return copies, nil
+}
+
+func scanCodexSkillCopies(projectToken string, projectRoot string, templates []TemplateItem) []ProjectCopy {
+	skillFiles := codexSkillFilesByID(filepath.Join(projectRoot, ".agents", "skills"))
+	templateByID := templateItemsByID(templates)
+	candidates := make(map[string]projectCopyCandidate, len(skillFiles))
+	for _, id := range sortedKeys(skillFiles) {
+		projectPath := skillFiles[id]
+		template, ok := templateByID[id]
+		copy := projectCopyFromScan(projectToken, "skill", id, displayProjectPath(projectRoot, projectPath), codexSkillProjectFiles(projectPath), template, ok)
+		addProjectCopyCandidate(candidates, id, template, ok, copy)
+	}
+	return projectCopiesFromCandidates(candidates)
+}
+
+func codexSkillFilesByID(root string) map[string]string {
+	result := map[string]string{}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return result
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		id := entry.Name()
+		path := filepath.Join(root, id, "SKILL.md")
+		if stat, err := os.Stat(path); err == nil && !stat.IsDir() {
+			result[id] = path
+		}
+	}
+	return result
+}
+
+func codexSkillProjectFiles(skillPath string) []string {
+	files := []string{skillPath}
+	openaiPath := filepath.Join(filepath.Dir(skillPath), "agents", "openai.yaml")
+	if stat, err := os.Stat(openaiPath); err == nil && !stat.IsDir() {
+		files = append(files, openaiPath)
+	}
+	return files
 }
 
 func scanAgentCopies(projectToken string, projectRoot string, templates []TemplateItem) []ProjectCopy {
@@ -295,6 +337,9 @@ func applyTemplateFilenameDisplay(item TemplateItem) TemplateItem {
 }
 
 func templateFilenameStem(item TemplateItem) string {
+	if item.Kind == "skill" && isCodexSkillTemplate(item) {
+		return item.ID
+	}
 	for _, path := range templateFileCandidates(item) {
 		candidate := filepath.ToSlash(path)
 		if !strings.HasPrefix(candidate, "templates/") {

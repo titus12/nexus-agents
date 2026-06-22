@@ -1,0 +1,4 @@
+interface:
+  display_name: "WF Subagents"
+  short_description: "Run the subagent workflow."
+  default_prompt: "$wf-subagents Split work across subagents."

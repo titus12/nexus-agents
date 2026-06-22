@@ -1,0 +1,4 @@
+interface:
+  display_name: "WF Commit"
+  short_description: "Run the commit-gate workflow."
+  default_prompt: "$wf-commit Check changes before commit."

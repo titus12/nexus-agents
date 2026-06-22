@@ -1,0 +1,4 @@
+interface:
+  display_name: "WF Design"
+  short_description: "Run the design workflow."
+  default_prompt: "$wf-design Design a solution before implementation."
