@@ -546,7 +546,7 @@ function templateFooterChips(item: TemplateItem): string[] {
   return [`v${item.version}`];
 }
 
-const systemAgentIds = new Set(["workflow-evaluator", "learning-curator", "model-arbiter"]);
+const systemAgentIds = new Set(["workflow-evaluator", "learning-curator", "model-arbiter", "unity-asset-safety-evaluator", "unity-regression-evaluator", "unity-workflow-evaluator"]);
 
 function agentModelClass(item: TemplateItem): string {
   if (item.kind !== "agent") return "";

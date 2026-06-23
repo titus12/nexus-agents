@@ -459,9 +459,14 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		"debugger", "gatekeeper", "hephaestus", "librarian", "oracle", "prometheus",
 		"quick", "reviewer-logic", "reviewer-perf", "reviewer-security", "sisyphus", "worker",
 		"workflow-evaluator", "learning-curator", "model-arbiter",
+		"unity-debugger", "unity-bugfix-developer", "unity-bugfix-reviewer", "unity-logic-developer", "unity-logic-reviewer", "unity-ui-developer",
+		"unity-asset-safety-evaluator", "unity-regression-evaluator", "unity-workflow-evaluator",
 	})
 	for _, agent := range agents {
 		displayName := "go-" + agent.ID
+		if strings.HasPrefix(agent.ID, "unity-") {
+			displayName = agent.ID
+		}
 		if agent.Name != displayName || agent.Slug != displayName {
 			t.Fatalf("expected agent template identity to preserve go- filename prefix, got %#v", agent)
 		}
@@ -484,7 +489,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		Content     string   `json:"content"`
 	}
 	getJSON(t, server, "/api/templates/rules", &rules)
-	assertTemplateIDs(t, "rules", rules, []string{"00-routing", "01-communication", "02-safety", "03-project-model"})
+	assertTemplateIDs(t, "rules", rules, []string{"00-routing", "01-communication", "02-safety", "03-project-model", "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety"})
 	for _, rule := range rules {
 		displayName := strings.TrimSuffix(strings.TrimPrefix(rule.SourcePaths[0], "templates/rules/"), ".md")
 		if rule.Name != displayName || rule.Slug != displayName {
@@ -506,6 +511,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "skills", skills, []string{
 		"coding-rules", "cross-client", "cross-config", "cross-gate", "cross-social", "dev-workflow",
 		"high-risk-api", "pmconf-pattern", "quest-system", "review-feedback", "skill-standard", "test-first-and-worktree", "testing",
+		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver", "csharp-behaviour-tree",
 	})
 	for _, skill := range skills {
 		if strings.HasPrefix(skill.SourcePaths[0], "templates/skills/go-") {
@@ -532,6 +538,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "workflows", workflows, []string{
 		"feature-development", "modify-existing", "bugfix", "code-review", "design",
 		"research", "commit-gate", "refactor", "lark-integration", "subagent-driven-development",
+		"bug-investigation", "logic-modification", "ui-feature-development", "unity-workflow-evaluation",
 	})
 	for _, workflow := range workflows {
 		if strings.HasPrefix(workflow.Entry, "templates/workflows/go-") {
@@ -543,7 +550,11 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		if workflow.Entry == "" || !strings.HasPrefix(workflow.Entry, "templates/workflows/") || !strings.HasSuffix(workflow.Entry, ".md") {
 			t.Fatalf("expected workflow entry to be copied markdown under templates/workflows, got %#v", workflow)
 		}
-		if workflow.Source != "Expanded workflow markdown" || workflow.Content == "" || !containsString(workflow.SourcePaths, "templates/rules/go-00-routing.md") {
+		routingPath := "templates/rules/go-00-routing.md"
+		if strings.HasPrefix(workflow.Entry, "templates/workflows/unity-") {
+			routingPath = "templates/rules/unity-00-routing.md"
+		}
+		if workflow.Source != "Expanded workflow markdown" || workflow.Content == "" || !containsString(workflow.SourcePaths, routingPath) {
 			t.Fatalf("expected btd workflow content and routing lineage, got %#v", workflow)
 		}
 		if !containsString(workflow.SourcePaths, workflow.Entry) {

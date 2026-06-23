@@ -192,24 +192,24 @@ type EvaluationProposalsResponse struct {
 }
 
 type StatisticsTaskItem struct {
-	RunID              string   `json:"runId"`
-	EvaluationID       string   `json:"evaluationId,omitempty"`
-	ProjectID          string   `json:"projectId"`
-	TaskTitle          string   `json:"taskTitle"`
-	WorkflowType       string   `json:"workflowType"`
-	Status             string   `json:"status"`
-	Score              float64  `json:"score"`
-	Confidence         float64  `json:"confidence"`
-	Agent              string   `json:"agent,omitempty"`
-	Model              string   `json:"model,omitempty"`
-	Rules              []string `json:"rules,omitempty"`
-	ArbiterModel       string   `json:"arbiterModel,omitempty"`
-	EscalationModel    string   `json:"escalationModel,omitempty"`
-	NeedsEscalation    bool     `json:"needsEscalation,omitempty"`
-	EscalationReasons  []string `json:"escalationReasons,omitempty"`
-	HighRiskWorkflow   bool     `json:"highRiskWorkflow,omitempty"`
-	FailedTask         bool     `json:"failedTask,omitempty"`
-	CreatedAt          string   `json:"createdAt"`
+	RunID             string   `json:"runId"`
+	EvaluationID      string   `json:"evaluationId,omitempty"`
+	ProjectID         string   `json:"projectId"`
+	TaskTitle         string   `json:"taskTitle"`
+	WorkflowType      string   `json:"workflowType"`
+	Status            string   `json:"status"`
+	Score             float64  `json:"score"`
+	Confidence        float64  `json:"confidence"`
+	Agent             string   `json:"agent,omitempty"`
+	Model             string   `json:"model,omitempty"`
+	Rules             []string `json:"rules,omitempty"`
+	ArbiterModel      string   `json:"arbiterModel,omitempty"`
+	EscalationModel   string   `json:"escalationModel,omitempty"`
+	NeedsEscalation   bool     `json:"needsEscalation,omitempty"`
+	EscalationReasons []string `json:"escalationReasons,omitempty"`
+	HighRiskWorkflow  bool     `json:"highRiskWorkflow,omitempty"`
+	FailedTask        bool     `json:"failedTask,omitempty"`
+	CreatedAt         string   `json:"createdAt"`
 }
 
 type StatisticsTasksResponse struct {
@@ -1266,7 +1266,7 @@ func evaluationModelPolicy(run TaskRun) map[string]any {
 	primary := "deepseek-v4-pro"
 	secondary := "deepseek-v4-flash"
 	escalationModel := "gpt-5.5"
-	highRiskWorkflow := workflow == "code-review" || workflow == "refactor" || workflow == "bugfix"
+	highRiskWorkflow := workflow == "code-review" || workflow == "refactor" || workflow == "bugfix" || isUnityEvaluationWorkflow(workflow)
 	failedTask := normalizeTaskStatus(run.SubmittedStatus) == "failed"
 	if highRiskWorkflow {
 		accuracyWeight = 0.72
@@ -1289,6 +1289,15 @@ func evaluationModelPolicy(run TaskRun) map[string]any {
 		"escalateWhen":     []any{"low_confidence", "failed_task", "score_gray_zone", "high_risk_workflow", "high_severity_proposal", "cross_project_recurring_issue"},
 		"highRiskWorkflow": highRiskWorkflow,
 		"failedTask":       failedTask,
+	}
+}
+
+func isUnityEvaluationWorkflow(workflow string) bool {
+	switch strings.ToLower(strings.TrimSpace(workflow)) {
+	case "bug-investigation", "logic-modification", "ui-feature-development", "unity-workflow-evaluation":
+		return true
+	default:
+		return false
 	}
 }
 

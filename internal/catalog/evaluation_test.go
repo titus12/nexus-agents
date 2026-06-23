@@ -227,3 +227,43 @@ func TestLearningCasesArchiveAndSearch(t *testing.T) {
 		t.Fatalf("expected search hit for archived case, got %#v", hits)
 	}
 }
+
+func TestUnityWorkflowsUseHighRiskEvaluationPolicy(t *testing.T) {
+	store, err := NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	defer store.Close()
+
+	for _, workflow := range []string{"bug-investigation", "logic-modification", "ui-feature-development", "unity-workflow-evaluation"} {
+		if _, err := store.SubmitTaskRun(TaskRunInput{
+			ProjectID:          "unity-sample",
+			WorkflowTemplateID: workflow,
+			WorkflowType:       workflow,
+			SubmittedStatus:    "success",
+			Context:            map[string]any{"agent": "unity-workflow-evaluator", "model": "deepseek-v4-flash"},
+			Evidence:           map[string]any{"verification": map[string]any{"passed": true}},
+		}); err != nil {
+			t.Fatalf("submit unity task run %s: %v", workflow, err)
+		}
+	}
+	if _, err := store.EvaluatePending(10); err != nil {
+		t.Fatalf("evaluate pending: %v", err)
+	}
+	evaluations, err := store.Evaluations()
+	if err != nil {
+		t.Fatalf("evaluations: %v", err)
+	}
+	if len(evaluations) != 4 {
+		t.Fatalf("expected four Unity evaluations, got %#v", evaluations)
+	}
+	for _, evaluation := range evaluations {
+		if highRisk, _ := evaluation.ModelPolicy["highRiskWorkflow"].(bool); !highRisk {
+			t.Fatalf("expected Unity workflow to be high risk, got %#v", evaluation.ModelPolicy)
+		}
+		reasons := evaluationEscalationReasons(evaluation)
+		if !containsString(reasons, "high_risk_workflow") {
+			t.Fatalf("expected high_risk_workflow escalation reason, got %#v", reasons)
+		}
+	}
+}

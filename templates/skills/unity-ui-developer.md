@@ -1,0 +1,1 @@
+﻿# unity-ui-developer`n`nImplement Unity UI using existing UGUI/TMP/UIArchitect patterns. Do not hand-edit generated View files. Verify presentation, interaction, loading/error/empty states, and input lock release paths.

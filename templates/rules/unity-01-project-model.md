@@ -1,0 +1,1 @@
+﻿# unity-01-project-model`n`nUnity project model: separate Editor and Runtime code; do not hand-edit generated View files; preserve `.meta` identity; treat Prefab, Scene, generated, imported assets, and serialized references as high-risk changes requiring evidence.
