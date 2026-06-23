@@ -18,6 +18,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "submit-task-run" {
+		if err := runSubmitTaskRun(os.Args[2:]); err != nil {
+			log.Fatalf("submit-task-run: %v", err)
+		}
+		return
+	}
+
 	addr := os.Getenv("NEXUS_ADDR")
 	if addr == "" {
 		addr = ":8766"

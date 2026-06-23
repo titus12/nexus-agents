@@ -243,6 +243,30 @@ export type TaskRunInput = {
   evidence?: Record<string, unknown>;
 };
 
+export type WorkflowRunSubmitOptions = {
+  projectId?: string;
+  workflowCopyId?: string;
+  workflowTemplateId?: string;
+  workflowId?: string;
+  workflowName?: string;
+  workflowSummary?: string;
+  workflowTrigger?: string;
+  graph?: WorkflowGraph | null;
+  context?: {
+    model?: string;
+    rules?: string[];
+    skills?: string[];
+    tools?: string[];
+    agent?: string;
+  };
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+  submittedStatus?: "success" | "partial_success" | "failed" | "cancelled";
+  taskTitle?: string;
+  startedAt?: string;
+  endedAt?: string;
+};
+
 export type Evaluation = {
   id: string;
   runId: string;
@@ -385,4 +409,39 @@ export type StatisticsTaskItem = {
 
 export type StatisticsTasksResponse = {
   items: StatisticsTaskItem[];
+};
+
+export type WorkflowRunRecord = {
+  id: string;
+  projectId: string;
+  workflowTemplateId: string;
+  workflowCopyID?: string;
+  workflowType: string;
+  taskTitle?: string;
+  status: "running" | "completed" | "failed" | string;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+  taskRunId?: string;
+};
+
+export type WorkflowRunStartInput = {
+  projectId: string;
+  workflowTemplateId?: string;
+  workflowCopyId?: string;
+  workflowType: string;
+  taskTitle?: string;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+};
+
+export type WorkflowRunFinishInput = {
+  submittedStatus?: string;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
 };

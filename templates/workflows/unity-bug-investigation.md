@@ -64,3 +64,130 @@ Use for:
    - Temporary data, Debug logs, mock/fake/test data, local paths, and debug bypasses.
 9. Final report includes bug symptom, root cause, changed files, verification evidence, skipped checks with reasons, and remaining risks.
 
+## Task Run Evidence Protocol
+
+At the end of this workflow, submit a Task Run Evidence payload to Nexus instead of scoring the task inline. If the local API is unavailable, include the same JSON payload in the final response so the user can submit it later.
+
+Preferred automation path via `$nexus-taskrun-submit`:
+
+1. Write the payload JSON to a local file such as `.nexus/task-run-unity-bug-investigation.json`.
+2. Invoke the `nexus-taskrun-submit` skill at workflow end.
+3. The skill should submit it with the Nexus CLI helper:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-unity-bug-investigation.json
+```
+
+If Nexus is not running but local direct write is preferred, the skill may submit straight into the evaluation store:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-unity-bug-investigation.json --use-store
+```
+
+Preferred automation path via `$nexus-taskrun-submit`:
+
+1. Write the payload JSON to a local file such as `.nexus/task-run-unity-bug-investigation.json`.
+2. Invoke the `nexus-taskrun-submit` skill at workflow end.
+3. The skill should submit it with the Nexus CLI helper:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-unity-bug-investigation.json
+```
+
+If Nexus is not running but local direct write is preferred, the skill may submit straight into the evaluation store:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-unity-bug-investigation.json --use-store
+```
+
+Preferred automation path:
+
+1. Write the payload JSON to a local file such as `.nexus/task-run-unity-bug-investigation.json`.
+2. Submit it with the Nexus CLI helper:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-unity-bug-investigation.json
+```
+
+If Nexus is not running but local direct write is preferred, submit straight into the evaluation store:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-unity-bug-investigation.json --use-store
+```
+
+Endpoint:
+
+```text
+POST http://127.0.0.1:8766/api/task-runs
+```
+
+Payload shape:
+
+```json
+{
+  "projectId": "<nexus project id or repo name>",
+  "workflowTemplateId": "bug-investigation",
+  "workflowCopyId": "<project workflow copy id if known>",
+  "workflowType": "bug-investigation",
+  "taskTitle": "<short task title>",
+  "submittedStatus": "<success|partial_success|failed|cancelled>",
+  "startedAt": "<ISO-8601 if known>",
+  "endedAt": "<ISO-8601 if known>",
+  "durationMs": 0,
+  "context": {
+    "agent": "<primary Unity agent>",
+    "model": "<model id>",
+    "rules": ["<rule ids loaded>"],
+    "skills": ["<skill ids loaded>"],
+    "tools": ["<tools used, including Unity MCP tools>"]
+  },
+  "metrics": {
+    "turnCount": 0,
+    "toolCallCount": 0,
+    "testRunCount": 0,
+    "retryCount": 0,
+    "errorCount": 0,
+    "filesChangedCount": 0
+  },
+  "evidence": {
+    "summary": "<what was fixed or investigated>",
+    "finalResult": "<delivered result>",
+    "reproduction": {
+      "steps": ["<original reproduction steps>"],
+      "reproduced": true,
+      "fixedOnSamePath": true
+    },
+    "rootCause": "<confirmed root cause before editing>",
+    "verification": {
+      "hasVerification": true,
+      "passed": true,
+      "types": ["unity_compile", "console", "editmode_test", "playmode_test", "manual_repro"],
+      "commands": ["<commands or Unity MCP operations run>"]
+    },
+    "compile": {
+      "passed": true
+    },
+    "console": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "tests": {
+      "editMode": "<passed|failed|skipped|not_applicable>",
+      "playMode": "<passed|failed|skipped|not_applicable>"
+    },
+    "assets": {
+      "prefabChanged": false,
+      "sceneChanged": false,
+      "metaSafe": true,
+      "generatedFilesTouched": false
+    },
+    "changedFiles": ["<paths changed>"],
+    "skippedChecks": ["<check and reason>"],
+    "remainingRisks": [],
+    "successfulPath": "<short reusable path if this should become a learning case>",
+    "tags": ["unity", "bugfix"],
+    "contextMissing": false
+  }
+}
+```
+

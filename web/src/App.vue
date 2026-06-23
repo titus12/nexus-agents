@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import {
   addProjectCopyFromTemplate,
   createTemplate,
+  createTaskRun,
   createProjectWorkflow,
   createWorkflow as createWorkflowApi,
   deleteProject as deleteProjectApi,
@@ -41,6 +42,7 @@ import {
   updateWorkflowGraph,
   updateProjectWorkflowGraph,
 } from "./api";
+import { buildWorkflowRunDraft } from "./workflow-task-run";
 import {
   addWorkflowEdge,
   addWorkflowNode,
@@ -183,6 +185,10 @@ const syncPreview = ref<ProjectCopy[]>([]);
 const selectedRoute = ref<ModelRoute | null>(null);
 const proxyResult = ref<ModelRouteResolution | null>(null);
 const proxyError = ref("");
+const workflowRunPayload = ref<Record<string, unknown> | null>(null);
+const workflowRunSubmitting = ref(false);
+const workflowRunError = ref("");
+const workflowRunResult = ref<{ id: string; workflowType: string; projectId: string } | null>(null);
 const routeSaveFeedback = ref("");
 const selectedInfrastructure = ref<InfrastructureItem | null>(null);
 const infrastructureBusy = ref(false);
@@ -1316,7 +1322,47 @@ async function duplicateWorkflow(card: WorkflowCard) {
 }
 
 function runWorkflow() {
+  workflowRunError.value = "";
+  workflowRunResult.value = null;
+  const draft = buildWorkflowRunDraft({
+    projectId: currentProject.value?.id || (activePage.value === "project-workflows" ? "selected-project" : "global-workflows"),
+    workflowCopyId: selectedWorkflowCard.value?.copy?.id,
+    workflowTemplateId: selectedWorkflowCard.value?.graphId || selectedWorkflowId.value || workflowGraph.value?.id,
+    workflowId: selectedWorkflowId.value || workflowGraph.value?.id,
+    workflowName: selectedWorkflowCard.value?.name || workflowGraph.value?.name,
+    workflowSummary: selectedWorkflowCard.value?.summary,
+    graph: workflowGraph.value
+      ? {
+          id: workflowGraph.value.id,
+          name: workflowGraph.value.name,
+          nodes: workflowGraph.value.nodes,
+          edges: workflowGraph.value.edges,
+        }
+      : null,
+  });
+  workflowRunPayload.value = draft.payload;
   drawerMode.value = "workflow-run";
+}
+
+async function submitWorkflowRun() {
+  if (!workflowRunPayload.value || workflowRunSubmitting.value) return;
+  workflowRunSubmitting.value = true;
+  workflowRunError.value = "";
+  workflowRunResult.value = null;
+  try {
+    const created = await createTaskRun(workflowRunPayload.value as any);
+    workflowRunResult.value = {
+      id: created.id,
+      workflowType: created.workflowType,
+      projectId: created.projectId,
+    };
+    showToast(`已自动提交 Task Run：${created.workflowType}`);
+  } catch (err) {
+    workflowRunError.value = errorMessage(err);
+    showToast(workflowRunError.value);
+  } finally {
+    workflowRunSubmitting.value = false;
+  }
 }
 
 async function runProxyTest() {
@@ -2615,6 +2661,16 @@ requires_openai_auth = true</pre>
               <div class="run-step active">合并 findings</div>
               <div class="run-step">等待 human approval</div>
             </div>
+            <div class="notice">当前已产品化为自动提交 Task Run。点击下方按钮会把当前 Go / Unity workflow 结果自动 POST 到 <code>/api/task-runs</code>。</div>
+            <div v-if="workflowRunError" class="notice danger">{{ workflowRunError }}</div>
+            <div v-if="workflowRunResult" class="notice">已提交：run={{ workflowRunResult.id }} / workflow={{ workflowRunResult.workflowType }} / project={{ workflowRunResult.projectId }}</div>
+            <pre v-if="workflowRunPayload" class="code-block drawer-preview-block compact">{{ JSON.stringify(workflowRunPayload, null, 2) }}</pre>
+          </div>
+          <div class="drawer-footer">
+            <button class="btn-secondary" type="button" @click="closeDrawer">关闭</button>
+            <button class="btn-primary" type="button" :disabled="workflowRunSubmitting || !workflowRunPayload" @click="submitWorkflowRun">
+              {{ workflowRunSubmitting ? '提交中...' : '自动上传 Task Run' }}
+            </button>
           </div>
         </template>
       </aside>

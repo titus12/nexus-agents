@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "test:unit": "tsc --module ESNext --moduleResolution Bundler --target ES2022 --strict --skipLibCheck --outDir .tmp-tests --rootDir src src/workflow-graph.ts src/project-state.ts src/types.ts && node --test tests/*.test.mjs",
+    "test:unit": "tsc --module ESNext --moduleResolution Bundler --target ES2022 --strict --skipLibCheck --outDir .tmp-tests --rootDir src src/workflow-graph.ts src/project-state.ts src/types.ts src/workflow-task-run.ts && node --test tests/*.test.mjs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1"
   },

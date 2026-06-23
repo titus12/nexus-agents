@@ -62,6 +62,53 @@ If a regression test is impractical, document the reproduction path and the alte
 
 At the end of this workflow, submit a Task Run Evidence payload to Nexus instead of scoring the task inline. If the local API is unavailable, include the same JSON payload in the final response so the user can submit it later.
 
+Preferred automation path via `$nexus-taskrun-submit`:
+
+1. Write the payload JSON to a local file such as `.nexus/task-run-go-bugfix.json`.
+2. Invoke the `nexus-taskrun-submit` skill at workflow end.
+3. The skill should submit it with the Nexus CLI helper:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-go-bugfix.json
+```
+
+If Nexus is not running but local direct write is preferred, the skill may submit straight into the evaluation store:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-go-bugfix.json --use-store
+```
+
+Preferred automation path via `$nexus-taskrun-submit`:
+
+1. Write the payload JSON to a local file such as `.nexus/task-run-go-bugfix.json`.
+2. Invoke the `nexus-taskrun-submit` skill at workflow end.
+3. The skill should submit it with the Nexus CLI helper:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-go-bugfix.json
+```
+
+If Nexus is not running but local direct write is preferred, the skill may submit straight into the evaluation store:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-go-bugfix.json --use-store
+```
+
+Preferred automation path:
+
+1. Write the payload JSON to a local file such as `.nexus/task-run-go-bugfix.json`.
+2. Submit it with the Nexus CLI helper:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-go-bugfix.json
+```
+
+If Nexus is not running but local direct write is preferred, submit straight into the evaluation store:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-go-bugfix.json --use-store
+```
+
 Endpoint:
 
 ```text

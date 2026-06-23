@@ -19,6 +19,18 @@ Treat the user's remaining prompt as the workflow input.
 
 At the end of this workflow, submit a Task Run Evidence payload to Nexus instead of scoring the task inline. If the local API is unavailable, include the same JSON payload in the final response so the user can submit it later.
 
+Preferred automation path: call `$nexus-taskrun-submit` at workflow end.
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file <task-run-payload.json>
+```
+
+If Nexus is not running but local direct write is preferred:
+
+```text
+go run .\cmd\nexus-agents submit-task-run --file <task-run-payload.json> --use-store
+```
+
 Endpoint:
 
 ```text

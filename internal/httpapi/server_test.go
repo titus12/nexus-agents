@@ -257,6 +257,80 @@ func TestEvaluationEndpoints(t *testing.T) {
 	}
 }
 
+func TestTaskRunsEndpointAcceptsWorkflowSubmitterPayload(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	server := NewServerWithEvaluationStore(evaluationStore)
+
+	response := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
+		"projectId":"btd-client",
+		"workflowTemplateId":"unity-ui-feature-development",
+		"workflowCopyId":"copy-123",
+		"workflowType":"ui-feature-development",
+		"taskTitle":"Implement shop popup",
+		"submittedStatus":"success",
+		"context":{"agent":"unity-ui-developer","model":"gpt-5.4","rules":["unity-00-routing"],"skills":["wf-unity-ui-feature"],"tools":["unity-mcp"]},
+		"metrics":{"toolCallCount":12,"nodeCount":3},
+		"evidence":{"summary":"workflow submitter auto-uploaded result","verification":{"hasVerification":true,"passed":true}}
+	}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected workflow submitter payload status 201, got %d body=%s", response.Code, response.Body.String())
+	}
+	var created catalog.TaskRun
+	decodeJSON(t, response, &created)
+	if created.ProjectID != "btd-client" || created.WorkflowType != "ui-feature-development" || created.WorkflowCopyID != "copy-123" {
+		t.Fatalf("unexpected created run: %#v", created)
+	}
+}
+
+func TestWorkflowRunnerEndpointsStartAndCompleteSubmitTaskRun(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	server := NewServerWithEvaluationStore(evaluationStore)
+
+	start := requestJSON(t, server, http.MethodPost, "/api/workflow-runs/start", `{
+		"projectId":"btd-client",
+		"workflowTemplateId":"ui-feature-development",
+		"workflowType":"ui-feature-development",
+		"taskTitle":"Implement popup",
+		"context":{"agent":"unity-ui-developer"}
+	}`)
+	if start.Code != http.StatusCreated {
+		t.Fatalf("expected workflow start status 201, got %d body=%s", start.Code, start.Body.String())
+	}
+	var started struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	decodeJSON(t, start, &started)
+	if started.ID == "" || started.Status != "running" {
+		t.Fatalf("unexpected started run: %#v", started)
+	}
+
+	complete := requestJSON(t, server, http.MethodPost, "/api/workflow-runs/"+started.ID+"/complete", `{
+		"submittedStatus":"success",
+		"evidence":{"summary":"workflow completed"}
+	}`)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("expected workflow complete status 200, got %d body=%s", complete.Code, complete.Body.String())
+	}
+	var finished struct {
+		Run struct {
+			Status    string `json:"status"`
+			TaskRunID string `json:"taskRunId"`
+		} `json:"run"`
+		TaskRun catalog.TaskRun `json:"taskRun"`
+	}
+	decodeJSON(t, complete, &finished)
+	if finished.Run.Status != "completed" || finished.Run.TaskRunID == "" || finished.TaskRun.WorkflowType != "ui-feature-development" {
+		t.Fatalf("unexpected workflow completion payload: %#v", finished)
+	}
+}
+
 func TestEvaluationProjectProposalAndStatisticsEndpoints(t *testing.T) {
 	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
 	if err != nil {

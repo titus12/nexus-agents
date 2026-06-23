@@ -20,6 +20,8 @@ import (
 
 	"nexus-agents/internal/catalog"
 	"nexus-agents/internal/codexrouter"
+	"nexus-agents/internal/taskrunsubmit"
+	"nexus-agents/internal/workflowrunner"
 	webui "nexus-agents/web"
 )
 
@@ -62,6 +64,7 @@ type Server struct {
 	infrastructure       *catalog.InfrastructureService
 	codexRouter          *codexrouter.Service
 	localDirectoryPicker LocalDirectoryPicker
+	workflowRunner       *workflowrunner.Runner
 	mux                  *http.ServeMux
 	webFS                fs.FS
 	webFileServer        http.Handler
@@ -119,6 +122,7 @@ func newServerWithOptions(store *catalog.Store, infrastructure *catalog.Infrastr
 		infrastructure:       infrastructure,
 		codexRouter:          router,
 		localDirectoryPicker: picker,
+		workflowRunner:       workflowrunner.New(taskrunsubmit.Submitter{Store: evaluationStore}),
 		mux:                  http.NewServeMux(),
 		webFS:                webFS,
 		webFileServer:        http.FileServer(http.FS(webFS)),
@@ -134,6 +138,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
 	s.mux.HandleFunc("/api/task-runs", s.handleTaskRuns)
+	s.mux.HandleFunc("/api/workflow-runs/start", s.handleWorkflowRunStart)
+	s.mux.HandleFunc("/api/workflow-runs/", s.handleWorkflowRunPath)
 	s.mux.HandleFunc("/api/evaluations", s.handleEvaluations)
 	s.mux.HandleFunc("/api/evaluations/", s.handleEvaluationPath)
 	s.mux.HandleFunc("/api/evaluation/", s.handleEvaluationReviewPath)
@@ -225,6 +231,57 @@ func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, run)
 	default:
 		methodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s *Server) handleWorkflowRunStart(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodPost) {
+		return
+	}
+	var input workflowrunner.StartInput
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	run, err := s.workflowRunner.StartRun(input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, run)
+}
+
+func (s *Server) handleWorkflowRunPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/workflow-runs/"), "/"), "/")
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	runID := parts[0]
+	action := parts[1]
+	if !allowMethods(w, r, http.MethodPost) {
+		return
+	}
+	var input workflowrunner.FinishInput
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	switch action {
+	case "complete":
+		run, taskRun, err := s.workflowRunner.CompleteRun(runID, input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"run": run, "taskRun": taskRun})
+	case "fail":
+		run, taskRun, err := s.workflowRunner.FailRun(runID, input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"run": run, "taskRun": taskRun})
+	default:
+		http.NotFound(w, r)
 	}
 }
 

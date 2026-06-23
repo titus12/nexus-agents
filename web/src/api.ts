@@ -27,8 +27,11 @@ import type {
   TemplateKind,
   TaskRun,
   TaskRunInput,
+  WorkflowRunFinishInput,
   WorkflowGraph,
   WorkflowInput,
+  WorkflowRunRecord,
+  WorkflowRunStartInput,
   WorkflowSummary,
 } from "./types";
 
@@ -56,6 +59,27 @@ export function fetchBootstrap(): Promise<BootstrapData> {
 
 export function createTaskRun(input: TaskRunInput): Promise<TaskRun> {
   return fetchJSON<TaskRun>("/api/task-runs", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function startWorkflowRun(input: WorkflowRunStartInput): Promise<WorkflowRunRecord> {
+  return fetchJSON<WorkflowRunRecord>("/api/workflow-runs/start", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function completeWorkflowRun(runId: string, input: WorkflowRunFinishInput): Promise<{ run: WorkflowRunRecord; taskRun: TaskRun }> {
+  return fetchJSON<{ run: WorkflowRunRecord; taskRun: TaskRun }>(`/api/workflow-runs/${encodeURIComponent(runId)}/complete`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function failWorkflowRun(runId: string, input: WorkflowRunFinishInput): Promise<{ run: WorkflowRunRecord; taskRun: TaskRun }> {
+  return fetchJSON<{ run: WorkflowRunRecord; taskRun: TaskRun }>(`/api/workflow-runs/${encodeURIComponent(runId)}/fail`, {
     method: "POST",
     body: JSON.stringify(input),
   });
