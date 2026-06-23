@@ -1,6 +1,17 @@
 import type {
   BootstrapData,
+  Evaluation,
+  EvaluationReviewInput,
+  EvaluationSummary,
+  EvaluationProjectHealth,
+  EvaluationProposal,
+  EvaluationProposalReviewInput,
+  EvaluationProposalsResponse,
+  EvaluationProjectsResponse,
   InfrastructureItem,
+  LearningCase,
+  LearningCaseHit,
+  StatisticsTasksResponse,
   LocalDirectoryPickerResponse,
   LocalDirectoriesResponse,
   ModelRoute,
@@ -14,6 +25,8 @@ import type {
   TemplateInput,
   TemplateItem,
   TemplateKind,
+  TaskRun,
+  TaskRunInput,
   WorkflowGraph,
   WorkflowInput,
   WorkflowSummary,
@@ -39,6 +52,74 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchBootstrap(): Promise<BootstrapData> {
   return fetchJSON<BootstrapData>("/api/bootstrap");
+}
+
+export function createTaskRun(input: TaskRunInput): Promise<TaskRun> {
+  return fetchJSON<TaskRun>("/api/task-runs", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchEvaluations(): Promise<Evaluation[]> {
+  return fetchJSON<Evaluation[]>("/api/evaluations");
+}
+
+export function runPendingEvaluations(): Promise<{ evaluated: number }> {
+  return fetchJSON<{ evaluated: number }>("/api/evaluations/run-pending", {
+    method: "POST",
+  });
+}
+
+export function fetchEvaluationSummary(): Promise<EvaluationSummary> {
+  return fetchJSON<EvaluationSummary>("/api/evaluations/summary");
+}
+
+export function reviewEvaluation(evaluationId: string, input: EvaluationReviewInput): Promise<unknown> {
+  return fetchJSON<unknown>(`/api/evaluations/${encodeURIComponent(evaluationId)}/review`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+
+export function fetchEvaluationProjects(): Promise<EvaluationProjectsResponse> {
+  return fetchJSON<EvaluationProjectsResponse>("/api/evaluation/projects");
+}
+
+export function fetchEvaluationProposals(projectId?: string, status?: string): Promise<EvaluationProposalsResponse> {
+  const params = new URLSearchParams();
+  if (projectId) params.set("projectId", projectId);
+  if (status) params.set("status", status);
+  const query = params.toString();
+  return fetchJSON<EvaluationProposalsResponse>(`/api/evaluation/proposals${query ? `?${query}` : ""}`);
+}
+
+export function reviewEvaluationProposal(proposalId: string, input: EvaluationProposalReviewInput): Promise<EvaluationProposal> {
+  return fetchJSON<EvaluationProposal>(`/api/evaluation/proposals/${encodeURIComponent(proposalId)}/review`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchStatisticsTasks(view: string, range: string): Promise<StatisticsTasksResponse> {
+  const params = new URLSearchParams({ view, range });
+  return fetchJSON<StatisticsTasksResponse>(`/api/statistics/tasks?${params.toString()}`);
+}
+
+export function fetchLearningCases(): Promise<LearningCase[]> {
+  return fetchJSON<LearningCase[]>("/api/learning-cases");
+}
+
+export function searchLearningCases(query: string, limit = 5): Promise<LearningCaseHit[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return fetchJSON<LearningCaseHit[]>(`/api/learning-cases/search?${params.toString()}`);
+}
+
+export function rebuildLearningCaseIndex(): Promise<{ indexed: number }> {
+  return fetchJSON<{ indexed: number }>("/api/learning-cases/rebuild-index", {
+    method: "POST",
+  });
 }
 
 export function fetchProjects(): Promise<Project[]> {

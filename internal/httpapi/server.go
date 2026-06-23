@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +58,7 @@ func (f LocalDirectoryPickerFunc) PickDirectory() (string, bool, error) {
 
 type Server struct {
 	store                *catalog.Store
+	evaluationStore      *catalog.EvaluationStore
 	infrastructure       *catalog.InfrastructureService
 	codexRouter          *codexrouter.Service
 	localDirectoryPicker LocalDirectoryPicker
@@ -81,14 +84,18 @@ func NewServerWithCodexRouter(router *codexrouter.Service) http.Handler {
 }
 
 func NewServerWithLocalDirectoryPicker(picker LocalDirectoryPicker) http.Handler {
-	return newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), codexrouter.NewService(codexrouter.DefaultConfig()), picker)
+	return newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), codexrouter.NewService(codexrouter.DefaultConfig()), picker, nil)
 }
 
 func newServer(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service) http.Handler {
-	return newServerWithOptions(store, infrastructure, router, defaultLocalDirectoryPicker{})
+	return newServerWithOptions(store, infrastructure, router, defaultLocalDirectoryPicker{}, nil)
 }
 
-func newServerWithOptions(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service, picker LocalDirectoryPicker) http.Handler {
+func NewServerWithEvaluationStore(evaluationStore *catalog.EvaluationStore) http.Handler {
+	return newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), codexrouter.NewService(codexrouter.DefaultConfig()), defaultLocalDirectoryPicker{}, evaluationStore)
+}
+
+func newServerWithOptions(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service, picker LocalDirectoryPicker, evaluationStore *catalog.EvaluationStore) http.Handler {
 	if infrastructure == nil {
 		infrastructure = catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{})
 	}
@@ -98,9 +105,17 @@ func newServerWithOptions(store *catalog.Store, infrastructure *catalog.Infrastr
 	if picker == nil {
 		picker = defaultLocalDirectoryPicker{}
 	}
+	if evaluationStore == nil {
+		var err error
+		evaluationStore, err = catalog.NewDefaultEvaluationStore()
+		if err != nil {
+			evaluationStore, _ = catalog.NewEvaluationStore(filepath.Join(os.TempDir(), "nexus-agents-evaluation.json"))
+		}
+	}
 	webFS := webui.Dist()
 	server := &Server{
 		store:                store,
+		evaluationStore:      evaluationStore,
 		infrastructure:       infrastructure,
 		codexRouter:          router,
 		localDirectoryPicker: picker,
@@ -118,6 +133,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
+	s.mux.HandleFunc("/api/task-runs", s.handleTaskRuns)
+	s.mux.HandleFunc("/api/evaluations", s.handleEvaluations)
+	s.mux.HandleFunc("/api/evaluations/", s.handleEvaluationPath)
+	s.mux.HandleFunc("/api/evaluation/", s.handleEvaluationReviewPath)
+	s.mux.HandleFunc("/api/statistics/", s.handleStatisticsPath)
+	s.mux.HandleFunc("/api/learning-cases", s.handleLearningCases)
+	s.mux.HandleFunc("/api/learning-cases/", s.handleLearningCasePath)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
 	s.mux.HandleFunc("/api/infrastructure/catalog", s.handleInfrastructureCatalog)
 	s.mux.HandleFunc("/api/infrastructure", s.handleInfrastructure)
@@ -179,6 +201,206 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Service: "nexus-agents",
 		Status:  "ok",
 	})
+}
+
+func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		runs, err := s.evaluationStore.TaskRuns()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, runs)
+	case http.MethodPost:
+		var input catalog.TaskRunInput
+		if !decodeRequest(w, r, &input) {
+			return
+		}
+		run, err := s.evaluationStore.SubmitTaskRun(input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusCreated, run)
+	default:
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s *Server) handleEvaluations(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodGet) {
+		return
+	}
+	evaluations, err := s.evaluationStore.Evaluations()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, evaluations)
+}
+
+func (s *Server) handleEvaluationPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/evaluations/"), "/"), "/")
+	if len(parts) == 1 && parts[0] == "summary" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		summary, err := s.evaluationStore.Summary()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "run-pending" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		count, err := s.evaluationStore.EvaluatePending(20)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int{"evaluated": count})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "review" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		var input catalog.EvaluationReviewInput
+		if !decodeRequest(w, r, &input) {
+			return
+		}
+		review, err := s.evaluationStore.ReviewEvaluation(parts[0], input)
+		if err == sql.ErrNoRows {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusCreated, review)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleEvaluationReviewPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/evaluation/"), "/"), "/")
+	if len(parts) == 1 && parts[0] == "projects" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		projects, err := s.evaluationStore.EvaluationProjects()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, projects)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "proposals" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		items, err := s.evaluationStore.EvaluationProposals(r.URL.Query().Get("projectId"), r.URL.Query().Get("status"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
+	if len(parts) == 3 && parts[0] == "proposals" && parts[2] == "review" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		var input catalog.EvaluationProposalReviewInput
+		if !decodeRequest(w, r, &input) {
+			return
+		}
+		proposal, err := s.evaluationStore.ReviewEvaluationProposal(parts[1], input)
+		if err == sql.ErrNoRows {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, proposal)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleStatisticsPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/statistics/"), "/"), "/")
+	if len(parts) == 1 && parts[0] == "tasks" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		items, err := s.evaluationStore.StatisticsTasks(r.URL.Query().Get("view"), r.URL.Query().Get("range"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleLearningCases(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodGet) {
+		return
+	}
+	cases, err := s.evaluationStore.LearningCases()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, cases)
+}
+
+func (s *Server) handleLearningCasePath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/learning-cases/"), "/"), "/")
+	if len(parts) == 1 && parts[0] == "search" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		limit := 5
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		hits, err := s.evaluationStore.SearchLearningCases(query, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, hits)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "rebuild-index" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		count, err := s.evaluationStore.RebuildLearningCaseIndex()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int{"indexed": count})
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (s *Server) handleInfrastructure(w http.ResponseWriter, r *http.Request) {

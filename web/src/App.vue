@@ -12,6 +12,11 @@ import {
   detachProjectCopy,
   duplicateWorkflow as duplicateWorkflowApi,
   fetchBootstrap,
+  fetchEvaluationProjects,
+  fetchEvaluationProposals,
+  fetchEvaluationSummary,
+  fetchLearningCases,
+  fetchStatisticsTasks,
   fetchInfrastructure,
   fetchInfrastructureCatalog,
   fetchLocalDirectories,
@@ -24,7 +29,10 @@ import {
   fetchWorkflows,
   installInfrastructure,
   importProject,
+  rebuildLearningCaseIndex,
   resolveModelRoute,
+  reviewEvaluationProposal,
+  runPendingEvaluations,
   rescanProject,
   syncProjectCopy,
   updateTemplate,
@@ -44,6 +52,10 @@ import {
 import { projectDeleteImpactMessage, upsertProject } from "./project-state";
 import type {
   BootstrapData,
+  EvaluationProjectHealth,
+  EvaluationProposal,
+  EvaluationSummary,
+  LearningCase,
   InfrastructureItem,
   LocalDirectoryEntry,
   LocalDirectoriesResponse,
@@ -57,6 +69,7 @@ import type {
   TemplateInput,
   TemplateItem,
   TemplateKind,
+  StatisticsTaskItem,
   TemplateLibrary,
   WorkflowGraph,
   WorkflowEdge,
@@ -73,6 +86,8 @@ type Page =
   | "workflows"
   | "infrastructure"
   | "model-routes"
+  | "statistics"
+  | "evaluation"
   | "project-detail"
   | "project-agents"
   | "project-rules"
@@ -99,6 +114,11 @@ type WorkflowCard = {
   nodeCount: number;
   edgeCount: number;
   copy?: ProjectCopy;
+  evaluation?: {
+    sampleCount: number;
+    averageScore: number;
+    successRate: number;
+  };
 };
 
 const emptyLibrary: TemplateLibrary = {
@@ -141,6 +161,19 @@ const workflowStageRef = ref<HTMLElement | null>(null);
 const infrastructureItems = ref<InfrastructureItem[]>([]);
 const availableInfrastructureItems = ref<InfrastructureItem[]>([]);
 const modelRoutes = ref<ModelRoute[]>([]);
+const evaluationSummary = ref<EvaluationSummary | null>(null);
+const evaluationBusy = ref(false);
+const learningCases = ref<LearningCase[]>([]);
+const learningCaseBusy = ref(false);
+const evaluationProjects = ref<EvaluationProjectHealth[]>([]);
+const evaluationProposals = ref<EvaluationProposal[]>([]);
+const selectedEvaluationProjectId = ref("");
+const proposalBusyId = ref("");
+const proposalReviewNote = ref("");
+const statisticsRange = ref<"24h" | "7d" | "30d" | "all">("7d");
+const statisticsView = ref<"failed" | "successful" | "top_scored" | "low_scored">("failed");
+const statisticsTasks = ref<StatisticsTaskItem[]>([]);
+const statisticsLoading = ref(false);
 
 const selectedTemplateKind = ref<TemplateKind>("agents");
 const selectedTemplate = ref<TemplateItem | null>(null);
@@ -237,6 +270,7 @@ const visibleWorkflowCards = computed<WorkflowCard[]>(() => {
           summary: workflow.summary,
           nodeCount: workflow.nodeCount,
           edgeCount: workflow.edgeCount,
+          evaluation: workflowEvaluationFor(workflow.id, workflow.id),
         }));
 
   if (!query) return cards;
@@ -267,9 +301,142 @@ const breadcrumb = computed(() => {
   }
   if (activePage.value === "infrastructure") return ["System", "Infrastructure"];
   if (activePage.value === "model-routes") return ["System", "Model Proxy"];
+  if (activePage.value === "statistics") return ["System", "Statistics"];
+  if (activePage.value === "evaluation") return ["System", "Evaluation"];
   if (activePage.value === "projects") return ["Projects"];
   return ["Template Library", pageTitle(activePage.value)];
 });
+
+const dimensionStatsByType = computed(() => {
+  const groups: Record<string, { dimension: string; name: string; sampleCount: number; averageScore: number; successRate: number }[]> = {
+    agent: [],
+    model: [],
+    rules: [],
+  };
+  for (const stat of evaluationSummary.value?.dimensionStats ?? []) {
+    if (stat.dimension === "agent" || stat.dimension === "model" || stat.dimension === "rules") {
+      groups[stat.dimension].push(stat);
+    }
+  }
+  return groups;
+});
+
+const componentStatsList = computed(() => {
+  return Object.entries(evaluationSummary.value?.componentStats ?? {}).map(([component, stat]) => ({
+    component,
+    sampleCount: stat.sampleCount,
+    averageScore: stat.averageScore,
+  }));
+});
+
+const statisticsLineChart = computed(() => {
+  const items = statisticsTasks.value.slice(0, 8).reverse();
+  const series = items.length > 0 ? items.map((item) => Math.round(item.score || 0)) : [62, 68, 72, 79, 84, 88];
+  const labels =
+    items.length > 0
+      ? items.map((item) => formatShortDate(item.createdAt))
+      : ["-5", "-4", "-3", "-2", "-1", "Now"];
+  const width = 640;
+  const height = 220;
+  const padding = 28;
+  const min = Math.min(50, ...series);
+  const max = Math.max(100, ...series);
+  const points = series.map((value, index) => {
+    const x = padding + (index * (width - padding * 2)) / Math.max(1, series.length - 1);
+    const y = height - padding - ((value - min) * (height - padding * 2)) / Math.max(1, max - min);
+    return { x, y, value, label: labels[index] };
+  });
+  return {
+    width,
+    height,
+    points,
+    path: points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" "),
+  };
+});
+
+const selectedEvaluationProject = computed(() => {
+  return evaluationProjects.value.find((item) => item.projectId === selectedEvaluationProjectId.value) ?? null;
+});
+
+const evaluationProjectOptions = computed(() => {
+  return evaluationProjects.value.map((item) => ({
+    ...item,
+    pendingBadge: `${item.pendingCount} pending`,
+  }));
+});
+
+const visibleLearningCases = computed(() => (Array.isArray(learningCases.value) ? learningCases.value.slice(0, 4) : []));
+
+const selectedProjectProposals = computed(() => {
+  if (!selectedEvaluationProjectId.value) return evaluationProposals.value;
+  return evaluationProposals.value.filter((item) => item.projectId === selectedEvaluationProjectId.value);
+});
+
+function learningCaseTags(item: LearningCase): string[] {
+  return Array.isArray(item.tags) ? item.tags.slice(0, 3) : [];
+}
+
+function formatShortDate(value: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function formatDateTime(value: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function statisticsViewLabel(view: string): string {
+  return {
+    failed: "Failed",
+    successful: "Successful",
+    top_scored: "Top Scored",
+    low_scored: "Low Scored",
+  }[view] ?? view;
+}
+
+function proposalSeverityClass(severity: string): string {
+  switch ((severity || "").toLowerCase()) {
+    case "high":
+      return "chip-red";
+    case "medium":
+      return "chip-orange";
+    default:
+      return "chip-teal";
+  }
+}
+
+function escalationFlags(item: { needsEscalation?: boolean; highRiskWorkflow?: boolean; failedTask?: boolean; escalationReasons?: string[] }): string[] {
+  const flags: string[] = [];
+  if (item.needsEscalation) flags.push("needs-escalation");
+  if (item.highRiskWorkflow) flags.push("high-risk");
+  if (item.failedTask) flags.push("failed-task");
+  for (const reason of item.escalationReasons ?? []) {
+    if (!flags.includes(reason)) flags.push(reason);
+  }
+  return flags;
+}
+
+function boolLabel(value?: boolean): string {
+  return value ? "Yes" : "No";
+}
+
+function proposalStatusClass(status: string): string {
+  switch ((status || "").toLowerCase()) {
+    case "approved":
+      return "chip-green";
+    case "rejected":
+      return "chip-red";
+    case "later":
+      return "chip-purple";
+    default:
+      return "chip-orange";
+  }
+}
 
 const templateDrawerReadOnly = computed(() => {
   return selectedTemplate.value?.kind === "rule" || selectedTemplate.value?.kind === "skill";
@@ -284,6 +451,8 @@ function pageTitle(page: Page): string {
     workflows: "Workflows",
     infrastructure: "Infrastructure",
     "model-routes": "Model Proxy",
+    statistics: "Statistics",
+    evaluation: "Evaluation",
     "project-detail": "Overview",
     "project-agents": "Agents",
     "project-rules": "Rules",
@@ -319,7 +488,19 @@ function projectCopyToWorkflowCard(copy: ProjectCopy): WorkflowCard {
     summary: summary?.summary ?? "Project workflow copy with manual sync metadata.",
     nodeCount: isSelectedProjectGraph && workflowGraph.value ? workflowGraph.value.nodes.length : summary?.nodeCount ?? 0,
     edgeCount: isSelectedProjectGraph && workflowGraph.value ? workflowGraph.value.edges.length : summary?.edgeCount ?? 0,
+    evaluation: workflowEvaluationFor(graphId, graphId),
     copy,
+  };
+}
+
+function workflowEvaluationFor(templateId: string, workflowType: string) {
+  const metrics = evaluationSummary.value?.workflowMetrics ?? [];
+  const found = metrics.find((metric) => metric.workflowTemplateId === templateId || metric.workflowType === workflowType);
+  if (!found) return undefined;
+  return {
+    sampleCount: found.sampleCount,
+    averageScore: found.averageScore,
+    successRate: found.successRate,
   };
 }
 
@@ -365,9 +546,11 @@ function templateFooterChips(item: TemplateItem): string[] {
   return [`v${item.version}`];
 }
 
+const systemAgentIds = new Set(["workflow-evaluator", "learning-curator", "model-arbiter"]);
+
 function agentModelClass(item: TemplateItem): string {
   if (item.kind !== "agent") return "";
-  return modelClassForTier(item.modelTier);
+  return [modelClassForTier(item.modelTier), systemAgentIds.has(item.id) ? "system-agent" : ""].filter(Boolean).join(" ");
 }
 
 function projectCopyModelClass(copy: ProjectCopy): string {
@@ -1190,9 +1373,13 @@ async function loadData() {
     fetchModelRoutes(),
     fetchInfrastructure(),
     fetchInfrastructureCatalog(),
+    fetchEvaluationSummary(),
+    fetchLearningCases(),
+    fetchEvaluationProjects(),
+    fetchStatisticsTasks(statisticsView.value, statisticsRange.value),
   ]);
 
-  const [bootstrap, workflowList, routeList, infraList, infraCatalog] = bootstrapResult;
+  const [bootstrap, workflowList, routeList, infraList, infraCatalog, evalSummary, caseList, projectHealth, statsTasks] = bootstrapResult;
 
   if (bootstrap.status === "fulfilled") {
     applyBootstrap(bootstrap.value);
@@ -1238,8 +1425,125 @@ async function loadData() {
     failures.push(errorMessage(infraCatalog.reason));
   }
 
+  if (evalSummary.status === "fulfilled") {
+    evaluationSummary.value = evalSummary.value;
+  }
+
+  if (caseList.status === "fulfilled") {
+    learningCases.value = Array.isArray(caseList.value) ? caseList.value : [];
+  }
+
+  if (projectHealth.status === "fulfilled") {
+    evaluationProjects.value = Array.isArray(projectHealth.value.projects) ? projectHealth.value.projects : [];
+    if (!selectedEvaluationProjectId.value && evaluationProjects.value.length > 0) {
+      selectedEvaluationProjectId.value = evaluationProjects.value[0].projectId;
+    }
+  }
+
+  if (statsTasks.status === "fulfilled") {
+    statisticsTasks.value = Array.isArray(statsTasks.value.items) ? statsTasks.value.items : [];
+  }
+
+  if (selectedEvaluationProjectId.value) {
+    try {
+      await loadEvaluationProposals("pending");
+    } catch (err) {
+      failures.push(errorMessage(err));
+    }
+  }
+
   error.value = failures.length > 0 ? failures.join("; ") : "";
   loading.value = false;
+}
+
+async function loadEvaluationProjects() {
+  const result = await fetchEvaluationProjects();
+  evaluationProjects.value = Array.isArray(result.projects) ? result.projects : [];
+  if (!selectedEvaluationProjectId.value && evaluationProjects.value.length > 0) {
+    selectedEvaluationProjectId.value = evaluationProjects.value[0].projectId;
+  }
+  if (selectedEvaluationProjectId.value && !evaluationProjects.value.some((item) => item.projectId === selectedEvaluationProjectId.value)) {
+    selectedEvaluationProjectId.value = evaluationProjects.value[0]?.projectId ?? "";
+  }
+}
+
+async function loadEvaluationProposals(status = "pending") {
+  const projectId = selectedEvaluationProjectId.value || undefined;
+  const result = await fetchEvaluationProposals(projectId, status);
+  evaluationProposals.value = Array.isArray(result.items) ? result.items : [];
+}
+
+async function loadStatisticsTasks() {
+  statisticsLoading.value = true;
+  try {
+    const result = await fetchStatisticsTasks(statisticsView.value, statisticsRange.value);
+    statisticsTasks.value = Array.isArray(result.items) ? result.items : [];
+  } finally {
+    statisticsLoading.value = false;
+  }
+}
+
+async function selectEvaluationProject(projectId: string) {
+  selectedEvaluationProjectId.value = projectId;
+  await loadEvaluationProposals("pending");
+}
+
+async function reviewProposal(proposal: EvaluationProposal, status: "approved" | "rejected" | "later") {
+  proposalBusyId.value = proposal.id;
+  try {
+    await reviewEvaluationProposal(proposal.id, {
+      status,
+      reviewNote: proposalReviewNote.value.trim() || `${status} via Evaluation panel`,
+    });
+    proposalReviewNote.value = "";
+    await Promise.all([loadEvaluationProjects(), loadEvaluationProposals("pending")]);
+    showToast(`Proposal ${status}: ${proposal.action}`);
+  } catch (err) {
+    showToast(errorMessage(err));
+  } finally {
+    proposalBusyId.value = "";
+  }
+}
+
+function setStatisticsView(view: "failed" | "successful" | "top_scored" | "low_scored") {
+  statisticsView.value = view;
+  void loadStatisticsTasks();
+}
+
+function setStatisticsRange(range: "24h" | "7d" | "30d" | "all") {
+  statisticsRange.value = range;
+  void loadStatisticsTasks();
+}
+
+async function evaluatePendingRuns() {
+  evaluationBusy.value = true;
+  try {
+    const result = await runPendingEvaluations();
+    evaluationSummary.value = await fetchEvaluationSummary();
+    learningCases.value = await fetchLearningCases().then((items) => (Array.isArray(items) ? items : []));
+    await Promise.all([loadEvaluationProjects(), loadStatisticsTasks()]);
+    if (selectedEvaluationProjectId.value) {
+      await loadEvaluationProposals("pending");
+    }
+    showToast(`Evaluated ${result.evaluated} task runs`);
+  } catch (err) {
+    showToast(errorMessage(err));
+  } finally {
+    evaluationBusy.value = false;
+  }
+}
+
+async function rebuildLearningCases() {
+  learningCaseBusy.value = true;
+  try {
+    const result = await rebuildLearningCaseIndex();
+    learningCases.value = await fetchLearningCases().then((items) => (Array.isArray(items) ? items : []));
+    showToast(`已重建 ${result.indexed} 条学习案例索引`);
+  } catch (err) {
+    showToast(errorMessage(err));
+  } finally {
+    learningCaseBusy.value = false;
+  }
 }
 
 function errorMessage(err: unknown): string {
@@ -1290,6 +1594,12 @@ onMounted(loadData);
         </button>
         <button class="sidebar-item" :class="{ active: activePage === 'model-routes' }" type="button" @click="openPage('model-routes')">
           <span class="sidebar-icon">M</span><span>Model Proxy</span>
+        </button>
+        <button class="sidebar-item" :class="{ active: activePage === 'statistics' }" type="button" @click="openPage('statistics')">
+          <span class="sidebar-icon">?</span><span>Statistics</span>
+        </button>
+        <button class="sidebar-item" :class="{ active: activePage === 'evaluation' }" type="button" @click="openPage('evaluation')">
+          <span class="sidebar-icon">E</span><span>Evaluation</span>
         </button>
       </div>
 
@@ -1387,6 +1697,7 @@ onMounted(loadData);
                 <div class="asset-card-body">
                   <div class="asset-desc">{{ item.summary }}</div>
                   <div class="asset-template-meta">
+                    <span v-if="systemAgentIds.has(item.id)">system-level evaluator</span>
                     <span v-if="item.kind === 'agent'">{{ item.modelTier }}</span>
                     <span v-else-if="item.kind === 'rule'">{{ item.source || item.entry }}</span>
                     <span v-else-if="item.kind === 'skill'">{{ item.source || item.entry }}</span>
@@ -1474,6 +1785,12 @@ onMounted(loadData);
               <div class="page-description">{{ activePage === 'workflows' ? '全局工作流模板库，用来沉淀可复用的 AI 开发工序。' : '项目工作流展示该项目的 Project Config Set 副本和同步状态。' }}</div>
               <div v-if="activePage === 'workflows'" class="page-actions">
                 <button class="btn-secondary" type="button" @click="runWorkflow">模拟运行</button>
+                <button class="btn-secondary" type="button" :disabled="evaluationBusy" @click="evaluatePendingRuns">
+                  {{ evaluationBusy ? '评估中...' : '评估待处理' }}
+                </button>
+                <button class="btn-secondary" type="button" :disabled="learningCaseBusy" @click="rebuildLearningCases">
+                  {{ learningCaseBusy ? '索引中...' : '重建案例索引' }}
+                </button>
                 <button class="btn-primary" type="button" @click="createWorkflow">新建工作流</button>
               </div>
             </div>
@@ -1508,6 +1825,9 @@ onMounted(loadData);
                         <div class="workflow-card-meta">
                           <span class="chip" :class="`chip-${statusTone(card.status)}`">{{ card.status }}</span>
                           <span class="chip chip-purple">{{ card.nodeCount }} nodes</span>
+                          <span v-if="card.evaluation" class="chip chip-teal">{{ card.evaluation.sampleCount }} runs</span>
+                          <span v-if="card.evaluation" class="chip chip-orange">score {{ card.evaluation.averageScore }}</span>
+                          <span v-if="card.evaluation" class="chip chip-green">{{ card.evaluation.successRate }}% success</span>
                         </div>
                       </button>
                       <div class="workflow-card-actions">
@@ -1640,6 +1960,219 @@ onMounted(loadData);
                   <button v-if="workflowEditorMode" class="btn-primary full" type="button" @click="saveWorkflow">保存修改</button>
                 </div>
               </aside>
+            </div>
+          </section>
+
+          <section v-else-if="activePage === 'statistics'" class="page active">
+            <div class="page-header">
+              <div>
+                <div class="page-title">Statistics</div>
+                <div class="page-description">Query task results and trend signals by time range and score view.</div>
+              </div>
+              <div class="page-actions">
+                <button class="btn-secondary" type="button" :disabled="evaluationBusy" @click="evaluatePendingRuns">
+                  {{ evaluationBusy ? 'Evaluating...' : 'Evaluate Pending' }}
+                </button>
+              </div>
+            </div>
+
+            <section class="panel statistics-panel">
+              <div class="panel-body statistics-panel-body">
+                <div class="statistics-toolbar">
+                  <div class="statistics-filter-group">
+                    <span class="toolbar-label">Time Range</span>
+                    <div class="chip-row">
+                      <button class="btn-secondary" :class="{ active: statisticsRange === '24h' }" type="button" @click="setStatisticsRange('24h')">Last 24h</button>
+                      <button class="btn-secondary" :class="{ active: statisticsRange === '7d' }" type="button" @click="setStatisticsRange('7d')">Last 7d</button>
+                      <button class="btn-secondary" :class="{ active: statisticsRange === '30d' }" type="button" @click="setStatisticsRange('30d')">Last 30d</button>
+                      <button class="btn-secondary" :class="{ active: statisticsRange === 'all' }" type="button" @click="setStatisticsRange('all')">All</button>
+                    </div>
+                  </div>
+                  <div class="statistics-filter-group">
+                    <span class="toolbar-label">View</span>
+                    <div class="chip-row">
+                      <button class="btn-secondary" :class="{ active: statisticsView === 'failed' }" type="button" @click="setStatisticsView('failed')">Failed</button>
+                      <button class="btn-secondary" :class="{ active: statisticsView === 'successful' }" type="button" @click="setStatisticsView('successful')">Successful</button>
+                      <button class="btn-secondary" :class="{ active: statisticsView === 'top_scored' }" type="button" @click="setStatisticsView('top_scored')">Top Scored</button>
+                      <button class="btn-secondary" :class="{ active: statisticsView === 'low_scored' }" type="button" @click="setStatisticsView('low_scored')">Low Scored</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="statistics-line-card compact">
+                  <div class="statistics-line-head">
+                    <div>
+                      <div class="section-title">Score Trend</div>
+                      <div class="drawer-subtitle">Recent scores for the selected statistics view.</div>
+                    </div>
+                    <span class="chip chip-green">{{ statisticsViewLabel(statisticsView) }}</span>
+                  </div>
+                  <svg class="statistics-line-chart" :viewBox="`0 0 ${statisticsLineChart.width} ${statisticsLineChart.height}`" role="img" aria-label="statistics score trend">
+                    <line x1="28" y1="192" x2="612" y2="192" class="chart-grid-line" />
+                    <line x1="28" y1="28" x2="28" y2="192" class="chart-grid-line" />
+                    <path :d="statisticsLineChart.path" class="chart-trend-line" />
+                    <g v-for="point in statisticsLineChart.points" :key="`${point.label}-${point.x}`">
+                      <circle :cx="point.x" :cy="point.y" r="5" class="chart-point" />
+                      <text :x="point.x" :y="point.y - 12" class="chart-value" text-anchor="middle">{{ point.value }}</text>
+                      <text :x="point.x" y="210" class="chart-label" text-anchor="middle">{{ point.label }}</text>
+                    </g>
+                  </svg>
+                </div>
+
+                <div class="table-shell">
+                  <table class="task-table">
+                    <thead>
+                      <tr>
+                        <th>Task</th>
+                        <th>Project</th>
+                        <th>Workflow</th>
+                        <th>Status</th>
+                        <th>Score</th>
+                        <th>Model</th>
+                        <th>Arbiter</th>
+                        <th>Flags</th>
+                        <th>Agent</th>
+                        <th>Time</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in statisticsTasks" :key="item.runId">
+                        <td>
+                          <div class="task-title-cell">{{ item.taskTitle || item.runId }}</div>
+                          <div class="table-subtext">{{ item.evaluationId || 'pending evaluation' }}</div>
+                        </td>
+                        <td>{{ item.projectId }}</td>
+                        <td>{{ item.workflowType }}</td>
+                        <td><span class="chip" :class="item.status === 'success' ? 'chip-green' : 'chip-orange'">{{ item.status }}</span></td>
+                        <td>{{ Number(item.score || 0).toFixed(1) }}</td>
+                        <td>{{ item.model || '-' }}</td>
+                        <td>
+                          <div class="task-title-cell">{{ item.arbiterModel || '-' }}</div>
+                          <div class="table-subtext">Escalation: {{ item.escalationModel || '-' }}</div>
+                        </td>
+                        <td>
+                          <div class="flag-list">
+                            <span v-for="flag in escalationFlags(item)" :key="`${item.runId}-${flag}`" class="chip chip-teal">{{ flag }}</span>
+                            <span v-if="escalationFlags(item).length === 0" class="table-subtext">-</span>
+                          </div>
+                          <div class="table-subtext">Escalate: {{ boolLabel(item.needsEscalation) }}</div>
+                        </td>
+                        <td>{{ item.agent || '-' }}</td>
+                        <td>{{ formatDateTime(item.createdAt) }}</td>
+                      </tr>
+                      <tr v-if="!statisticsLoading && statisticsTasks.length === 0">
+                        <td colspan="10">
+                          <div class="empty-inline">No task runs found for this view and time range.</div>
+                        </td>
+                      </tr>
+                      <tr v-if="statisticsLoading">
+                        <td colspan="10">
+                          <div class="empty-inline">Loading statistics...</div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <section v-else-if="activePage === 'evaluation'" class="page active">
+            <div class="page-header">
+              <div>
+                <div class="page-title">Evaluation</div>
+                <div class="page-description">Review project-level optimization proposals before any workflow, rules, model, or agent change is accepted.</div>
+              </div>
+              <div class="page-actions">
+                <button class="btn-secondary" type="button" :disabled="evaluationBusy" @click="evaluatePendingRuns">
+                  {{ evaluationBusy ? 'Evaluating...' : 'Evaluate Pending' }}
+                </button>
+              </div>
+            </div>
+
+            <div class="evaluation-layout">
+              <section class="panel">
+                <div class="panel-header">
+                  <div>
+                    <div class="panel-title">Projects</div>
+                    <div class="drawer-subtitle">Health summary grouped by project.</div>
+                  </div>
+                </div>
+                <div class="panel-body evaluation-project-grid">
+                  <button
+                    v-for="item in evaluationProjectOptions"
+                    :key="item.projectId"
+                    type="button"
+                    class="evaluation-project-card"
+                    :class="{ active: selectedEvaluationProjectId === item.projectId }"
+                    @click="selectEvaluationProject(item.projectId)"
+                  >
+                    <div class="asset-card-header compact">
+                      <strong>{{ item.projectId }}</strong>
+                      <span class="chip chip-orange">{{ item.proposalCount }} proposals</span>
+                    </div>
+                    <div class="project-health-grid">
+                      <div><span>Avg Score</span><strong>{{ item.averageScore || 0 }}</strong></div>
+                      <div><span>Success Rate</span><strong>{{ item.successRate || 0 }}%</strong></div>
+                      <div><span>Failed</span><strong>{{ item.failedCount }}</strong></div>
+                      <div><span>Pending</span><strong>{{ item.pendingCount }}</strong></div>
+                    </div>
+                  </button>
+                  <div v-if="evaluationProjectOptions.length === 0" class="empty-state compact">No evaluated projects yet.</div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-header">
+                  <div>
+                    <div class="panel-title">Optimization Proposals</div>
+                    <div class="drawer-subtitle">Pending recommendations extracted from evaluation results.</div>
+                  </div>
+                  <div class="asset-chip-row" v-if="selectedEvaluationProject">
+                    <span class="chip chip-purple">{{ selectedEvaluationProject.projectId }}</span>
+                    <span class="chip chip-green">{{ selectedEvaluationProject.successRate }}% success</span>
+                  </div>
+                </div>
+                <div class="panel-body proposal-list">
+                  <article v-for="proposal in selectedProjectProposals" :key="proposal.id" class="proposal-card">
+                    <div class="asset-card-header compact">
+                      <strong>{{ proposal.action }}</strong>
+                      <div class="asset-chip-row">
+                        <span class="chip" :class="proposalSeverityClass(proposal.severity)">{{ proposal.severity }}</span>
+                        <span class="chip" :class="proposalStatusClass(proposal.status)">{{ proposal.status }}</span>
+                      </div>
+                    </div>
+                    <div class="proposal-meta-row">
+                      <span>Target: {{ proposal.target }}</span>
+                      <span>Run: {{ proposal.sourceRunId }}</span>
+                      <span>Eval: {{ proposal.sourceEvaluationId }}</span>
+                    </div>
+                    <p class="proposal-reason">{{ proposal.reason }}</p>
+                    <div class="proposal-meta-row muted">
+                      <span>Created: {{ formatDateTime(proposal.createdAt) }}</span>
+                      <span v-if="proposal.reviewedAt">Reviewed: {{ formatDateTime(proposal.reviewedAt) }}</span>
+                    </div>
+                    <div class="proposal-routing-grid">
+                      <div><span>Arbiter</span><strong>{{ proposal.arbiterModel || '-' }}</strong></div>
+                      <div><span>Escalation</span><strong>{{ proposal.escalationModel || '-' }}</strong></div>
+                      <div><span>Needs Escalation</span><strong>{{ boolLabel(proposal.needsEscalation) }}</strong></div>
+                      <div><span>High Risk</span><strong>{{ boolLabel(proposal.highRiskWorkflow) }}</strong></div>
+                    </div>
+                    <div class="flag-list proposal-flag-list">
+                      <span v-for="reason in escalationFlags(proposal)" :key="`${proposal.id}-${reason}`" class="chip chip-teal">{{ reason }}</span>
+                    </div>
+                    <label class="field-label proposal-note-field">Review Note
+                      <textarea v-model="proposalReviewNote" class="field-textarea proposal-note-input" placeholder="Why approve, reject, or defer this proposal?"></textarea>
+                    </label>
+                    <div class="proposal-actions">
+                      <button class="btn-secondary" type="button" :disabled="proposalBusyId === proposal.id" @click="reviewProposal(proposal, 'approved')">Approve</button>
+                      <button class="btn-secondary danger" type="button" :disabled="proposalBusyId === proposal.id" @click="reviewProposal(proposal, 'rejected')">Reject</button>
+                      <button class="btn-secondary" type="button" :disabled="proposalBusyId === proposal.id" @click="reviewProposal(proposal, 'later')">Later</button>
+                    </div>
+                  </article>
+                  <div v-if="selectedProjectProposals.length === 0" class="empty-state compact">No pending proposals for this project.</div>
+                </div>
+              </section>
             </div>
           </section>
 

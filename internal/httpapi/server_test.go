@@ -175,6 +175,146 @@ func TestProjectEndpoints(t *testing.T) {
 	}
 }
 
+func TestEvaluationEndpoints(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	server := NewServerWithEvaluationStore(evaluationStore)
+
+	createResponse := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
+		"projectId":"sample",
+		"workflowTemplateId":"bugfix",
+		"workflowCopyId":"proj_workflow_sample_bugfix",
+		"workflowType":"bugfix",
+		"taskTitle":"fix panic",
+		"submittedStatus":"success",
+		"durationMs":1200000,
+		"context":{"agent":"debugger","model":"gpt-5.4","rules":["bugfix-core"],"tools":["shell"]},
+		"metrics":{"testRunCount":2,"retryCount":0},
+		"evidence":{"verification":{"hasVerification":true,"passed":true}}
+	}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected task run create status 201, got %d body=%s", createResponse.Code, createResponse.Body.String())
+	}
+	var created catalog.TaskRun
+	decodeJSON(t, createResponse, &created)
+	if created.ID == "" || created.EvaluationStatus != "pending" {
+		t.Fatalf("expected pending task run, got %#v", created)
+	}
+
+	runResponse := requestJSON(t, server, http.MethodPost, "/api/evaluations/run-pending", "")
+	if runResponse.Code != http.StatusOK {
+		t.Fatalf("expected run pending status 200, got %d", runResponse.Code)
+	}
+	var runBody struct {
+		Evaluated int `json:"evaluated"`
+	}
+	decodeJSON(t, runResponse, &runBody)
+	if runBody.Evaluated != 1 {
+		t.Fatalf("expected one evaluated task run, got %#v", runBody)
+	}
+
+	var evaluations []catalog.Evaluation
+	getJSON(t, server, "/api/evaluations", &evaluations)
+	if len(evaluations) != 1 || evaluations[0].RunID != created.ID || evaluations[0].RubricID != "bugfix-rubric" {
+		t.Fatalf("unexpected evaluations: %#v", evaluations)
+	}
+
+	score := 80.0
+	reviewResponse := requestJSON(t, server, http.MethodPost, "/api/evaluations/"+evaluations[0].ID+"/review", `{"reviewer":"user","overrideStatus":"partial_success","overrideScore":80,"review":{"comment":"needs one more regression case"}}`)
+	if reviewResponse.Code != http.StatusCreated {
+		t.Fatalf("expected review status 201, got %d body=%s", reviewResponse.Code, reviewResponse.Body.String())
+	}
+	var review catalog.EvaluationReview
+	decodeJSON(t, reviewResponse, &review)
+	if review.OverrideScore == nil || *review.OverrideScore != score || review.OverrideStatus != "partial_success" {
+		t.Fatalf("unexpected review: %#v", review)
+	}
+
+	var summary catalog.EvaluationSummary
+	getJSON(t, server, "/api/evaluations/summary", &summary)
+	if summary.TotalRuns != 1 || summary.EvaluatedRuns != 1 || len(summary.WorkflowMetrics) != 1 {
+		t.Fatalf("unexpected summary: %#v", summary)
+	}
+	if len(summary.DimensionStats) == 0 {
+		t.Fatalf("expected agent/model/rules dimension stats, got %#v", summary)
+	}
+
+	rebuildResponse := requestJSON(t, server, http.MethodPost, "/api/learning-cases/rebuild-index", "")
+	if rebuildResponse.Code != http.StatusOK {
+		t.Fatalf("expected rebuild index status 200, got %d body=%s", rebuildResponse.Code, rebuildResponse.Body.String())
+	}
+	var cases []catalog.LearningCase
+	getJSON(t, server, "/api/learning-cases", &cases)
+	if len(cases) != 1 || cases[0].CaseType != "success" {
+		t.Fatalf("expected archived success learning case, got %#v", cases)
+	}
+	var hits []catalog.LearningCaseHit
+	getJSON(t, server, "/api/learning-cases/search?q=panic", &hits)
+	if len(hits) != 1 || hits[0].Case.ID != cases[0].ID {
+		t.Fatalf("expected learning case search hit, got %#v", hits)
+	}
+}
+
+func TestEvaluationProjectProposalAndStatisticsEndpoints(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	server := NewServerWithEvaluationStore(evaluationStore)
+
+	weakResponse := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
+		"projectId":"sample",
+		"workflowTemplateId":"research",
+		"workflowType":"research",
+		"taskTitle":"research model routing",
+		"submittedStatus":"partial_success",
+		"context":{"agent":"oracle","model":"deepseek-v4-flash","rules":[]},
+		"metrics":{"errorCount":1},
+		"evidence":{"contextMissing":true}
+	}`)
+	if weakResponse.Code != http.StatusCreated {
+		t.Fatalf("expected weak task run status 201, got %d body=%s", weakResponse.Code, weakResponse.Body.String())
+	}
+	if response := requestJSON(t, server, http.MethodPost, "/api/evaluations/run-pending", ""); response.Code != http.StatusOK {
+		t.Fatalf("expected run pending status 200, got %d", response.Code)
+	}
+
+	var projects catalog.EvaluationProjectsResponse
+	getJSON(t, server, "/api/evaluation/projects", &projects)
+	if len(projects.Projects) != 1 || projects.Projects[0].ProjectID != "sample" || projects.Projects[0].ProposalCount == 0 {
+		t.Fatalf("expected sample project health with proposals, got %#v", projects)
+	}
+
+	var proposals catalog.EvaluationProposalsResponse
+	getJSON(t, server, "/api/evaluation/proposals?projectId=sample&status=pending", &proposals)
+	if len(proposals.Items) == 0 || proposals.Items[0].ProjectID != "sample" || proposals.Items[0].Status != "pending" {
+		t.Fatalf("expected pending project proposals, got %#v", proposals)
+	}
+
+	reviewResponse := requestJSON(t, server, http.MethodPost, "/api/evaluation/proposals/"+proposals.Items[0].ID+"/review", `{"status":"approved","reviewNote":"accept"}`)
+	if reviewResponse.Code != http.StatusOK {
+		t.Fatalf("expected proposal review status 200, got %d body=%s", reviewResponse.Code, reviewResponse.Body.String())
+	}
+	var reviewed catalog.EvaluationProposal
+	decodeJSON(t, reviewResponse, &reviewed)
+	if reviewed.Status != "approved" || reviewed.ReviewNote != "accept" || reviewed.SourceRunID == "" || reviewed.SourceEvaluationID == "" {
+		t.Fatalf("unexpected reviewed proposal: %#v", reviewed)
+	}
+
+	var failed catalog.StatisticsTasksResponse
+	getJSON(t, server, "/api/statistics/tasks?view=failed&range=all", &failed)
+	if len(failed.Items) != 0 {
+		t.Fatalf("partial success should not appear in failed view, got %#v", failed)
+	}
+	var low catalog.StatisticsTasksResponse
+	getJSON(t, server, "/api/statistics/tasks?view=low_scored&range=all", &low)
+	if len(low.Items) != 1 || low.Items[0].ProjectID != "sample" || low.Items[0].EvaluationID == "" || low.Items[0].Agent != "oracle" {
+		t.Fatalf("expected low scored task view joined with run metadata, got %#v", low)
+	}
+}
+
 func TestProjectImportAndDeleteEndpoints(t *testing.T) {
 	root := t.TempDir()
 	home := t.TempDir()
@@ -318,6 +458,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "agents", agents, []string{
 		"debugger", "gatekeeper", "hephaestus", "librarian", "oracle", "prometheus",
 		"quick", "reviewer-logic", "reviewer-perf", "reviewer-security", "sisyphus", "worker",
+		"workflow-evaluator", "learning-curator", "model-arbiter",
 	})
 	for _, agent := range agents {
 		displayName := "go-" + agent.ID

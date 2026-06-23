@@ -208,3 +208,181 @@ export type InfrastructureItem = {
   lastCheckedAt?: string;
   output?: string;
 };
+
+export type TaskRun = {
+  id: string;
+  projectId: string;
+  workflowTemplateId?: string;
+  workflowCopyId?: string;
+  workflowType: string;
+  taskTitle?: string;
+  submittedStatus: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  evaluationStatus: string;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TaskRunInput = {
+  projectId: string;
+  workflowTemplateId?: string;
+  workflowCopyId?: string;
+  workflowType: string;
+  taskTitle?: string;
+  submittedStatus: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+};
+
+export type Evaluation = {
+  id: string;
+  runId: string;
+  rubricId: string;
+  rubricVersion: string;
+  evaluationLevel: number;
+  finalStatus: string;
+  overallScore: number;
+  confidence: number;
+  scores: Record<string, unknown>;
+  analysis: Record<string, unknown>;
+  modelJudgements?: Record<string, unknown>;
+  createdAt: string;
+  latestReviewStatus?: string;
+  latestReviewScore?: number;
+  latestReviewComment?: string;
+};
+
+export type EvaluationReviewInput = {
+  reviewer?: string;
+  overrideStatus?: string;
+  overrideScore?: number;
+  review?: Record<string, unknown>;
+};
+
+export type EvaluationSummary = {
+  totalRuns: number;
+  evaluatedRuns: number;
+  pendingRuns: number;
+  workflowMetrics: WorkflowEvaluationStat[];
+  topIssues: { issue: string; count: number }[];
+  componentStats: Record<string, { sampleCount: number; averageScore: number }>;
+  dimensionStats: EvaluationDimensionStat[];
+};
+
+export type WorkflowEvaluationStat = {
+  workflowTemplateId: string;
+  workflowType: string;
+  sampleCount: number;
+  averageScore: number;
+  successRate: number;
+};
+
+export type EvaluationDimensionStat = {
+  dimension: "agent" | "model" | "rules" | string;
+  name: string;
+  sampleCount: number;
+  averageScore: number;
+  successRate: number;
+};
+
+export type LearningCase = {
+  id: string;
+  runId: string;
+  evaluationId: string;
+  caseType: string;
+  projectId: string;
+  workflowTemplateId?: string;
+  workflowType: string;
+  title: string;
+  summary: string;
+  path: string[];
+  components: Record<string, unknown>;
+  scores: Record<string, unknown>;
+  tags: string[];
+  retentionClass: string;
+  createdAt: string;
+};
+
+export type LearningCaseHit = {
+  case: LearningCase;
+  similarity: number;
+};
+
+
+export type EvaluationProjectHealth = {
+  projectId: string;
+  totalRuns: number;
+  successRate: number;
+  averageScore: number;
+  failedCount: number;
+  pendingCount: number;
+  proposalCount: number;
+};
+
+export type EvaluationProjectsResponse = {
+  projects: EvaluationProjectHealth[];
+};
+
+export type EvaluationProposal = {
+  id: string;
+  projectId: string;
+  sourceRunId: string;
+  sourceEvaluationId: string;
+  target: string;
+  action: string;
+  reason: string;
+  severity: string;
+  status: string;
+  arbiterModel?: string;
+  escalationModel?: string;
+  needsEscalation?: boolean;
+  escalationReasons?: string[];
+  highRiskWorkflow?: boolean;
+  failedTask?: boolean;
+  createdAt: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+};
+
+export type EvaluationProposalsResponse = {
+  items: EvaluationProposal[];
+};
+
+export type EvaluationProposalReviewInput = {
+  status: "approved" | "rejected" | "later" | "pending" | string;
+  reviewNote?: string;
+};
+
+export type StatisticsTaskItem = {
+  runId: string;
+  evaluationId?: string;
+  projectId: string;
+  taskTitle: string;
+  workflowType: string;
+  status: string;
+  score: number;
+  confidence: number;
+  agent?: string;
+  model?: string;
+  rules?: string[];
+  arbiterModel?: string;
+  escalationModel?: string;
+  needsEscalation?: boolean;
+  escalationReasons?: string[];
+  highRiskWorkflow?: boolean;
+  failedTask?: boolean;
+  createdAt: string;
+};
+
+export type StatisticsTasksResponse = {
+  items: StatisticsTaskItem[];
+};
