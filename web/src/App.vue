@@ -2127,7 +2127,7 @@ onMounted(loadData);
             <div class="page-header">
               <div>
                 <div class="page-title">Evaluation</div>
-                <div class="page-description">Review project-level optimization proposals before any workflow, rules, model, or agent change is accepted.</div>
+                <div class="page-description">Objective evaluation only: evidence, metrics, workflow history, and retrieval entry points for manual review in project Codex.</div>
               </div>
               <div class="page-actions">
                 <button class="btn-secondary" type="button" :disabled="evaluationBusy" @click="evaluatePendingRuns">
@@ -2155,7 +2155,7 @@ onMounted(loadData);
                   >
                     <div class="asset-card-header compact">
                       <strong>{{ item.projectId }}</strong>
-                      <span class="chip chip-orange">{{ item.proposalCount }} proposals</span>
+                      <span class="chip chip-orange">{{ item.pendingCount }} pending</span>
                     </div>
                     <div class="project-health-grid">
                       <div><span>Avg Score</span><strong>{{ item.averageScore || 0 }}</strong></div>
@@ -2171,8 +2171,8 @@ onMounted(loadData);
               <section class="panel">
                 <div class="panel-header">
                   <div>
-                    <div class="panel-title">Optimization Proposals</div>
-                    <div class="drawer-subtitle">Pending recommendations extracted from evaluation results.</div>
+                    <div class="panel-title">Manual Review Signals</div>
+                    <div class="drawer-subtitle">Evaluation exposes evidence, objective metrics, and retrieval signals. Optimization decisions are made manually in project Codex.</div>
                   </div>
                   <div class="asset-chip-row" v-if="selectedEvaluationProject">
                     <span class="chip chip-purple">{{ selectedEvaluationProject.projectId }}</span>
@@ -2180,43 +2180,28 @@ onMounted(loadData);
                   </div>
                 </div>
                 <div class="panel-body proposal-list">
-                  <article v-for="proposal in selectedProjectProposals" :key="proposal.id" class="proposal-card">
+                  <article v-if="selectedEvaluationProject" class="proposal-card">
                     <div class="asset-card-header compact">
-                      <strong>{{ proposal.action }}</strong>
+                      <strong>{{ selectedEvaluationProject.projectId }}</strong>
                       <div class="asset-chip-row">
-                        <span class="chip" :class="proposalSeverityClass(proposal.severity)">{{ proposal.severity }}</span>
-                        <span class="chip" :class="proposalStatusClass(proposal.status)">{{ proposal.status }}</span>
+                        <span class="chip chip-green">{{ selectedEvaluationProject.successRate }}% success</span>
+                        <span class="chip chip-purple">{{ selectedEvaluationProject.totalRuns }} runs</span>
                       </div>
                     </div>
                     <div class="proposal-meta-row">
-                      <span>Target: {{ proposal.target }}</span>
-                      <span>Run: {{ proposal.sourceRunId }}</span>
-                      <span>Eval: {{ proposal.sourceEvaluationId }}</span>
+                      <span>Average Score: {{ selectedEvaluationProject.averageScore || 0 }}</span>
+                      <span>Failed: {{ selectedEvaluationProject.failedCount }}</span>
+                      <span>Pending: {{ selectedEvaluationProject.pendingCount }}</span>
                     </div>
-                    <p class="proposal-reason">{{ proposal.reason }}</p>
-                    <div class="proposal-meta-row muted">
-                      <span>Created: {{ formatDateTime(proposal.createdAt) }}</span>
-                      <span v-if="proposal.reviewedAt">Reviewed: {{ formatDateTime(proposal.reviewedAt) }}</span>
-                    </div>
+                    <p class="proposal-reason">Use the evidence, workflow metrics, dimension statistics, and learning-case retrieval below to manually review whether agents, models, workflows, rules, or skills need adjustment.</p>
                     <div class="proposal-routing-grid">
-                      <div><span>Arbiter</span><strong>{{ proposal.arbiterModel || '-' }}</strong></div>
-                      <div><span>Escalation</span><strong>{{ proposal.escalationModel || '-' }}</strong></div>
-                      <div><span>Needs Escalation</span><strong>{{ boolLabel(proposal.needsEscalation) }}</strong></div>
-                      <div><span>High Risk</span><strong>{{ boolLabel(proposal.highRiskWorkflow) }}</strong></div>
-                    </div>
-                    <div class="flag-list proposal-flag-list">
-                      <span v-for="reason in escalationFlags(proposal)" :key="`${proposal.id}-${reason}`" class="chip chip-teal">{{ reason }}</span>
-                    </div>
-                    <label class="field-label proposal-note-field">Review Note
-                      <textarea v-model="proposalReviewNote" class="field-textarea proposal-note-input" placeholder="Why approve, reject, or defer this proposal?"></textarea>
-                    </label>
-                    <div class="proposal-actions">
-                      <button class="btn-secondary" type="button" :disabled="proposalBusyId === proposal.id" @click="reviewProposal(proposal, 'approved')">Approve</button>
-                      <button class="btn-secondary danger" type="button" :disabled="proposalBusyId === proposal.id" @click="reviewProposal(proposal, 'rejected')">Reject</button>
-                      <button class="btn-secondary" type="button" :disabled="proposalBusyId === proposal.id" @click="reviewProposal(proposal, 'later')">Later</button>
+                      <div><span>Objective Eval</span><strong>Enabled</strong></div>
+                      <div><span>Auto Suggestions</span><strong>Disabled</strong></div>
+                      <div><span>Review Mode</span><strong>Manual in Codex</strong></div>
+                      <div><span>Retrieval</span><strong>Learning Cases</strong></div>
                     </div>
                   </article>
-                  <div v-if="selectedProjectProposals.length === 0" class="empty-state compact">No pending proposals for this project.</div>
+                  <div v-else class="empty-state compact">Select a project to inspect evidence, metrics, and retrieval signals.</div>
                 </div>
               </section>
             </div>

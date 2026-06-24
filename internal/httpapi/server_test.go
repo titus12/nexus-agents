@@ -357,24 +357,14 @@ func TestEvaluationProjectProposalAndStatisticsEndpoints(t *testing.T) {
 
 	var projects catalog.EvaluationProjectsResponse
 	getJSON(t, server, "/api/evaluation/projects", &projects)
-	if len(projects.Projects) != 1 || projects.Projects[0].ProjectID != "sample" || projects.Projects[0].ProposalCount == 0 {
-		t.Fatalf("expected sample project health with proposals, got %#v", projects)
+	if len(projects.Projects) != 1 || projects.Projects[0].ProjectID != "sample" || projects.Projects[0].ProposalCount != 0 {
+		t.Fatalf("expected sample project health without auto proposals, got %#v", projects)
 	}
 
 	var proposals catalog.EvaluationProposalsResponse
 	getJSON(t, server, "/api/evaluation/proposals?projectId=sample&status=pending", &proposals)
-	if len(proposals.Items) == 0 || proposals.Items[0].ProjectID != "sample" || proposals.Items[0].Status != "pending" {
-		t.Fatalf("expected pending project proposals, got %#v", proposals)
-	}
-
-	reviewResponse := requestJSON(t, server, http.MethodPost, "/api/evaluation/proposals/"+proposals.Items[0].ID+"/review", `{"status":"approved","reviewNote":"accept"}`)
-	if reviewResponse.Code != http.StatusOK {
-		t.Fatalf("expected proposal review status 200, got %d body=%s", reviewResponse.Code, reviewResponse.Body.String())
-	}
-	var reviewed catalog.EvaluationProposal
-	decodeJSON(t, reviewResponse, &reviewed)
-	if reviewed.Status != "approved" || reviewed.ReviewNote != "accept" || reviewed.SourceRunID == "" || reviewed.SourceEvaluationID == "" {
-		t.Fatalf("unexpected reviewed proposal: %#v", reviewed)
+	if len(proposals.Items) != 0 {
+		t.Fatalf("expected no auto proposals in objective evaluation mode, got %#v", proposals)
 	}
 
 	var failed catalog.StatisticsTasksResponse

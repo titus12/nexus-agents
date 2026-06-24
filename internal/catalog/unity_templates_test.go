@@ -72,3 +72,29 @@ func TestNexusTaskrunSubmitSkillIncludesHelperAssets(t *testing.T) {
 		}
 	}
 }
+
+func TestNexusEvaluationReviewSkillExists(t *testing.T) {
+	root := filepath.Join("..", "..")
+	skillPath := filepath.Join(root, "templates", "skills", "codex", "nexus-evaluation-review", "SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", skillPath, err)
+	}
+	text := string(data)
+	for _, needle := range []string{
+		"name: nexus-evaluation-review",
+		"/api/evaluations/summary",
+		"/api/evaluation/projects",
+		"/api/evaluations",
+		"/api/learning-cases",
+		"/api/statistics/tasks",
+		"objective",
+		"evidence-first",
+		"Review target",
+		"Objective diagnosis",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("expected %s to contain %q", skillPath, needle)
+		}
+	}
+}

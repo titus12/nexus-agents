@@ -312,11 +312,6 @@ func (s *EvaluationStore) EvaluatePending(limit int) (int, error) {
 			log.Printf("[evaluation] archive learning case run=%s evaluation=%s type=%s score=%.1f", s.data.TaskRuns[index].ID, evaluation.ID, learningCase.CaseType, evaluation.OverallScore)
 			s.data.LearningCases = append(s.data.LearningCases, learningCase)
 		}
-		proposals := proposalsForEvaluation(s.data.TaskRuns[index], evaluation)
-		if len(proposals) > 0 {
-			log.Printf("[evaluation] generated proposals run=%s evaluation=%s count=%d", s.data.TaskRuns[index].ID, evaluation.ID, len(proposals))
-			s.data.Proposals = append(s.data.Proposals, proposals...)
-		}
 		log.Printf("[evaluation] evaluated task run id=%s workflow=%s status=%s score=%.1f policy=%s", s.data.TaskRuns[index].ID, s.data.TaskRuns[index].WorkflowType, evaluation.FinalStatus, evaluation.OverallScore, evaluation.ModelPolicy["mode"])
 		count++
 	}
@@ -419,7 +414,7 @@ func (s *EvaluationStore) EvaluationProjects() (EvaluationProjectsResponse, erro
 	defer s.mu.Unlock()
 	runByID := s.runByIDLocked()
 	type total struct {
-		runs, evaluated, failed, pending, proposals int
+		runs, evaluated, failed, pending int
 		score                                       float64
 	}
 	totals := map[string]*total{}
@@ -447,26 +442,16 @@ func (s *EvaluationStore) EvaluationProjects() (EvaluationProjectsResponse, erro
 			item.failed++
 		}
 	}
-	for _, proposal := range s.data.Proposals {
-		if proposal.Status == "pending" {
-			item := totals[proposal.ProjectID]
-			if item == nil {
-				item = &total{}
-				totals[proposal.ProjectID] = item
-			}
-			item.proposals++
-		}
-	}
 	response := EvaluationProjectsResponse{}
 	for projectID, item := range totals {
-		health := EvaluationProjectHealth{ProjectID: projectID, TotalRuns: item.runs, FailedCount: item.failed, PendingCount: item.pending, ProposalCount: item.proposals}
+		health := EvaluationProjectHealth{ProjectID: projectID, TotalRuns: item.runs, FailedCount: item.failed, PendingCount: item.pending, ProposalCount: 0}
 		if item.evaluated > 0 {
 			health.AverageScore = round1(item.score / float64(item.evaluated))
 			health.SuccessRate = round1(float64(item.evaluated-item.failed) * 100 / float64(item.evaluated))
 		}
 		response.Projects = append(response.Projects, health)
 	}
-	sort.Slice(response.Projects, func(i, j int) bool { return response.Projects[i].ProposalCount > response.Projects[j].ProposalCount })
+	sort.Slice(response.Projects, func(i, j int) bool { return response.Projects[i].AverageScore < response.Projects[j].AverageScore })
 	return response, nil
 }
 
@@ -767,10 +752,9 @@ func scoreTaskRun(run TaskRun) (map[string]any, map[string]any) {
 		"tools":    componentAttribution(toolsScore(run), nil),
 	}
 	analysis := map[string]any{
-		"confidence":      round1(confidenceForRun(run) / 100),
-		"primaryCauses":   stringSliceToAny(primaryCauses(run, scores)),
-		"attribution":     attribution,
-		"recommendations": recommendationsForRun(run, scores),
+		"confidence":    round1(confidenceForRun(run) / 100),
+		"primaryCauses": stringSliceToAny(primaryCauses(run, scores)),
+		"attribution":   attribution,
 	}
 	return scores, analysis
 }
@@ -951,20 +935,6 @@ func primaryCauses(run TaskRun, scores map[string]any) []string {
 		causes = append(causes, "efficiency_issue")
 	}
 	return causes
-}
-
-func recommendationsForRun(run TaskRun, scores map[string]any) []map[string]any {
-	recommendations := []map[string]any{}
-	if numberValue(scores["verificationScore"]) < 65 {
-		recommendations = append(recommendations, map[string]any{"target": "workflow", "action": "add_verification_checkpoint", "reason": "verification evidence is weak or missing"})
-	}
-	if rulesScore(run) < 65 {
-		recommendations = append(recommendations, map[string]any{"target": "rules", "action": "review_rule_loading", "reason": "rules are missing or too many rules were loaded"})
-	}
-	if contextScore(run) < 65 {
-		recommendations = append(recommendations, map[string]any{"target": "context", "action": "add_context_discovery", "reason": "task evidence reports missing project context"})
-	}
-	return recommendations
 }
 
 func finalStatus(run TaskRun, overall float64) string {
@@ -1394,22 +1364,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func proposalsForEvaluation(run TaskRun, evaluation Evaluation) []EvaluationProposal {
-	raw, ok := evaluation.Analysis["recommendations"].([]map[string]any)
-	if !ok {
-		return nil
-	}
-	items := []EvaluationProposal{}
-	for _, rec := range raw {
-		items = append(items, EvaluationProposal{
-			ID: newEvaluationID("proposal"), ProjectID: run.ProjectID, SourceRunID: run.ID, SourceEvaluationID: evaluation.ID,
-			Target: stringValue(rec["target"]), Action: stringValue(rec["action"]), Reason: stringValue(rec["reason"]),
-			Severity: firstNonEmpty(stringValue(rec["severity"]), "medium"), Status: "pending", CreatedAt: evaluation.CreatedAt,
-		})
-	}
-	return items
 }
 
 func normalizeProposalStatus(status string) string {
