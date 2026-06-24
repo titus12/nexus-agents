@@ -139,6 +139,19 @@ func (r *Runner) finishRun(id string, input FinishInput, status RunStatus) (RunR
 			submittedStatus = "success"
 		}
 	}
+	metrics := cloneMap(record.Metrics)
+	if r.submitter.TokenLookup != nil {
+		if usage, ok, err := r.submitter.TokenLookup.TokenUsageForWorkflowRun(record.ID); err != nil {
+			return record, catalog.TaskRun{}, err
+		} else if ok {
+			metrics["tokenUsage"] = usage
+		}
+		if routeMetrics, ok, err := r.submitter.TokenLookup.RouteMetricsForWorkflowRun(record.ID); err != nil {
+			return record, catalog.TaskRun{}, err
+		} else if ok {
+			metrics["routeMetrics"] = routeMetrics
+		}
+	}
 	taskRun, err := r.submitter.SubmitWorkflowResult(catalog.TaskRunInput{
 		ProjectID:          record.ProjectID,
 		WorkflowTemplateID: record.WorkflowTemplateID,
@@ -150,7 +163,7 @@ func (r *Runner) finishRun(id string, input FinishInput, status RunStatus) (RunR
 		EndedAt:            record.EndedAt,
 		DurationMS:         record.DurationMS,
 		Context:            cloneMap(record.Context),
-		Metrics:            cloneMap(record.Metrics),
+		Metrics:            metrics,
 		Evidence:           cloneMap(record.Evidence),
 	})
 	if err != nil {

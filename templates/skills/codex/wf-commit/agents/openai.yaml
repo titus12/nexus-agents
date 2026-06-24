@@ -2,3 +2,9 @@ interface:
   display_name: "WF Commit"
   short_description: "Run the commit-gate workflow."
   default_prompt: "$wf-commit Check changes before commit."
+workflow_run_header_protocol:
+  required_headers:
+    - X-Nexus-Workflow-Run-Id
+    - X-Nexus-Workflow-Role
+  notes: "Start or reuse one Nexus workflow run ID for the full workflow; update only the role header between stages."
+

@@ -386,6 +386,60 @@ export type EvaluationProposalReviewInput = {
   reviewNote?: string;
 };
 
+export type TokenUsageRoleRollup = {
+  requestCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheHitRate: number;
+  outputInputRatio: number;
+  models: Record<string, number>;
+};
+
+export type WorkflowTokenUsage = {
+  workflowRunId: string;
+  requestCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheHitRate: number;
+  outputInputRatio: number;
+  roles: Record<string, TokenUsageRoleRollup>;
+  updatedAt?: string;
+};
+
+export type RouteMetricRoleRollup = {
+  requestCount: number;
+  successCount: number;
+  errorCount: number;
+  errorRate: number;
+  durationMs: number;
+  averageRequestDurationMs: number;
+  requestBytes: number;
+  toolCount: number;
+  inputItemCount: number;
+  toolCallCount: number;
+  models: Record<string, number>;
+};
+
+export type WorkflowRouteMetrics = {
+  workflowRunId: string;
+  requestCount: number;
+  successCount: number;
+  errorCount: number;
+  errorRate: number;
+  durationMs: number;
+  averageRequestDurationMs: number;
+  requestBytes: number;
+  toolCount: number;
+  inputItemCount: number;
+  toolCallCount: number;
+  roles: Record<string, RouteMetricRoleRollup>;
+  updatedAt?: string;
+};
+
 export type StatisticsTaskItem = {
   runId: string;
   evaluationId?: string;
@@ -404,6 +458,8 @@ export type StatisticsTaskItem = {
   escalationReasons?: string[];
   highRiskWorkflow?: boolean;
   failedTask?: boolean;
+  tokenUsage?: WorkflowTokenUsage;
+  routeMetrics?: WorkflowRouteMetrics;
   createdAt: string;
 };
 

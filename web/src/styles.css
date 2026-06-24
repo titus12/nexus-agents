@@ -1350,3 +1350,47 @@ tr:last-child td { border-bottom: none; }
 .proposal-flag-list {
   margin-top: 10px;
 }
+
+
+.evaluation-task-stack {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.evaluation-task-card {
+  gap: 10px;
+}
+
+.task-metric-section {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.task-metric-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.role-breakdown-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.role-breakdown-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--panel-soft);
+  display: grid;
+  gap: 6px;
+}
+
+.panel-title.mini {
+  font-size: 13px;
+}

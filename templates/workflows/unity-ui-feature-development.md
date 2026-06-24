@@ -66,6 +66,34 @@ Use for:
    - Temporary data, debug logs, mock/fake data, local paths, IPs, tokens, and test-only switches.
 9. Final report includes changed files, verification evidence, skipped checks with reasons, and remaining risks.
 
+## Workflow Run Header Protocol
+
+When this workflow is started from a Nexus-enabled project, create or reuse one workflow run record first and treat its `id` as the canonical workflow run ID for the entire session.
+
+Start endpoint:
+
+```text
+POST http://127.0.0.1:8766/api/workflow-runs/start
+```
+
+Use the returned `id` as `workflowRunId`.
+
+For every subsequent model message routed through Nexus Codex, carry these headers:
+
+```text
+X-Nexus-Workflow-Run-Id: <workflowRunId>
+X-Nexus-Workflow-Role: <current role>
+```
+
+Role should reflect the active workflow stage, for example: `planner`, `worker`, `reviewer`, `tester`, `arbiter`, or `unknown`.
+
+Rules:
+
+1. Do not change `workflowRunId` mid-workflow.
+2. Every routed message in the workflow must include both headers.
+3. When role changes, update only `X-Nexus-Workflow-Role`.
+4. At workflow end, submit or complete evidence against the same workflow run ID.
+
 ## Task Run Evidence Protocol
 
 At the end of this workflow, submit a Task Run Evidence payload to Nexus instead of scoring the task inline. If the local API is unavailable, include the same JSON payload in the final response so the user can submit it later.

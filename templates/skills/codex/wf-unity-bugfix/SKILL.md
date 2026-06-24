@@ -9,6 +9,21 @@ Invoke with $wf-unity-bugfix to load templates/workflows/unity-bug-investigation
 
 Read the corresponding workflow markdown completely before acting and follow its required rules and skills.
 
+## Workflow Run Header Protocol
+
+When invoked inside a Nexus project workflow:
+
+1. Start or reuse a workflow run record from Nexus.
+2. Use the returned run `id` as `workflowRunId`.
+3. Ensure every subsequent Nexus-routed model request carries:
+
+```text
+X-Nexus-Workflow-Run-Id: <workflowRunId>
+X-Nexus-Workflow-Role: <current role>
+```
+
+The role value must change with the active stage, but the workflow run ID must stay stable for the whole workflow.
+
 ## Task Run Evidence Protocol
 
 At the end of this workflow, submit a Task Run Evidence payload to Nexus instead of scoring the task inline. If the local API is unavailable, include the same JSON payload in the final response so the user can submit it later.

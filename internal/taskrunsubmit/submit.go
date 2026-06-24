@@ -17,10 +17,16 @@ type StoreSubmitter interface {
 	SubmitTaskRun(input catalog.TaskRunInput) (catalog.TaskRun, error)
 }
 
+type TokenUsageLookup interface {
+	TokenUsageForWorkflowRun(workflowRunID string) (catalog.WorkflowTokenUsage, bool, error)
+	RouteMetricsForWorkflowRun(workflowRunID string) (catalog.WorkflowRouteMetrics, bool, error)
+}
+
 type Submitter struct {
-	Endpoint   string
-	HTTPClient *http.Client
-	Store      StoreSubmitter
+	Endpoint    string
+	HTTPClient  *http.Client
+	Store       StoreSubmitter
+	TokenLookup TokenUsageLookup
 }
 
 func (s Submitter) SubmitWorkflowResult(input catalog.TaskRunInput) (catalog.TaskRun, error) {

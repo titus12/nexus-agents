@@ -19,6 +19,34 @@ Evaluate completed Unity workflow Task Run Evidence for bug investigation, logic
 5. Generate recommendations for missing rules, skills, tests, or reviewer checkpoints.
 6. Archive useful successful paths or representative failures as learning cases.
 
+## Workflow Run Header Protocol
+
+When this workflow is started from a Nexus-enabled project, create or reuse one workflow run record first and treat its `id` as the canonical workflow run ID for the entire session.
+
+Start endpoint:
+
+```text
+POST http://127.0.0.1:8766/api/workflow-runs/start
+```
+
+Use the returned `id` as `workflowRunId`.
+
+For every subsequent model message routed through Nexus Codex, carry these headers:
+
+```text
+X-Nexus-Workflow-Run-Id: <workflowRunId>
+X-Nexus-Workflow-Role: <current role>
+```
+
+Role should reflect the active workflow stage, for example: `planner`, `worker`, `reviewer`, `tester`, `arbiter`, or `unknown`.
+
+Rules:
+
+1. Do not change `workflowRunId` mid-workflow.
+2. Every routed message in the workflow must include both headers.
+3. When role changes, update only `X-Nexus-Workflow-Role`.
+4. At workflow end, submit or complete evidence against the same workflow run ID.
+
 ## Task Run Evidence Protocol
 
 This evaluation workflow consumes Task Run Evidence submitted by source workflows and may submit its own evaluation run to Nexus when it is executed as a workflow. If the local API is unavailable, include the same JSON payload in the final response so the user can submit it later.

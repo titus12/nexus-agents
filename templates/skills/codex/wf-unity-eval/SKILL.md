@@ -8,6 +8,21 @@ description: Invoke with $wf-unity-eval to load templates/workflows/unity-workfl
 Invoke with $wf-unity-eval to load templates/workflows/unity-workflow-evaluation.md and evaluate Unity workflow evidence.
 
 Read the corresponding workflow markdown completely before acting and follow its required rules and skills.
+## Workflow Run Header Protocol
+
+When invoked inside a Nexus project workflow:
+
+1. Start or reuse a workflow run record from Nexus.
+2. Use the returned run `id` as `workflowRunId`.
+3. Ensure every subsequent Nexus-routed model request carries:
+
+```text
+X-Nexus-Workflow-Run-Id: <workflowRunId>
+X-Nexus-Workflow-Role: <current role>
+```
+
+The role value must change with the active stage, but the workflow run ID must stay stable for the whole workflow.
+
 ## Task Run Evidence Protocol
 
 This evaluation workflow consumes Task Run Evidence submitted by source workflows and may submit its own evaluation run to Nexus when it is executed as a workflow. If the local API is unavailable, include the same JSON payload in the final response so the user can submit it later.

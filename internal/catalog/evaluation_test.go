@@ -3,6 +3,9 @@ package catalog
 import (
 	"path/filepath"
 	"testing"
+	"time"
+
+	"nexus-agents/internal/codexrouter"
 )
 
 func TestEvaluationStoreSubmitEvaluateAndPersist(t *testing.T) {
@@ -265,5 +268,180 @@ func TestUnityWorkflowsUseHighRiskEvaluationPolicy(t *testing.T) {
 		if !containsString(reasons, "high_risk_workflow") {
 			t.Fatalf("expected high_risk_workflow escalation reason, got %#v", reasons)
 		}
+	}
+}
+
+func TestEvaluationStoreTokenUsageAggregationByRole(t *testing.T) {
+	store, err := NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	defer store.Close()
+
+	events := []codexrouter.TokenUsageEvent{
+		{WorkflowRunID: "wf_run_token", Role: "worker", Model: "gpt-5.5", InputTokens: 100, CachedInputTokens: 40, OutputTokens: 10, TotalTokens: 110},
+		{WorkflowRunID: "wf_run_token", Role: "worker", Model: "gpt-5.5", InputTokens: 50, CachedInputTokens: 10, OutputTokens: 5, TotalTokens: 55},
+		{WorkflowRunID: "wf_run_token", Role: "reviewer", Model: "deepseek-v4-pro", InputTokens: 30, OutputTokens: 7, TotalTokens: 37},
+		{WorkflowRunID: "other", Role: "worker", Model: "gpt-5.5", InputTokens: 999, OutputTokens: 999},
+	}
+	for _, event := range events {
+		if err := store.RecordTokenUsage(event); err != nil {
+			t.Fatalf("record usage: %v", err)
+		}
+	}
+	usage, ok, err := store.TokenUsageForWorkflowRun("wf_run_token")
+	if err != nil {
+		t.Fatalf("token usage lookup: %v", err)
+	}
+	if !ok || usage.RequestCount != 3 || usage.InputTokens != 180 || usage.OutputTokens != 22 || usage.TotalTokens != 202 {
+		t.Fatalf("unexpected aggregate: %#v ok=%v", usage, ok)
+	}
+	worker := usage.Roles["worker"]
+	if worker.RequestCount != 2 || worker.Models["gpt-5.5"] != 2 || worker.CacheHitRate != 33.3 {
+		t.Fatalf("unexpected worker rollup: %#v", worker)
+	}
+	reviewer := usage.Roles["reviewer"]
+	if reviewer.RequestCount != 1 || reviewer.Models["deepseek-v4-pro"] != 1 {
+		t.Fatalf("unexpected reviewer rollup: %#v", reviewer)
+	}
+
+	reopened, err := NewEvaluationStore(store.path)
+	if err != nil {
+		t.Fatalf("reopen evaluation store: %v", err)
+	}
+	defer reopened.Close()
+	persisted, ok, err := reopened.TokenUsageForWorkflowRun("wf_run_token")
+	if err != nil || !ok || persisted.RequestCount != 3 {
+		t.Fatalf("expected persisted token usage, got %#v ok=%v err=%v", persisted, ok, err)
+	}
+}
+
+func TestEvaluationIncludesTokenEfficiencyScore(t *testing.T) {
+	store, err := NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.SubmitTaskRun(TaskRunInput{
+		ProjectID:          "sample",
+		WorkflowTemplateID: "bugfix",
+		WorkflowType:       "bugfix",
+		SubmittedStatus:    "success",
+		Metrics: map[string]any{"tokenUsage": map[string]any{
+			"workflowRunId": "wf_run_expensive",
+			"requestCount":  20,
+			"inputTokens":   320000,
+			"outputTokens":  20000,
+			"totalTokens":   340000,
+			"cacheHitRate":  5,
+		}},
+		Context:  map[string]any{"rules": []any{"bugfix-core"}, "agent": "debugger", "model": "gpt-5.5"},
+		Evidence: map[string]any{"verification": map[string]any{"passed": true}},
+	}); err != nil {
+		t.Fatalf("submit task run: %v", err)
+	}
+	if _, err := store.EvaluatePending(10); err != nil {
+		t.Fatalf("evaluate pending: %v", err)
+	}
+	evaluations, err := store.Evaluations()
+	if err != nil || len(evaluations) != 1 {
+		t.Fatalf("expected one evaluation, got %#v err=%v", evaluations, err)
+	}
+	if numberValue(evaluations[0].Scores["tokenEfficiencyScore"]) >= 70 {
+		t.Fatalf("expected low token efficiency score, got %#v", evaluations[0].Scores)
+	}
+	if !containsString(anySliceToStrings(evaluations[0].Analysis["primaryCauses"]), "token_overuse") {
+		t.Fatalf("expected token_overuse cause, got %#v", evaluations[0].Analysis)
+	}
+}
+
+func TestEvaluationStoreRouteMetricsAggregationByRole(t *testing.T) {
+	store, err := NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	defer store.Close()
+	events := []codexrouter.WorkflowRouteEvent{
+		{WorkflowRunID: "wf_run_route", Role: "worker", Model: "gpt-5.5", StatusCode: 200, DurationMS: 1000, RequestBytes: 100, ToolCount: 3, InputItemCount: 2, ToolCallCount: 1},
+		{WorkflowRunID: "wf_run_route", Role: "worker", Model: "gpt-5.5", StatusCode: 502, DurationMS: 2000, RequestBytes: 150, ToolCount: 3, InputItemCount: 2, ToolCallCount: 0},
+		{WorkflowRunID: "wf_run_route", Role: "reviewer", Model: "deepseek-v4-pro", StatusCode: 200, DurationMS: 3000, RequestBytes: 250, ToolCount: 1, InputItemCount: 1, ToolCallCount: 2},
+	}
+	for _, event := range events {
+		if err := store.RecordWorkflowRouteEvent(event); err != nil {
+			t.Fatalf("record route event: %v", err)
+		}
+	}
+	metrics, ok, err := store.RouteMetricsForWorkflowRun("wf_run_route")
+	if err != nil || !ok {
+		t.Fatalf("route metrics lookup ok=%v err=%v metrics=%#v", ok, err, metrics)
+	}
+	if metrics.RequestCount != 3 || metrics.SuccessCount != 2 || metrics.ErrorCount != 1 || metrics.ErrorRate != 33.3 || metrics.DurationMS != 6000 {
+		t.Fatalf("unexpected route metrics: %#v", metrics)
+	}
+	worker := metrics.Roles["worker"]
+	if worker.RequestCount != 2 || worker.ErrorCount != 1 || worker.Models["gpt-5.5"] != 2 || worker.AverageRequestDurationMS != 1500 {
+		t.Fatalf("unexpected worker route rollup: %#v", worker)
+	}
+}
+
+func TestEvaluationIncludesRouteHealthScore(t *testing.T) {
+	store, err := NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.SubmitTaskRun(TaskRunInput{
+		ProjectID:          "sample",
+		WorkflowTemplateID: "bugfix",
+		WorkflowType:       "bugfix",
+		SubmittedStatus:    "success",
+		Metrics: map[string]any{"routeMetrics": map[string]any{
+			"workflowRunId": "wf_run_unhealthy",
+			"requestCount":  15,
+			"errorCount":    3,
+			"durationMs":    20 * 60 * 1000,
+			"toolCallCount": 0,
+		}},
+		Context:  map[string]any{"rules": []any{"bugfix-core"}, "agent": "debugger", "model": "gpt-5.5"},
+		Evidence: map[string]any{"verification": map[string]any{"passed": true}},
+	}); err != nil {
+		t.Fatalf("submit task run: %v", err)
+	}
+	if _, err := store.EvaluatePending(10); err != nil {
+		t.Fatalf("evaluate pending: %v", err)
+	}
+	evaluations, err := store.Evaluations()
+	if err != nil || len(evaluations) != 1 {
+		t.Fatalf("expected one evaluation, got %#v err=%v", evaluations, err)
+	}
+	if numberValue(evaluations[0].Scores["routeHealthScore"]) >= 70 {
+		t.Fatalf("expected low route health score, got %#v", evaluations[0].Scores)
+	}
+	if !containsString(anySliceToStrings(evaluations[0].Analysis["primaryCauses"]), "route_health_issue") {
+		t.Fatalf("expected route_health_issue cause, got %#v", evaluations[0].Analysis)
+	}
+}
+
+func TestActiveWorkflowSessionStoreBindsAndExpires(t *testing.T) {
+	store, err := NewActiveWorkflowSessionStore(filepath.Join(t.TempDir(), "active-workflow-sessions.json"))
+	if err != nil {
+		t.Fatalf("new active workflow session store: %v", err)
+	}
+	base := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return base }
+	if err := store.Bind(ActiveWorkflowSession{SessionID: "sess-1", WorkflowRunID: "wf_run_1", ProjectID: "sample", WorkflowType: "bugfix", Status: "active"}); err != nil {
+		t.Fatalf("bind active session: %v", err)
+	}
+	session, ok, err := store.Lookup("sess-1")
+	if err != nil || !ok || session.WorkflowRunID != "wf_run_1" {
+		t.Fatalf("lookup active session ok=%v err=%v session=%#v", ok, err, session)
+	}
+	store.now = func() time.Time { return base.Add(25 * time.Hour) }
+	_, ok, err = store.Lookup("sess-1")
+	if err != nil {
+		t.Fatalf("lookup expired session: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected expired session to be pruned")
 	}
 }

@@ -1,6 +1,7 @@
 package codexrouter
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -284,4 +285,92 @@ func findRouteForTest(t *testing.T, cfg Config, id string) Route {
 	}
 	t.Fatalf("route %s not found", id)
 	return Route{}
+}
+
+type recordingTokenUsageRecorder struct {
+	events      []TokenUsageEvent
+	routeEvents []WorkflowRouteEvent
+}
+
+func (r *recordingTokenUsageRecorder) RecordTokenUsage(event TokenUsageEvent) error {
+	r.events = append(r.events, event)
+	return nil
+}
+
+func (r *recordingTokenUsageRecorder) RecordWorkflowRouteEvent(event WorkflowRouteEvent) error {
+	r.routeEvents = append(r.routeEvents, event)
+	return nil
+}
+
+func (r *recordingTokenUsageRecorder) LookupWorkflowSession(sessionID string) (WorkflowSessionContext, bool, error) {
+	return WorkflowSessionContext{}, false, nil
+}
+
+func TestRecordTokenUsageUsesHeadersOnly(t *testing.T) {
+	service := NewService(Config{Routes: []Route{{ID: "gpt-test", Model: "gpt-test", API: "responses"}}})
+	recorder := &recordingTokenUsageRecorder{}
+	service.SetTokenUsageRecorder(recorder)
+
+	tracker := newResponseUsageTracker(false)
+	tracker.updateFromObject(map[string]any{"usage": map[string]any{
+		"input_tokens":         100.0,
+		"output_tokens":        25.0,
+		"total_tokens":         125.0,
+		"input_tokens_details": map[string]any{"cached_tokens": 40.0},
+	}})
+	request := httptest.NewRequest("POST", "/proxy/codex/v1/responses", nil)
+	request.Header.Set(workflowRunIDHeader, "wf_run_123")
+	request.Header.Set(workflowRoleHeader, "Worker Role")
+
+	if err := service.recordTokenUsage(request, responseRequest{Model: "gpt-test"}, Route{ID: "gpt-test"}, tracker); err != nil {
+		t.Fatalf("record token usage: %v", err)
+	}
+	if len(recorder.events) != 1 {
+		t.Fatalf("expected one event, got %#v", recorder.events)
+	}
+	event := recorder.events[0]
+	if event.WorkflowRunID != "wf_run_123" || event.Role != "worker-role" || event.Model != "gpt-test" {
+		t.Fatalf("unexpected event identity: %#v", event)
+	}
+	if event.InputTokens != 100 || event.CachedInputTokens != 40 || event.OutputTokens != 25 || event.TotalTokens != 125 {
+		t.Fatalf("unexpected token counts: %#v", event)
+	}
+}
+
+func TestRecordTokenUsageSkipsMissingWorkflowRunHeader(t *testing.T) {
+	service := NewService(Config{Routes: []Route{{ID: "gpt-test", Model: "gpt-test", API: "responses"}}})
+	recorder := &recordingTokenUsageRecorder{}
+	service.SetTokenUsageRecorder(recorder)
+	tracker := newResponseUsageTracker(false)
+	tracker.updateFromObject(map[string]any{"usage": map[string]any{"input_tokens": 10.0, "output_tokens": 2.0}})
+	request := httptest.NewRequest("POST", "/proxy/codex/v1/responses", nil)
+	if err := service.recordTokenUsage(request, responseRequest{Model: "gpt-test"}, Route{ID: "gpt-test"}, tracker); err != nil {
+		t.Fatalf("record token usage without header: %v", err)
+	}
+	if len(recorder.events) != 0 {
+		t.Fatalf("expected no events without workflow header, got %#v", recorder.events)
+	}
+}
+
+func TestRecordRouteEventUsesHeadersOnly(t *testing.T) {
+	service := NewService(Config{Routes: []Route{{ID: "gpt-test", Model: "gpt-test", API: "responses"}}})
+	recorder := &recordingTokenUsageRecorder{}
+	service.SetTokenUsageRecorder(recorder)
+	request := httptest.NewRequest("POST", "/proxy/codex/v1/responses", nil)
+	request.Header.Set(workflowRunIDHeader, "wf_run_route")
+	request.Header.Set(workflowRoleHeader, "reviewer")
+	stats := requestStats{BodyBytes: 2048, ToolCount: 5, InputItemsCount: 3}
+	if err := service.recordRouteEvent(request, responseRequest{Model: "gpt-test"}, Route{ID: "gpt-test"}, stats, 200, 1234, 2); err != nil {
+		t.Fatalf("record route event: %v", err)
+	}
+	if len(recorder.routeEvents) != 1 {
+		t.Fatalf("expected one route event, got %#v", recorder.routeEvents)
+	}
+	event := recorder.routeEvents[0]
+	if event.WorkflowRunID != "wf_run_route" || event.Role != "reviewer" || event.StatusCode != 200 || event.DurationMS != 1234 {
+		t.Fatalf("unexpected route event identity: %#v", event)
+	}
+	if event.RequestBytes != 2048 || event.ToolCount != 5 || event.InputItemCount != 3 || event.ToolCallCount != 2 {
+		t.Fatalf("unexpected route event metrics: %#v", event)
+	}
 }

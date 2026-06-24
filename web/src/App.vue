@@ -73,6 +73,10 @@ import type {
   TemplateKind,
   StatisticsTaskItem,
   TemplateLibrary,
+  RouteMetricRoleRollup,
+  TokenUsageRoleRollup,
+  WorkflowRouteMetrics,
+  WorkflowTokenUsage,
   WorkflowGraph,
   WorkflowEdge,
   WorkflowNode,
@@ -378,6 +382,15 @@ const selectedProjectProposals = computed(() => {
   return evaluationProposals.value.filter((item) => item.projectId === selectedEvaluationProjectId.value);
 });
 
+
+const selectedEvaluationProjectTasks = computed(() => {
+  if (!selectedEvaluationProjectId.value) return [] as StatisticsTaskItem[];
+  return statisticsTasks.value
+    .filter((item) => item.projectId === selectedEvaluationProjectId.value)
+    .slice()
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+});
+
 function learningCaseTags(item: LearningCase): string[] {
   return Array.isArray(item.tags) ? item.tags.slice(0, 3) : [];
 }
@@ -394,6 +407,41 @@ function formatDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
+}
+
+
+function asWorkflowTokenUsage(value: unknown): WorkflowTokenUsage | null {
+  if (!value || typeof value !== "object") return null;
+  return value as WorkflowTokenUsage;
+}
+
+function asWorkflowRouteMetrics(value: unknown): WorkflowRouteMetrics | null {
+  if (!value || typeof value !== "object") return null;
+  return value as WorkflowRouteMetrics;
+}
+
+function formatNumber(value: number | undefined | null): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "-";
+  return new Intl.NumberFormat().format(Math.round(value));
+}
+
+function formatDurationMinutes(value: number | undefined | null): string {
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "-";
+  if (value < 1000) return `${Math.round(value)} ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} s`;
+  return `${(value / 60_000).toFixed(1)} min`;
+}
+
+function roleMetricEntries(record: Record<string, unknown> | undefined | null): Array<[string, unknown]> {
+  if (!record || typeof record !== "object") return [];
+  return Object.entries(record).sort((left, right) => left[0].localeCompare(right[0]));
+}
+
+function topModelsLabel(models: Record<string, number> | undefined | null): string {
+  if (!models || typeof models !== "object") return "-";
+  const entries = Object.entries(models).sort((left, right) => right[1] - left[1]).slice(0, 2);
+  if (entries.length === 0) return "-";
+  return entries.map(([model, count]) => `${model} ?${count}`).join(", ");
 }
 
 function statisticsViewLabel(view: string): string {
@@ -2202,6 +2250,79 @@ onMounted(loadData);
                     </div>
                   </article>
                   <div v-else class="empty-state compact">Select a project to inspect evidence, metrics, and retrieval signals.</div>
+
+                  <div v-if="selectedEvaluationProject" class="evaluation-task-stack">
+                    <div class="panel-title mini">Project Tasks</div>
+                    <article v-for="item in selectedEvaluationProjectTasks" :key="`eval-task-${item.runId}`" class="proposal-card evaluation-task-card">
+                      <div class="asset-card-header compact">
+                        <div>
+                          <strong>{{ item.taskTitle || item.runId }}</strong>
+                          <div class="table-subtext">{{ item.workflowType }} ? {{ formatDateTime(item.createdAt) }}</div>
+                        </div>
+                        <div class="asset-chip-row">
+                          <span class="chip" :class="item.status === 'success' ? 'chip-green' : item.status === 'failed' ? 'chip-red' : 'chip-orange'">{{ item.status }}</span>
+                          <span class="chip chip-purple">score {{ Number(item.score || 0).toFixed(1) }}</span>
+                        </div>
+                      </div>
+                      <div class="proposal-meta-row">
+                        <span>Agent: {{ item.agent || '-' }}</span>
+                        <span>Model: {{ item.model || '-' }}</span>
+                        <span>Run ID: {{ item.runId }}</span>
+                      </div>
+
+                      <template v-if="asWorkflowTokenUsage(item.tokenUsage)">
+                        <div class="task-metric-section">
+                          <div class="task-metric-title">Token Usage</div>
+                          <div class="proposal-routing-grid">
+                            <div><span>Total</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.totalTokens) }}</strong></div>
+                            <div><span>Input</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.inputTokens) }}</strong></div>
+                            <div><span>Cached</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.cachedInputTokens) }}</strong></div>
+                            <div><span>Output</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.outputTokens) }}</strong></div>
+                            <div><span>Requests</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.requestCount) }}</strong></div>
+                            <div><span>Cache Hit</span><strong>{{ asWorkflowTokenUsage(item.tokenUsage)?.cacheHitRate ?? 0 }}%</strong></div>
+                          </div>
+                          <div class="role-breakdown-grid">
+                            <div v-for="[role, stat] in roleMetricEntries(asWorkflowTokenUsage(item.tokenUsage)?.roles)" :key="`${item.runId}-token-${role}`" class="role-breakdown-card">
+                              <strong>{{ role }}</strong>
+                              <div class="table-subtext">{{ topModelsLabel((stat as TokenUsageRoleRollup).models) }}</div>
+                              <div class="detail-list compact-detail-list">
+                                <div><span>Req</span><strong>{{ formatNumber((stat as TokenUsageRoleRollup).requestCount) }}</strong></div>
+                                <div><span>Total</span><strong>{{ formatNumber((stat as TokenUsageRoleRollup).totalTokens) }}</strong></div>
+                                <div><span>Cache</span><strong>{{ (stat as TokenUsageRoleRollup).cacheHitRate }}%</strong></div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+
+                      <template v-if="asWorkflowRouteMetrics(item.routeMetrics)">
+                        <div class="task-metric-section">
+                          <div class="task-metric-title">Route Metrics</div>
+                          <div class="proposal-routing-grid">
+                            <div><span>Requests</span><strong>{{ formatNumber(asWorkflowRouteMetrics(item.routeMetrics)?.requestCount) }}</strong></div>
+                            <div><span>Errors</span><strong>{{ formatNumber(asWorkflowRouteMetrics(item.routeMetrics)?.errorCount) }}</strong></div>
+                            <div><span>Error Rate</span><strong>{{ asWorkflowRouteMetrics(item.routeMetrics)?.errorRate ?? 0 }}%</strong></div>
+                            <div><span>Duration</span><strong>{{ formatDurationMinutes(asWorkflowRouteMetrics(item.routeMetrics)?.durationMs) }}</strong></div>
+                            <div><span>Avg Req</span><strong>{{ formatDurationMinutes(asWorkflowRouteMetrics(item.routeMetrics)?.averageRequestDurationMs) }}</strong></div>
+                            <div><span>Tool Calls</span><strong>{{ formatNumber(asWorkflowRouteMetrics(item.routeMetrics)?.toolCallCount) }}</strong></div>
+                          </div>
+                          <div class="role-breakdown-grid">
+                            <div v-for="[role, stat] in roleMetricEntries(asWorkflowRouteMetrics(item.routeMetrics)?.roles)" :key="`${item.runId}-route-${role}`" class="role-breakdown-card">
+                              <strong>{{ role }}</strong>
+                              <div class="table-subtext">{{ topModelsLabel((stat as RouteMetricRoleRollup).models) }}</div>
+                              <div class="detail-list compact-detail-list">
+                                <div><span>Req</span><strong>{{ formatNumber((stat as RouteMetricRoleRollup).requestCount) }}</strong></div>
+                                <div><span>Err</span><strong>{{ formatNumber((stat as RouteMetricRoleRollup).errorCount) }}</strong></div>
+                                <div><span>Tools</span><strong>{{ formatNumber((stat as RouteMetricRoleRollup).toolCallCount) }}</strong></div>
+                                <div><span>Avg</span><strong>{{ formatDurationMinutes((stat as RouteMetricRoleRollup).averageRequestDurationMs) }}</strong></div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </article>
+                    <div v-if="selectedEvaluationProjectTasks.length === 0" class="empty-state compact">No task-level evaluation records found for this project in the current statistics range.</div>
+                  </div>
                 </div>
               </section>
             </div>

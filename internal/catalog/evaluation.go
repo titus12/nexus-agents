@@ -16,6 +16,8 @@ import (
 	"time"
 
 	chromem "github.com/philippgille/chromem-go"
+
+	"nexus-agents/internal/codexrouter"
 )
 
 type TaskRun struct {
@@ -124,6 +126,60 @@ type EvaluationDimensionStat struct {
 	SuccessRate  float64 `json:"successRate"`
 }
 
+type WorkflowTokenUsage struct {
+	WorkflowRunID     string                      `json:"workflowRunId"`
+	RequestCount      int                         `json:"requestCount"`
+	InputTokens       int                         `json:"inputTokens"`
+	CachedInputTokens int                         `json:"cachedInputTokens"`
+	OutputTokens      int                         `json:"outputTokens"`
+	TotalTokens       int                         `json:"totalTokens"`
+	CacheHitRate      float64                     `json:"cacheHitRate"`
+	OutputInputRatio  float64                     `json:"outputInputRatio"`
+	Roles             map[string]TokenUsageRollup `json:"roles"`
+	UpdatedAt         string                      `json:"updatedAt"`
+}
+
+type TokenUsageRollup struct {
+	RequestCount      int            `json:"requestCount"`
+	InputTokens       int            `json:"inputTokens"`
+	CachedInputTokens int            `json:"cachedInputTokens"`
+	OutputTokens      int            `json:"outputTokens"`
+	TotalTokens       int            `json:"totalTokens"`
+	CacheHitRate      float64        `json:"cacheHitRate"`
+	OutputInputRatio  float64        `json:"outputInputRatio"`
+	Models            map[string]int `json:"models"`
+}
+
+type WorkflowRouteMetrics struct {
+	WorkflowRunID            string                       `json:"workflowRunId"`
+	RequestCount             int                          `json:"requestCount"`
+	SuccessCount             int                          `json:"successCount"`
+	ErrorCount               int                          `json:"errorCount"`
+	ErrorRate                float64                      `json:"errorRate"`
+	DurationMS               int64                        `json:"durationMs"`
+	AverageRequestDurationMS int64                        `json:"averageRequestDurationMs"`
+	RequestBytes             int                          `json:"requestBytes"`
+	ToolCount                int                          `json:"toolCount"`
+	InputItemCount           int                          `json:"inputItemCount"`
+	ToolCallCount            int                          `json:"toolCallCount"`
+	Roles                    map[string]RouteMetricRollup `json:"roles"`
+	UpdatedAt                string                       `json:"updatedAt"`
+}
+
+type RouteMetricRollup struct {
+	RequestCount             int            `json:"requestCount"`
+	SuccessCount             int            `json:"successCount"`
+	ErrorCount               int            `json:"errorCount"`
+	ErrorRate                float64        `json:"errorRate"`
+	DurationMS               int64          `json:"durationMs"`
+	AverageRequestDurationMS int64          `json:"averageRequestDurationMs"`
+	RequestBytes             int            `json:"requestBytes"`
+	ToolCount                int            `json:"toolCount"`
+	InputItemCount           int            `json:"inputItemCount"`
+	ToolCallCount            int            `json:"toolCallCount"`
+	Models                   map[string]int `json:"models"`
+}
+
 type LearningCase struct {
 	ID                 string         `json:"id"`
 	RunID              string         `json:"runId"`
@@ -223,12 +279,14 @@ type EvaluationStore struct {
 }
 
 type evaluationData struct {
-	Version       int                  `json:"version"`
-	TaskRuns      []TaskRun            `json:"taskRuns"`
-	Evaluations   []Evaluation         `json:"evaluations"`
-	Reviews       []EvaluationReview   `json:"reviews"`
-	LearningCases []LearningCase       `json:"learningCases"`
-	Proposals     []EvaluationProposal `json:"proposals"`
+	Version       int                              `json:"version"`
+	TaskRuns      []TaskRun                        `json:"taskRuns"`
+	Evaluations   []Evaluation                     `json:"evaluations"`
+	Reviews       []EvaluationReview               `json:"reviews"`
+	LearningCases []LearningCase                   `json:"learningCases"`
+	Proposals     []EvaluationProposal             `json:"proposals"`
+	TokenUsages   []codexrouter.TokenUsageEvent    `json:"tokenUsages"`
+	RouteEvents   []codexrouter.WorkflowRouteEvent `json:"routeEvents"`
 }
 
 func NewDefaultEvaluationStore() (*EvaluationStore, error) {
@@ -409,13 +467,80 @@ func (s *EvaluationStore) RebuildLearningCaseIndex() (int, error) {
 	return len(cases), nil
 }
 
+func (s *EvaluationStore) RecordTokenUsage(event codexrouter.TokenUsageEvent) error {
+	event.WorkflowRunID = strings.TrimSpace(event.WorkflowRunID)
+	if event.WorkflowRunID == "" {
+		return nil
+	}
+	event.Role = normalizeTokenRole(event.Role)
+	event.Model = strings.TrimSpace(event.Model)
+	if event.Model == "" {
+		event.Model = "unknown"
+	}
+	if event.TotalTokens == 0 {
+		event.TotalTokens = event.InputTokens + event.OutputTokens
+	}
+	if strings.TrimSpace(event.CreatedAt) == "" {
+		event.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.TokenUsages = append(s.data.TokenUsages, event)
+	return s.saveLocked()
+}
+
+func (s *EvaluationStore) TokenUsageForWorkflowRun(workflowRunID string) (WorkflowTokenUsage, bool, error) {
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowRunID == "" {
+		return WorkflowTokenUsage{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	usage := aggregateTokenUsageLocked(workflowRunID, s.data.TokenUsages)
+	return usage, usage.RequestCount > 0, nil
+}
+
+func (s *EvaluationStore) RecordWorkflowRouteEvent(event codexrouter.WorkflowRouteEvent) error {
+	event.WorkflowRunID = strings.TrimSpace(event.WorkflowRunID)
+	if event.WorkflowRunID == "" {
+		return nil
+	}
+	event.Role = normalizeTokenRole(event.Role)
+	event.Model = strings.TrimSpace(event.Model)
+	if event.Model == "" {
+		event.Model = "unknown"
+	}
+	if strings.TrimSpace(event.CreatedAt) == "" {
+		event.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.RouteEvents = append(s.data.RouteEvents, event)
+	return s.saveLocked()
+}
+
+func (s *EvaluationStore) RouteMetricsForWorkflowRun(workflowRunID string) (WorkflowRouteMetrics, bool, error) {
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowRunID == "" {
+		return WorkflowRouteMetrics{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	metrics := aggregateRouteMetricsLocked(workflowRunID, s.data.RouteEvents)
+	return metrics, metrics.RequestCount > 0, nil
+}
+
+func (s *EvaluationStore) LookupWorkflowSession(sessionID string) (codexrouter.WorkflowSessionContext, bool, error) {
+	return codexrouter.WorkflowSessionContext{}, false, nil
+}
+
 func (s *EvaluationStore) EvaluationProjects() (EvaluationProjectsResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	runByID := s.runByIDLocked()
 	type total struct {
 		runs, evaluated, failed, pending int
-		score                                       float64
+		score                            float64
 	}
 	totals := map[string]*total{}
 	for _, run := range s.data.TaskRuns {
@@ -727,20 +852,24 @@ func scoreTaskRun(run TaskRun) (map[string]any, map[string]any) {
 	completion := statusScore(run.SubmittedStatus)
 	verification := verificationScore(run.Evidence)
 	efficiency := efficiencyScore(run)
+	tokenEfficiency := tokenEfficiencyScore(run)
+	routeHealth := routeHealthScore(run)
 	workflowFit := 70.0
 	if run.WorkflowTemplateID != "" || run.WorkflowCopyID != "" {
 		workflowFit = 88
 	}
 	risk := riskControlScore(run.Evidence)
-	overall := completion*0.25 + verification*0.25 + efficiency*0.15 + workflowFit*0.20 + risk*0.15
+	overall := completion*0.22 + verification*0.23 + efficiency*0.12 + tokenEfficiency*0.08 + routeHealth*0.08 + workflowFit*0.16 + risk*0.11
 	scores := map[string]any{
-		"completionScore":   round1(completion),
-		"accuracyScore":     round1((completion + verification) / 2),
-		"efficiencyScore":   round1(efficiency),
-		"verificationScore": round1(verification),
-		"riskControlScore":  round1(risk),
-		"workflowFitScore":  round1(workflowFit),
-		"overallScore":      round1(overall),
+		"completionScore":      round1(completion),
+		"accuracyScore":        round1((completion + verification) / 2),
+		"efficiencyScore":      round1(efficiency),
+		"tokenEfficiencyScore": round1(tokenEfficiency),
+		"routeHealthScore":     round1(routeHealth),
+		"verificationScore":    round1(verification),
+		"riskControlScore":     round1(risk),
+		"workflowFitScore":     round1(workflowFit),
+		"overallScore":         round1(overall),
 	}
 	attribution := map[string]any{
 		"workflow": componentAttribution(workflowFit, workflowIssue(run)),
@@ -750,6 +879,8 @@ func scoreTaskRun(run TaskRun) (map[string]any, map[string]any) {
 		"skills":   componentAttribution(componentPresenceScore(run.Context, "skills"), nil),
 		"context":  componentAttribution(contextScore(run), contextIssues(run)),
 		"tools":    componentAttribution(toolsScore(run), nil),
+		"tokens":   componentAttribution(tokenEfficiency, tokenIssues(run)),
+		"route":    componentAttribution(routeHealth, routeIssues(run)),
 	}
 	analysis := map[string]any{
 		"confidence":    round1(confidenceForRun(run) / 100),
@@ -833,6 +964,124 @@ func efficiencyScore(run TaskRun) float64 {
 		return 20
 	}
 	return score
+}
+
+func tokenEfficiencyScore(run TaskRun) float64 {
+	usage, ok := tokenUsageMap(run)
+	if !ok {
+		return 78
+	}
+	total := numberValue(usage["totalTokens"])
+	input := numberValue(usage["inputTokens"])
+	cached := numberValue(usage["cachedInputTokens"])
+	requestCount := numberValue(usage["requestCount"])
+	score := 88.0
+	if total > 250000 {
+		score -= math.Min(30, (total-250000)/20000)
+	}
+	if requestCount > 12 {
+		score -= math.Min(18, (requestCount-12)*2)
+	}
+	if input > 0 {
+		cacheHitRate := cached * 100 / input
+		if cacheHitRate < 20 && input > 50000 {
+			score -= 10
+		}
+		if cacheHitRate > 60 {
+			score += 4
+		}
+	}
+	if score < 20 {
+		return 20
+	}
+	if score > 96 {
+		return 96
+	}
+	return score
+}
+
+func tokenUsageMap(run TaskRun) (map[string]any, bool) {
+	usage, ok := run.Metrics["tokenUsage"].(map[string]any)
+	if !ok || len(usage) == 0 {
+		return nil, false
+	}
+	return usage, true
+}
+
+func tokenIssues(run TaskRun) []string {
+	usage, ok := tokenUsageMap(run)
+	if !ok {
+		return []string{"token metrics missing from task evidence"}
+	}
+	issues := []string{}
+	if numberValue(usage["totalTokens"]) > 250000 {
+		issues = append(issues, "workflow token usage exceeds first-pass threshold")
+	}
+	if numberValue(usage["requestCount"]) > 12 {
+		issues = append(issues, "many model requests in one workflow run")
+	}
+	input := numberValue(usage["inputTokens"])
+	if input > 50000 && numberValue(usage["cacheHitRate"]) < 20 {
+		issues = append(issues, "low prompt cache reuse for large context")
+	}
+	return issues
+}
+
+func routeHealthScore(run TaskRun) float64 {
+	metrics, ok := routeMetricsMap(run)
+	if !ok {
+		return 78
+	}
+	score := 90.0
+	requestCount := numberValue(metrics["requestCount"])
+	errorCount := numberValue(metrics["errorCount"])
+	duration := numberValue(metrics["durationMs"])
+	toolCallCount := numberValue(metrics["toolCallCount"])
+	if errorCount > 0 {
+		score -= math.Min(30, errorCount*10)
+	}
+	if requestCount > 12 {
+		score -= math.Min(18, (requestCount-12)*2)
+	}
+	if duration > 15*60*1000 {
+		score -= math.Min(18, (duration-15*60*1000)/(2*60*1000))
+	}
+	if toolCallCount == 0 && requestCount >= 4 {
+		score -= 8
+	}
+	if score < 20 {
+		return 20
+	}
+	return score
+}
+
+func routeMetricsMap(run TaskRun) (map[string]any, bool) {
+	metrics, ok := run.Metrics["routeMetrics"].(map[string]any)
+	if !ok || len(metrics) == 0 {
+		return nil, false
+	}
+	return metrics, true
+}
+
+func routeIssues(run TaskRun) []string {
+	metrics, ok := routeMetricsMap(run)
+	if !ok {
+		return []string{"route metrics missing from task evidence"}
+	}
+	issues := []string{}
+	if numberValue(metrics["errorCount"]) > 0 {
+		issues = append(issues, "model route errors occurred during workflow")
+	}
+	if numberValue(metrics["requestCount"]) > 12 {
+		issues = append(issues, "many model requests in one workflow run")
+	}
+	if numberValue(metrics["durationMs"]) > 15*60*1000 {
+		issues = append(issues, "workflow route duration exceeds first-pass threshold")
+	}
+	if numberValue(metrics["toolCallCount"]) == 0 && numberValue(metrics["requestCount"]) >= 4 {
+		issues = append(issues, "multiple model requests without tool calls")
+	}
+	return issues
 }
 
 func componentPresenceScore(context map[string]any, key string) float64 {
@@ -933,6 +1182,12 @@ func primaryCauses(run TaskRun, scores map[string]any) []string {
 	}
 	if numberValue(scores["efficiencyScore"]) < 70 {
 		causes = append(causes, "efficiency_issue")
+	}
+	if numberValue(scores["tokenEfficiencyScore"]) < 70 {
+		causes = append(causes, "token_overuse")
+	}
+	if numberValue(scores["routeHealthScore"]) < 70 {
+		causes = append(causes, "route_health_issue")
 	}
 	return causes
 }
@@ -1459,6 +1714,118 @@ func filterStatisticsItems(items []StatisticsTaskItem, view string) []Statistics
 		}
 	})
 	return filtered
+}
+
+func aggregateTokenUsageLocked(workflowRunID string, events []codexrouter.TokenUsageEvent) WorkflowTokenUsage {
+	usage := WorkflowTokenUsage{WorkflowRunID: workflowRunID, Roles: map[string]TokenUsageRollup{}}
+	for _, event := range events {
+		if event.WorkflowRunID != workflowRunID {
+			continue
+		}
+		usage.RequestCount++
+		usage.InputTokens += event.InputTokens
+		usage.CachedInputTokens += event.CachedInputTokens
+		usage.OutputTokens += event.OutputTokens
+		total := event.TotalTokens
+		if total == 0 {
+			total = event.InputTokens + event.OutputTokens
+		}
+		usage.TotalTokens += total
+		if event.CreatedAt > usage.UpdatedAt {
+			usage.UpdatedAt = event.CreatedAt
+		}
+		role := normalizeTokenRole(event.Role)
+		rollup := usage.Roles[role]
+		if rollup.Models == nil {
+			rollup.Models = map[string]int{}
+		}
+		rollup.RequestCount++
+		rollup.InputTokens += event.InputTokens
+		rollup.CachedInputTokens += event.CachedInputTokens
+		rollup.OutputTokens += event.OutputTokens
+		rollup.TotalTokens += total
+		model := strings.TrimSpace(event.Model)
+		if model == "" {
+			model = "unknown"
+		}
+		rollup.Models[model]++
+		rollup.CacheHitRate = tokenPercent(rollup.CachedInputTokens, rollup.InputTokens)
+		rollup.OutputInputRatio = tokenPercent(rollup.OutputTokens, rollup.InputTokens)
+		usage.Roles[role] = rollup
+	}
+	usage.CacheHitRate = tokenPercent(usage.CachedInputTokens, usage.InputTokens)
+	usage.OutputInputRatio = tokenPercent(usage.OutputTokens, usage.InputTokens)
+	return usage
+}
+
+func aggregateRouteMetricsLocked(workflowRunID string, events []codexrouter.WorkflowRouteEvent) WorkflowRouteMetrics {
+	metrics := WorkflowRouteMetrics{WorkflowRunID: workflowRunID, Roles: map[string]RouteMetricRollup{}}
+	for _, event := range events {
+		if event.WorkflowRunID != workflowRunID {
+			continue
+		}
+		metrics.RequestCount++
+		if event.StatusCode >= 200 && event.StatusCode < 400 {
+			metrics.SuccessCount++
+		} else {
+			metrics.ErrorCount++
+		}
+		metrics.DurationMS += event.DurationMS
+		metrics.RequestBytes += event.RequestBytes
+		metrics.ToolCount += event.ToolCount
+		metrics.InputItemCount += event.InputItemCount
+		metrics.ToolCallCount += event.ToolCallCount
+		if event.CreatedAt > metrics.UpdatedAt {
+			metrics.UpdatedAt = event.CreatedAt
+		}
+		role := normalizeTokenRole(event.Role)
+		rollup := metrics.Roles[role]
+		if rollup.Models == nil {
+			rollup.Models = map[string]int{}
+		}
+		rollup.RequestCount++
+		if event.StatusCode >= 200 && event.StatusCode < 400 {
+			rollup.SuccessCount++
+		} else {
+			rollup.ErrorCount++
+		}
+		rollup.DurationMS += event.DurationMS
+		rollup.RequestBytes += event.RequestBytes
+		rollup.ToolCount += event.ToolCount
+		rollup.InputItemCount += event.InputItemCount
+		rollup.ToolCallCount += event.ToolCallCount
+		model := strings.TrimSpace(event.Model)
+		if model == "" {
+			model = "unknown"
+		}
+		rollup.Models[model]++
+		rollup.ErrorRate = tokenPercent(rollup.ErrorCount, rollup.RequestCount)
+		if rollup.RequestCount > 0 {
+			rollup.AverageRequestDurationMS = rollup.DurationMS / int64(rollup.RequestCount)
+		}
+		metrics.Roles[role] = rollup
+	}
+	metrics.ErrorRate = tokenPercent(metrics.ErrorCount, metrics.RequestCount)
+	if metrics.RequestCount > 0 {
+		metrics.AverageRequestDurationMS = metrics.DurationMS / int64(metrics.RequestCount)
+	}
+	return metrics
+}
+
+func normalizeTokenRole(role string) string {
+	role = strings.TrimSpace(strings.ToLower(role))
+	role = strings.ReplaceAll(role, " ", "-")
+	if role == "" {
+		return "unknown"
+	}
+	return role
+}
+
+func tokenPercent(numerator, denominator int) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return round1(float64(numerator) * 100 / float64(denominator))
 }
 
 func stringValue(value any) string {

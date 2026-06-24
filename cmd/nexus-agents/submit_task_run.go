@@ -17,10 +17,10 @@ func runSubmitTaskRun(args []string) error {
 	flags.SetOutput(io.Discard)
 
 	var (
-		filePath   string
-		endpoint   string
-		useStore   bool
-		storePath  string
+		filePath  string
+		endpoint  string
+		useStore  bool
+		storePath string
 	)
 	flags.StringVar(&filePath, "file", "", "Path to a JSON TaskRunInput payload file. Use - for stdin.")
 	flags.StringVar(&endpoint, "endpoint", taskrunsubmit.DefaultEndpoint, "HTTP endpoint for task run submission.")
@@ -43,6 +43,7 @@ func runSubmitTaskRun(args []string) error {
 	}
 
 	submitter := taskrunsubmit.Submitter{Endpoint: endpoint}
+	var sessionStore *catalog.ActiveWorkflowSessionStore
 	if useStore {
 		store, err := openEvaluationStore(storePath)
 		if err != nil {
@@ -51,10 +52,16 @@ func runSubmitTaskRun(args []string) error {
 		defer store.Close()
 		submitter.Store = store
 	}
+	sessionStore, _ = catalog.NewDefaultActiveWorkflowSessionStore()
 
 	run, err := submitter.SubmitWorkflowResult(input)
 	if err != nil {
 		return err
+	}
+	if sessionStore != nil {
+		if sessionID, ok := input.Context["sessionId"].(string); ok && strings.TrimSpace(sessionID) != "" {
+			_ = sessionStore.Complete(sessionID)
+		}
 	}
 	encoded, err := json.MarshalIndent(run, "", "  ")
 	if err != nil {

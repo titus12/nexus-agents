@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,6 +25,35 @@ import (
 	"nexus-agents/internal/workflowrunner"
 	webui "nexus-agents/web"
 )
+
+type workflowRouterRecorder struct {
+	evaluationStore *catalog.EvaluationStore
+	sessionStore    *catalog.ActiveWorkflowSessionStore
+}
+
+func (r *workflowRouterRecorder) RecordTokenUsage(event codexrouter.TokenUsageEvent) error {
+	return r.evaluationStore.RecordTokenUsage(event)
+}
+
+func (r *workflowRouterRecorder) RecordWorkflowRouteEvent(event codexrouter.WorkflowRouteEvent) error {
+	return r.evaluationStore.RecordWorkflowRouteEvent(event)
+}
+
+func (r *workflowRouterRecorder) LookupWorkflowSession(sessionID string) (codexrouter.WorkflowSessionContext, bool, error) {
+	if r == nil || r.sessionStore == nil {
+		return codexrouter.WorkflowSessionContext{}, false, nil
+	}
+	session, ok, err := r.sessionStore.Lookup(sessionID)
+	if err != nil || !ok {
+		return codexrouter.WorkflowSessionContext{}, ok, err
+	}
+	return codexrouter.WorkflowSessionContext{WorkflowRunID: session.WorkflowRunID, Role: session.CurrentRole}, true, nil
+}
+
+func roleString(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
 
 type healthResponse struct {
 	Service string `json:"service"`
@@ -61,6 +91,7 @@ func (f LocalDirectoryPickerFunc) PickDirectory() (string, bool, error) {
 type Server struct {
 	store                *catalog.Store
 	evaluationStore      *catalog.EvaluationStore
+	sessionStore         *catalog.ActiveWorkflowSessionStore
 	infrastructure       *catalog.InfrastructureService
 	codexRouter          *codexrouter.Service
 	localDirectoryPicker LocalDirectoryPicker
@@ -115,14 +146,22 @@ func newServerWithOptions(store *catalog.Store, infrastructure *catalog.Infrastr
 			evaluationStore, _ = catalog.NewEvaluationStore(filepath.Join(os.TempDir(), "nexus-agents-evaluation.json"))
 		}
 	}
+	sessionStore, err := catalog.NewDefaultActiveWorkflowSessionStore()
+	if err != nil {
+		sessionStore, _ = catalog.NewActiveWorkflowSessionStore(filepath.Join(os.TempDir(), "nexus-agents-active-workflow-sessions.json"))
+	}
+	if router != nil && evaluationStore != nil && sessionStore != nil {
+		router.SetTokenUsageRecorder(&workflowRouterRecorder{evaluationStore: evaluationStore, sessionStore: sessionStore})
+	}
 	webFS := webui.Dist()
 	server := &Server{
 		store:                store,
 		evaluationStore:      evaluationStore,
 		infrastructure:       infrastructure,
+		sessionStore:         sessionStore,
 		codexRouter:          router,
 		localDirectoryPicker: picker,
-		workflowRunner:       workflowrunner.New(taskrunsubmit.Submitter{Store: evaluationStore}),
+		workflowRunner:       workflowrunner.New(taskrunsubmit.Submitter{Store: evaluationStore, TokenLookup: evaluationStore}),
 		mux:                  http.NewServeMux(),
 		webFS:                webFS,
 		webFileServer:        http.FileServer(http.FS(webFS)),
@@ -246,6 +285,24 @@ func (s *Server) handleWorkflowRunStart(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if s.sessionStore != nil {
+		sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
+		if sessionID != "" {
+			_ = s.sessionStore.Bind(catalog.ActiveWorkflowSession{
+				SessionID:          sessionID,
+				WorkflowRunID:      run.ID,
+				ProjectID:          run.ProjectID,
+				WorkflowTemplateID: run.WorkflowTemplateID,
+				WorkflowCopyID:     run.WorkflowCopyID,
+				WorkflowType:       run.WorkflowType,
+				TaskTitle:          run.TaskTitle,
+				CurrentRole:        roleString(input.Context["role"]),
+				StartedAt:          run.StartedAt,
+				Status:             "active",
+			})
+			log.Printf("[workflow-session] bind session_id=%s workflow_run=%s workflow_type=%s project=%s", sessionID, run.ID, run.WorkflowType, run.ProjectID)
+		}
 	}
 	writeJSON(w, http.StatusCreated, run)
 }

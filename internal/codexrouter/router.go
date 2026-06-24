@@ -20,6 +20,49 @@ const defaultBaseInstructions = "You are Codex, a coding agent. Follow the devel
 
 const chatgptCodexBaseURL = "https://chatgpt.com/backend-api/codex"
 
+const workflowRunIDHeader = "X-Nexus-Workflow-Run-Id"
+const workflowRoleHeader = "X-Nexus-Workflow-Role"
+const unknownWorkflowRole = "unknown"
+
+type TokenUsageEvent struct {
+	WorkflowRunID     string `json:"workflowRunId"`
+	Role              string `json:"role,omitempty"`
+	Model             string `json:"model"`
+	InputTokens       int    `json:"inputTokens"`
+	CachedInputTokens int    `json:"cachedInputTokens"`
+	OutputTokens      int    `json:"outputTokens"`
+	TotalTokens       int    `json:"totalTokens"`
+	CreatedAt         string `json:"createdAt"`
+}
+
+type WorkflowRouteEvent struct {
+	WorkflowRunID  string `json:"workflowRunId"`
+	Role           string `json:"role,omitempty"`
+	Model          string `json:"model"`
+	StatusCode     int    `json:"statusCode"`
+	DurationMS     int64  `json:"durationMs"`
+	RequestBytes   int    `json:"requestBytes"`
+	ToolCount      int    `json:"toolCount"`
+	InputItemCount int    `json:"inputItemCount"`
+	ToolCallCount  int    `json:"toolCallCount"`
+	CreatedAt      string `json:"createdAt"`
+}
+
+type WorkflowSessionLookup interface {
+	LookupWorkflowSession(sessionID string) (WorkflowSessionContext, bool, error)
+}
+
+type WorkflowSessionContext struct {
+	WorkflowRunID string
+	Role          string
+}
+
+type TokenUsageRecorder interface {
+	RecordTokenUsage(TokenUsageEvent) error
+	RecordWorkflowRouteEvent(WorkflowRouteEvent) error
+	WorkflowSessionLookup
+}
+
 var regexpNonAlnum = regexp.MustCompile(`[^A-Za-z0-9]`)
 
 type Config struct {
@@ -43,9 +86,10 @@ type Route struct {
 }
 
 type Service struct {
-	config  Config
-	client  *http.Client
-	history *responseHistory
+	config        Config
+	client        *http.Client
+	history       *responseHistory
+	usageRecorder TokenUsageRecorder
 }
 
 func NewService(config Config) *Service {
@@ -58,8 +102,7 @@ func NewService(config Config) *Service {
 	return &Service{
 		config:  config,
 		history: newResponseHistory(),
-		// 不设全局 Timeout：SSE 流式响应可能持续数分钟，全局超时会提前断流。
-		// 仅在 Transport 层限制 TCP 连接建立时间（30s）和响应头等待时间（60s）。
+		// SSE responses can last for minutes; keep timeout limits at the Transport layer.
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext: (&net.Dialer{
@@ -73,6 +116,10 @@ func NewService(config Config) *Service {
 			},
 		},
 	}
+}
+
+func (s *Service) SetTokenUsageRecorder(recorder TokenUsageRecorder) {
+	s.usageRecorder = recorder
 }
 
 func DefaultConfig() Config {
@@ -248,21 +295,23 @@ func (s *Service) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	route := s.routeForModel(request.Model)
 	reqStats := requestLogStats(request.Raw, len(body))
-	log.Printf("[codex] <- model=%s route=%s api=%s body_bytes=%d stream=%v tool_count=%d input_items_count=%d previous_response_id=%s",
-		request.Model, route.ID, route.API, reqStats.BodyBytes, request.Stream,
+	sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
+	workflowRunID, workflowRole := s.workflowContext(r)
+	log.Printf("[codex] <- session_id=%s workflow_run=%s role=%s model=%s route=%s api=%s body_bytes=%d stream=%v tool_count=%d input_items_count=%d previous_response_id=%s",
+		stringOr(sessionID, "-"), stringOr(workflowRunID, "-"), stringOr(workflowRole, "unknown"), request.Model, route.ID, route.API, reqStats.BodyBytes, request.Stream,
 		reqStats.ToolCount, reqStats.InputItemsCount, reqStats.PreviousResponseID,
 	)
 	switch route.API {
 	case "responses":
-		s.proxyResponses(w, r, request, route)
+		s.proxyResponses(w, r, request, route, reqStats)
 	case "chat_completions":
-		s.proxyChatCompletions(w, r, request, route)
+		s.proxyChatCompletions(w, r, request, route, reqStats)
 	default:
 		writeJSON(w, http.StatusInternalServerError, openAIError("unsupported route api: "+route.API, http.StatusInternalServerError))
 	}
 }
 
-func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request responseRequest, route Route) {
+func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request responseRequest, route Route, reqStats requestStats) {
 	payload := request.Raw
 	if len(payload) == 0 {
 		payload = map[string]any{}
@@ -294,6 +343,9 @@ func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request
 	response, err := s.client.Do(upstream)
 	if err != nil {
 		log.Printf("[codex] -> route=%s upstream_error=%v", route.ID, err)
+		if recErr := s.recordRouteEvent(r, request, route, reqStats, http.StatusBadGateway, time.Since(t0).Milliseconds(), 0); recErr != nil {
+			log.Printf("[codex] route_event_record_error route=%s err=%v", route.ID, recErr)
+		}
 		writeJSON(w, http.StatusBadGateway, openAIError(err.Error(), http.StatusBadGateway))
 		return
 	}
@@ -302,16 +354,22 @@ func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request
 
 	copyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	// 对 SSE 流必须逐块 flush，否则数据积压在缓冲区，客户端看到"一直处理中"。
+	// 鐎?SSE 濞翠礁绻€妞ゅ鈧劕娼?flush閿涘苯鎯侀崚娆愭殶閹诡喚袧閸樺婀紓鎾冲暱閸栫尨绱濈€广垺鍩涚粩顖滄箙閸?娑撯偓閻╂潙顦╅悶鍡曡厬"閵?
 	usage := newResponseUsageTracker(request.Stream)
 	flushWriter(w, response.Body, usage)
 	usage.finish()
-	log.Printf("[codex] -> route=%s status=%d usage_input=%s cached=%s output=%s total=%dms",
-		route.ID, response.StatusCode, usage.inputTokens(), usage.cachedTokens(), usage.outputTokens(), time.Since(t0).Milliseconds())
+	if err := s.recordTokenUsage(r, request, route, usage); err != nil {
+		log.Printf("[codex] token_usage_record_error route=%s err=%v", route.ID, err)
+	}
+	if err := s.recordRouteEvent(r, request, route, reqStats, response.StatusCode, time.Since(t0).Milliseconds(), usage.toolCallCount()); err != nil {
+		log.Printf("[codex] route_event_record_error route=%s err=%v", route.ID, err)
+	}
+	workflowRunID, workflowRole := s.workflowContext(r)
+	log.Printf("[codex] -> session_id=%s workflow_run=%s role=%s route=%s status=%d duration_ms=%d usage_input=%s cached=%s output=%s total_tokens=%d tool_calls=%d",
+		stringOr(strings.TrimSpace(r.Header.Get("Session-Id")), "-"), stringOr(workflowRunID, "-"), stringOr(workflowRole, "unknown"), route.ID, response.StatusCode, time.Since(t0).Milliseconds(), usage.inputTokens(), usage.cachedTokens(), usage.outputTokens(), usage.totalTokenCount(), usage.toolCallCount())
 }
 
-// flushWriter 从 src 读取数据并逐块写入 dst，每写一块立即 flush。
-// 这对 SSE 流式响应至关重要：Codex Desktop 依赖每个事件的即时到达来更新 UI。
+// flushWriter copies response chunks and flushes after each write for SSE clients.
 func flushWriter(w http.ResponseWriter, src io.Reader, usage *responseUsageTracker) {
 	flusher, canFlush := w.(http.Flusher)
 	buf := make([]byte, 4096)
@@ -353,7 +411,7 @@ func isPublicOpenAIAPIBaseURL(value string) bool {
 	return strings.EqualFold(parsed.Hostname(), "api.openai.com")
 }
 
-func (s *Service) proxyChatCompletions(w http.ResponseWriter, r *http.Request, request responseRequest, route Route) {
+func (s *Service) proxyChatCompletions(w http.ResponseWriter, r *http.Request, request responseRequest, route Route, reqStats requestStats) {
 	converted := responsesToChatRequest(request, route, s.history)
 	data, err := json.Marshal(converted.body)
 	if err != nil {
@@ -372,18 +430,28 @@ func (s *Service) proxyChatCompletions(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 
+	t0 := time.Now()
 	response, err := s.client.Do(upstream)
 	if err != nil {
+		if recErr := s.recordRouteEvent(r, request, route, reqStats, http.StatusBadGateway, time.Since(t0).Milliseconds(), 0); recErr != nil {
+			log.Printf("[codex] route_event_record_error route=%s err=%v", route.ID, recErr)
+		}
 		writeJSON(w, http.StatusBadGateway, openAIError(err.Error(), http.StatusBadGateway))
 		return
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
+		if recErr := s.recordRouteEvent(r, request, route, reqStats, http.StatusBadGateway, time.Since(t0).Milliseconds(), 0); recErr != nil {
+			log.Printf("[codex] route_event_record_error route=%s err=%v", route.ID, recErr)
+		}
 		writeJSON(w, http.StatusBadGateway, openAIError(err.Error(), http.StatusBadGateway))
 		return
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if recErr := s.recordRouteEvent(r, request, route, reqStats, response.StatusCode, time.Since(t0).Milliseconds(), 0); recErr != nil {
+			log.Printf("[codex] route_event_record_error route=%s err=%v", route.ID, recErr)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(response.StatusCode)
 		_, _ = w.Write(body)
@@ -392,6 +460,9 @@ func (s *Service) proxyChatCompletions(w http.ResponseWriter, r *http.Request, r
 
 	var chat map[string]any
 	if err := json.Unmarshal(body, &chat); err != nil {
+		if recErr := s.recordRouteEvent(r, request, route, reqStats, http.StatusBadGateway, time.Since(t0).Milliseconds(), 0); recErr != nil {
+			log.Printf("[codex] route_event_record_error route=%s err=%v", route.ID, recErr)
+		}
 		writeJSON(w, http.StatusBadGateway, openAIError("upstream returned non-JSON body: "+truncate(string(body), 500), http.StatusBadGateway))
 		return
 	}
@@ -401,6 +472,14 @@ func (s *Service) proxyChatCompletions(w http.ResponseWriter, r *http.Request, r
 		requestedModel = route.ID
 	}
 	resp := chatResponseToResponse(chat, requestedModel, converted.toolContext)
+	usage := newResponseUsageTracker(false)
+	usage.updateFromObject(resp)
+	if err := s.recordTokenUsage(r, request, route, usage); err != nil {
+		log.Printf("[codex] token_usage_record_error route=%s err=%v", route.ID, err)
+	}
+	if err := s.recordRouteEvent(r, request, route, reqStats, response.StatusCode, time.Since(t0).Milliseconds(), countResponseToolCalls(resp)); err != nil {
+		log.Printf("[codex] route_event_record_error route=%s err=%v", route.ID, err)
+	}
 
 	// Record conversation history for previous_response_id chaining.
 	if respID, ok := resp["id"].(string); ok {
@@ -418,6 +497,98 @@ func (s *Service) proxyChatCompletions(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Service) workflowContext(r *http.Request) (string, string) {
+	workflowRunID := strings.TrimSpace(r.Header.Get(workflowRunIDHeader))
+	role := normalizeWorkflowRole(r.Header.Get(workflowRoleHeader))
+	if workflowRunID != "" {
+		return workflowRunID, role
+	}
+	if s == nil || s.usageRecorder == nil {
+		return "", role
+	}
+	sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
+	if sessionID == "" {
+		return "", role
+	}
+	ctx, ok, err := s.usageRecorder.LookupWorkflowSession(sessionID)
+	if err != nil || !ok {
+		return "", role
+	}
+	if strings.TrimSpace(ctx.Role) != "" && role == unknownWorkflowRole {
+		role = normalizeWorkflowRole(ctx.Role)
+	}
+	return strings.TrimSpace(ctx.WorkflowRunID), role
+}
+
+func (s *Service) recordTokenUsage(r *http.Request, request responseRequest, route Route, usage *responseUsageTracker) error {
+	if s == nil || s.usageRecorder == nil || usage == nil {
+		return nil
+	}
+	workflowRunID, role := s.workflowContext(r)
+	if workflowRunID == "" {
+		return nil
+	}
+	model := strings.TrimSpace(request.Model)
+	if model == "" {
+		model = route.ID
+	}
+	input := usage.inputTokenCount()
+	cached := usage.cachedTokenCount()
+	output := usage.outputTokenCount()
+	total := usage.totalTokenCount()
+	if total == 0 {
+		total = input + output
+	}
+	if input == 0 && cached == 0 && output == 0 && total == 0 {
+		return nil
+	}
+	return s.usageRecorder.RecordTokenUsage(TokenUsageEvent{
+		WorkflowRunID:     workflowRunID,
+		Role:              role,
+		Model:             model,
+		InputTokens:       input,
+		CachedInputTokens: cached,
+		OutputTokens:      output,
+		TotalTokens:       total,
+		CreatedAt:         time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (s *Service) recordRouteEvent(r *http.Request, request responseRequest, route Route, stats requestStats, statusCode int, durationMS int64, observedToolCallCount int) error {
+	if s == nil || s.usageRecorder == nil {
+		return nil
+	}
+	workflowRunID, role := s.workflowContext(r)
+	if workflowRunID == "" {
+		return nil
+	}
+	model := strings.TrimSpace(request.Model)
+	if model == "" {
+		model = route.ID
+	}
+	return s.usageRecorder.RecordWorkflowRouteEvent(WorkflowRouteEvent{
+		WorkflowRunID:  workflowRunID,
+		Role:           role,
+		Model:          model,
+		StatusCode:     statusCode,
+		DurationMS:     durationMS,
+		RequestBytes:   stats.BodyBytes,
+		ToolCount:      stats.ToolCount,
+		InputItemCount: stats.InputItemsCount,
+		ToolCallCount:  observedToolCallCount,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func normalizeWorkflowRole(role string) string {
+	role = strings.TrimSpace(strings.ToLower(role))
+	role = strings.ReplaceAll(role, " ", "-")
+	if role == "" {
+		return unknownWorkflowRole
+	}
+	return role
 }
 
 func truncate(s string, max int) string {
@@ -516,12 +687,14 @@ type upstreamResponseUsage struct {
 	InputTokens       *int
 	CachedInputTokens *int
 	OutputTokens      *int
+	TotalTokens       *int
 }
 
 type responseUsageTracker struct {
-	stream bool
-	buf    strings.Builder
-	usage  upstreamResponseUsage
+	stream                bool
+	buf                   strings.Builder
+	usage                 upstreamResponseUsage
+	observedToolCallCount int
 }
 
 func newResponseUsageTracker(stream bool) *responseUsageTracker {
@@ -564,11 +737,41 @@ func (t *responseUsageTracker) outputTokens() string {
 	return optionalInt(t.usage.OutputTokens)
 }
 
+func (t *responseUsageTracker) inputTokenCount() int {
+	return optionalIntValue(t.usage.InputTokens)
+}
+
+func (t *responseUsageTracker) cachedTokenCount() int {
+	return optionalIntValue(t.usage.CachedInputTokens)
+}
+
+func (t *responseUsageTracker) outputTokenCount() int {
+	return optionalIntValue(t.usage.OutputTokens)
+}
+
+func (t *responseUsageTracker) totalTokenCount() int {
+	return optionalIntValue(t.usage.TotalTokens)
+}
+
+func (t *responseUsageTracker) toolCallCount() int {
+	if t == nil {
+		return 0
+	}
+	return t.observedToolCallCount
+}
+
 func optionalInt(value *int) string {
 	if value == nil {
 		return "-"
 	}
 	return fmt.Sprint(*value)
+}
+
+func optionalIntValue(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (t *responseUsageTracker) consumeSSE(final bool) {
@@ -606,6 +809,9 @@ func (t *responseUsageTracker) updateFromObject(obj map[string]any) {
 	if usage, ok := obj["usage"].(map[string]any); ok {
 		t.updateFromUsage(usage)
 	}
+	if object, _ := obj["object"].(string); object == "response" {
+		t.observedToolCallCount = countResponseToolCalls(obj)
+	}
 	if response, ok := obj["response"].(map[string]any); ok {
 		t.updateFromObject(response)
 	}
@@ -614,6 +820,7 @@ func (t *responseUsageTracker) updateFromObject(obj map[string]any) {
 func (t *responseUsageTracker) updateFromUsage(usage map[string]any) {
 	setIntFromAny(&t.usage.InputTokens, firstDefined(usage["input_tokens"], usage["prompt_tokens"]))
 	setIntFromAny(&t.usage.OutputTokens, firstDefined(usage["output_tokens"], usage["completion_tokens"]))
+	setIntFromAny(&t.usage.TotalTokens, usage["total_tokens"])
 
 	if inputDetails, ok := firstDefined(usage["input_tokens_details"], usage["prompt_tokens_details"]).(map[string]any); ok {
 		setIntFromAny(&t.usage.CachedInputTokens, firstDefined(inputDetails["cached_tokens"], inputDetails["cached_input_tokens"]))
@@ -640,6 +847,33 @@ func intFromAny(value any) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func countResponseToolCalls(response map[string]any) int {
+	if response == nil {
+		return 0
+	}
+	count := 0
+	if output, ok := response["output"].([]map[string]any); ok {
+		for _, item := range output {
+			if itemType, _ := item["type"].(string); itemType != "" && itemType != "message" {
+				count++
+			}
+		}
+		return count
+	}
+	if output, ok := response["output"].([]any); ok {
+		for _, raw := range output {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if itemType, _ := item["type"].(string); itemType != "" && itemType != "message" {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func modelCatalogEntry(route Route, index int) map[string]any {
@@ -677,8 +911,7 @@ func modelCatalogEntry(route Route, index int) map[string]any {
 	if priority == 0 && index > 0 {
 		priority = index
 	}
-	// input_modalities: responses API (GPT subscription) 支持图片；
-	// chat_completions 路由只支持 text，除非 Route 上明确声明了 image。
+	// Responses routes support image input; chat-completions routes are text-only in v1.
 	inputModalities := []string{"text"}
 	if route.API == "responses" {
 		inputModalities = []string{"text", "image"}

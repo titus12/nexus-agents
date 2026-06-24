@@ -1781,6 +1781,84 @@ func TestCodexRouterResponsesPassesGPTSubscriptionBearer(t *testing.T) {
 	}
 }
 
+func TestCodexRouterTokenUsageHeadersAttachToWorkflowCompletion(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":      "chatcmpl_token",
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "done"}}},
+			"usage": map[string]any{
+				"prompt_tokens":         100,
+				"completion_tokens":     20,
+				"total_tokens":          120,
+				"prompt_tokens_details": map[string]any{"cached_tokens": 60},
+			},
+		})
+	}))
+	defer upstream.Close()
+	router := codexrouter.NewService(codexrouter.Config{
+		DefaultModel: "deepseek-v4-pro",
+		Routes: []codexrouter.Route{{
+			ID:       "deepseek-v4-pro",
+			API:      "chat_completions",
+			BaseURL:  upstream.URL,
+			Model:    "deepseek-v4-pro",
+			AuthMode: "api_key",
+			APIKey:   "provider-key",
+		}},
+	})
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), router, defaultLocalDirectoryPicker{}, evaluationStore)
+
+	start := requestJSON(t, server, http.MethodPost, "/api/workflow-runs/start", `{"projectId":"sample","workflowType":"bugfix","workflowTemplateId":"bugfix"}`)
+	if start.Code != http.StatusCreated {
+		t.Fatalf("start workflow status=%d body=%s", start.Code, start.Body.String())
+	}
+	var started struct {
+		ID string `json:"id"`
+	}
+	decodeJSON(t, start, &started)
+
+	request := httptest.NewRequest(http.MethodPost, "/proxy/codex/v1/responses", strings.NewReader(`{"model":"deepseek-v4-pro","input":"hello","stream":false}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Nexus-Workflow-Run-Id", started.ID)
+	request.Header.Set("X-Nexus-Workflow-Role", "worker")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("proxy response status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	complete := requestJSON(t, server, http.MethodPost, "/api/workflow-runs/"+started.ID+"/complete", `{"submittedStatus":"success"}`)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete workflow status=%d body=%s", complete.Code, complete.Body.String())
+	}
+	var finished struct {
+		TaskRun catalog.TaskRun `json:"taskRun"`
+	}
+	decodeJSON(t, complete, &finished)
+	usage, ok := finished.TaskRun.Metrics["tokenUsage"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected token usage metric, got %#v", finished.TaskRun.Metrics)
+	}
+	if usage["workflowRunId"] != started.ID || int(usage["requestCount"].(float64)) != 1 || int(usage["totalTokens"].(float64)) != 120 {
+		t.Fatalf("unexpected token usage metric: %#v", usage)
+	}
+	routeMetrics, ok := finished.TaskRun.Metrics["routeMetrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected route metrics, got %#v", finished.TaskRun.Metrics)
+	}
+	if routeMetrics["workflowRunId"] != started.ID || int(routeMetrics["requestCount"].(float64)) != 1 || int(routeMetrics["successCount"].(float64)) != 1 {
+		t.Fatalf("unexpected route metrics: %#v", routeMetrics)
+	}
+	roles, ok := routeMetrics["roles"].(map[string]any)
+	if !ok || roles["worker"] == nil {
+		t.Fatalf("expected worker role route metrics, got %#v", routeMetrics)
+	}
+}
+
 func assertTemplateIDs[T any](t *testing.T, label string, items []T, want []string) {
 	t.Helper()
 	if len(items) != len(want) {
