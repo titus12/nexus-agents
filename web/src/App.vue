@@ -197,11 +197,19 @@ const routeSaveFeedback = ref("");
 const selectedInfrastructure = ref<InfrastructureItem | null>(null);
 const infrastructureBusy = ref(false);
 const infrastructureFeedback = ref("");
+const WORKFLOW_NODE_WIDTH = 236;
+const WORKFLOW_NODE_HEIGHT = 126;
+const WORKFLOW_STAGE_PADDING = 20;
+const WORKFLOW_DRAG_THRESHOLD = 4;
+const workflowCanvasRef = ref<HTMLElement | null>(null);
 const nodeDragState = ref<{
   nodeId: string;
   pointerId: number;
   offsetX: number;
   offsetY: number;
+  startX: number;
+  startY: number;
+  dragging: boolean;
 } | null>(null);
 
 const importForm = ref<ProjectInput>({
@@ -658,19 +666,39 @@ function projectCopyFooterChips(copy: ProjectCopy): string[] {
 function workflowEdgePath(edge: WorkflowEdge): string {
   const endpoints = workflowEdgeEndpoints(edge);
   if (!endpoints) return "";
-  const { startX, startY, endX, endY } = endpoints;
-  const curve = Math.max(90, Math.abs(endX - startX) * 0.48);
-  return `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`;
+  const { startX, startY, endX, endY, startSide, endSide } = endpoints;
+  if ((startSide === "bottom" && endSide === "top") || (startSide === "top" && endSide === "bottom")) {
+    const midY = startY + (endY - startY) / 2;
+    return `M ${startX} ${startY} L ${startX} ${midY} L ${endX} ${midY} L ${endX} ${endY}`;
+  }
+  if ((startSide === "right" && endSide === "left") || (startSide === "left" && endSide === "right")) {
+    const midX = startX + (endX - startX) / 2;
+    return `M ${startX} ${startY} L ${midX} ${startY} L ${midX} ${endY} L ${endX} ${endY}`;
+  }
+  const horizontalGap = Math.abs(endX - startX);
+  const verticalGap = Math.abs(endY - startY);
+  if (verticalGap >= horizontalGap) {
+    const midY = startY + (endY - startY) / 2;
+    return `M ${startX} ${startY} L ${startX} ${midY} L ${endX} ${midY} L ${endX} ${endY}`;
+  }
+  const midX = startX + (endX - startX) / 2;
+  return `M ${startX} ${startY} L ${midX} ${startY} L ${midX} ${endY} L ${endX} ${endY}`;
 }
 
 function workflowEdgeLabelX(edge: WorkflowEdge): number {
   const endpoints = workflowEdgeEndpoints(edge);
-  return endpoints ? (endpoints.startX + endpoints.endX) / 2 : 0;
+  if (!endpoints) return 0;
+  return (endpoints.startX + endpoints.endX) / 2;
 }
 
 function workflowEdgeLabelY(edge: WorkflowEdge): number {
   const endpoints = workflowEdgeEndpoints(edge);
-  return endpoints ? (endpoints.startY + endpoints.endY) / 2 - 10 : 0;
+  if (!endpoints) return 0;
+  const horizontalGap = Math.abs(endpoints.endX - endpoints.startX);
+  const verticalGap = Math.abs(endpoints.endY - endpoints.startY);
+  return verticalGap >= horizontalGap
+    ? endpoints.startY + (endpoints.endY - endpoints.startY) / 2 - 10
+    : (endpoints.startY + endpoints.endY) / 2 - 10;
 }
 
 function workflowEdgeEndpoints(edge: WorkflowEdge) {
@@ -678,16 +706,115 @@ function workflowEdgeEndpoints(edge: WorkflowEdge) {
   const from = nodes.find((node) => node.id === edge.from);
   const to = nodes.find((node) => node.id === edge.to);
   if (!from || !to) return null;
+  const fromCenterX = from.x + WORKFLOW_NODE_WIDTH / 2;
+  const fromCenterY = from.y + WORKFLOW_NODE_HEIGHT / 2;
+  const toCenterX = to.x + WORKFLOW_NODE_WIDTH / 2;
+  const toCenterY = to.y + WORKFLOW_NODE_HEIGHT / 2;
+  const dx = toCenterX - fromCenterX;
+  const dy = toCenterY - fromCenterY;
+
+  let startSide: "top" | "bottom" | "left" | "right";
+  let endSide: "top" | "bottom" | "left" | "right";
+  const preferredAnchors = workflowPreferredAnchors(edge);
+  if (preferredAnchors) {
+    startSide = preferredAnchors.startSide;
+    endSide = preferredAnchors.endSide;
+  } else if (Math.abs(dy) >= Math.abs(dx)) {
+    startSide = dy >= 0 ? "bottom" : "top";
+    endSide = dy >= 0 ? "top" : "bottom";
+  } else {
+    startSide = dx >= 0 ? "right" : "left";
+    endSide = dx >= 0 ? "left" : "right";
+  }
+
+  const start = workflowNodeAnchor(from, startSide);
+  const end = workflowNodeAnchor(to, endSide);
   return {
-    startX: from.x + 236,
-    startY: from.y + 63,
-    endX: to.x,
-    endY: to.y + 63,
+    startX: start.x,
+    startY: start.y,
+    endX: end.x,
+    endY: end.y,
+    startSide,
+    endSide,
   };
 }
 
+function workflowPreferredAnchors(edge: WorkflowEdge):
+  | { startSide: "top" | "bottom" | "left" | "right"; endSide: "top" | "bottom" | "left" | "right" }
+  | null {
+  const verticalFlow = new Set([
+    "start->owner",
+    "owner->reproduce",
+    "reproduce->evidence_gate",
+    "evidence_gate->diagnose",
+    "diagnose->patch",
+    "patch->verify",
+    "verify->loop_control",
+    "loop_control->capsule",
+  ]);
+  const rightBranch = new Set([
+    "verify->review",
+    "review->loop_control",
+    "loop_control->exit_gate",
+    "exit_gate->submit",
+  ]);
+  const leftBranch = new Set([
+    "evidence_gate->probe",
+    "probe->exit_gate",
+    "capsule->diagnose",
+  ]);
+  const key = `${edge.from}->${edge.to}`;
+  if (verticalFlow.has(key)) {
+    return { startSide: "bottom", endSide: "top" };
+  }
+  if (rightBranch.has(key)) {
+    return { startSide: "right", endSide: "left" };
+  }
+  if (leftBranch.has(key)) {
+    return { startSide: "left", endSide: "right" };
+  }
+  return null;
+}
+
+function workflowNodeAnchor(node: WorkflowNode, side: "top" | "bottom" | "left" | "right") {
+  switch (side) {
+    case "top":
+      return { x: node.x + WORKFLOW_NODE_WIDTH / 2, y: node.y };
+    case "bottom":
+      return { x: node.x + WORKFLOW_NODE_WIDTH / 2, y: node.y + WORKFLOW_NODE_HEIGHT };
+    case "left":
+      return { x: node.x, y: node.y + WORKFLOW_NODE_HEIGHT / 2 };
+    case "right":
+    default:
+      return { x: node.x + WORKFLOW_NODE_WIDTH, y: node.y + WORKFLOW_NODE_HEIGHT / 2 };
+  }
+}
+
+const workflowStageWidth = computed(() => {
+  const nodes = workflowGraph.value?.nodes ?? [];
+  const maxRight = nodes.reduce((max, node) => Math.max(max, node.x + WORKFLOW_NODE_WIDTH), 0);
+  return Math.max(1180, maxRight + 80);
+});
+
+const workflowStageHeight = computed(() => {
+  const nodes = workflowGraph.value?.nodes ?? [];
+  const maxBottom = nodes.reduce((max, node) => Math.max(max, node.y + WORKFLOW_NODE_HEIGHT), 0);
+  return Math.max(960, maxBottom + 100);
+});
+
 function workflowEdgeKey(edge: WorkflowEdge, index: number): string {
   return `${edge.from}->${edge.to}:${index}`;
+}
+
+function workflowNodeDisplayName(nodeId: string): string {
+  const node = workflowGraph.value?.nodes.find((item) => item.id === nodeId);
+  return node?.label || nodeId;
+}
+
+function workflowEdgeDisplay(edge: WorkflowEdge): string {
+  const from = workflowNodeDisplayName(edge.from);
+  const to = workflowNodeDisplayName(edge.to);
+  return edge.label ? `${from} --${edge.label}--> ${to}` : `${from} -> ${to}`;
 }
 
 function selectWorkflowEdge(edge: WorkflowEdge, index: number) {
@@ -734,6 +861,9 @@ function startWorkflowNodeDrag(event: PointerEvent, node: WorkflowNode) {
     pointerId: event.pointerId,
     offsetX: point.x - node.x,
     offsetY: point.y - node.y,
+    startX: point.x,
+    startY: point.y,
+    dragging: false,
   };
   (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
 }
@@ -741,8 +871,22 @@ function startWorkflowNodeDrag(event: PointerEvent, node: WorkflowNode) {
 function dragWorkflowNode(event: PointerEvent) {
   if (!nodeDragState.value || !workflowGraph.value) return;
   const point = workflowStagePoint(event);
-  const nextX = clamp(point.x - nodeDragState.value.offsetX, 20, 1244);
-  const nextY = clamp(point.y - nodeDragState.value.offsetY, 20, 474);
+  const movedX = point.x - nodeDragState.value.startX;
+  const movedY = point.y - nodeDragState.value.startY;
+  if (!nodeDragState.value.dragging && Math.hypot(movedX, movedY) < WORKFLOW_DRAG_THRESHOLD) {
+    return;
+  }
+  nodeDragState.value.dragging = true;
+  const nextX = clamp(
+    point.x - nodeDragState.value.offsetX,
+    WORKFLOW_STAGE_PADDING,
+    workflowStageWidth.value - WORKFLOW_NODE_WIDTH - WORKFLOW_STAGE_PADDING,
+  );
+  const nextY = clamp(
+    point.y - nodeDragState.value.offsetY,
+    WORKFLOW_STAGE_PADDING,
+    workflowStageHeight.value - WORKFLOW_NODE_HEIGHT - WORKFLOW_STAGE_PADDING,
+  );
   workflowGraph.value = moveWorkflowNode(workflowGraph.value, nodeDragState.value.nodeId, nextX, nextY);
 }
 
@@ -758,10 +902,11 @@ function endWorkflowNodeDrag(event: PointerEvent) {
 
 function workflowStagePoint(event: PointerEvent) {
   const rect = workflowStageRef.value?.getBoundingClientRect();
-  if (!rect) return { x: 0, y: 0 };
+  const canvasRect = workflowCanvasRef.value?.getBoundingClientRect();
+  if (!rect || !canvasRect) return { x: 0, y: 0 };
   return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top,
+    x: event.clientX - canvasRect.left + (workflowCanvasRef.value?.scrollLeft ?? 0),
+    y: event.clientY - canvasRect.top + (workflowCanvasRef.value?.scrollTop ?? 0),
   };
 }
 
@@ -1943,9 +2088,14 @@ onMounted(loadData);
                   <button class="btn-secondary" type="button" @click="addWorkflowTemplateToProject">从模板添加</button>
                   <button class="btn-primary" type="button" @click="createWorkflow">新建工作流</button>
                 </div>
-                <div class="workflow-canvas">
-                  <div v-if="workflowGraph" ref="workflowStageRef" class="workflow-stage">
-                  <svg class="workflow-edges" viewBox="0 0 1500 620" aria-hidden="true">
+                <div ref="workflowCanvasRef" class="workflow-canvas">
+                  <div
+                    v-if="workflowGraph"
+                    ref="workflowStageRef"
+                    class="workflow-stage"
+                    :style="{ width: `${workflowStageWidth}px`, minWidth: `${workflowStageWidth}px`, height: `${workflowStageHeight}px`, minHeight: `${workflowStageHeight}px` }"
+                  >
+                  <svg class="workflow-edges" :viewBox="`0 0 ${workflowStageWidth} ${workflowStageHeight}`" :style="{ width: `${workflowStageWidth}px`, height: `${workflowStageHeight}px` }" aria-hidden="true">
                     <defs>
                       <marker id="workflow-edge-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
                         <path d="M 0 0 L 10 5 L 0 10 z"></path>
@@ -2031,8 +2181,8 @@ onMounted(loadData);
                       <input class="field-input" :value="selectedEdge.label" :readonly="!workflowEditorMode" @input="updateSelectedWorkflowEdgeLabel(inputValue($event))" />
                     </label>
                     <div class="detail-list">
-                      <div><span>From</span><strong>{{ selectedEdge.from }}</strong></div>
-                      <div><span>To</span><strong>{{ selectedEdge.to }}</strong></div>
+                      <div><span>From</span><strong>{{ workflowNodeDisplayName(selectedEdge.from) }}</strong></div>
+                      <div><span>To</span><strong>{{ workflowNodeDisplayName(selectedEdge.to) }}</strong></div>
                     </div>
                     <button v-if="workflowEditorMode" class="btn-secondary danger full" type="button" @click="deleteSelectedWorkflowEdge">删除连线</button>
                   </template>
@@ -2049,7 +2199,7 @@ onMounted(loadData);
                       <div><span>path</span><strong>{{ selectedWorkflowCard.copy.path }}</strong></div>
                     </div>
                     <pre v-if="selectedWorkflowCard?.copy?.diff" class="code-block">{{ selectedWorkflowCard.copy.diff }}</pre>
-                    <pre class="code-block">{{ workflowGraph.edges.map((edge) => `${edge.from} -> ${edge.to}`).join('\n') }}</pre>
+                    <pre class="code-block">{{ workflowGraph.edges.map(workflowEdgeDisplay).join('\n') }}</pre>
                   </template>
                   <button v-if="workflowEditorMode" class="btn-primary full" type="button" @click="saveWorkflow">保存修改</button>
                 </div>

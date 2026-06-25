@@ -477,8 +477,8 @@ tr:last-child td { border-bottom: none; }
 }
 .icon-btn:hover { color: var(--text-primary); border-color: var(--border-light); }
 .workflow-shell {
-  height: calc(100vh - 190px);
-  min-height: 560px;
+  height: calc(100vh - 136px);
+  min-height: 720px;
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr) 300px;
   gap: 12px;
@@ -611,7 +611,7 @@ tr:last-child td { border-bottom: none; }
   min-height: 36px;
   margin: 8px 0 10px;
 }
-.workflow-library .panel-body { overflow-y: auto; max-height: calc(100vh - 252px); padding: 12px; }
+.workflow-library .panel-body { overflow-y: auto; max-height: calc(100vh - 198px); padding: 12px; }
 .workflow-list { display: grid; gap: 10px; min-width: 0; overflow-x: hidden; }
 .workflow-card {
   min-width: 0;
@@ -661,7 +661,8 @@ tr:last-child td { border-bottom: none; }
   min-width: 0;
   min-height: 0;
   position: relative;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   background:
     linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px),
@@ -670,12 +671,10 @@ tr:last-child td { border-bottom: none; }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
 }
-.workflow-stage { position: relative; width: 1500px; height: 620px; user-select: none; }
+.workflow-stage { position: relative; user-select: none; }
 .workflow-edges {
   position: absolute;
   inset: 0;
-  width: 1500px;
-  height: 620px;
   z-index: 0;
   pointer-events: visiblePainted;
   overflow: visible;

@@ -2202,11 +2202,11 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "bugfix",
-			name:      "$wf-go-bugfix Bug 排查修复",
+			name:      "$wf-go-bugfix Bug \u6392\u67e5\u4fee\u590d",
 			trigger:   "$wf-go-bugfix",
 			owner:     "debugger",
-			summary:   "报错、异常或 crash 排查，先定位根因再修复，禁止猜测性修改。",
-			content:   "debugger 日志优先排查；复杂或跨模块升级 oracle；定位根因后加载 coding-rules 修复；用复现路径和 build 验证。",
+			summary:   "Go \u62a5\u9519\u3001\u5d29\u6e83\u3001\u5931\u8d25\u6d4b\u8bd5\u6216\u884c\u4e3a\u7c7b bug \u6392\u67e5\uff1b\u4ee5\u590d\u73b0\u548c\u8bc1\u636e\u4e3a\u5148\uff0c\u56f4\u7ed5\u6700\u5c0f\u6839\u56e0\u4fee\u590d\u505a\u6709\u754c loop\u3002",
+			content:   "Bugfix Owner \u7ef4\u62a4 Loop Capsule \u548c\u9000\u51fa\u6761\u4ef6\uff1b\u5148\u590d\u73b0\u548c\u8bca\u65ad\uff0c\u6ca1\u53ef\u9760\u7ebf\u7d22\u5148\u52a0\u5173\u952e\u65e5\u5fd7\uff1b\u6709\u8bc1\u636e\u540e\u6700\u5c0f\u4fee\u590d\u5e76\u9a8c\u8bc1\uff0c\u5931\u8d25\u5219\u538b\u7f29\u4e0a\u4e0b\u6587\u8fdb\u5165\u4e0b\u4e00\u8f6e\u6216\u9000\u51fa\u63d0\u4ea4\u8bc1\u636e\u3002",
 			tags:      []string{"routing", "bugfix", "root-cause"},
 			status:    "ready",
 			updatedAt: "2026-06-20 11:02",
@@ -2454,6 +2454,42 @@ func btdWorkflowGraphs() map[string]WorkflowGraph {
 }
 
 func workflowGraphFromRoutingSpec(spec btdWorkflowSpec) WorkflowGraph {
+	if spec.id == "bugfix" {
+		return WorkflowGraph{
+			ID:   spec.id,
+			Name: spec.name,
+			Nodes: []WorkflowNode{
+				{ID: "start", Type: "input", Category: "event", Label: "\u5f00\u59cb", Agent: "-", Detail: "\u7528\u6237 bug \u63cf\u8ff0\u6216\u5931\u8d25\u6d4b\u8bd5\u8fdb\u5165 $wf-go-bugfix\u3002", X: 430, Y: 40},
+				{ID: "owner", Type: "agent", Category: "action", Label: "Bugfix \u4e3b\u63a7", Agent: "bugfix-owner", Detail: "\u521b\u5efa workflow run\uff0c\u52a0\u8f7d\u89c4\u5219\u4e0e skill\uff0c\u7ef4\u62a4 Loop \u80f6\u56ca\u4e0e\u9000\u51fa\u9884\u7b97\u3002", X: 430, Y: 190},
+				{ID: "reproduce", Type: "agent", Category: "action", Label: "\u590d\u73b0\u5931\u8d25", Agent: "reproducer", Detail: "\u8bb0\u5f55\u547d\u4ee4\u3001\u8f93\u5165\u3001\u9519\u8bef\u4e0e\u73af\u5883\uff1b\u4f18\u5148\u6784\u9020\u6700\u5c0f\u5931\u8d25\u56de\u5f52\u6d4b\u8bd5\u3002", X: 430, Y: 340},
+				{ID: "evidence_gate", Type: "condition", Category: "condition", Label: "\u7ebf\u7d22\u662f\u5426\u53ef\u9760", Agent: "debugger", Detail: "\u5224\u65ad\u6839\u56e0\u7ebf\u7d22\u662f\u5426\u8db3\u591f\u53ef\u9760\uff1b\u4f4e\u7f6e\u4fe1\u5ea6\u4e0d\u80fd\u76f4\u63a5\u6539\u884c\u4e3a\u3002", X: 430, Y: 520},
+				{ID: "probe", Type: "transform", Category: "action", Label: "\u52a0\u5173\u952e\u65e5\u5fd7/\u63a2\u9488", Agent: "debugger", Detail: "\u65e0\u53ef\u9760\u7ebf\u7d22\u65f6\uff0c\u5148\u52a0\u6700\u5c0f\u8bca\u65ad\u65e5\u5fd7\u6216\u63a2\u9488\uff0c\u7b49\u5f85\u65b0\u7684\u8fd0\u884c\u65f6\u8bc1\u636e\u3002", X: 90, Y: 520},
+				{ID: "diagnose", Type: "agent", Category: "action", Label: "\u8bca\u65ad\u6839\u56e0", Agent: "debugger", Detail: "\u5f62\u6210\u6839\u56e0\u5047\u8bbe\uff0c\u8bb0\u5f55\u7f6e\u4fe1\u5ea6\u3001\u652f\u6301\u8bc1\u636e\u4e0e\u53cd\u5bf9\u8bc1\u636e\u3002", X: 430, Y: 700},
+				{ID: "patch", Type: "agent", Category: "action", Label: "\u6700\u5c0f\u4fee\u590d", Agent: "implementer", Detail: "\u53ea\u4fee\u6839\u56e0\uff0c\u4e0d\u505a\u987a\u624b\u91cd\u6784\uff1b\u8bb0\u5f55 patch \u610f\u56fe\u4e0e\u6539\u52a8\u6587\u4ef6\u3002", X: 430, Y: 850},
+				{ID: "verify", Type: "agent", Category: "action", Label: "\u9a8c\u8bc1\u4fee\u590d", Agent: "verifier", Detail: "\u8fd0\u884c\u590d\u73b0\u3001\u56de\u5f52\u3001\u53d7\u5f71\u54cd package \u6216\u6784\u5efa\u9a8c\u8bc1\u3002", X: 430, Y: 1000},
+				{ID: "loop_control", Type: "loop", Category: "condition", Label: "Loop \u63a7\u5236", Agent: "bugfix-owner", Detail: "\u9a8c\u8bc1\u540e\u7edf\u4e00\u51b3\u7b56\uff1a\u901a\u8fc7\u5c31\u9000\u51fa\uff1b\u5931\u8d25\u4e14\u4ecd\u6709\u9884\u7b97\u5c31\u8fdb\u5165\u4e0b\u4e00\u8f6e\u3002", X: 430, Y: 1180},
+				{ID: "capsule", Type: "transform", Category: "data", Label: "\u538b\u7f29\u4e0a\u4e0b\u6587", Agent: "bugfix-owner", Detail: "\u538b\u7f29\u672c\u8f6e\u5931\u8d25\u4fe1\u606f\uff0c\u4f5c\u4e3a\u4e0b\u4e00\u8f6e\u8bca\u65ad\u8f93\u5165\u3002", X: 430, Y: 1360},
+				{ID: "exit_gate", Type: "condition", Category: "condition", Label: "\u9000\u51fa\u68c0\u67e5", Agent: "bugfix-owner", Detail: "\u786e\u8ba4\u9000\u51fa\u539f\u56e0\uff1a\u6210\u529f\u3001\u9884\u7b97\u8017\u5c3d\u3001\u540c\u9519\u91cd\u590d\u3001\u4f4e\u7f6e\u4fe1\u5ea6\u6216\u9a8c\u8bc1\u963b\u585e\u3002", X: 770, Y: 1180},
+				{ID: "submit", Type: "output", Category: "data", Label: "\u63d0\u4ea4\u8bc1\u636e", Agent: "learning-curator", Detail: "\u63d0\u4ea4 Task Run Evidence\uff0c\u72b6\u6001\u4e3a success\u3001partial_success\u3001failed\u3001cancelled \u6216 blocked\u3002", X: 770, Y: 1360},
+			},
+			Edges: []WorkflowEdge{
+				{From: "start", To: "owner", Label: "\u542f\u52a8"},
+				{From: "owner", To: "reproduce", Label: "\u521d\u59cb\u5316"},
+				{From: "reproduce", To: "evidence_gate", Label: "\u5931\u8d25\u8bc1\u636e"},
+				{From: "evidence_gate", To: "probe", Label: "\u65e0\u53ef\u9760\u7ebf\u7d22"},
+				{From: "evidence_gate", To: "diagnose", Label: "\u7ebf\u7d22\u53ef\u9760"},
+				{From: "probe", To: "exit_gate", Label: "\u7b49\u5f85\u8fd0\u884c\u65f6\u590d\u73b0"},
+				{From: "diagnose", To: "patch", Label: "\u6839\u56e0\u6210\u7acb"},
+				{From: "patch", To: "verify", Label: "\u5019\u9009\u4fee\u590d"},
+				{From: "verify", To: "loop_control", Label: "\u9a8c\u8bc1\u7ed3\u679c"},
+				{From: "loop_control", To: "capsule", Label: "\u7ee7\u7eed\u4e0b\u4e00\u8f6e"},
+				{From: "capsule", To: "diagnose", Label: "\u56de\u5230\u8bca\u65ad"},
+				{From: "loop_control", To: "exit_gate", Label: "\u9000\u51fa"},
+				{From: "exit_gate", To: "submit", Label: "\u63d0\u4ea4"},
+			},
+		}
+	}
+
 	nodes := []WorkflowNode{
 		{ID: "trigger", Type: "input", Category: "event", Label: spec.trigger, Agent: "-", Detail: "Workflow skill " + spec.trigger + " receives the request and forwards the rest as workflow input.", X: 48, Y: 210},
 		{ID: "route", Type: "condition", Category: "condition", Label: "workflow skill", Agent: "sisyphus", Detail: "The wf-* skill points to this workflow file as the source of truth.", X: 300, Y: 210},
