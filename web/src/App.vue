@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, h, onMounted, ref } from "vue";
+import { NDataTable, type DataTableColumns } from "naive-ui";
 import {
   addProjectCopyFromTemplate,
   createTemplate,
@@ -8,16 +9,19 @@ import {
   createWorkflow as createWorkflowApi,
   deleteProject as deleteProjectApi,
   deleteProjectWorkflow,
+  deleteTaskRun,
   deleteTemplate,
   deleteWorkflow as deleteWorkflowApi,
   detachProjectCopy,
   duplicateWorkflow as duplicateWorkflowApi,
   fetchBootstrap,
+  fetchEvaluations,
   fetchEvaluationProjects,
   fetchEvaluationProposals,
   fetchEvaluationSummary,
   fetchLearningCases,
   fetchStatisticsTasks,
+  fetchTaskRuns,
   fetchInfrastructure,
   fetchInfrastructureCatalog,
   fetchLocalDirectories,
@@ -54,6 +58,8 @@ import {
 import { projectDeleteImpactMessage, upsertProject } from "./project-state";
 import type {
   BootstrapData,
+  Evaluation,
+  EvaluationEvidenceRow,
   EvaluationProjectHealth,
   EvaluationProposal,
   EvaluationSummary,
@@ -72,6 +78,7 @@ import type {
   TemplateItem,
   TemplateKind,
   StatisticsTaskItem,
+  TaskRun,
   TemplateLibrary,
   RouteMetricRoleRollup,
   TokenUsageRoleRollup,
@@ -109,6 +116,7 @@ type DrawerMode =
   | "workflow-run"
   | "infrastructure"
   | "infrastructure-catalog"
+  | "evidence-dossier"
   | null;
 
 type WorkflowCard = {
@@ -173,7 +181,11 @@ const learningCases = ref<LearningCase[]>([]);
 const learningCaseBusy = ref(false);
 const evaluationProjects = ref<EvaluationProjectHealth[]>([]);
 const evaluationProposals = ref<EvaluationProposal[]>([]);
+const taskRuns = ref<TaskRun[]>([]);
+const evaluations = ref<Evaluation[]>([]);
 const selectedEvaluationProjectId = ref("");
+const selectedEvidenceRunId = ref("");
+const evidenceDeleteBusy = ref(false);
 const proposalBusyId = ref("");
 const proposalReviewNote = ref("");
 const statisticsRange = ref<"24h" | "7d" | "30d" | "all">("7d");
@@ -391,13 +403,125 @@ const selectedProjectProposals = computed(() => {
 });
 
 
-const selectedEvaluationProjectTasks = computed(() => {
-  if (!selectedEvaluationProjectId.value) return [] as StatisticsTaskItem[];
-  return statisticsTasks.value
-    .filter((item) => item.projectId === selectedEvaluationProjectId.value)
-    .slice()
-    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+const evaluationEvidenceRows = computed<EvaluationEvidenceRow[]>(() => {
+  const byRun = new Map<string, EvaluationEvidenceRow>();
+  for (const taskRun of taskRuns.value) {
+    byRun.set(taskRun.id, { runId: taskRun.id, taskRun });
+  }
+  for (const evaluation of evaluations.value) {
+    const row = byRun.get(evaluation.runId) ?? { runId: evaluation.runId };
+    row.evaluation = evaluation;
+    byRun.set(evaluation.runId, row);
+  }
+  for (const statistic of statisticsTasks.value) {
+    const row = byRun.get(statistic.runId) ?? { runId: statistic.runId };
+    row.statistics = statistic;
+    byRun.set(statistic.runId, row);
+  }
+  return Array.from(byRun.values())
+    .sort((left, right) => new Date(evidenceCreatedAt(right)).getTime() - new Date(evidenceCreatedAt(left)).getTime());
 });
+
+const selectedEvidenceRow = computed(() => {
+  return evaluationEvidenceRows.value.find((row) => row.runId === selectedEvidenceRunId.value) ?? evaluationEvidenceRows.value[0] ?? null;
+});
+
+const evidenceTableColumns = computed<DataTableColumns<EvaluationEvidenceRow>>(() => [
+  {
+    title: "Task / Summary",
+    key: "task",
+    width: 280,
+    fixed: "left",
+    render: (row) => renderEvidenceCell(evidenceTaskSummary(row), row.runId, true),
+  },
+  {
+    title: "Workflow",
+    key: "workflow",
+    width: 260,
+    render: (row) => renderEvidenceCell(evidenceWorkflowIdentity(row), evidenceWorkflowType(row), false, evidenceWorkflowIdentity(row).startsWith("Missing")),
+  },
+  {
+    title: "Project",
+    key: "project",
+    width: 160,
+    render: (row) => renderEvidenceCell(evidenceProjectId(row)),
+  },
+  {
+    title: "Agent / Model",
+    key: "agentModel",
+    width: 220,
+    render: (row) => renderEvidenceCell(evidenceAgentModel(row)),
+  },
+  {
+    title: "Rules / Skills / Tools",
+    key: "rulesSkillsTools",
+    width: 280,
+    render: (row) => renderEvidenceCell(evidenceRulesSkillsTools(row)),
+  },
+  {
+    title: "Verification",
+    key: "verification",
+    width: 250,
+    render: (row) => renderEvidenceCell(evidenceVerification(row), undefined, false, evidenceVerification(row).startsWith("Missing")),
+  },
+  {
+    title: "Path",
+    key: "path",
+    width: 220,
+    render: (row) => renderEvidenceCell(evidencePath(row), undefined, false, evidencePath(row).startsWith("Missing")),
+  },
+  {
+    title: "Risks",
+    key: "risks",
+    width: 220,
+    render: (row) => renderEvidenceCell(evidenceRisks(row)),
+  },
+  {
+    title: "Token / Route",
+    key: "tokenRoute",
+    width: 270,
+    render: (row) => renderEvidenceCell(evidenceTokenRoute(row), undefined, false, evidenceTokenRoute(row).includes("Missing")),
+  },
+  {
+    title: "Duration",
+    key: "duration",
+    width: 150,
+    render: (row) => renderEvidenceCell(evidenceDuration(row)),
+  },
+  {
+    title: "Rounds",
+    key: "rounds",
+    width: 150,
+    render: (row) => renderEvidenceCell(evidenceRounds(row), "model requests / turns"),
+  },
+  {
+    title: "Scores",
+    key: "scores",
+    width: 230,
+    render: (row) => h("span", { class: ["chip", evidenceStatusClass(row)] }, evidenceScores(row)),
+  },
+  {
+    title: "Gaps / Causes",
+    key: "gapsCauses",
+    width: 300,
+    render: (row) => renderEvidenceCell(evidenceGapsCauses(row), undefined, false, /missing/i.test(evidenceGapsCauses(row))),
+  },
+  {
+    title: "Time",
+    key: "time",
+    width: 190,
+    render: (row) => renderEvidenceCell(formatDateTime(evidenceCreatedAt(row))),
+  },
+]);
+
+const evidenceTableRowProps = (row: EvaluationEvidenceRow) => ({
+  class: selectedEvidenceRow.value?.runId === row.runId ? "selected-evidence-row" : "",
+  onClick: () => selectEvidenceRow(row),
+});
+
+function evidenceRowKey(row: EvaluationEvidenceRow): string {
+  return row.runId;
+}
 
 function learningCaseTags(item: LearningCase): string[] {
   return Array.isArray(item.tags) ? item.tags.slice(0, 3) : [];
@@ -438,6 +562,185 @@ function formatDurationMinutes(value: number | undefined | null): string {
   if (value < 1000) return `${Math.round(value)} ms`;
   if (value < 60_000) return `${(value / 1000).toFixed(1)} s`;
   return `${(value / 60_000).toFixed(1)} min`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["id", "name", "model", "templateId", "title"]) {
+      const candidate = stringValue(record[key]);
+      if (candidate) return candidate;
+    }
+  }
+  return "";
+}
+
+function stringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap((item) => stringList(item)).filter(Boolean);
+  const single = stringValue(value);
+  return single ? [single] : [];
+}
+
+function compactList(values: string[], missing = "Missing"): string {
+  const clean = values.map((value) => value.trim()).filter(Boolean);
+  if (clean.length === 0) return missing;
+  const visible = clean.slice(0, 3).join(", ");
+  return clean.length > 3 ? `${visible} +${clean.length - 3}` : visible;
+}
+
+function jsonPreview(value: unknown): string {
+  if (value === undefined || value === null) return "Missing";
+  if (typeof value === "string") return value || "Missing";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function renderEvidenceCell(primary: string, secondary?: string, monoSecondary = false, missing = false) {
+  return h("div", { class: "evidence-cell" }, [
+    h("span", { class: missing ? "missing-text evidence-cell-primary" : "evidence-cell-primary" }, primary || "Missing"),
+    secondary
+      ? h("div", { class: ["table-subtext", monoSecondary ? "mono" : ""].filter(Boolean) }, secondary)
+      : null,
+  ]);
+}
+
+function evidenceTaskSummary(row: EvaluationEvidenceRow): string {
+  const evidence = asRecord(row.taskRun?.evidence);
+  return stringValue(evidence.summary) || row.taskRun?.taskTitle || row.statistics?.taskTitle || row.runId;
+}
+
+function evidenceProjectId(row: EvaluationEvidenceRow): string {
+  return row.taskRun?.projectId || row.statistics?.projectId || "Missing";
+}
+
+function evidenceCreatedAt(row: EvaluationEvidenceRow): string {
+  return row.evaluation?.createdAt || row.statistics?.createdAt || row.taskRun?.createdAt || "";
+}
+
+function evidenceWorkflowType(row: EvaluationEvidenceRow): string {
+  return row.taskRun?.workflowType || row.statistics?.workflowType || "Missing";
+}
+
+function evidenceWorkflowIdentity(row: EvaluationEvidenceRow): string {
+  const templateId = row.taskRun?.workflowTemplateId;
+  const copyId = row.taskRun?.workflowCopyId;
+  if (!templateId && !copyId) return "Missing workflow identity";
+  return [templateId, copyId, evidenceWorkflowType(row)].filter(Boolean).join(" / ");
+}
+
+function evidenceContext(row: EvaluationEvidenceRow): Record<string, unknown> {
+  return asRecord(row.taskRun?.context);
+}
+
+function evidenceMetrics(row: EvaluationEvidenceRow): Record<string, unknown> {
+  return asRecord(row.taskRun?.metrics);
+}
+
+function evidenceMap(row: EvaluationEvidenceRow): Record<string, unknown> {
+  return asRecord(row.taskRun?.evidence);
+}
+
+function evidenceAgentModel(row: EvaluationEvidenceRow): string {
+  const context = evidenceContext(row);
+  const agent = stringValue(context.agent) || row.statistics?.agent || "Missing agent";
+  const model = stringValue(context.model) || row.statistics?.model || "Missing model";
+  return `${agent} / ${model}`;
+}
+
+function evidenceRulesSkillsTools(row: EvaluationEvidenceRow): string {
+  const context = evidenceContext(row);
+  const rules = stringList(context.rules);
+  const skills = stringList(context.skills);
+  const tools = stringList(context.tools);
+  const parts = [
+    `Rules: ${compactList(rules)}`,
+    `Skills: ${compactList(skills)}`,
+    `Tools: ${compactList(tools)}`,
+  ];
+  return parts.join(" | ");
+}
+
+function evidenceVerification(row: EvaluationEvidenceRow): string {
+  const verification = asRecord(evidenceMap(row).verification);
+  if (Object.keys(verification).length === 0) return "Missing verification";
+  const passed = typeof verification.passed === "boolean" ? String(verification.passed) : "unknown";
+  const hasVerification = typeof verification.hasVerification === "boolean" ? String(verification.hasVerification) : "unknown";
+  const types = compactList(stringList(verification.types), "no types");
+  return `passed=${passed}; has=${hasVerification}; ${types}`;
+}
+
+function evidencePath(row: EvaluationEvidenceRow): string {
+  return compactList(stringList(evidenceMap(row).successfulPath), "Missing path");
+}
+
+function evidenceRisks(row: EvaluationEvidenceRow): string {
+  return compactList(stringList(evidenceMap(row).risks), "No risks recorded");
+}
+
+function evidenceTokenRoute(row: EvaluationEvidenceRow): string {
+  const metrics = evidenceMetrics(row);
+  const tokenUsage = asRecord(metrics.tokenUsage ?? row.statistics?.tokenUsage);
+  const routeMetrics = asRecord(metrics.routeMetrics ?? row.statistics?.routeMetrics);
+  const tokenText = Object.keys(tokenUsage).length > 0
+    ? `tokens ${formatNumber(Number(tokenUsage.totalTokens ?? 0))}; req ${formatNumber(Number(tokenUsage.requestCount ?? 0))}`
+    : "tokens Missing";
+  const routeText = Object.keys(routeMetrics).length > 0
+    ? `route errors ${formatNumber(Number(routeMetrics.errorCount ?? 0))}; rate ${routeMetrics.errorRate ?? 0}%`
+    : "route Missing";
+  return `${tokenText} | ${routeText}`;
+}
+
+function evidenceDuration(row: EvaluationEvidenceRow): string {
+  return formatDurationMinutes(row.taskRun?.durationMs);
+}
+
+function evidenceRounds(row: EvaluationEvidenceRow): string {
+  const metrics = evidenceMetrics(row);
+  const routeMetrics = asRecord(metrics.routeMetrics ?? row.statistics?.routeMetrics);
+  const tokenUsage = asRecord(metrics.tokenUsage ?? row.statistics?.tokenUsage);
+  const routeRequests = Number(routeMetrics.requestCount ?? 0);
+  const tokenRequests = Number(tokenUsage.requestCount ?? 0);
+  const directRequests = Number(metrics.requestCount ?? 0);
+  const rounds = routeRequests || tokenRequests || directRequests;
+  return rounds > 0 ? formatNumber(rounds) : "Missing";
+}
+
+function evidenceScores(row: EvaluationEvidenceRow): string {
+  const evaluation = row.evaluation;
+  if (!evaluation) return row.taskRun?.evaluationStatus === "pending" ? "Pending evaluation" : "Missing evaluation";
+  return `${evaluation.finalStatus}; score ${Number(evaluation.overallScore || 0).toFixed(1)}; conf ${Number(evaluation.confidence || 0).toFixed(2)}`;
+}
+
+function evidenceGapsCauses(row: EvaluationEvidenceRow): string {
+  const analysis = asRecord(row.evaluation?.analysis);
+  const causes = stringList(analysis.primaryCauses);
+  const attribution = asRecord(analysis.attribution);
+  const issues: string[] = [];
+  for (const item of Object.values(attribution)) {
+    issues.push(...stringList(asRecord(item).issues));
+  }
+  if (evidenceWorkflowIdentity(row).startsWith("Missing")) issues.unshift("workflow identity missing");
+  if (evidenceVerification(row).startsWith("Missing")) issues.unshift("verification evidence missing");
+  return compactList([...causes, ...issues], "No gaps recorded");
+}
+
+function evidenceStatusClass(row: EvaluationEvidenceRow): string {
+  const status = row.evaluation?.finalStatus || row.statistics?.status || row.taskRun?.submittedStatus || "";
+  return status === "success" ? "chip-green" : status === "failed" ? "chip-red" : status ? "chip-orange" : "chip-purple";
+}
+
+function selectEvidenceRow(row: EvaluationEvidenceRow) {
+  selectedEvidenceRunId.value = row.runId;
+  drawerMode.value = "evidence-dossier";
 }
 
 function roleMetricEntries(record: Record<string, unknown> | undefined | null): Array<[string, unknown]> {
@@ -1616,9 +1919,11 @@ async function loadData() {
     fetchLearningCases(),
     fetchEvaluationProjects(),
     fetchStatisticsTasks(statisticsView.value, statisticsRange.value),
+    fetchTaskRuns(),
+    fetchEvaluations(),
   ]);
 
-  const [bootstrap, workflowList, routeList, infraList, infraCatalog, evalSummary, caseList, projectHealth, statsTasks] = bootstrapResult;
+  const [bootstrap, workflowList, routeList, infraList, infraCatalog, evalSummary, caseList, projectHealth, statsTasks, taskRunList, evaluationList] = bootstrapResult;
 
   if (bootstrap.status === "fulfilled") {
     applyBootstrap(bootstrap.value);
@@ -1683,6 +1988,14 @@ async function loadData() {
     statisticsTasks.value = Array.isArray(statsTasks.value.items) ? statsTasks.value.items : [];
   }
 
+  if (taskRunList.status === "fulfilled") {
+    taskRuns.value = Array.isArray(taskRunList.value) ? taskRunList.value : [];
+  }
+
+  if (evaluationList.status === "fulfilled") {
+    evaluations.value = Array.isArray(evaluationList.value) ? evaluationList.value : [];
+  }
+
   if (selectedEvaluationProjectId.value) {
     try {
       await loadEvaluationProposals("pending");
@@ -1722,8 +2035,46 @@ async function loadStatisticsTasks() {
   }
 }
 
+async function loadEvaluationEvidence() {
+  const [runsResult, evaluationsResult] = await Promise.all([fetchTaskRuns(), fetchEvaluations()]);
+  taskRuns.value = Array.isArray(runsResult) ? runsResult : [];
+  evaluations.value = Array.isArray(evaluationsResult) ? evaluationsResult : [];
+}
+
+async function deleteSelectedEvidenceRun() {
+  const row = selectedEvidenceRow.value;
+  if (!row) return;
+  if (!window.confirm(`Delete task run ${row.runId}? This also removes its evaluation, reviews, learning cases, and proposals.`)) {
+    return;
+  }
+  evidenceDeleteBusy.value = true;
+  try {
+    await deleteTaskRun(row.runId);
+    selectedEvidenceRunId.value = "";
+    closeDrawer();
+    await Promise.all([
+      loadEvaluationEvidence(),
+      loadEvaluationProjects(),
+      loadEvaluationProposals("pending"),
+      loadStatisticsTasks(),
+      fetchEvaluationSummary().then((summary) => {
+        evaluationSummary.value = summary;
+      }),
+      fetchLearningCases().then((items) => {
+        learningCases.value = Array.isArray(items) ? items : [];
+      }),
+    ]);
+    showToast(`Deleted task run ${row.runId}`);
+  } catch (err) {
+    showToast(errorMessage(err));
+  } finally {
+    evidenceDeleteBusy.value = false;
+  }
+}
+
 async function selectEvaluationProject(projectId: string) {
   selectedEvaluationProjectId.value = projectId;
+  selectedEvidenceRunId.value = "";
   await loadEvaluationProposals("pending");
 }
 
@@ -1760,7 +2111,7 @@ async function evaluatePendingRuns() {
     const result = await runPendingEvaluations();
     evaluationSummary.value = await fetchEvaluationSummary();
     learningCases.value = await fetchLearningCases().then((items) => (Array.isArray(items) ? items : []));
-    await Promise.all([loadEvaluationProjects(), loadStatisticsTasks()]);
+    await Promise.all([loadEvaluationProjects(), loadStatisticsTasks(), loadEvaluationEvidence()]);
     if (selectedEvaluationProjectId.value) {
       await loadEvaluationProposals("pending");
     }
@@ -2324,158 +2675,47 @@ onMounted(loadData);
           <section v-else-if="activePage === 'evaluation'" class="page active">
             <div class="page-header">
               <div>
-                <div class="page-title">Evaluation</div>
-                <div class="page-description">Objective evaluation only: evidence, metrics, workflow history, and retrieval entry points for manual review in project Codex.</div>
+                <div class="page-title">Evaluation Evidence Table</div>
+                <div class="page-description">High-density customer evidence review: task summary, workflow identity, execution context, verification, risks, metrics, scores, and raw evidence.</div>
               </div>
               <div class="page-actions">
+                <span class="chip chip-purple">{{ evaluationEvidenceRows.length }} evidence rows</span>
+                <span class="chip chip-orange">{{ evaluationSummary?.pendingRuns ?? 0 }} pending</span>
                 <button class="btn-secondary" type="button" :disabled="evaluationBusy" @click="evaluatePendingRuns">
                   {{ evaluationBusy ? 'Evaluating...' : 'Evaluate Pending' }}
                 </button>
               </div>
             </div>
 
-            <div class="evaluation-layout">
-              <section class="panel">
-                <div class="panel-header">
-                  <div>
-                    <div class="panel-title">Projects</div>
-                    <div class="drawer-subtitle">Health summary grouped by project.</div>
-                  </div>
+            <section class="panel evidence-table-panel">
+              <div class="panel-header compact-header">
+                <div>
+                  <div class="panel-title">Customer Evidence</div>
+                  <div class="drawer-subtitle">Header row lists fields; second row explains what each field audits; data starts from the third row. Click any row to open the evidence dossier drawer.</div>
                 </div>
-                <div class="panel-body evaluation-project-grid">
-                  <button
-                    v-for="item in evaluationProjectOptions"
-                    :key="item.projectId"
-                    type="button"
-                    class="evaluation-project-card"
-                    :class="{ active: selectedEvaluationProjectId === item.projectId }"
-                    @click="selectEvaluationProject(item.projectId)"
-                  >
-                    <div class="asset-card-header compact">
-                      <strong>{{ item.projectId }}</strong>
-                      <span class="chip chip-orange">{{ item.pendingCount }} pending</span>
-                    </div>
-                    <div class="project-health-grid">
-                      <div><span>Avg Score</span><strong>{{ item.averageScore || 0 }}</strong></div>
-                      <div><span>Success Rate</span><strong>{{ item.successRate || 0 }}%</strong></div>
-                      <div><span>Failed</span><strong>{{ item.failedCount }}</strong></div>
-                      <div><span>Pending</span><strong>{{ item.pendingCount }}</strong></div>
-                    </div>
-                  </button>
-                  <div v-if="evaluationProjectOptions.length === 0" class="empty-state compact">No evaluated projects yet.</div>
+              </div>
+              <div class="panel-body evidence-table-body">
+                <div class="evidence-audit-help-row">
+                  <span>Task: audit customer-facing summary</span>
+                  <span>Workflow: audit identity and traceability</span>
+                  <span>Verification: audit proof and outcome</span>
+                  <span>Gaps: audit missing evidence and main causes</span>
                 </div>
-              </section>
-
-              <section class="panel">
-                <div class="panel-header">
-                  <div>
-                    <div class="panel-title">Manual Review Signals</div>
-                    <div class="drawer-subtitle">Evaluation exposes evidence, objective metrics, and retrieval signals. Optimization decisions are made manually in project Codex.</div>
-                  </div>
-                  <div class="asset-chip-row" v-if="selectedEvaluationProject">
-                    <span class="chip chip-purple">{{ selectedEvaluationProject.projectId }}</span>
-                    <span class="chip chip-green">{{ selectedEvaluationProject.successRate }}% success</span>
-                  </div>
-                </div>
-                <div class="panel-body proposal-list">
-                  <article v-if="selectedEvaluationProject" class="proposal-card">
-                    <div class="asset-card-header compact">
-                      <strong>{{ selectedEvaluationProject.projectId }}</strong>
-                      <div class="asset-chip-row">
-                        <span class="chip chip-green">{{ selectedEvaluationProject.successRate }}% success</span>
-                        <span class="chip chip-purple">{{ selectedEvaluationProject.totalRuns }} runs</span>
-                      </div>
-                    </div>
-                    <div class="proposal-meta-row">
-                      <span>Average Score: {{ selectedEvaluationProject.averageScore || 0 }}</span>
-                      <span>Failed: {{ selectedEvaluationProject.failedCount }}</span>
-                      <span>Pending: {{ selectedEvaluationProject.pendingCount }}</span>
-                    </div>
-                    <p class="proposal-reason">Use the evidence, workflow metrics, dimension statistics, and learning-case retrieval below to manually review whether agents, models, workflows, rules, or skills need adjustment.</p>
-                    <div class="proposal-routing-grid">
-                      <div><span>Objective Eval</span><strong>Enabled</strong></div>
-                      <div><span>Auto Suggestions</span><strong>Disabled</strong></div>
-                      <div><span>Review Mode</span><strong>Manual in Codex</strong></div>
-                      <div><span>Retrieval</span><strong>Learning Cases</strong></div>
-                    </div>
-                  </article>
-                  <div v-else class="empty-state compact">Select a project to inspect evidence, metrics, and retrieval signals.</div>
-
-                  <div v-if="selectedEvaluationProject" class="evaluation-task-stack">
-                    <div class="panel-title mini">Project Tasks</div>
-                    <article v-for="item in selectedEvaluationProjectTasks" :key="`eval-task-${item.runId}`" class="proposal-card evaluation-task-card">
-                      <div class="asset-card-header compact">
-                        <div>
-                          <strong>{{ item.taskTitle || item.runId }}</strong>
-                          <div class="table-subtext">{{ item.workflowType }} ? {{ formatDateTime(item.createdAt) }}</div>
-                        </div>
-                        <div class="asset-chip-row">
-                          <span class="chip" :class="item.status === 'success' ? 'chip-green' : item.status === 'failed' ? 'chip-red' : 'chip-orange'">{{ item.status }}</span>
-                          <span class="chip chip-purple">score {{ Number(item.score || 0).toFixed(1) }}</span>
-                        </div>
-                      </div>
-                      <div class="proposal-meta-row">
-                        <span>Agent: {{ item.agent || '-' }}</span>
-                        <span>Model: {{ item.model || '-' }}</span>
-                        <span>Run ID: {{ item.runId }}</span>
-                      </div>
-
-                      <template v-if="asWorkflowTokenUsage(item.tokenUsage)">
-                        <div class="task-metric-section">
-                          <div class="task-metric-title">Token Usage</div>
-                          <div class="proposal-routing-grid">
-                            <div><span>Total</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.totalTokens) }}</strong></div>
-                            <div><span>Input</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.inputTokens) }}</strong></div>
-                            <div><span>Cached</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.cachedInputTokens) }}</strong></div>
-                            <div><span>Output</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.outputTokens) }}</strong></div>
-                            <div><span>Requests</span><strong>{{ formatNumber(asWorkflowTokenUsage(item.tokenUsage)?.requestCount) }}</strong></div>
-                            <div><span>Cache Hit</span><strong>{{ asWorkflowTokenUsage(item.tokenUsage)?.cacheHitRate ?? 0 }}%</strong></div>
-                          </div>
-                          <div class="role-breakdown-grid">
-                            <div v-for="[role, stat] in roleMetricEntries(asWorkflowTokenUsage(item.tokenUsage)?.roles)" :key="`${item.runId}-token-${role}`" class="role-breakdown-card">
-                              <strong>{{ role }}</strong>
-                              <div class="table-subtext">{{ topModelsLabel((stat as TokenUsageRoleRollup).models) }}</div>
-                              <div class="detail-list compact-detail-list">
-                                <div><span>Req</span><strong>{{ formatNumber((stat as TokenUsageRoleRollup).requestCount) }}</strong></div>
-                                <div><span>Total</span><strong>{{ formatNumber((stat as TokenUsageRoleRollup).totalTokens) }}</strong></div>
-                                <div><span>Cache</span><strong>{{ (stat as TokenUsageRoleRollup).cacheHitRate }}%</strong></div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </template>
-
-                      <template v-if="asWorkflowRouteMetrics(item.routeMetrics)">
-                        <div class="task-metric-section">
-                          <div class="task-metric-title">Route Metrics</div>
-                          <div class="proposal-routing-grid">
-                            <div><span>Requests</span><strong>{{ formatNumber(asWorkflowRouteMetrics(item.routeMetrics)?.requestCount) }}</strong></div>
-                            <div><span>Errors</span><strong>{{ formatNumber(asWorkflowRouteMetrics(item.routeMetrics)?.errorCount) }}</strong></div>
-                            <div><span>Error Rate</span><strong>{{ asWorkflowRouteMetrics(item.routeMetrics)?.errorRate ?? 0 }}%</strong></div>
-                            <div><span>Duration</span><strong>{{ formatDurationMinutes(asWorkflowRouteMetrics(item.routeMetrics)?.durationMs) }}</strong></div>
-                            <div><span>Avg Req</span><strong>{{ formatDurationMinutes(asWorkflowRouteMetrics(item.routeMetrics)?.averageRequestDurationMs) }}</strong></div>
-                            <div><span>Tool Calls</span><strong>{{ formatNumber(asWorkflowRouteMetrics(item.routeMetrics)?.toolCallCount) }}</strong></div>
-                          </div>
-                          <div class="role-breakdown-grid">
-                            <div v-for="[role, stat] in roleMetricEntries(asWorkflowRouteMetrics(item.routeMetrics)?.roles)" :key="`${item.runId}-route-${role}`" class="role-breakdown-card">
-                              <strong>{{ role }}</strong>
-                              <div class="table-subtext">{{ topModelsLabel((stat as RouteMetricRoleRollup).models) }}</div>
-                              <div class="detail-list compact-detail-list">
-                                <div><span>Req</span><strong>{{ formatNumber((stat as RouteMetricRoleRollup).requestCount) }}</strong></div>
-                                <div><span>Err</span><strong>{{ formatNumber((stat as RouteMetricRoleRollup).errorCount) }}</strong></div>
-                                <div><span>Tools</span><strong>{{ formatNumber((stat as RouteMetricRoleRollup).toolCallCount) }}</strong></div>
-                                <div><span>Avg</span><strong>{{ formatDurationMinutes((stat as RouteMetricRoleRollup).averageRequestDurationMs) }}</strong></div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </template>
-                    </article>
-                    <div v-if="selectedEvaluationProjectTasks.length === 0" class="empty-state compact">No task-level evaluation records found for this project in the current statistics range.</div>
-                  </div>
-                </div>
-              </section>
-            </div>
+                <n-data-table
+                  class="evidence-data-table"
+                  :columns="evidenceTableColumns"
+                  :data="evaluationEvidenceRows"
+                  :row-key="evidenceRowKey"
+                  :row-props="evidenceTableRowProps"
+                  scroll-x="3300"
+                  :max-height="620"
+                  :single-line="false"
+                  :bordered="false"
+                  size="small"
+                />
+                <div v-if="evaluationEvidenceRows.length === 0" class="empty-inline">No task runs or evaluations found.</div>
+              </div>
+            </section>
           </section>
 
           <section v-else-if="activePage === 'infrastructure'" class="page active">
@@ -2693,8 +2933,75 @@ requires_openai_auth = true</pre>
     </div>
 
     <div v-if="drawerMode" class="drawer-backdrop" @click.self="closeDrawer">
-      <aside class="drawer">
-        <template v-if="drawerMode === 'template' && selectedTemplate">
+      <aside class="drawer" :class="{ 'evidence-drawer': drawerMode === 'evidence-dossier' }">
+        <template v-if="drawerMode === 'evidence-dossier' && selectedEvidenceRow">
+          <div class="drawer-header">
+            <div>
+              <div class="drawer-title">Evidence Dossier</div>
+              <div class="drawer-subtitle">{{ evidenceTaskSummary(selectedEvidenceRow) }} / {{ selectedEvidenceRow.runId }}</div>
+            </div>
+            <button class="icon-btn" type="button" @click="closeDrawer">x</button>
+          </div>
+          <div class="drawer-body evidence-dossier">
+            <section class="task-metric-section">
+              <div class="task-metric-title">Task Summary</div>
+              <div class="detail-list compact-detail-list">
+                <div><span>Task</span><strong>{{ evidenceTaskSummary(selectedEvidenceRow) }}</strong></div>
+                <div><span>Run ID</span><strong class="mono">{{ selectedEvidenceRow.runId }}</strong></div>
+                <div><span>Evaluation ID</span><strong class="mono">{{ selectedEvidenceRow.evaluation?.id || 'Missing' }}</strong></div>
+                <div><span>Status</span><strong>{{ selectedEvidenceRow.evaluation?.finalStatus || selectedEvidenceRow.taskRun?.submittedStatus || 'Missing' }}</strong></div>
+                <div><span>Duration</span><strong>{{ formatDurationMinutes(selectedEvidenceRow.taskRun?.durationMs) }}</strong></div>
+              </div>
+            </section>
+
+            <section class="task-metric-section">
+              <div class="task-metric-title">Workflow & Execution</div>
+              <div class="detail-list compact-detail-list">
+                <div><span>Workflow</span><strong>{{ evidenceWorkflowIdentity(selectedEvidenceRow) }}</strong></div>
+                <div><span>Workflow Type</span><strong>{{ evidenceWorkflowType(selectedEvidenceRow) }}</strong></div>
+                <div><span>Agent / Model</span><strong>{{ evidenceAgentModel(selectedEvidenceRow) }}</strong></div>
+                <div><span>Rules / Skills / Tools</span><strong>{{ evidenceRulesSkillsTools(selectedEvidenceRow) }}</strong></div>
+              </div>
+            </section>
+
+            <section class="task-metric-section">
+              <div class="task-metric-title">Evaluation Judgement</div>
+              <div class="proposal-routing-grid">
+                <div><span>Result</span><strong>{{ evidenceScores(selectedEvidenceRow) }}</strong></div>
+                <div><span>Gaps / Causes</span><strong>{{ evidenceGapsCauses(selectedEvidenceRow) }}</strong></div>
+                <div><span>Verification</span><strong>{{ evidenceVerification(selectedEvidenceRow) }}</strong></div>
+                <div><span>Risk</span><strong>{{ evidenceRisks(selectedEvidenceRow) }}</strong></div>
+                <div><span>Path</span><strong>{{ evidencePath(selectedEvidenceRow) }}</strong></div>
+                <div><span>Token / Route</span><strong>{{ evidenceTokenRoute(selectedEvidenceRow) }}</strong></div>
+              </div>
+            </section>
+
+            <details class="raw-json-block" open>
+              <summary>Raw Evidence JSON</summary>
+              <pre>{{ jsonPreview(selectedEvidenceRow.taskRun?.evidence) }}</pre>
+            </details>
+            <details class="raw-json-block">
+              <summary>Raw Context JSON</summary>
+              <pre>{{ jsonPreview(selectedEvidenceRow.taskRun?.context) }}</pre>
+            </details>
+            <details class="raw-json-block">
+              <summary>Raw Metrics JSON</summary>
+              <pre>{{ jsonPreview(selectedEvidenceRow.taskRun?.metrics) }}</pre>
+            </details>
+            <details class="raw-json-block">
+              <summary>Scores / Analysis / Model Policy JSON</summary>
+              <pre>{{ jsonPreview({ scores: selectedEvidenceRow.evaluation?.scores, analysis: selectedEvidenceRow.evaluation?.analysis, modelPolicy: selectedEvidenceRow.evaluation?.modelPolicy }) }}</pre>
+            </details>
+          </div>
+          <div class="drawer-footer">
+            <button class="btn-secondary" type="button" @click="closeDrawer">Close</button>
+            <button class="btn-secondary danger" type="button" :disabled="evidenceDeleteBusy" @click="deleteSelectedEvidenceRun">
+              {{ evidenceDeleteBusy ? 'Deleting...' : 'Delete Task Run' }}
+            </button>
+          </div>
+        </template>
+
+        <template v-else-if="drawerMode === 'template' && selectedTemplate">
           <div class="drawer-header">
             <div><div class="drawer-title">{{ selectedTemplate.name }}</div><div class="drawer-subtitle">{{ kindLabel(selectedTemplate.kind) }} Template / {{ selectedTemplate.id }}</div></div>
             <button class="icon-btn" type="button" @click="closeDrawer">×</button>

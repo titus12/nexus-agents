@@ -279,6 +279,7 @@ export type Evaluation = {
   scores: Record<string, unknown>;
   analysis: Record<string, unknown>;
   modelJudgements?: Record<string, unknown>;
+  modelPolicy?: Record<string, unknown>;
   createdAt: string;
   latestReviewStatus?: string;
   latestReviewScore?: number;
@@ -465,6 +466,13 @@ export type StatisticsTaskItem = {
 
 export type StatisticsTasksResponse = {
   items: StatisticsTaskItem[];
+};
+
+export type EvaluationEvidenceRow = {
+  runId: string;
+  taskRun?: TaskRun;
+  evaluation?: Evaluation;
+  statistics?: StatisticsTaskItem;
 };
 
 export type WorkflowRunRecord = {

@@ -64,6 +64,16 @@ export function createTaskRun(input: TaskRunInput): Promise<TaskRun> {
   });
 }
 
+export function fetchTaskRuns(): Promise<TaskRun[]> {
+  return fetchJSON<TaskRun[]>("/api/task-runs");
+}
+
+export async function deleteTaskRun(taskRunId: string): Promise<void> {
+  await fetchJSON<void>(`/api/task-runs/${encodeURIComponent(taskRunId)}`, {
+    method: "DELETE",
+  });
+}
+
 export function startWorkflowRun(input: WorkflowRunStartInput): Promise<WorkflowRunRecord> {
   return fetchJSON<WorkflowRunRecord>("/api/workflow-runs/start", {
     method: "POST",

@@ -177,6 +177,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
 	s.mux.HandleFunc("/api/task-runs", s.handleTaskRuns)
+	s.mux.HandleFunc("/api/task-runs/", s.handleTaskRunPath)
 	s.mux.HandleFunc("/api/workflow-runs/start", s.handleWorkflowRunStart)
 	s.mux.HandleFunc("/api/workflow-runs/", s.handleWorkflowRunPath)
 	s.mux.HandleFunc("/api/evaluations", s.handleEvaluations)
@@ -271,6 +272,27 @@ func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) {
 	default:
 		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
+}
+
+func (s *Server) handleTaskRunPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/task-runs/"), "/"), "/")
+	if len(parts) != 1 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowMethods(w, r, http.MethodDelete) {
+		return
+	}
+	ok, err := s.evaluationStore.DeleteTaskRun(parts[0])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleWorkflowRunStart(w http.ResponseWriter, r *http.Request) {

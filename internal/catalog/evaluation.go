@@ -348,6 +348,63 @@ func (s *EvaluationStore) TaskRuns() ([]TaskRun, error) {
 	return runs, nil
 }
 
+func (s *EvaluationStore) DeleteTaskRun(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, nil
+	}
+	found := false
+	taskRuns := s.data.TaskRuns[:0]
+	for _, run := range s.data.TaskRuns {
+		if run.ID == id {
+			found = true
+			continue
+		}
+		taskRuns = append(taskRuns, run)
+	}
+	if !found {
+		return false, nil
+	}
+	s.data.TaskRuns = taskRuns
+	evaluations := s.data.Evaluations[:0]
+	deletedEvaluationIDs := map[string]bool{}
+	for _, evaluation := range s.data.Evaluations {
+		if evaluation.RunID == id {
+			deletedEvaluationIDs[evaluation.ID] = true
+			continue
+		}
+		evaluations = append(evaluations, evaluation)
+	}
+	s.data.Evaluations = evaluations
+	reviews := s.data.Reviews[:0]
+	for _, review := range s.data.Reviews {
+		if deletedEvaluationIDs[review.EvaluationID] {
+			continue
+		}
+		reviews = append(reviews, review)
+	}
+	s.data.Reviews = reviews
+	learningCases := s.data.LearningCases[:0]
+	for _, item := range s.data.LearningCases {
+		if item.RunID == id || deletedEvaluationIDs[item.EvaluationID] {
+			continue
+		}
+		learningCases = append(learningCases, item)
+	}
+	s.data.LearningCases = learningCases
+	proposals := s.data.Proposals[:0]
+	for _, proposal := range s.data.Proposals {
+		if proposal.SourceRunID == id || deletedEvaluationIDs[proposal.SourceEvaluationID] {
+			continue
+		}
+		proposals = append(proposals, proposal)
+	}
+	s.data.Proposals = proposals
+	return true, s.saveLocked()
+}
+
 func (s *EvaluationStore) EvaluatePending(limit int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
