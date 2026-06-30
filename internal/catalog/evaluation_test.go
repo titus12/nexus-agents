@@ -422,6 +422,51 @@ func TestEvaluationIncludesRouteHealthScore(t *testing.T) {
 	}
 }
 
+func TestEvaluationStoreTaskRunsAndStatisticsIncludeAggregatedMetrics(t *testing.T) {
+	store, err := NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	run, err := store.SubmitTaskRun(TaskRunInput{
+		ProjectID:       "sample",
+		WorkflowType:    "bugfix",
+		SubmittedStatus: "success",
+		Context:         map[string]any{"agent": "debugger", "model": "gpt-5.5"},
+		Evidence:        map[string]any{"verification": map[string]any{"hasVerification": true, "passed": true}},
+	})
+	if err != nil {
+		t.Fatalf("submit task run: %v", err)
+	}
+	if err := store.RecordTokenUsage(codexrouter.TokenUsageEvent{WorkflowRunID: run.ID, Role: "worker", Model: "gpt-5.5", InputTokens: 100, OutputTokens: 20, TotalTokens: 120}); err != nil {
+		t.Fatalf("record token usage: %v", err)
+	}
+	if err := store.RecordWorkflowRouteEvent(codexrouter.WorkflowRouteEvent{WorkflowRunID: run.ID, Role: "worker", Model: "gpt-5.5", StatusCode: 200, DurationMS: 1500}); err != nil {
+		t.Fatalf("record route event: %v", err)
+	}
+	runs, err := store.TaskRuns()
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("task runs = %#v err=%v", runs, err)
+	}
+	usage, ok := runs[0].Metrics["tokenUsage"].(WorkflowTokenUsage)
+	if !ok || usage.RequestCount != 1 || usage.TotalTokens != 120 {
+		t.Fatalf("expected enriched token usage, got %#v", runs[0].Metrics)
+	}
+	routeMetrics, ok := runs[0].Metrics["routeMetrics"].(WorkflowRouteMetrics)
+	if !ok || routeMetrics.RequestCount != 1 || routeMetrics.DurationMS != 1500 {
+		t.Fatalf("expected enriched route metrics, got %#v", runs[0].Metrics)
+	}
+	if runs[0].DurationMS != 1500 {
+		t.Fatalf("expected duration from route metrics, got %d", runs[0].DurationMS)
+	}
+	stats, err := store.StatisticsTasks("pending", "all")
+	if err != nil || len(stats.Items) != 1 {
+		t.Fatalf("statistics = %#v err=%v", stats, err)
+	}
+	if stats.Items[0].TokenUsage.RequestCount != 1 || stats.Items[0].RouteMetrics.RequestCount != 1 || stats.Items[0].DurationMS != 1500 {
+		t.Fatalf("expected statistics metrics, got %#v", stats.Items[0])
+	}
+}
+
 func TestActiveWorkflowSessionStoreBindsAndExpires(t *testing.T) {
 	store, err := NewActiveWorkflowSessionStore(filepath.Join(t.TempDir(), "active-workflow-sessions.json"))
 	if err != nil {

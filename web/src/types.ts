@@ -461,6 +461,7 @@ export type StatisticsTaskItem = {
   failedTask?: boolean;
   tokenUsage?: WorkflowTokenUsage;
   routeMetrics?: WorkflowRouteMetrics;
+  durationMs?: number;
   createdAt: string;
 };
 

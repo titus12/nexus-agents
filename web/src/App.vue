@@ -699,8 +699,23 @@ function evidenceTokenRoute(row: EvaluationEvidenceRow): string {
   return `${tokenText} | ${routeText}`;
 }
 
+function firstPositiveNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return undefined;
+}
+
 function evidenceDuration(row: EvaluationEvidenceRow): string {
-  return formatDurationMinutes(row.taskRun?.durationMs);
+  const metrics = evidenceMetrics(row);
+  const routeMetrics = asRecord(metrics.routeMetrics ?? row.statistics?.routeMetrics);
+  return formatDurationMinutes(firstPositiveNumber(
+    row.taskRun?.durationMs,
+    row.statistics?.durationMs,
+    routeMetrics.durationMs,
+    metrics.durationMs,
+  ));
 }
 
 function evidenceRounds(row: EvaluationEvidenceRow): string {

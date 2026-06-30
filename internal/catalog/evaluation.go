@@ -248,24 +248,27 @@ type EvaluationProposalsResponse struct {
 }
 
 type StatisticsTaskItem struct {
-	RunID             string   `json:"runId"`
-	EvaluationID      string   `json:"evaluationId,omitempty"`
-	ProjectID         string   `json:"projectId"`
-	TaskTitle         string   `json:"taskTitle"`
-	WorkflowType      string   `json:"workflowType"`
-	Status            string   `json:"status"`
-	Score             float64  `json:"score"`
-	Confidence        float64  `json:"confidence"`
-	Agent             string   `json:"agent,omitempty"`
-	Model             string   `json:"model,omitempty"`
-	Rules             []string `json:"rules,omitempty"`
-	ArbiterModel      string   `json:"arbiterModel,omitempty"`
-	EscalationModel   string   `json:"escalationModel,omitempty"`
-	NeedsEscalation   bool     `json:"needsEscalation,omitempty"`
-	EscalationReasons []string `json:"escalationReasons,omitempty"`
-	HighRiskWorkflow  bool     `json:"highRiskWorkflow,omitempty"`
-	FailedTask        bool     `json:"failedTask,omitempty"`
-	CreatedAt         string   `json:"createdAt"`
+	RunID             string               `json:"runId"`
+	EvaluationID      string               `json:"evaluationId,omitempty"`
+	ProjectID         string               `json:"projectId"`
+	TaskTitle         string               `json:"taskTitle"`
+	WorkflowType      string               `json:"workflowType"`
+	Status            string               `json:"status"`
+	Score             float64              `json:"score"`
+	Confidence        float64              `json:"confidence"`
+	Agent             string               `json:"agent,omitempty"`
+	Model             string               `json:"model,omitempty"`
+	Rules             []string             `json:"rules,omitempty"`
+	ArbiterModel      string               `json:"arbiterModel,omitempty"`
+	EscalationModel   string               `json:"escalationModel,omitempty"`
+	NeedsEscalation   bool                 `json:"needsEscalation,omitempty"`
+	EscalationReasons []string             `json:"escalationReasons,omitempty"`
+	HighRiskWorkflow  bool                 `json:"highRiskWorkflow,omitempty"`
+	FailedTask        bool                 `json:"failedTask,omitempty"`
+	TokenUsage        WorkflowTokenUsage   `json:"tokenUsage,omitempty"`
+	RouteMetrics      WorkflowRouteMetrics `json:"routeMetrics,omitempty"`
+	DurationMS        int64                `json:"durationMs,omitempty"`
+	CreatedAt         string               `json:"createdAt"`
 }
 
 type StatisticsTasksResponse struct {
@@ -343,7 +346,10 @@ func (s *EvaluationStore) SubmitTaskRun(input TaskRunInput) (TaskRun, error) {
 func (s *EvaluationStore) TaskRuns() ([]TaskRun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	runs := append([]TaskRun(nil), s.data.TaskRuns...)
+	runs := make([]TaskRun, len(s.data.TaskRuns))
+	for index, run := range s.data.TaskRuns {
+		runs[index] = s.enrichTaskRunMetricsLocked(run)
+	}
 	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt > runs[j].CreatedAt })
 	return runs, nil
 }
@@ -612,7 +618,7 @@ func (s *EvaluationStore) EvaluationProjects() (EvaluationProjectsResponse, erro
 		}
 	}
 	for _, eval := range s.data.Evaluations {
-		run := runByID[eval.RunID]
+		run := s.enrichTaskRunMetricsLocked(runByID[eval.RunID])
 		item := totals[run.ProjectID]
 		if item == nil {
 			item = &total{}
@@ -678,7 +684,7 @@ func (s *EvaluationStore) StatisticsTasks(view, rangeKey string) (StatisticsTask
 	items := []StatisticsTaskItem{}
 	cutoff := statisticsCutoff(rangeKey)
 	for _, eval := range s.data.Evaluations {
-		run := runByID[eval.RunID]
+		run := s.enrichTaskRunMetricsLocked(runByID[eval.RunID])
 		if !timeInRange(eval.CreatedAt, cutoff) {
 			continue
 		}
@@ -688,7 +694,7 @@ func (s *EvaluationStore) StatisticsTasks(view, rangeKey string) (StatisticsTask
 	if view == "pending" {
 		for _, run := range s.data.TaskRuns {
 			if run.EvaluationStatus == "pending" && timeInRange(run.CreatedAt, cutoff) {
-				items = append(items, statisticsItemForRun(run, Evaluation{}))
+				items = append(items, statisticsItemForRun(s.enrichTaskRunMetricsLocked(run), Evaluation{}))
 			}
 		}
 	}
@@ -1281,6 +1287,24 @@ func numberValue(value any) float64 {
 	case json.Number:
 		number, _ := typed.Float64()
 		return number
+	case float32:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int16:
+		return float64(typed)
+	case int8:
+		return float64(typed)
+	case uint:
+		return float64(typed)
+	case uint64:
+		return float64(typed)
+	case uint32:
+		return float64(typed)
+	case uint16:
+		return float64(typed)
+	case uint8:
+		return float64(typed)
 	default:
 		return 0
 	}
@@ -1713,6 +1737,7 @@ func timeInRange(value string, cutoff time.Time) bool {
 }
 
 func statisticsItemForRun(run TaskRun, eval Evaluation) StatisticsTaskItem {
+	run = enrichTaskRunMetrics(run)
 	status := run.SubmittedStatus
 	created := run.CreatedAt
 	if eval.ID != "" {
@@ -1737,8 +1762,104 @@ func statisticsItemForRun(run TaskRun, eval Evaluation) StatisticsTaskItem {
 		EscalationReasons: evaluationEscalationReasons(eval),
 		HighRiskWorkflow:  evaluationPolicyBool(eval, "highRiskWorkflow"),
 		FailedTask:        evaluationPolicyBool(eval, "failedTask"),
+		TokenUsage:        workflowTokenUsageFromMap(run.Metrics),
+		RouteMetrics:      workflowRouteMetricsFromMap(run.Metrics),
+		DurationMS:        run.DurationMS,
 		CreatedAt:         created,
 	}
+}
+
+func (s *EvaluationStore) enrichTaskRunMetricsLocked(run TaskRun) TaskRun {
+	metrics := cloneEvaluationMap(run.Metrics)
+	if _, ok := metrics["tokenUsage"]; !ok {
+		if usage := aggregateTokenUsageLocked(run.ID, s.data.TokenUsages); usage.RequestCount > 0 {
+			metrics["tokenUsage"] = usage
+		}
+	}
+	if _, ok := metrics["routeMetrics"]; !ok {
+		if routeMetrics := aggregateRouteMetricsLocked(run.ID, s.data.RouteEvents); routeMetrics.RequestCount > 0 {
+			metrics["routeMetrics"] = routeMetrics
+		}
+	}
+	run.Metrics = metrics
+	return enrichTaskRunMetrics(run)
+}
+
+func enrichTaskRunMetrics(run TaskRun) TaskRun {
+	if run.Metrics == nil {
+		run.Metrics = map[string]any{}
+	}
+	if run.DurationMS <= 0 {
+		if routeMetrics := workflowRouteMetricsFromMap(run.Metrics); routeMetrics.DurationMS > 0 {
+			run.DurationMS = routeMetrics.DurationMS
+		} else if duration := int64(numberValue(run.Metrics["durationMs"])); duration > 0 {
+			run.DurationMS = duration
+		} else if duration := durationFromTimestamps(run.StartedAt, run.EndedAt); duration > 0 {
+			run.DurationMS = duration
+		}
+	}
+	return run
+}
+
+func durationFromTimestamps(startedAt, endedAt string) int64 {
+	start, err1 := time.Parse(time.RFC3339Nano, strings.TrimSpace(startedAt))
+	end, err2 := time.Parse(time.RFC3339Nano, strings.TrimSpace(endedAt))
+	if err1 != nil || err2 != nil || end.Before(start) {
+		return 0
+	}
+	return end.Sub(start).Milliseconds()
+}
+
+func workflowTokenUsageFromMap(metrics map[string]any) WorkflowTokenUsage {
+	if usage, ok := metrics["tokenUsage"].(WorkflowTokenUsage); ok {
+		return usage
+	}
+	usageMap, ok := tokenUsageMap(TaskRun{Metrics: metrics})
+	if !ok {
+		return WorkflowTokenUsage{}
+	}
+	return WorkflowTokenUsage{
+		WorkflowRunID:     firstNonEmpty(stringFromAny(usageMap["workflowRunId"]), stringFromAny(usageMap["workflow_run_id"])),
+		RequestCount:      int(numberValue(usageMap["requestCount"])),
+		InputTokens:       int(numberValue(usageMap["inputTokens"])),
+		CachedInputTokens: int(numberValue(usageMap["cachedInputTokens"])),
+		OutputTokens:      int(numberValue(usageMap["outputTokens"])),
+		TotalTokens:       int(numberValue(usageMap["totalTokens"])),
+		CacheHitRate:      numberValue(usageMap["cacheHitRate"]),
+		OutputInputRatio:  numberValue(usageMap["outputInputRatio"]),
+		UpdatedAt:         stringFromAny(usageMap["updatedAt"]),
+	}
+}
+
+func workflowRouteMetricsFromMap(metrics map[string]any) WorkflowRouteMetrics {
+	if routeMetrics, ok := metrics["routeMetrics"].(WorkflowRouteMetrics); ok {
+		return routeMetrics
+	}
+	metricsMap, ok := routeMetricsMap(TaskRun{Metrics: metrics})
+	if !ok {
+		return WorkflowRouteMetrics{}
+	}
+	return WorkflowRouteMetrics{
+		WorkflowRunID:            firstNonEmpty(stringFromAny(metricsMap["workflowRunId"]), stringFromAny(metricsMap["workflow_run_id"])),
+		RequestCount:             int(numberValue(metricsMap["requestCount"])),
+		SuccessCount:             int(numberValue(metricsMap["successCount"])),
+		ErrorCount:               int(numberValue(metricsMap["errorCount"])),
+		ErrorRate:                numberValue(metricsMap["errorRate"]),
+		DurationMS:               int64(numberValue(metricsMap["durationMs"])),
+		AverageRequestDurationMS: int64(numberValue(metricsMap["averageRequestDurationMs"])),
+		RequestBytes:             int(numberValue(metricsMap["requestBytes"])),
+		ToolCount:                int(numberValue(metricsMap["toolCount"])),
+		InputItemCount:           int(numberValue(metricsMap["inputItemCount"])),
+		ToolCallCount:            int(numberValue(metricsMap["toolCallCount"])),
+		UpdatedAt:                stringFromAny(metricsMap["updatedAt"]),
+	}
+}
+
+func stringFromAny(value any) string {
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
 }
 
 func filterStatisticsItems(items []StatisticsTaskItem, view string) []StatisticsTaskItem {
