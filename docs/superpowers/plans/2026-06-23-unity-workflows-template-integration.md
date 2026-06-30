@@ -32,7 +32,7 @@
 - [ ] Add Unity agents to tdAgentTemplates() with model tier, skills, tools, MCP, and source paths.
 - [ ] Add Unity rules to tdRuleTemplates() and route paths in tdRuleTemplatePath() when needed.
 - [ ] Add Unity skills and wf-* Codex entries to tdSkillTemplates(), tdSkillTemplatePath(), and workflowSkillTemplateID().
-- [ ] Add Unity workflow specs to tdWorkflowSpecs() with triggers $wf-unity-bugfix, $wf-unity-logic-mod, $wf-unity-ui-feature, $wf-unity-eval.
+- [ ] Add Unity workflow specs to tdWorkflowSpecs() with triggers $wf-unity-bugfix, $wf-unity-logic-mod, $wf-unity-ui-feature.
 - [ ] Add tdWorkflowTemplatePath() mapping for Unity workflows.
 - [ ] Extend graph generation so Unity workflows include developer/tester/reviewer/evaluator nodes, while existing Go graphs remain stable.
 

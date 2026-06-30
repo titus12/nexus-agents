@@ -68,7 +68,6 @@ function inferWorkflowType(options: WorkflowRunSubmitOptions): string {
     .map((item) => slugify(String(item)));
 
   for (const candidate of candidates) {
-    if (candidate.includes("unity-workflow-evaluation")) return "unity-workflow-evaluation";
     if (candidate.includes("unity-ui-feature-development") || candidate.includes("ui-feature-development")) return "ui-feature-development";
     if (candidate.includes("unity-logic-modification") || candidate.includes("logic-modification")) return "logic-modification";
     if (candidate.includes("unity-bug-investigation") || candidate.includes("bug-investigation")) return "bug-investigation";
@@ -102,7 +101,6 @@ function inferPrimaryAgent(options: WorkflowRunSubmitOptions, workflowType: stri
   if (workflowType.startsWith("ui-")) return "unity-ui-developer";
   if (workflowType === "logic-modification") return "unity-logic-developer";
   if (workflowType === "bug-investigation") return "unity-debugger";
-  if (workflowType === "unity-workflow-evaluation") return "unity-workflow-evaluator";
   if (workflowType === "bugfix") return "debugger";
   return "workflow-runner";
 }
@@ -115,8 +113,6 @@ function inferRules(workflowType: string): string[] {
       return ["unity-00-routing", "unity-id-logic-mod-safety"];
     case "ui-feature-development":
       return ["unity-00-routing", "unity-id-ui-safety"];
-    case "unity-workflow-evaluation":
-      return ["unity-00-routing"];
     case "bugfix":
       return ["00-routing"];
     default:
@@ -132,8 +128,6 @@ function inferSkills(workflowType: string): string[] {
       return ["wf-unity-logic-mod", "unity-testing"];
     case "ui-feature-development":
       return ["wf-unity-ui-feature", "unity-testing", "unity-asset-safety"];
-    case "unity-workflow-evaluation":
-      return ["wf-unity-eval"];
     case "bugfix":
       return ["wf-go-bugfix"];
     default:
@@ -203,15 +197,6 @@ function buildEvidence(options: WorkflowRunSubmitOptions, workflowType: string):
     };
     defaultEvidence.assets = { prefabChanged: false, sceneChanged: false, metaSafe: true, generatedFilesTouched: false };
     defaultEvidence.tags = ["unity", "ui-feature", "workflow-runner"];
-  } else if (workflowType === "unity-workflow-evaluation") {
-    defaultEvidence.score = 0;
-    defaultEvidence.decision = "pass";
-    defaultEvidence.evaluatedWorkflowType = "unknown";
-    defaultEvidence.compile = { passed: "unknown" };
-    defaultEvidence.console = { errors: 0, warnings: 0 };
-    defaultEvidence.tests = { editMode: "not_applicable", playMode: "not_applicable" };
-    defaultEvidence.assets = { prefabChanged: false, sceneChanged: false, metaSafe: true, generatedFilesTouched: false };
-    defaultEvidence.tags = ["unity", "workflow-evaluation", "workflow-runner"];
   } else {
     defaultEvidence.unfinishedItems = [];
     defaultEvidence.risks = [];

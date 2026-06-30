@@ -1600,7 +1600,7 @@ func evaluationModelPolicy(run TaskRun) map[string]any {
 
 func isUnityEvaluationWorkflow(workflow string) bool {
 	switch strings.ToLower(strings.TrimSpace(workflow)) {
-	case "bug-investigation", "logic-modification", "ui-feature-development", "unity-workflow-evaluation":
+	case "bug-investigation", "logic-modification", "ui-feature-development":
 		return true
 	default:
 		return false

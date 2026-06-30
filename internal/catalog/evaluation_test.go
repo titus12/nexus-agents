@@ -238,7 +238,7 @@ func TestUnityWorkflowsUseHighRiskEvaluationPolicy(t *testing.T) {
 	}
 	defer store.Close()
 
-	for _, workflow := range []string{"bug-investigation", "logic-modification", "ui-feature-development", "unity-workflow-evaluation"} {
+	for _, workflow := range []string{"bug-investigation", "logic-modification", "ui-feature-development"} {
 		if _, err := store.SubmitTaskRun(TaskRunInput{
 			ProjectID:          "unity-sample",
 			WorkflowTemplateID: workflow,
@@ -257,8 +257,8 @@ func TestUnityWorkflowsUseHighRiskEvaluationPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("evaluations: %v", err)
 	}
-	if len(evaluations) != 4 {
-		t.Fatalf("expected four Unity evaluations, got %#v", evaluations)
+	if len(evaluations) != 3 {
+		t.Fatalf("expected three Unity evaluations, got %#v", evaluations)
 	}
 	for _, evaluation := range evaluations {
 		if highRisk, _ := evaluation.ModelPolicy["highRiskWorkflow"].(bool); !highRisk {

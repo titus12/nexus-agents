@@ -587,8 +587,6 @@ func workflowSkillTemplateID(workflowID string) (string, bool) {
 		return "wf-unity-logic-mod", true
 	case "ui-feature-development":
 		return "wf-unity-ui-feature", true
-	case "unity-workflow-evaluation":
-		return "wf-unity-eval", true
 	default:
 		return "", false
 	}
@@ -1718,8 +1716,8 @@ func btdRuleTemplates() []TemplateItem {
 		},
 		{
 			id:        "unity-00-routing",
-			summary:   "Unity workflow routing rule for bugfix, logic modification, UI feature, and evaluation entries.",
-			content:   "Unity work enters through $wf-unity-bugfix, $wf-unity-logic-mod, $wf-unity-ui-feature, and $wf-unity-eval.",
+			summary:   "Unity workflow routing rule for bugfix, logic modification, and UI feature entries.",
+			content:   "Unity work enters through $wf-unity-bugfix, $wf-unity-logic-mod, and $wf-unity-ui-feature.",
 			updatedAt: "2026-06-23 19:40",
 		},
 		{
@@ -2039,13 +2037,6 @@ func btdSkillTemplates() []TemplateItem {
 			applicableAgents: []string{"unity-ui-developer", "unity-asset-safety-evaluator", "unity-regression-evaluator"},
 			updatedAt:        "2026-06-23 19:58",
 		},
-		{
-			id:               "wf-unity-eval",
-			summary:          "Codex skill entry for the Unity workflow evaluation workflow.",
-			content:          "Invoke with $wf-unity-eval to load templates/workflows/unity-workflow-evaluation.md and evaluate Unity workflow evidence.",
-			applicableAgents: []string{"unity-workflow-evaluator", "unity-regression-evaluator", "unity-asset-safety-evaluator", "model-arbiter", "learning-curator"},
-			updatedAt:        "2026-06-23 19:59",
-		},
 	}
 
 	items := make([]TemplateItem, 0, len(specs))
@@ -2098,7 +2089,7 @@ func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "dev-workflow", "coding-rules", "testing", "pmconf-pattern", "quest-system", "cross-config":
 		return "templates/skills/go-" + id + ".md"
-	case "wf-go-feat", "wf-go-mod", "wf-go-bugfix", "wf-go-review", "wf-go-refactor", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-eval":
+	case "wf-go-feat", "wf-go-mod", "wf-go-bugfix", "wf-go-review", "wf-go-refactor", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature":
 		return "templates/skills/codex/" + id + "/SKILL.md"
 	default:
 		return "templates/skills/" + id + ".md"
@@ -2138,7 +2129,7 @@ func workflowTemplateSourcePaths(id string) []string {
 
 func isUnityWorkflowID(id string) bool {
 	switch id {
-	case "bug-investigation", "logic-modification", "ui-feature-development", "unity-workflow-evaluation":
+	case "bug-investigation", "logic-modification", "ui-feature-development":
 		return true
 	default:
 		return false
@@ -2320,17 +2311,6 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 			tags:      []string{"unity", "ui", "asset-safety", "evaluation"},
 			status:    "ready",
 			updatedAt: "2026-06-23 20:02",
-		},
-		{
-			id:        "unity-workflow-evaluation",
-			name:      "$wf-unity-eval Unity Workflow Evaluation",
-			trigger:   "$wf-unity-eval",
-			owner:     "unity-workflow-evaluator",
-			summary:   "Evaluate Unity workflow Task Run Evidence with regression and asset safety specialist scoring.",
-			content:   "workflow evaluator normalizes evidence; regression and asset evaluators score in parallel; model arbiter handles risky cases.",
-			tags:      []string{"unity", "evaluation", "arbiter", "learning"},
-			status:    "ready",
-			updatedAt: "2026-06-23 20:03",
 		},
 	}
 }

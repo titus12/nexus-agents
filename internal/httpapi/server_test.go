@@ -602,7 +602,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "workflows", workflows, []string{
 		"feature-development", "modify-existing", "bugfix", "code-review", "design",
 		"research", "commit-gate", "refactor", "lark-integration", "subagent-driven-development",
-		"bug-investigation", "logic-modification", "ui-feature-development", "unity-workflow-evaluation",
+		"bug-investigation", "logic-modification", "ui-feature-development",
 	})
 	for _, workflow := range workflows {
 		if strings.HasPrefix(workflow.Entry, "templates/workflows/go-") {
