@@ -96,13 +96,13 @@ Codex Desktop
            │           ├─ 原样转发客户端的 OpenAI bearer token
            │           └─ 流式响应体直接回传给 Codex
            │
-           └─ model = deepseek-v4-pro / deepseek-v4-flash
+           └─ model = deepseek-v4-pro / deepseek-v4-flash / glm-5.2 / glm-5.1 / claude-sonnet-5
                   └─ proxyChatCompletions()   ← 协议转换
                        ├─ responsesToChatRequest()   请求方向转换
                        │    ├─ instructions → system message
                        │    ├─ input 条目 + previous_response_id 历史 → messages[]
                        │    └─ Responses tools → Chat Completions functions
-                       ├─ POST /chat/completions → Winky DeepSeek（使用 DEEPSEEK_API_KEY）
+                       ├─ POST /chat/completions → Winky（使用 DEEPSEEK_API_KEY）
                        └─ chatResponseToResponse() + responseToSSE()   响应方向转换
                             ├─ chat message → Responses output item
                             ├─ tool_calls → function_call / custom_tool_call 条目
@@ -120,8 +120,9 @@ Codex Desktop
 | `deepseek-v4-flash` | DeepSeek V4 Flash | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` | — |
 | `glm-5.2` | GLM-5.2 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY` | — |
 | `glm-5.1` | GLM-5.1 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY` | — |
+| `claude-sonnet-5` | Claude Sonnet 5 | `lumos.diandian.info/winky/claude/v1` | `DEEPSEEK_API_KEY` | — |
 
-> GPT 路由（`api = "responses"`）走 ChatGPT 官方 Codex 后端，支持图片输入。DeepSeek / GLM 路由（`api = "chat_completions"`）走 Winky 代理，`DEEPSEEK_API_KEY` 是 Winky 统一 key，目前仅支持文本。
+> GPT 路由（`api = "responses"`）走 ChatGPT 官方 Codex 后端，支持图片输入。DeepSeek / GLM / Claude 路由（`api = "chat_completions"`）走 Winky 代理，`DEEPSEEK_API_KEY` 是 Winky 统一 key，目前仅支持文本。
 
 ### 关键实现文件
 
@@ -155,7 +156,7 @@ sandbox = "unelevated"
 
 **各配置项说明：**
 
-- `requires_openai_auth = true`：让 Codex 把 ChatGPT 订阅 bearer token 带在请求头里。GPT 路由会原样转发这个 token 到 `chatgpt.com`；DeepSeek / GLM 路由忽略它，改用服务端的 `DEEPSEEK_API_KEY`（Winky 统一 key）。
+- `requires_openai_auth = true`：让 Codex 把 ChatGPT 订阅 bearer token 带在请求头里。GPT 路由会原样转发这个 token 到 `chatgpt.com`；DeepSeek / GLM / Claude 路由忽略它，改用服务端的 `DEEPSEEK_API_KEY`（Winky 统一 key）。
 
 - `model_catalog_json`：必须填**本地文件路径**，不能填 HTTP URL（Codex Desktop 不读远程 URL）。服务每次启动时自动写入该文件并设为**只读**，防止 Codex 在工作时覆盖。若需更新，重启服务即可。
 

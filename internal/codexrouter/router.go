@@ -129,6 +129,8 @@ func DefaultConfig() Config {
 	deepSeekProvider := getenvDefault("NEXUS_DEEPSEEK_PROVIDER", "Winky DeepSeek")
 	glmBaseURL := getenvDefault("NEXUS_GLM_BASE_URL", "https://lumos.diandian.info/winky/glm/v1")
 	glmProvider := getenvDefault("NEXUS_GLM_PROVIDER", "Winky GLM")
+	claudeBaseURL := getenvDefault("NEXUS_CLAUDE_BASE_URL", "https://lumos.diandian.info/winky/claude/v1")
+	claudeProvider := getenvDefault("NEXUS_CLAUDE_PROVIDER", "Winky Claude")
 	return Config{
 		DefaultModel: "gpt-5.5",
 		Routes: []Route{
@@ -217,6 +219,24 @@ func DefaultConfig() Config {
 				Priority:    6,
 				DropParams:  []string{"response_format", "parallel_tool_calls"},
 			},
+		{
+			ID:          "claude-sonnet-5",
+			DisplayName: "Claude Sonnet 5",
+			Description: getenvDefault("NEXUS_CLAUDE_SONNET_5_DESCRIPTION", "Claude Sonnet 5 via Winky API."),
+			// claude-sonnet-5 is only valid on the Anthropic Messages protocol
+			// (/v1/messages), not on the OpenAI Chat Completions protocol
+			// (/v1/chat/completions) exposed by the same Winky upstream. Using
+			// chat_completions here makes the upstream reject the model name
+			// with a ValidationException, so route through the native
+			// Anthropic Messages adapter instead.
+			API:       "anthropic_messages",
+			BaseURL:   claudeBaseURL,
+			Model:     "claude-sonnet-5",
+			Provider:  claudeProvider,
+			AuthMode:  "api_key",
+			APIKeyEnv: "DEEPSEEK_API_KEY",
+			Priority:  7,
+		},
 		},
 	}
 }
@@ -308,6 +328,8 @@ func (s *Service) handleResponses(w http.ResponseWriter, r *http.Request) {
 		s.proxyResponses(w, r, request, route, reqStats)
 	case "chat_completions":
 		s.proxyChatCompletions(w, r, request, route, reqStats)
+	case "anthropic_messages":
+		s.proxyAnthropicMessages(w, r, request, route, reqStats)
 	default:
 		writeJSON(w, http.StatusInternalServerError, openAIError("unsupported route api: "+route.API, http.StatusInternalServerError))
 	}
@@ -928,6 +950,14 @@ func modelCatalogEntry(route Route, index int) map[string]any {
 		defaultReasoning = "none"
 		reasoningLevels = []map[string]string{
 			{"effort": "none", "description": "Use the model default reasoning behavior"},
+		}
+	}
+	if strings.Contains(modelName, "claude") {
+		defaultReasoning = "high"
+		reasoningLevels = []map[string]string{
+			{"effort": "none", "description": "Use the model default reasoning behavior"},
+			{"effort": "high", "description": "Use stronger reasoning"},
+			{"effort": "max", "description": "Use maximum reasoning"},
 		}
 	}
 	description := route.Description

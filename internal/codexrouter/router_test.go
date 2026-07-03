@@ -1,6 +1,9 @@
 package codexrouter
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -276,6 +279,31 @@ func TestDefaultConfigIncludesGLMViaWinky(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigIncludesClaudeSonnetViaWinky(t *testing.T) {
+	t.Setenv("NEXUS_CLAUDE_BASE_URL", "")
+	t.Setenv("NEXUS_CLAUDE_PROVIDER", "")
+	t.Setenv("NEXUS_CLAUDE_SONNET_5_DESCRIPTION", "")
+
+	cfg := DefaultConfig()
+	route := findRouteForTest(t, cfg, "claude-sonnet-5")
+
+	if route.BaseURL != "https://lumos.diandian.info/winky/claude/v1" {
+		t.Fatalf("expected default Claude Winky base URL, got %q", route.BaseURL)
+	}
+	if route.Provider != "Winky Claude" {
+		t.Fatalf("expected default Claude provider, got %q", route.Provider)
+	}
+	if route.Model != "claude-sonnet-5" || route.API != "anthropic_messages" {
+		t.Fatalf("expected Claude anthropic_messages route, got %#v", route)
+	}
+	if route.APIKeyEnv != "DEEPSEEK_API_KEY" {
+		t.Fatalf("expected Claude to reuse Winky API key env DEEPSEEK_API_KEY, got %q", route.APIKeyEnv)
+	}
+	if !strings.Contains(route.Description, "Winky") {
+		t.Fatalf("expected default description to mention Winky, got %q", route.Description)
+	}
+}
+
 func findRouteForTest(t *testing.T, cfg Config, id string) Route {
 	t.Helper()
 	for _, route := range cfg.Routes {
@@ -395,3 +423,215 @@ func TestRecordRouteEventUsesBoundSession(t *testing.T) {
 		t.Fatalf("unexpected route event metrics: %#v", event)
 	}
 }
+
+// TestResponsesToAnthropicRequest verifies a Codex Responses request with a
+// string input and instructions is converted into a valid Anthropic Messages
+// body (model, max_tokens default, system field, user message, stream=false).
+func TestResponsesToAnthropicRequest(t *testing.T) {
+	history := newResponseHistory()
+	raw := map[string]any{
+		"model":        "claude-sonnet-5",
+		"instructions": "You are a coding agent.",
+		"input":        "say hi in exactly 3 words",
+		"stream":       true,
+	}
+	req := responseRequest{
+		Model:        "claude-sonnet-5",
+		Instructions: "You are a coding agent.",
+		Input:        "say hi in exactly 3 words",
+		Stream:       true,
+		Raw:          raw,
+	}
+	route := Route{ID: "claude-sonnet-5", Model: "claude-sonnet-5", API: "anthropic_messages"}
+
+	converted := responsesToAnthropicRequest(req, route, history)
+
+	if converted.body["model"] != "claude-sonnet-5" {
+		t.Fatalf("expected model claude-sonnet-5, got %v", converted.body["model"])
+	}
+	if converted.body["max_tokens"] != defaultAnthropicMaxTokens {
+		t.Fatalf("expected default max_tokens %d, got %v", defaultAnthropicMaxTokens, converted.body["max_tokens"])
+	}
+	if system, _ := converted.body["system"].(string); system != "You are a coding agent." {
+		t.Fatalf("expected system instructions, got %q", system)
+	}
+	if converted.body["stream"] != false {
+		t.Fatalf("expected stream=false in upstream body, got %v", converted.body["stream"])
+	}
+	messages, ok := converted.body["messages"].([]map[string]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("expected 1 user message, got %v", converted.body["messages"])
+	}
+	if messages[0]["role"] != "user" || messages[0]["content"] != "say hi in exactly 3 words" {
+		t.Fatalf("unexpected user message: %#v", messages[0])
+	}
+	if !converted.wantsStream {
+		t.Errorf("expected wantsStream to be true")
+	}
+}
+
+// TestResponsesToAnthropicRequestMaxTokens verifies max_output_tokens from the
+// Codex request is forwarded as max_tokens in the Anthropic body.
+func TestResponsesToAnthropicRequestMaxTokens(t *testing.T) {
+	history := newResponseHistory()
+	raw := map[string]any{
+		"model":            "claude-sonnet-5",
+		"input":            "hi",
+		"max_output_tokens": float64(8),
+	}
+	req := responseRequest{Model: "claude-sonnet-5", Input: "hi", Raw: raw}
+	route := Route{ID: "claude-sonnet-5", Model: "claude-sonnet-5", API: "anthropic_messages"}
+
+	converted := responsesToAnthropicRequest(req, route, history)
+
+	if converted.body["max_tokens"] != float64(8) {
+		t.Fatalf("expected max_tokens 8, got %v", converted.body["max_tokens"])
+	}
+}
+
+// TestAnthropicResponseToResponse verifies an Anthropic Messages JSON response
+// is converted into a Codex Responses object with concatenated text and mapped
+// usage.
+func TestAnthropicResponseToResponse(t *testing.T) {
+	anthropic := map[string]any{
+		"id":   "msg_abc123",
+		"type": "message",
+		"role": "assistant",
+		"content": []any{
+			map[string]any{"type": "text", "text": "Hello"},
+			map[string]any{"type": "text", "text": " there"},
+		},
+		"model": "claude-sonnet-5",
+		"usage": map[string]any{
+			"input_tokens":  float64(8),
+			"output_tokens": float64(8),
+		},
+	}
+
+	resp := anthropicResponseToResponse(anthropic, "claude-sonnet-5")
+
+	if resp["object"] != "response" {
+		t.Fatalf("expected object=response, got %v", resp["object"])
+	}
+	if resp["status"] != "completed" {
+		t.Fatalf("expected status=completed, got %v", resp["status"])
+	}
+	if resp["model"] != "claude-sonnet-5" {
+		t.Fatalf("expected model claude-sonnet-5, got %v", resp["model"])
+	}
+	if resp["output_text"] != "Hello there" {
+		t.Fatalf("expected concatenated output_text, got %q", resp["output_text"])
+	}
+	if !strings.HasPrefix(resp["id"].(string), "resp_") {
+		t.Fatalf("expected resp_ prefixed id, got %q", resp["id"])
+	}
+	output, ok := resp["output"].([]map[string]any)
+	if !ok || len(output) != 1 || output[0]["type"] != "message" {
+		t.Fatalf("expected one message output item, got %v", resp["output"])
+	}
+	usage, ok := resp["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected usage map, got %v", resp["usage"])
+	}
+	if usage["input_tokens"] != float64(8) || usage["output_tokens"] != float64(8) {
+		t.Fatalf("unexpected usage: %#v", usage)
+	}
+	if usage["total_tokens"] != float64(16) {
+		t.Fatalf("expected total_tokens 16, got %v", usage["total_tokens"])
+	}
+}
+
+// TestProxyAnthropicMessagesEndToEnd spins up a fake Anthropic /messages server
+// and verifies the full proxy path for both non-stream and stream requests,
+// including the x-api-key/anthropic-version auth headers.
+func TestProxyAnthropicMessagesEndToEnd(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "test-key-123")
+
+	var capturedHeaders http.Header
+	var capturedBody map[string]any
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeaders = r.Header.Clone()
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id": "msg_test",
+			"type": "message",
+			"role": "assistant",
+			"content": [{"type": "text", "text": "Hello world"}],
+			"model": "claude-sonnet-5",
+			"usage": {"input_tokens": 5, "output_tokens": 3}
+		}`))
+	}))
+	defer fake.Close()
+
+	service := NewService(Config{Routes: []Route{{
+		ID:        "claude-sonnet-5",
+		Model:     "claude-sonnet-5",
+		API:       "anthropic_messages",
+		BaseURL:   fake.URL,
+		AuthMode:  "api_key",
+		APIKeyEnv: "DEEPSEEK_API_KEY",
+	}}})
+
+	// Non-streaming request.
+	payload := `{"model":"claude-sonnet-5","input":"hi","stream":false}`
+	req := httptest.NewRequest("POST", "/proxy/codex/v1/responses", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	service.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-stream: expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if capturedHeaders.Get("x-api-key") != "test-key-123" {
+		t.Fatalf("expected x-api-key header, got %q", capturedHeaders.Get("x-api-key"))
+	}
+	if capturedHeaders.Get("anthropic-version") != "2023-06-01" {
+		t.Fatalf("expected anthropic-version header, got %q", capturedHeaders.Get("anthropic-version"))
+	}
+	if capturedHeaders.Get("Authorization") != "" {
+		t.Fatalf("expected no Authorization header for anthropic route, got %q", capturedHeaders.Get("Authorization"))
+	}
+	if capturedBody["model"] != "claude-sonnet-5" {
+		t.Fatalf("expected upstream model claude-sonnet-5, got %v", capturedBody["model"])
+	}
+	if capturedBody["stream"] != false {
+		t.Fatalf("expected upstream stream=false, got %v", capturedBody["stream"])
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("non-stream: invalid JSON response: %v body=%s", err, rec.Body.String())
+	}
+	if resp["output_text"] != "Hello world" {
+		t.Fatalf("non-stream: expected output_text 'Hello world', got %v", resp["output_text"])
+	}
+
+	// Streaming request.
+	streamPayload := `{"model":"claude-sonnet-5","input":"hi","stream":true}`
+	streamReq := httptest.NewRequest("POST", "/proxy/codex/v1/responses", strings.NewReader(streamPayload))
+	streamRec := httptest.NewRecorder()
+	service.ServeHTTP(streamRec, streamReq)
+
+	if streamRec.Code != http.StatusOK {
+		t.Fatalf("stream: expected 200, got %d body=%s", streamRec.Code, streamRec.Body.String())
+	}
+	ct := streamRec.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("stream: expected text/event-stream content-type, got %q", ct)
+	}
+	sse := streamRec.Body.String()
+	for _, want := range []string{
+		"event: response.created",
+		"event: response.output_text.delta",
+		"event: response.completed",
+		"data: [DONE]",
+		"Hello world",
+	} {
+		if !strings.Contains(sse, want) {
+			t.Errorf("stream: SSE missing %q\nfull stream:\n%s", want, sse)
+		}
+	}
+}
+

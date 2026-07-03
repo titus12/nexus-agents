@@ -431,7 +431,6 @@ const evidenceTableColumns = computed<DataTableColumns<EvaluationEvidenceRow>>((
     title: "Task / Summary",
     key: "task",
     width: 280,
-    fixed: "left",
     render: (row) => renderEvidenceCell(evidenceTaskSummary(row), row.runId, true),
   },
   {
@@ -2723,7 +2722,8 @@ onMounted(loadData);
                   :row-key="evidenceRowKey"
                   :row-props="evidenceTableRowProps"
                   scroll-x="3300"
-                  :max-height="620"
+                  flex-height
+                  :scrollbar-props="{ trigger: 'none' }"
                   :single-line="false"
                   :bordered="false"
                   size="small"
@@ -2785,13 +2785,13 @@ onMounted(loadData);
               </section>
               <section class="panel panel-pad">
                 <div class="section-title">Model Catalog</div>
-                <span class="chip chip-green">GPT + DeepSeek + GLM</span>
+                <span class="chip chip-green">GPT + DeepSeek + GLM + Claude</span>
                 <div class="form-hint mono">http://127.0.0.1:8766/proxy/codex/model-catalog.json</div>
               </section>
               <section class="panel panel-pad">
                 <div class="section-title">Auth Policy</div>
                 <span class="chip chip-orange">Runtime env</span>
-                <div class="form-hint">GPT routes reuse Codex bearer auth. DeepSeek and GLM routes share the server-side Winky API key env var.</div>
+                <div class="form-hint">GPT routes reuse Codex bearer auth. DeepSeek, GLM, and Claude routes share the server-side Winky API key env var.</div>
               </section>
             </div>
             <section class="panel panel-pad">

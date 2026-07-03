@@ -1158,8 +1158,8 @@ func TestModelRouteEndpoint(t *testing.T) {
 	}
 	getJSON(t, server, "/api/model-routes", &routes)
 
-	if len(routes) != 7 {
-		t.Fatalf("expected seven Codex model routes, got %d routes: %#v", len(routes), routes)
+	if len(routes) != 8 {
+		t.Fatalf("expected eight Codex model routes, got %d routes: %#v", len(routes), routes)
 	}
 
 	wantTargets := map[string]string{
@@ -1170,6 +1170,7 @@ func TestModelRouteEndpoint(t *testing.T) {
 		"deepseek-v4-flash": "deepseek-v4-flash",
 		"glm-5.2":           "glm-5.2",
 		"glm-5.1":           "glm-5.1",
+		"claude-sonnet-5":   "claude-sonnet-5",
 	}
 	for _, route := range routes {
 		if route.Client != "Codex Responses" {
@@ -1190,6 +1191,9 @@ func TestModelRouteEndpoint(t *testing.T) {
 		}
 		if strings.HasPrefix(route.Source, "glm-") && route.Provider != "Winky GLM" {
 			t.Fatalf("expected GLM route to use Winky GLM provider, got %#v", route)
+		}
+		if strings.HasPrefix(route.Source, "claude-") && route.Provider != "Winky Claude" {
+			t.Fatalf("expected Claude route to use Winky Claude provider, got %#v", route)
 		}
 		delete(wantTargets, route.Source)
 	}
@@ -1576,6 +1580,12 @@ func TestModelRouteResolveEndpoint(t *testing.T) {
 			wantProvider: "Winky GLM",
 			wantTarget:   "glm-5.1",
 		},
+		{
+			name:         "codex claude sonnet 5 to winky",
+			path:         "/api/model-routes/resolve?client=codex&model=claude-sonnet-5",
+			wantProvider: "Winky Claude",
+			wantTarget:   "claude-sonnet-5",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1625,6 +1635,7 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 	foundGPT := false
 	foundDeepSeek := false
 	foundGLM := false
+	foundClaude := false
 	for _, model := range catalogBody.Models {
 		if model.Slug == "gpt-5.5" {
 			foundGPT = model.DisplayName != "" && model.ApplyPatchToolType == "freeform"
@@ -1637,9 +1648,12 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 		if model.Slug == "glm-5.2" {
 			foundGLM = model.DisplayName == "GLM-5.2" && model.DefaultReasoningLevel == "none"
 		}
+		if model.Slug == "claude-sonnet-5" {
+			foundClaude = model.DisplayName == "Claude Sonnet 5" && model.DefaultReasoningLevel == "high"
+		}
 	}
-	if !foundGPT || !foundDeepSeek || !foundGLM {
-		t.Fatalf("expected catalog to include GPT subscription, DeepSeek, and GLM models, got %#v", catalogBody.Models)
+	if !foundGPT || !foundDeepSeek || !foundGLM || !foundClaude {
+		t.Fatalf("expected catalog to include GPT subscription, DeepSeek, GLM, and Claude models, got %#v", catalogBody.Models)
 	}
 
 	var modelsBody struct {
@@ -1654,13 +1668,15 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 	foundModelGPT := false
 	foundModelDeepSeek := false
 	foundModelGLM := false
+	foundModelClaude := false
 	for _, model := range modelsBody.Data {
 		foundModelGPT = foundModelGPT || model.ID == "gpt-5.5"
 		foundModelDeepSeek = foundModelDeepSeek || model.ID == "deepseek-v4-flash"
 		foundModelGLM = foundModelGLM || model.ID == "glm-5.2"
+		foundModelClaude = foundModelClaude || model.ID == "claude-sonnet-5"
 	}
-	if modelsBody.Object != "list" || !foundModelGPT || !foundModelDeepSeek || !foundModelGLM {
-		t.Fatalf("expected OpenAI-compatible model list with GPT, DeepSeek, and GLM models, got %#v", modelsBody)
+	if modelsBody.Object != "list" || !foundModelGPT || !foundModelDeepSeek || !foundModelGLM || !foundModelClaude {
+		t.Fatalf("expected OpenAI-compatible model list with GPT, DeepSeek, GLM, and Claude models, got %#v", modelsBody)
 	}
 }
 
