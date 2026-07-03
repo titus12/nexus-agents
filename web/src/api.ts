@@ -58,8 +58,12 @@ export function fetchBootstrap(): Promise<BootstrapData> {
 }
 
 export function createTaskRun(input: TaskRunInput): Promise<TaskRun> {
+  const sessionId =
+    (typeof input.sessionId === "string" ? input.sessionId.trim() : "") ||
+    (typeof input.context?.sessionId === "string" ? input.context.sessionId.trim() : "");
   return fetchJSON<TaskRun>("/api/task-runs", {
     method: "POST",
+    headers: sessionId ? { "Session-Id": sessionId } : undefined,
     body: JSON.stringify(input),
   });
 }

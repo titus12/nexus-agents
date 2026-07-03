@@ -24,6 +24,7 @@ type TokenUsageLookup interface {
 
 type Submitter struct {
 	Endpoint    string
+	SessionID   string
 	HTTPClient  *http.Client
 	Store       StoreSubmitter
 	TokenLookup TokenUsageLookup
@@ -51,6 +52,9 @@ func (s Submitter) SubmitWorkflowResult(input catalog.TaskRunInput) (catalog.Tas
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	if sessionID := strings.TrimSpace(s.SessionID); sessionID != "" {
+		request.Header.Set("Session-Id", sessionID)
+	}
 
 	response, err := client.Do(request)
 	if err != nil {

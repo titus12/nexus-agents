@@ -41,6 +41,7 @@ type TaskRun struct {
 
 type TaskRunInput struct {
 	ProjectID          string         `json:"projectId"`
+	SessionID          string         `json:"sessionId,omitempty"`
 	WorkflowTemplateID string         `json:"workflowTemplateId"`
 	WorkflowCopyID     string         `json:"workflowCopyId"`
 	WorkflowType       string         `json:"workflowType"`
@@ -128,6 +129,7 @@ type EvaluationDimensionStat struct {
 
 type WorkflowTokenUsage struct {
 	WorkflowRunID     string                      `json:"workflowRunId"`
+	SessionID         string                      `json:"sessionId,omitempty"`
 	RequestCount      int                         `json:"requestCount"`
 	InputTokens       int                         `json:"inputTokens"`
 	CachedInputTokens int                         `json:"cachedInputTokens"`
@@ -152,6 +154,7 @@ type TokenUsageRollup struct {
 
 type WorkflowRouteMetrics struct {
 	WorkflowRunID            string                       `json:"workflowRunId"`
+	SessionID                string                       `json:"sessionId,omitempty"`
 	RequestCount             int                          `json:"requestCount"`
 	SuccessCount             int                          `json:"successCount"`
 	ErrorCount               int                          `json:"errorCount"`
@@ -532,7 +535,8 @@ func (s *EvaluationStore) RebuildLearningCaseIndex() (int, error) {
 
 func (s *EvaluationStore) RecordTokenUsage(event codexrouter.TokenUsageEvent) error {
 	event.WorkflowRunID = strings.TrimSpace(event.WorkflowRunID)
-	if event.WorkflowRunID == "" {
+	event.SessionID = strings.TrimSpace(event.SessionID)
+	if event.WorkflowRunID == "" && event.SessionID == "" {
 		return nil
 	}
 	event.Role = normalizeTokenRole(event.Role)
@@ -563,9 +567,36 @@ func (s *EvaluationStore) TokenUsageForWorkflowRun(workflowRunID string) (Workfl
 	return usage, usage.RequestCount > 0, nil
 }
 
+func (s *EvaluationStore) TokenUsageForSessionWindow(sessionID, startedAt, endedAt string) (WorkflowTokenUsage, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return WorkflowTokenUsage{}, false, nil
+	}
+	start, end, ok := parseTelemetryWindow(startedAt, endedAt)
+	if !ok {
+		return WorkflowTokenUsage{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := make([]codexrouter.TokenUsageEvent, 0)
+	for _, event := range s.data.TokenUsages {
+		if strings.TrimSpace(event.SessionID) != sessionID {
+			continue
+		}
+		if !eventInTelemetryWindow(event.CreatedAt, start, end) {
+			continue
+		}
+		events = append(events, event)
+	}
+	usage := aggregateTokenUsageEvents(sessionWindowID(sessionID, start, end), events)
+	usage.SessionID = sessionID
+	return usage, usage.RequestCount > 0, nil
+}
+
 func (s *EvaluationStore) RecordWorkflowRouteEvent(event codexrouter.WorkflowRouteEvent) error {
 	event.WorkflowRunID = strings.TrimSpace(event.WorkflowRunID)
-	if event.WorkflowRunID == "" {
+	event.SessionID = strings.TrimSpace(event.SessionID)
+	if event.WorkflowRunID == "" && event.SessionID == "" {
 		return nil
 	}
 	event.Role = normalizeTokenRole(event.Role)
@@ -590,6 +621,32 @@ func (s *EvaluationStore) RouteMetricsForWorkflowRun(workflowRunID string) (Work
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	metrics := aggregateRouteMetricsLocked(workflowRunID, s.data.RouteEvents)
+	return metrics, metrics.RequestCount > 0, nil
+}
+
+func (s *EvaluationStore) RouteMetricsForSessionWindow(sessionID, startedAt, endedAt string) (WorkflowRouteMetrics, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return WorkflowRouteMetrics{}, false, nil
+	}
+	start, end, ok := parseTelemetryWindow(startedAt, endedAt)
+	if !ok {
+		return WorkflowRouteMetrics{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := make([]codexrouter.WorkflowRouteEvent, 0)
+	for _, event := range s.data.RouteEvents {
+		if strings.TrimSpace(event.SessionID) != sessionID {
+			continue
+		}
+		if !eventInTelemetryWindow(event.CreatedAt, start, end) {
+			continue
+		}
+		events = append(events, event)
+	}
+	metrics := aggregateRouteMetricEvents(sessionWindowID(sessionID, start, end), events)
+	metrics.SessionID = sessionID
 	return metrics, metrics.RequestCount > 0, nil
 }
 
@@ -1820,6 +1877,7 @@ func workflowTokenUsageFromMap(metrics map[string]any) WorkflowTokenUsage {
 	}
 	return WorkflowTokenUsage{
 		WorkflowRunID:     firstNonEmpty(stringFromAny(usageMap["workflowRunId"]), stringFromAny(usageMap["workflow_run_id"])),
+		SessionID:         firstNonEmpty(stringFromAny(usageMap["sessionId"]), stringFromAny(usageMap["session_id"])),
 		RequestCount:      int(numberValue(usageMap["requestCount"])),
 		InputTokens:       int(numberValue(usageMap["inputTokens"])),
 		CachedInputTokens: int(numberValue(usageMap["cachedInputTokens"])),
@@ -1841,6 +1899,7 @@ func workflowRouteMetricsFromMap(metrics map[string]any) WorkflowRouteMetrics {
 	}
 	return WorkflowRouteMetrics{
 		WorkflowRunID:            firstNonEmpty(stringFromAny(metricsMap["workflowRunId"]), stringFromAny(metricsMap["workflow_run_id"])),
+		SessionID:                firstNonEmpty(stringFromAny(metricsMap["sessionId"]), stringFromAny(metricsMap["session_id"])),
 		RequestCount:             int(numberValue(metricsMap["requestCount"])),
 		SuccessCount:             int(numberValue(metricsMap["successCount"])),
 		ErrorCount:               int(numberValue(metricsMap["errorCount"])),
@@ -1895,11 +1954,19 @@ func filterStatisticsItems(items []StatisticsTaskItem, view string) []Statistics
 }
 
 func aggregateTokenUsageLocked(workflowRunID string, events []codexrouter.TokenUsageEvent) WorkflowTokenUsage {
-	usage := WorkflowTokenUsage{WorkflowRunID: workflowRunID, Roles: map[string]TokenUsageRollup{}}
+	filtered := make([]codexrouter.TokenUsageEvent, 0)
 	for _, event := range events {
 		if event.WorkflowRunID != workflowRunID {
 			continue
 		}
+		filtered = append(filtered, event)
+	}
+	return aggregateTokenUsageEvents(workflowRunID, filtered)
+}
+
+func aggregateTokenUsageEvents(workflowRunID string, events []codexrouter.TokenUsageEvent) WorkflowTokenUsage {
+	usage := WorkflowTokenUsage{WorkflowRunID: workflowRunID, Roles: map[string]TokenUsageRollup{}}
+	for _, event := range events {
 		usage.RequestCount++
 		usage.InputTokens += event.InputTokens
 		usage.CachedInputTokens += event.CachedInputTokens
@@ -1937,11 +2004,19 @@ func aggregateTokenUsageLocked(workflowRunID string, events []codexrouter.TokenU
 }
 
 func aggregateRouteMetricsLocked(workflowRunID string, events []codexrouter.WorkflowRouteEvent) WorkflowRouteMetrics {
-	metrics := WorkflowRouteMetrics{WorkflowRunID: workflowRunID, Roles: map[string]RouteMetricRollup{}}
+	filtered := make([]codexrouter.WorkflowRouteEvent, 0)
 	for _, event := range events {
 		if event.WorkflowRunID != workflowRunID {
 			continue
 		}
+		filtered = append(filtered, event)
+	}
+	return aggregateRouteMetricEvents(workflowRunID, filtered)
+}
+
+func aggregateRouteMetricEvents(workflowRunID string, events []codexrouter.WorkflowRouteEvent) WorkflowRouteMetrics {
+	metrics := WorkflowRouteMetrics{WorkflowRunID: workflowRunID, Roles: map[string]RouteMetricRollup{}}
+	for _, event := range events {
 		metrics.RequestCount++
 		if event.StatusCode >= 200 && event.StatusCode < 400 {
 			metrics.SuccessCount++
@@ -1988,6 +2063,54 @@ func aggregateRouteMetricsLocked(workflowRunID string, events []codexrouter.Work
 		metrics.AverageRequestDurationMS = metrics.DurationMS / int64(metrics.RequestCount)
 	}
 	return metrics
+}
+
+func parseTelemetryWindow(startedAt, endedAt string) (time.Time, time.Time, bool) {
+	start, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(startedAt))
+	if err != nil {
+		return time.Time{}, time.Time{}, false
+	}
+	endText := strings.TrimSpace(endedAt)
+	var end time.Time
+	if endText == "" {
+		end = time.Now().UTC()
+	} else {
+		parsed, err := time.Parse(time.RFC3339Nano, endText)
+		if err != nil {
+			return time.Time{}, time.Time{}, false
+		}
+		end = parsed
+	}
+	if end.Before(start) {
+		return time.Time{}, time.Time{}, false
+	}
+	return start.Add(-5 * time.Second), end.Add(5 * time.Second), true
+}
+
+func eventInTelemetryWindow(createdAt string, start, end time.Time) bool {
+	created, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(createdAt))
+	if err != nil {
+		return false
+	}
+	return !created.Before(start) && !created.After(end)
+}
+
+func sessionWindowID(sessionID string, start, end time.Time) string {
+	return "session_window_" + slugifyTelemetryID(sessionID) + "_" + start.UTC().Format("20060102T150405") + "_" + end.UTC().Format("20060102T150405")
+}
+
+func slugifyTelemetryID(value string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteByte('-')
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }
 
 func normalizeTokenRole(role string) string {

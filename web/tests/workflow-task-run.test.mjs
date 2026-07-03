@@ -5,6 +5,7 @@ import { buildWorkflowRunDraft } from "../.tmp-tests/workflow-task-run.js";
 test("buildWorkflowRunDraft infers Unity UI workflow payload", () => {
   const draft = buildWorkflowRunDraft({
     projectId: "btd-client",
+    sessionId: "sess-ui-1",
     workflowTemplateId: "unity-ui-feature-development",
     workflowName: "Unity UI Feature Development",
     graph: {
@@ -19,7 +20,9 @@ test("buildWorkflowRunDraft infers Unity UI workflow payload", () => {
   assert.equal(draft.payload.projectId, "btd-client");
   assert.equal(draft.payload.workflowTemplateId, "unity-ui-feature-development");
   assert.equal(draft.payload.workflowType, "ui-feature-development");
+  assert.equal(draft.payload.sessionId, "sess-ui-1");
   assert.equal(draft.payload.context.agent, "unity-ui-developer");
+  assert.equal(draft.payload.context.sessionId, "sess-ui-1");
   assert.equal(draft.payload.evidence.uiChecks.openClose, true);
 });
 

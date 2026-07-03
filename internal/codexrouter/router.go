@@ -26,6 +26,7 @@ const unknownWorkflowRole = "unknown"
 
 type TokenUsageEvent struct {
 	WorkflowRunID     string `json:"workflowRunId"`
+	SessionID         string `json:"sessionId,omitempty"`
 	Role              string `json:"role,omitempty"`
 	Model             string `json:"model"`
 	InputTokens       int    `json:"inputTokens"`
@@ -37,6 +38,7 @@ type TokenUsageEvent struct {
 
 type WorkflowRouteEvent struct {
 	WorkflowRunID  string `json:"workflowRunId"`
+	SessionID      string `json:"sessionId,omitempty"`
 	Role           string `json:"role,omitempty"`
 	Model          string `json:"model"`
 	StatusCode     int    `json:"statusCode"`
@@ -500,24 +502,38 @@ func (s *Service) proxyChatCompletions(w http.ResponseWriter, r *http.Request, r
 }
 
 func (s *Service) workflowContext(r *http.Request) (string, string) {
-	workflowRunID := strings.TrimSpace(r.Header.Get(workflowRunIDHeader))
 	role := normalizeWorkflowRole(r.Header.Get(workflowRoleHeader))
-	if workflowRunID != "" {
-		return workflowRunID, role
-	}
+	externalWorkflowRunID := strings.TrimSpace(r.Header.Get(workflowRunIDHeader))
 	if s == nil || s.usageRecorder == nil {
+		if externalWorkflowRunID != "" {
+			log.Printf("[workflow-session] ignore external workflow_run=%s because usage recorder is unavailable", externalWorkflowRunID)
+		}
 		return "", role
 	}
 	sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
 	if sessionID == "" {
+		if externalWorkflowRunID != "" {
+			log.Printf("[workflow-session] ignore external workflow_run=%s because Session-Id header is missing", externalWorkflowRunID)
+		}
 		return "", role
 	}
 	ctx, ok, err := s.usageRecorder.LookupWorkflowSession(sessionID)
-	if err != nil || !ok {
+	if err != nil {
+		log.Printf("[workflow-session] lookup error session_id=%s err=%v", sessionID, err)
+		return "", role
+	}
+	if !ok {
+		if externalWorkflowRunID != "" {
+			log.Printf("[workflow-session] ignore external workflow_run=%s because session_id=%s is not bound", externalWorkflowRunID, sessionID)
+		}
+		log.Printf("[workflow-session] lookup miss session_id=%s", sessionID)
 		return "", role
 	}
 	if strings.TrimSpace(ctx.Role) != "" && role == unknownWorkflowRole {
 		role = normalizeWorkflowRole(ctx.Role)
+	}
+	if externalWorkflowRunID != "" && strings.TrimSpace(ctx.WorkflowRunID) != "" && externalWorkflowRunID != strings.TrimSpace(ctx.WorkflowRunID) {
+		log.Printf("[workflow-session] ignore external workflow_run=%s and use bound workflow_run=%s for session_id=%s", externalWorkflowRunID, strings.TrimSpace(ctx.WorkflowRunID), sessionID)
 	}
 	return strings.TrimSpace(ctx.WorkflowRunID), role
 }
@@ -526,8 +542,9 @@ func (s *Service) recordTokenUsage(r *http.Request, request responseRequest, rou
 	if s == nil || s.usageRecorder == nil || usage == nil {
 		return nil
 	}
+	sessionID := sessionIDFromRequest(r)
 	workflowRunID, role := s.workflowContext(r)
-	if workflowRunID == "" {
+	if workflowRunID == "" && sessionID == "" {
 		return nil
 	}
 	model := strings.TrimSpace(request.Model)
@@ -546,6 +563,7 @@ func (s *Service) recordTokenUsage(r *http.Request, request responseRequest, rou
 	}
 	return s.usageRecorder.RecordTokenUsage(TokenUsageEvent{
 		WorkflowRunID:     workflowRunID,
+		SessionID:         sessionID,
 		Role:              role,
 		Model:             model,
 		InputTokens:       input,
@@ -560,8 +578,9 @@ func (s *Service) recordRouteEvent(r *http.Request, request responseRequest, rou
 	if s == nil || s.usageRecorder == nil {
 		return nil
 	}
+	sessionID := sessionIDFromRequest(r)
 	workflowRunID, role := s.workflowContext(r)
-	if workflowRunID == "" {
+	if workflowRunID == "" && sessionID == "" {
 		return nil
 	}
 	model := strings.TrimSpace(request.Model)
@@ -570,6 +589,7 @@ func (s *Service) recordRouteEvent(r *http.Request, request responseRequest, rou
 	}
 	return s.usageRecorder.RecordWorkflowRouteEvent(WorkflowRouteEvent{
 		WorkflowRunID:  workflowRunID,
+		SessionID:      sessionID,
 		Role:           role,
 		Model:          model,
 		StatusCode:     statusCode,
@@ -580,6 +600,13 @@ func (s *Service) recordRouteEvent(r *http.Request, request responseRequest, rou
 		ToolCallCount:  observedToolCallCount,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
 	})
+}
+
+func sessionIDFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.Header.Get("Session-Id"))
 }
 
 func normalizeWorkflowRole(role string) string {

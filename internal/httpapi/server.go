@@ -263,15 +263,103 @@ func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) {
 		if !decodeRequest(w, r, &input) {
 			return
 		}
+		input = s.withServerTaskRunMetrics(r, input)
 		run, err := s.evaluationStore.SubmitTaskRun(input)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if sessionID := sessionIDForTaskRun(r, input); sessionID != "" && s.sessionStore != nil {
+			_ = s.sessionStore.Complete(sessionID)
+		}
 		writeJSON(w, http.StatusCreated, run)
 	default:
 		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
+}
+
+func (s *Server) withServerTaskRunMetrics(r *http.Request, input catalog.TaskRunInput) catalog.TaskRunInput {
+	metrics := catalogCloneMap(input.Metrics)
+	delete(metrics, "tokenUsage")
+	delete(metrics, "routeMetrics")
+	sessionID := sessionIDForTaskRun(r, input)
+	if sessionID == "" {
+		log.Printf("[workflow-session] task-run submit has no Session-Id; tokenUsage and routeMetrics remain server-only and absent")
+		input.Metrics = metrics
+		return input
+	}
+	if s == nil || s.sessionStore == nil || s.evaluationStore == nil {
+		log.Printf("[workflow-session] task-run submit session_id=%s cannot enrich metrics because stores are unavailable", sessionID)
+		input.Metrics = metrics
+		return input
+	}
+	session, ok, err := s.sessionStore.Lookup(sessionID)
+	if err != nil {
+		log.Printf("[workflow-session] task-run submit session lookup error session_id=%s err=%v", sessionID, err)
+	} else if !ok || strings.TrimSpace(session.WorkflowRunID) == "" {
+		log.Printf("[workflow-session] task-run submit session lookup miss session_id=%s", sessionID)
+	} else {
+		workflowRunID := strings.TrimSpace(session.WorkflowRunID)
+		if usage, ok, err := s.evaluationStore.TokenUsageForWorkflowRun(workflowRunID); err != nil {
+			log.Printf("[workflow-session] task-run submit token usage lookup error session_id=%s workflow_run=%s err=%v", sessionID, workflowRunID, err)
+		} else if ok {
+			metrics["tokenUsage"] = usage
+		}
+		if routeMetrics, ok, err := s.evaluationStore.RouteMetricsForWorkflowRun(workflowRunID); err != nil {
+			log.Printf("[workflow-session] task-run submit route metrics lookup error session_id=%s workflow_run=%s err=%v", sessionID, workflowRunID, err)
+		} else if ok {
+			metrics["routeMetrics"] = routeMetrics
+		}
+		if metrics["tokenUsage"] != nil || metrics["routeMetrics"] != nil {
+			log.Printf("[workflow-session] task-run submit enriched session_id=%s workflow_run=%s token_usage=%t route_metrics=%t", sessionID, workflowRunID, metrics["tokenUsage"] != nil, metrics["routeMetrics"] != nil)
+			input.Metrics = metrics
+			return input
+		}
+		log.Printf("[workflow-session] task-run submit workflow_run=%s had no telemetry; trying session time window session_id=%s", workflowRunID, sessionID)
+	}
+	if strings.TrimSpace(input.StartedAt) == "" {
+		log.Printf("[workflow-session] task-run submit session window attribution skipped session_id=%s reason=missing startedAt", sessionID)
+		input.Metrics = metrics
+		return input
+	}
+	if usage, ok, err := s.evaluationStore.TokenUsageForSessionWindow(sessionID, input.StartedAt, input.EndedAt); err != nil {
+		log.Printf("[workflow-session] task-run submit session window token usage lookup error session_id=%s started_at=%s ended_at=%s err=%v", sessionID, input.StartedAt, input.EndedAt, err)
+	} else if ok {
+		metrics["tokenUsage"] = usage
+	}
+	if routeMetrics, ok, err := s.evaluationStore.RouteMetricsForSessionWindow(sessionID, input.StartedAt, input.EndedAt); err != nil {
+		log.Printf("[workflow-session] task-run submit session window route metrics lookup error session_id=%s started_at=%s ended_at=%s err=%v", sessionID, input.StartedAt, input.EndedAt, err)
+	} else if ok {
+		metrics["routeMetrics"] = routeMetrics
+	}
+	log.Printf("[workflow-session] task-run submit session window enriched session_id=%s started_at=%s ended_at=%s token_usage=%t route_metrics=%t", sessionID, input.StartedAt, input.EndedAt, metrics["tokenUsage"] != nil, metrics["routeMetrics"] != nil)
+	input.Metrics = metrics
+	return input
+}
+
+func sessionIDForTaskRun(r *http.Request, input catalog.TaskRunInput) string {
+	if r != nil {
+		if sessionID := strings.TrimSpace(r.Header.Get("Session-Id")); sessionID != "" {
+			return sessionID
+		}
+	}
+	if sessionID := strings.TrimSpace(input.SessionID); sessionID != "" {
+		return sessionID
+	}
+	if input.Context != nil {
+		if sessionID, ok := input.Context["sessionId"].(string); ok {
+			return strings.TrimSpace(sessionID)
+		}
+	}
+	return ""
+}
+
+func catalogCloneMap(values map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *Server) handleTaskRunPath(w http.ResponseWriter, r *http.Request) {
@@ -299,32 +387,40 @@ func (s *Server) handleWorkflowRunStart(w http.ResponseWriter, r *http.Request) 
 	if !allowMethods(w, r, http.MethodPost) {
 		return
 	}
+	sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
+	if sessionID == "" {
+		log.Printf("[workflow-session] start rejected because Session-Id header is missing")
+		http.Error(w, "Session-Id header is required", http.StatusBadRequest)
+		return
+	}
 	var input workflowrunner.StartInput
 	if !decodeRequest(w, r, &input) {
 		return
 	}
 	run, err := s.workflowRunner.StartRun(input)
 	if err != nil {
+		log.Printf("[workflow-session] start failed session_id=%s workflow_type=%s project=%s err=%v", sessionID, input.WorkflowType, input.ProjectID, err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if s.sessionStore != nil {
-		sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
-		if sessionID != "" {
-			_ = s.sessionStore.Bind(catalog.ActiveWorkflowSession{
-				SessionID:          sessionID,
-				WorkflowRunID:      run.ID,
-				ProjectID:          run.ProjectID,
-				WorkflowTemplateID: run.WorkflowTemplateID,
-				WorkflowCopyID:     run.WorkflowCopyID,
-				WorkflowType:       run.WorkflowType,
-				TaskTitle:          run.TaskTitle,
-				CurrentRole:        roleString(input.Context["role"]),
-				StartedAt:          run.StartedAt,
-				Status:             "active",
-			})
-			log.Printf("[workflow-session] bind session_id=%s workflow_run=%s workflow_type=%s project=%s", sessionID, run.ID, run.WorkflowType, run.ProjectID)
+		if err := s.sessionStore.Bind(catalog.ActiveWorkflowSession{
+			SessionID:          sessionID,
+			WorkflowRunID:      run.ID,
+			ProjectID:          run.ProjectID,
+			WorkflowTemplateID: run.WorkflowTemplateID,
+			WorkflowCopyID:     run.WorkflowCopyID,
+			WorkflowType:       run.WorkflowType,
+			TaskTitle:          run.TaskTitle,
+			CurrentRole:        roleString(input.Context["role"]),
+			StartedAt:          run.StartedAt,
+			Status:             "active",
+		}); err != nil {
+			log.Printf("[workflow-session] bind failed session_id=%s workflow_run=%s workflow_type=%s project=%s err=%v", sessionID, run.ID, run.WorkflowType, run.ProjectID, err)
+			http.Error(w, "failed to bind workflow session", http.StatusInternalServerError)
+			return
 		}
+		log.Printf("[workflow-session] bind session_id=%s workflow_run=%s workflow_type=%s project=%s", sessionID, run.ID, run.WorkflowType, run.ProjectID)
 	}
 	writeJSON(w, http.StatusCreated, run)
 }

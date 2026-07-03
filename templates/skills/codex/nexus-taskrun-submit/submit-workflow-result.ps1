@@ -4,6 +4,8 @@ param(
 
     [string]$Endpoint = "http://127.0.0.1:8766/api/task-runs",
 
+    [string]$SessionId = "",
+
     [switch]$UseStore,
 
     [string]$StorePath = ""
@@ -27,6 +29,11 @@ $args = @(
     "--endpoint",
     $Endpoint
 )
+
+if ($SessionId -ne "") {
+    $args += "--session-id"
+    $args += $SessionId
+}
 
 if ($UseStore) {
     $args += "--use-store"

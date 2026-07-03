@@ -1,5 +1,6 @@
 export type WorkflowRunSubmitOptions = {
   projectId?: string;
+  sessionId?: string;
   workflowCopyId?: string;
   workflowTemplateId?: string;
   workflowId?: string;
@@ -13,6 +14,7 @@ export type WorkflowRunSubmitOptions = {
     edges?: Array<{ from: string; to: string; label?: string }>;
   } | null;
   context?: {
+    sessionId?: string;
     model?: string;
     rules?: string[];
     skills?: string[];
@@ -215,7 +217,9 @@ export function buildWorkflowRunDraft(options: WorkflowRunSubmitOptions): Workfl
   const startedTime = Date.parse(startedAt);
   const endedTime = Date.parse(endedAt);
   const durationMs = Number.isFinite(startedTime) && Number.isFinite(endedTime) ? Math.max(0, endedTime - startedTime) : 0;
+  const sessionId = options.sessionId || options.context?.sessionId || "";
   const context = {
+    ...(sessionId ? { sessionId } : {}),
     agent: inferPrimaryAgent(options, workflowType),
     model: options.context?.model || "nexus-workflow-runner",
     rules: options.context?.rules?.length ? options.context.rules : inferRules(workflowType),
@@ -224,6 +228,7 @@ export function buildWorkflowRunDraft(options: WorkflowRunSubmitOptions): Workfl
   };
   const payload = {
     projectId: options.projectId || "global-workflows",
+    ...(sessionId ? { sessionId } : {}),
     workflowTemplateId: workflowTemplateId(options, workflowType),
     workflowCopyId: options.workflowCopyId || "",
     workflowType,

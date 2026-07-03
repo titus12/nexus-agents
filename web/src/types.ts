@@ -230,6 +230,7 @@ export type TaskRun = {
 
 export type TaskRunInput = {
   projectId: string;
+  sessionId?: string;
   workflowTemplateId?: string;
   workflowCopyId?: string;
   workflowType: string;
@@ -245,6 +246,7 @@ export type TaskRunInput = {
 
 export type WorkflowRunSubmitOptions = {
   projectId?: string;
+  sessionId?: string;
   workflowCopyId?: string;
   workflowTemplateId?: string;
   workflowId?: string;
@@ -253,6 +255,7 @@ export type WorkflowRunSubmitOptions = {
   workflowTrigger?: string;
   graph?: WorkflowGraph | null;
   context?: {
+    sessionId?: string;
     model?: string;
     rules?: string[];
     skills?: string[];

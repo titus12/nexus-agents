@@ -180,7 +180,7 @@ func TestEvaluationEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluation store: %v", err)
 	}
-	server := NewServerWithEvaluationStore(evaluationStore)
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore).(*Server)
 
 	createResponse := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
 		"projectId":"sample",
@@ -262,7 +262,7 @@ func TestTaskRunsEndpointAcceptsWorkflowSubmitterPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluation store: %v", err)
 	}
-	server := NewServerWithEvaluationStore(evaluationStore)
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore).(*Server)
 
 	response := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
 		"projectId":"btd-client",
@@ -290,15 +290,19 @@ func TestWorkflowRunnerEndpointsStartAndCompleteSubmitTaskRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluation store: %v", err)
 	}
-	server := NewServerWithEvaluationStore(evaluationStore)
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore)
 
-	start := requestJSON(t, server, http.MethodPost, "/api/workflow-runs/start", `{
+	startReq := httptest.NewRequest(http.MethodPost, "/api/workflow-runs/start", strings.NewReader(`{
 		"projectId":"btd-client",
 		"workflowTemplateId":"ui-feature-development",
 		"workflowType":"ui-feature-development",
 		"taskTitle":"Implement popup",
 		"context":{"agent":"unity-ui-developer"}
-	}`)
+	}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("Session-Id", "sess-workflow-1")
+	start := httptest.NewRecorder()
+	server.ServeHTTP(start, startReq)
 	if start.Code != http.StatusCreated {
 		t.Fatalf("expected workflow start status 201, got %d body=%s", start.Code, start.Body.String())
 	}
@@ -336,7 +340,7 @@ func TestEvaluationProjectProposalAndStatisticsEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluation store: %v", err)
 	}
-	server := NewServerWithEvaluationStore(evaluationStore)
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore)
 
 	weakResponse := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
 		"projectId":"sample",
@@ -1812,7 +1816,11 @@ func TestCodexRouterTokenUsageHeadersAttachToWorkflowCompletion(t *testing.T) {
 	})
 	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), router, defaultLocalDirectoryPicker{}, evaluationStore)
 
-	start := requestJSON(t, server, http.MethodPost, "/api/workflow-runs/start", `{"projectId":"sample","workflowType":"bugfix","workflowTemplateId":"bugfix"}`)
+	startReq := httptest.NewRequest(http.MethodPost, "/api/workflow-runs/start", strings.NewReader(`{"projectId":"sample","workflowType":"bugfix","workflowTemplateId":"bugfix"}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("Session-Id", "sess-token-1")
+	start := httptest.NewRecorder()
+	server.ServeHTTP(start, startReq)
 	if start.Code != http.StatusCreated {
 		t.Fatalf("start workflow status=%d body=%s", start.Code, start.Body.String())
 	}
@@ -1823,7 +1831,7 @@ func TestCodexRouterTokenUsageHeadersAttachToWorkflowCompletion(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/proxy/codex/v1/responses", strings.NewReader(`{"model":"deepseek-v4-pro","input":"hello","stream":false}`))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Nexus-Workflow-Run-Id", started.ID)
+	request.Header.Set("Session-Id", "sess-token-1")
 	request.Header.Set("X-Nexus-Workflow-Role", "worker")
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
@@ -1856,6 +1864,172 @@ func TestCodexRouterTokenUsageHeadersAttachToWorkflowCompletion(t *testing.T) {
 	roles, ok := routeMetrics["roles"].(map[string]any)
 	if !ok || roles["worker"] == nil {
 		t.Fatalf("expected worker role route metrics, got %#v", routeMetrics)
+	}
+}
+
+func TestTaskRunSubmitEnrichesMetricsFromBoundSession(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	if err := evaluationStore.RecordTokenUsage(codexrouter.TokenUsageEvent{
+		WorkflowRunID: "wf_run_session_submit",
+		Role:          "worker",
+		Model:         "gpt-test",
+		InputTokens:   100,
+		OutputTokens:  20,
+		TotalTokens:   120,
+	}); err != nil {
+		t.Fatalf("record token usage: %v", err)
+	}
+	if err := evaluationStore.RecordWorkflowRouteEvent(codexrouter.WorkflowRouteEvent{
+		WorkflowRunID:  "wf_run_session_submit",
+		Role:           "worker",
+		Model:          "gpt-test",
+		StatusCode:     200,
+		DurationMS:     1500,
+		RequestBytes:   2048,
+		ToolCount:      3,
+		InputItemCount: 2,
+		ToolCallCount:  1,
+	}); err != nil {
+		t.Fatalf("record route event: %v", err)
+	}
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore).(*Server)
+	if err := server.sessionStore.Bind(catalog.ActiveWorkflowSession{
+		SessionID:     "sess-submit-1",
+		WorkflowRunID: "wf_run_session_submit",
+		ProjectID:     "sample",
+		WorkflowType:  "bugfix",
+		Status:        "active",
+	}); err != nil {
+		t.Fatalf("bind session: %v", err)
+	}
+
+	body := `{
+		"projectId":"sample",
+		"workflowType":"bugfix",
+		"submittedStatus":"success",
+		"metrics":{
+			"toolCallCount":7,
+			"tokenUsage":{"workflowRunId":"client_fake","requestCount":99},
+			"routeMetrics":{"workflowRunId":"client_fake","requestCount":99}
+		}
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/api/task-runs", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Session-Id", "sess-submit-1")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("submit task run status=%d body=%s", response.Code, response.Body.String())
+	}
+	var run catalog.TaskRun
+	decodeJSON(t, response, &run)
+	if numberValueForHTTPTest(run.Metrics["toolCallCount"]) != 7 {
+		t.Fatalf("expected original tool metric to remain, got %#v", run.Metrics)
+	}
+	usage, ok := run.Metrics["tokenUsage"].(map[string]any)
+	if !ok || usage["workflowRunId"] != "wf_run_session_submit" || int(numberValueForHTTPTest(usage["requestCount"])) != 1 || int(numberValueForHTTPTest(usage["totalTokens"])) != 120 {
+		t.Fatalf("expected server token usage, got %#v", run.Metrics["tokenUsage"])
+	}
+	routeMetrics, ok := run.Metrics["routeMetrics"].(map[string]any)
+	if !ok || routeMetrics["workflowRunId"] != "wf_run_session_submit" || int(numberValueForHTTPTest(routeMetrics["requestCount"])) != 1 || int(numberValueForHTTPTest(routeMetrics["toolCallCount"])) != 1 {
+		t.Fatalf("expected server route metrics, got %#v", run.Metrics["routeMetrics"])
+	}
+	if _, ok, err := server.sessionStore.Lookup("sess-submit-1"); err != nil || ok {
+		t.Fatalf("expected session to be completed, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestTaskRunSubmitEnrichesMetricsFromSessionTimeWindow(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	if err := evaluationStore.RecordTokenUsage(codexrouter.TokenUsageEvent{
+		SessionID:    "sess-window-1",
+		Role:         "worker",
+		Model:        "gpt-window",
+		InputTokens:  80,
+		OutputTokens: 16,
+		TotalTokens:  96,
+		CreatedAt:    "2026-07-02T08:00:03Z",
+	}); err != nil {
+		t.Fatalf("record token usage: %v", err)
+	}
+	if err := evaluationStore.RecordTokenUsage(codexrouter.TokenUsageEvent{
+		SessionID:    "sess-window-1",
+		Role:         "worker",
+		Model:        "gpt-window",
+		InputTokens:  999,
+		OutputTokens: 1,
+		TotalTokens:  1000,
+		CreatedAt:    "2026-07-02T09:00:00Z",
+	}); err != nil {
+		t.Fatalf("record out-of-window token usage: %v", err)
+	}
+	if err := evaluationStore.RecordWorkflowRouteEvent(codexrouter.WorkflowRouteEvent{
+		SessionID:      "sess-window-1",
+		Role:           "worker",
+		Model:          "gpt-window",
+		StatusCode:     200,
+		DurationMS:     2500,
+		RequestBytes:   1024,
+		ToolCount:      4,
+		InputItemCount: 3,
+		ToolCallCount:  2,
+		CreatedAt:      "2026-07-02T08:00:04Z",
+	}); err != nil {
+		t.Fatalf("record route event: %v", err)
+	}
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore).(*Server)
+
+	body := `{
+		"projectId":"sample",
+		"workflowType":"bugfix",
+		"submittedStatus":"success",
+		"startedAt":"2026-07-02T08:00:00Z",
+		"endedAt":"2026-07-02T08:00:10Z",
+		"sessionId":"sess-window-1",
+		"metrics":{
+			"toolCallCount":7,
+			"tokenUsage":{"workflowRunId":"client_fake","requestCount":99},
+			"routeMetrics":{"workflowRunId":"client_fake","requestCount":99}
+		}
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/api/task-runs", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("submit task run status=%d body=%s", response.Code, response.Body.String())
+	}
+	var run catalog.TaskRun
+	decodeJSON(t, response, &run)
+	usage, ok := run.Metrics["tokenUsage"].(map[string]any)
+	if !ok || usage["sessionId"] != "sess-window-1" || int(numberValueForHTTPTest(usage["requestCount"])) != 1 || int(numberValueForHTTPTest(usage["totalTokens"])) != 96 {
+		t.Fatalf("expected session-window token usage, got %#v", run.Metrics["tokenUsage"])
+	}
+	routeMetrics, ok := run.Metrics["routeMetrics"].(map[string]any)
+	if !ok || routeMetrics["sessionId"] != "sess-window-1" || int(numberValueForHTTPTest(routeMetrics["requestCount"])) != 1 || int(numberValueForHTTPTest(routeMetrics["toolCallCount"])) != 2 {
+		t.Fatalf("expected session-window route metrics, got %#v", run.Metrics["routeMetrics"])
+	}
+}
+
+func numberValueForHTTPTest(value any) float64 {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float64:
+		return typed
+	case json.Number:
+		result, _ := typed.Float64()
+		return result
+	default:
+		return 0
 	}
 }
 

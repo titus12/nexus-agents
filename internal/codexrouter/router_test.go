@@ -290,6 +290,8 @@ func findRouteForTest(t *testing.T, cfg Config, id string) Route {
 type recordingTokenUsageRecorder struct {
 	events      []TokenUsageEvent
 	routeEvents []WorkflowRouteEvent
+	session     WorkflowSessionContext
+	ok          bool
 }
 
 func (r *recordingTokenUsageRecorder) RecordTokenUsage(event TokenUsageEvent) error {
@@ -303,12 +305,12 @@ func (r *recordingTokenUsageRecorder) RecordWorkflowRouteEvent(event WorkflowRou
 }
 
 func (r *recordingTokenUsageRecorder) LookupWorkflowSession(sessionID string) (WorkflowSessionContext, bool, error) {
-	return WorkflowSessionContext{}, false, nil
+	return r.session, r.ok, nil
 }
 
-func TestRecordTokenUsageUsesHeadersOnly(t *testing.T) {
+func TestRecordTokenUsageUsesBoundSession(t *testing.T) {
 	service := NewService(Config{Routes: []Route{{ID: "gpt-test", Model: "gpt-test", API: "responses"}}})
-	recorder := &recordingTokenUsageRecorder{}
+	recorder := &recordingTokenUsageRecorder{session: WorkflowSessionContext{WorkflowRunID: "wf_run_123", Role: "worker-role"}, ok: true}
 	service.SetTokenUsageRecorder(recorder)
 
 	tracker := newResponseUsageTracker(false)
@@ -319,7 +321,7 @@ func TestRecordTokenUsageUsesHeadersOnly(t *testing.T) {
 		"input_tokens_details": map[string]any{"cached_tokens": 40.0},
 	}})
 	request := httptest.NewRequest("POST", "/proxy/codex/v1/responses", nil)
-	request.Header.Set(workflowRunIDHeader, "wf_run_123")
+	request.Header.Set("Session-Id", "sess-123")
 	request.Header.Set(workflowRoleHeader, "Worker Role")
 
 	if err := service.recordTokenUsage(request, responseRequest{Model: "gpt-test"}, Route{ID: "gpt-test"}, tracker); err != nil {
@@ -329,7 +331,7 @@ func TestRecordTokenUsageUsesHeadersOnly(t *testing.T) {
 		t.Fatalf("expected one event, got %#v", recorder.events)
 	}
 	event := recorder.events[0]
-	if event.WorkflowRunID != "wf_run_123" || event.Role != "worker-role" || event.Model != "gpt-test" {
+	if event.WorkflowRunID != "wf_run_123" || event.SessionID != "sess-123" || event.Role != "worker-role" || event.Model != "gpt-test" {
 		t.Fatalf("unexpected event identity: %#v", event)
 	}
 	if event.InputTokens != 100 || event.CachedInputTokens != 40 || event.OutputTokens != 25 || event.TotalTokens != 125 {
@@ -337,27 +339,46 @@ func TestRecordTokenUsageUsesHeadersOnly(t *testing.T) {
 	}
 }
 
-func TestRecordTokenUsageSkipsMissingWorkflowRunHeader(t *testing.T) {
+func TestRecordTokenUsageSkipsMissingSessionID(t *testing.T) {
 	service := NewService(Config{Routes: []Route{{ID: "gpt-test", Model: "gpt-test", API: "responses"}}})
-	recorder := &recordingTokenUsageRecorder{}
+	recorder := &recordingTokenUsageRecorder{session: WorkflowSessionContext{WorkflowRunID: "wf_run_123"}, ok: true}
 	service.SetTokenUsageRecorder(recorder)
 	tracker := newResponseUsageTracker(false)
 	tracker.updateFromObject(map[string]any{"usage": map[string]any{"input_tokens": 10.0, "output_tokens": 2.0}})
 	request := httptest.NewRequest("POST", "/proxy/codex/v1/responses", nil)
 	if err := service.recordTokenUsage(request, responseRequest{Model: "gpt-test"}, Route{ID: "gpt-test"}, tracker); err != nil {
-		t.Fatalf("record token usage without header: %v", err)
+		t.Fatalf("record token usage without session id: %v", err)
 	}
 	if len(recorder.events) != 0 {
-		t.Fatalf("expected no events without workflow header, got %#v", recorder.events)
+		t.Fatalf("expected no events without session id, got %#v", recorder.events)
 	}
 }
 
-func TestRecordRouteEventUsesHeadersOnly(t *testing.T) {
+func TestRecordTokenUsageUsesUnboundSessionID(t *testing.T) {
 	service := NewService(Config{Routes: []Route{{ID: "gpt-test", Model: "gpt-test", API: "responses"}}})
-	recorder := &recordingTokenUsageRecorder{}
+	recorder := &recordingTokenUsageRecorder{ok: false}
+	service.SetTokenUsageRecorder(recorder)
+	tracker := newResponseUsageTracker(false)
+	tracker.updateFromObject(map[string]any{"usage": map[string]any{"input_tokens": 10.0, "output_tokens": 2.0}})
+	request := httptest.NewRequest("POST", "/proxy/codex/v1/responses", nil)
+	request.Header.Set("Session-Id", "sess-unbound")
+	if err := service.recordTokenUsage(request, responseRequest{Model: "gpt-test"}, Route{ID: "gpt-test"}, tracker); err != nil {
+		t.Fatalf("record token usage with unbound session id: %v", err)
+	}
+	if len(recorder.events) != 1 {
+		t.Fatalf("expected one event with unbound session id, got %#v", recorder.events)
+	}
+	if recorder.events[0].WorkflowRunID != "" || recorder.events[0].SessionID != "sess-unbound" {
+		t.Fatalf("unexpected unbound session event: %#v", recorder.events[0])
+	}
+}
+
+func TestRecordRouteEventUsesBoundSession(t *testing.T) {
+	service := NewService(Config{Routes: []Route{{ID: "gpt-test", Model: "gpt-test", API: "responses"}}})
+	recorder := &recordingTokenUsageRecorder{session: WorkflowSessionContext{WorkflowRunID: "wf_run_route"}, ok: true}
 	service.SetTokenUsageRecorder(recorder)
 	request := httptest.NewRequest("POST", "/proxy/codex/v1/responses", nil)
-	request.Header.Set(workflowRunIDHeader, "wf_run_route")
+	request.Header.Set("Session-Id", "sess-route-1")
 	request.Header.Set(workflowRoleHeader, "reviewer")
 	stats := requestStats{BodyBytes: 2048, ToolCount: 5, InputItemsCount: 3}
 	if err := service.recordRouteEvent(request, responseRequest{Model: "gpt-test"}, Route{ID: "gpt-test"}, stats, 200, 1234, 2); err != nil {
@@ -367,7 +388,7 @@ func TestRecordRouteEventUsesHeadersOnly(t *testing.T) {
 		t.Fatalf("expected one route event, got %#v", recorder.routeEvents)
 	}
 	event := recorder.routeEvents[0]
-	if event.WorkflowRunID != "wf_run_route" || event.Role != "reviewer" || event.StatusCode != 200 || event.DurationMS != 1234 {
+	if event.WorkflowRunID != "wf_run_route" || event.SessionID != "sess-route-1" || event.Role != "reviewer" || event.StatusCode != 200 || event.DurationMS != 1234 {
 		t.Fatalf("unexpected route event identity: %#v", event)
 	}
 	if event.RequestBytes != 2048 || event.ToolCount != 5 || event.InputItemCount != 3 || event.ToolCallCount != 2 {
