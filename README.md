@@ -13,7 +13,6 @@ Nexus Agents 是一个 AI 开发配置管理台。设计原型在 `design/` 目�
 - 工作流列表/画布：支持创建、编辑、节点选择和模拟运行抽屉
 - Codex/Claude 模型路由表与路由解析
 - **Codex 路由器（混合模式）**：Codex Desktop 本地代理——GPT 订阅模型走 ChatGPT Codex 后端，DeepSeek 模型走 Winky API 并做 Chat Completions 协议转换
-- 项目导入写入本地 `.nexus` 元数据文件（已加入 .gitignore），工作流图存储在 `.claude/workflows/*.graph.json`
 
 ## 模板目录结构
 ```text
