@@ -18,6 +18,7 @@ var validFrontmatterTypes = map[string]bool{
 }
 
 var placeholderPattern = regexp.MustCompile(`(?i)\b(TBD|TODO|FIXME|placeholder|coming soon)\b|待补充|占位|稍后补充`)
+var mojibakePattern = regexp.MustCompile(`(�|Ã.|Â.|â€.|鈥|閳|鐞|閹|婢|鍔|绋|寮圭|闈㈡|鎸夐|缃戠|鍗忚|鎴樻|鐜╂)`)
 
 func Validate(projectRoot string) (ValidationReport, error) {
 	bundle, err := ScanBundle(projectRoot)
@@ -130,6 +131,9 @@ func validateDocument(doc Document, docByPath map[string]bool) []ValidationIssue
 	if placeholderPattern.MatchString(doc.Body) {
 		issues = append(issues, ValidationIssue{Severity: "warning", Code: "placeholder_content", Path: doc.Path, Message: "Document still contains placeholder/TODO content."})
 	}
+	if likelyMojibake(fm.Raw + "\n" + doc.Body) {
+		issues = append(issues, ValidationIssue{Severity: "warning", Code: "mojibake_content", Path: doc.Path, Message: "Document appears to contain mojibake/garbled Chinese text; rewrite the affected frontmatter or body as UTF-8."})
+	}
 	if doc.Name == "routing.md" && !mentionsKnowledgePath(doc.Body) {
 		issues = append(issues, ValidationIssue{Severity: "warning", Code: "routing_without_targets", Path: doc.Path, Message: "Routing documents should name the target KnowledgeBase files agents must load."})
 	}
@@ -140,6 +144,43 @@ func validateDocument(doc Document, docByPath map[string]bool) []ValidationIssue
 		}
 	}
 	return issues
+}
+
+func likelyMojibake(text string) bool {
+	text = stripMarkdownCode(text)
+	matches := mojibakePattern.FindAllString(text, -1)
+	if len(matches) >= 2 {
+		return true
+	}
+	return strings.Contains(text, "�")
+}
+
+func stripMarkdownCode(text string) string {
+	var out []string
+	inFence := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		for {
+			start := strings.Index(line, "`")
+			if start < 0 {
+				break
+			}
+			end := strings.Index(line[start+1:], "`")
+			if end < 0 {
+				break
+			}
+			line = line[:start] + line[start+1+end+1:]
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 func normalizedResourcePath(resource string) string {

@@ -75,6 +75,36 @@ func TestValidateDomainRoutingAliases(t *testing.T) {
 	}
 }
 
+func TestValidateReportsMojibakeContent(t *testing.T) {
+	root := t.TempDir()
+	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
+	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: design/KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Root\n\nThis text contains garbled Chinese like 鐞涘奔璐熼弽 and 閹存ɑ鏋 AI.")
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
+
+	report, err := Validate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasIssue(report.Issues, "mojibake_content") {
+		t.Fatalf("expected mojibake_content issue, got %#v", report.Issues)
+	}
+}
+
+func TestValidateAllowsMojibakeExamplesInsideCode(t *testing.T) {
+	root := t.TempDir()
+	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
+	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: design/KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Root\n\nUse examples like `鈥?` only inside code spans when documenting encoding checks.\n\n```text\n鐞涘奔璐熼弽\n閹存ɑ鏋\n```")
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
+
+	report, err := Validate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasIssue(report.Issues, "mojibake_content") {
+		t.Fatalf("code examples should not trigger mojibake_content: %#v", report.Issues)
+	}
+}
+
 func TestMaintenanceDetectsDuplicateChineseHardRules(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
