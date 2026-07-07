@@ -1,0 +1,562 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nexus Agents 项目设计方案</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --bg-soft: #0f1730;
+      --panel: rgba(17, 24, 51, 0.82);
+      --panel-2: rgba(22, 31, 61, 0.94);
+      --text: #e7ecff;
+      --muted: #a7b1d6;
+      --accent: #7aa2ff;
+      --accent-2: #8be9fd;
+      --good: #58d68d;
+      --warn: #f5b041;
+      --line: rgba(255,255,255,.10);
+      --shadow: 0 14px 44px rgba(0,0,0,.36);
+      --code: #0d132a;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+      background:
+        radial-gradient(1200px 700px at 18% 0%, rgba(122,162,255,.20), transparent 55%),
+        radial-gradient(900px 500px at 85% 12%, rgba(139,233,253,.10), transparent 58%),
+        linear-gradient(180deg, var(--bg), #09101e 70%);
+      color: var(--text);
+      line-height: 1.75;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent-2); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .shell {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 28px 20px 56px;
+    }
+
+    .hero {
+      background: linear-gradient(180deg, rgba(17,24,51,.96), rgba(17,24,51,.76));
+      border: 1px solid var(--line);
+      border-radius: 26px;
+      padding: 28px 28px 24px;
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 5px 11px;
+      border-radius: 999px;
+      background: rgba(122,162,255,.14);
+      color: var(--accent-2);
+      font-size: 12px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 14px 0 10px;
+      font-size: clamp(30px, 3.2vw, 42px);
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }
+
+    .sub {
+      max-width: 1040px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(300px, .9fr);
+      gap: 18px;
+      margin-top: 22px;
+      align-items: stretch;
+    }
+
+    .hero-box {
+      background: rgba(255,255,255,.04);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+    }
+
+    .hero-box h2 {
+      margin: 0 0 10px;
+      font-size: 16px;
+      color: var(--accent-2);
+    }
+
+    .hero-box p {
+      margin: 0;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 12px;
+      background: rgba(255,255,255,.04);
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .toc,
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(8px);
+    }
+
+    .toc {
+      position: sticky;
+      top: 18px;
+      padding: 18px;
+    }
+
+    .toc h2 {
+      margin: 0 0 12px;
+      font-size: 14px;
+      color: var(--accent-2);
+      letter-spacing: .02em;
+    }
+
+    .toc a {
+      display: block;
+      padding: 8px 10px;
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 14px;
+      margin: 2px 0;
+    }
+
+    .toc a:hover {
+      background: rgba(255,255,255,.06);
+      text-decoration: none;
+    }
+
+    .content {
+      display: grid;
+      gap: 18px;
+    }
+
+    .card {
+      padding: 22px 22px 18px;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 24px;
+      line-height: 1.2;
+    }
+
+    h3 {
+      margin: 14px 0 10px;
+      font-size: 18px;
+      line-height: 1.35;
+    }
+
+    p {
+      margin: 0 0 12px;
+      color: var(--text);
+    }
+
+    ul {
+      margin: 10px 0 0 18px;
+      padding: 0;
+    }
+
+    li { margin: 6px 0; }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .summary-item {
+      border-radius: 16px;
+      padding: 14px 14px 13px;
+      background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
+      border: 1px solid var(--line);
+      min-height: 110px;
+    }
+
+    .summary-item .k {
+      font-size: 12px;
+      color: var(--accent-2);
+      margin-bottom: 8px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .summary-item .v {
+      font-size: 14px;
+      color: var(--text);
+    }
+
+    .section-lead {
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .mini-card {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+    }
+
+    .mini-card .title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 26px;
+      height: 26px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(122,162,255,.18);
+      color: var(--accent-2);
+      border: 1px solid rgba(122,162,255,.28);
+    }
+
+    .three-col {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .roadmap {
+      display: grid;
+      gap: 12px;
+      margin-top: 10px;
+    }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid var(--line);
+    }
+
+    .phase .label {
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(88,214,141,.12);
+      color: #a8f5c4;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .phase .desc { color: var(--text); }
+    .phase .desc span { color: var(--muted); }
+
+    code {
+      background: var(--code);
+      border: 1px solid rgba(255,255,255,.08);
+      padding: 2px 6px;
+      border-radius: 6px;
+      color: #d8e2ff;
+    }
+
+    .note {
+      border-left: 4px solid var(--accent);
+      background: rgba(122,162,255,.08);
+      padding: 12px 14px;
+      border-radius: 12px;
+      color: var(--muted);
+    }
+
+    .subtle {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 1120px) {
+      .grid { grid-template-columns: 1fr; }
+      .toc { position: static; }
+      .hero-grid, .summary, .three-col, .mini-grid { grid-template-columns: 1fr; }
+      .phase { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <span class="eyebrow">Developer Design Doc</span>
+      <h1>Nexus Agents 项目设计方案</h1>
+      <p class="sub">
+        面向开发人员的项目设计说明：讲清楚 Nexus Agents 为什么存在、要解决什么 AI 开发痛点、核心能力有哪些、这些能力的价值是什么，以及未来如何演进。
+      </p>
+
+      <div class="hero-grid">
+        <div class="hero-box">
+          <h2>项目定位</h2>
+          <p>把 AI 开发从“临时提示词 + 手工约定”推进到“可配置、可复用、可评估、可沉淀”的工程体系。</p>
+          <div class="chips">
+            <span class="chip">项目级管理</span>
+            <span class="chip">知识库导入</span>
+            <span class="chip">Workflow 编排</span>
+            <span class="chip">模型路由</span>
+            <span class="chip">评估闭环</span>
+          </div>
+        </div>
+        <div class="hero-box">
+          <h2>阅读方式</h2>
+          <p>先看总览，再看痛点与解决方式；如果你是开发者，重点关注“核心功能与设计价值”和“未来方向”。</p>
+        </div>
+      </div>
+
+      <div class="summary">
+        <div class="summary-item">
+          <div class="k">Why</div>
+          <div class="v">解决 AI 开发中的上下文不稳定、流程不一致、知识不可审查、结果难复盘。</div>
+        </div>
+        <div class="summary-item">
+          <div class="k">What</div>
+          <div class="v">管理 Agents、Rules、Skills、Workflows、Knowledge Base、Routing 和 Evaluation。</div>
+        </div>
+        <div class="summary-item">
+          <div class="k">Value</div>
+          <div class="v">让项目知识和流程可视、可校验、可同步、可评估，适合真实项目长期迭代。</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="grid">
+      <aside class="toc">
+        <h2>目录</h2>
+        <a href="#origin">1. 项目初衷</a>
+        <a href="#painpoints">2. AI 开发中的痛点与解决方式</a>
+        <a href="#features">3. 核心功能与设计价值</a>
+        <a href="#advantages">4. 项目优势</a>
+        <a href="#future">5. 未来方向</a>
+      </aside>
+
+      <main class="content">
+        <section class="card" id="origin">
+          <h2>1. 项目初衷</h2>
+          <p class="section-lead">
+            Nexus Agents 的目标，不是再造一个“单次对话更聪明”的聊天壳，而是把 AI 开发从临时提示词、口头约定和一次性操作，推进到一个可配置、可复用、可评估、可沉淀的工程体系。
+          </p>
+          <p>
+            在真实项目里，AI 开发往往不是“模型不会写”，而是“项目上下文不稳定、约束不统一、流程不一致、结果不可复盘”。Nexus Agents 关注的是项目级能力：让 Agent、规则、技能、工作流、知识库、模型路由、评估闭环都能围绕同一个项目持续演进。
+          </p>
+          <div class="note">
+            对于 btd-client、btd-game-server 这类中大型项目，Nexus Agents 的价值在于：把分散在仓库、文档和人工经验中的 AI 开发资产，变成可观察、可维护、可同步的项目能力。
+          </div>
+        </section>
+
+        <section class="card" id="painpoints">
+          <h2>2. AI 开发中的痛点与解决方式</h2>
+          <p class="section-lead">这一部分建议按“痛点 → 解决方式”的方式阅读，方便快速定位 Nexus 解决了什么问题。</p>
+
+          <div class="mini-grid">
+            <div class="mini-card">
+              <div class="title"><span class="badge">01</span> 上下文不稳定</div>
+              <p><strong>痛点：</strong> AI 每次处理任务时，都可能重复解释项目结构、目录约定、禁止修改的文件、构建方式和常见坑位。</p>
+              <p><strong>解决：</strong> 将约束前置为项目资产，并通过 Loaded Knowledge 机制检查当前任务加载了什么、是否足够支撑执行。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">02</span> 工作流不可复用</div>
+              <p><strong>痛点：</strong> bugfix、feature、review、refactor 等流程依赖临时 prompt，质量波动大。</p>
+              <p><strong>解决：</strong> 将工作流沉淀成模板和项目副本，并配合图形化展示与评估结果持续优化。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">03</span> 多工具配置割裂</div>
+              <p><strong>痛点：</strong> Codex、Claude Code、<code>.claude</code>、<code>.codex</code>、<code>.agents</code> 各自维护，容易冲突。</p>
+              <p><strong>解决：</strong> 用 Nexus Agents 统一管理项目中的 Agents、Rules、Skills、Workflows 与知识资产。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">04</span> 知识库过重或不可审查</div>
+              <p><strong>痛点：</strong> 重型 RAG / 向量检索容易变成“查得到但看不清”。</p>
+              <p><strong>解决：</strong> 知识保持在 Git 内，Nexus 负责导出、展示、校验、路由预览和维护报告。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">05</span> 模型路由复杂</div>
+              <p><strong>痛点：</strong> 不同模型后端接入混杂，项目侧难以稳定控制路由策略。</p>
+              <p><strong>解决：</strong> 通过本地 Codex Router 统一路由，把模型选择与项目流程解耦。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">06</span> 结果缺少证据与评估</div>
+              <p><strong>痛点：</strong> AI 结果往往缺少证据，失败经验也难沉淀。</p>
+              <p><strong>解决：</strong> 通过 TaskRun、Evaluation、Evidence、Learning Case、Loaded Knowledge 检查形成闭环。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">07</span> 模板与项目副本难同步</div>
+              <p><strong>痛点：</strong> 全局模板更新后，项目副本是否过期、是否可安全同步通常说不清。</p>
+              <p><strong>解决：</strong> 用版本、hash、diff、sync preview 和手动同步机制管理关系，避免自动覆盖。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card" id="features">
+          <h2>3. 核心功能与设计价值</h2>
+          <p class="section-lead">这里不写成模块清单，而是从“功能为什么存在、它带来的价值是什么”来说明。</p>
+
+          <div class="mini-grid">
+            <div class="mini-card">
+              <div class="title"><span class="badge">A</span> 项目接入与配置管理</div>
+              <p><strong>设计目标：</strong> 导入本地项目后自动识别 Agents、Rules、Skills、Workflows、workflow graph 和项目知识库。</p>
+              <p><strong>设计价值：</strong> 让项目级 AI 配置从“散落文件”变成“可视化资产”。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">B</span> 模板库与项目副本体系</div>
+              <p><strong>设计目标：</strong> 维护全局模板，同时允许项目保留自己的副本和定制。</p>
+              <p><strong>设计价值：</strong> 统一标准与项目差异可以同时存在。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">C</span> 同步与差异管理</div>
+              <p><strong>设计目标：</strong> 用版本、hash、diff、状态和 sync preview 管理模板与副本关系。</p>
+              <p><strong>设计价值：</strong> 开发者能知道“改了什么、能不能同步、是否会覆盖本地修改”。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">D</span> 工作流编排与可视化</div>
+              <p><strong>设计目标：</strong> 将 bugfix、feature、review、refactor 等过程沉淀成 workflow，并图形化展示。</p>
+              <p><strong>设计价值：</strong> 让 AI 开发从“临时聊天”变成“可复用流程”。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">E</span> 项目知识库管理</div>
+              <p><strong>设计目标：</strong> 为知识库生成前端展示页，提供 Overview、Validation、Docs、Routing、Maintenance。</p>
+              <p><strong>设计价值：</strong> 知识库既能“看”，又能“验”，还能“维护”，且 source of truth 仍留在 Git 中。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">F</span> 模型路由与本地代理</div>
+              <p><strong>设计目标：</strong> 统一 Codex 模型请求，根据模型 slug 路由到不同后端能力。</p>
+              <p><strong>设计价值：</strong> 模型能力与项目流程解耦，按任务灵活分工。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">G</span> 执行记录与评估闭环</div>
+              <p><strong>设计目标：</strong> 记录 TaskRun、Evidence、token usage、route metrics，并生成 Evaluation / Learning Case。</p>
+              <p><strong>设计价值：</strong> 结果可复盘，失败可沉淀，优化可反向驱动。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">H</span> 统计与健康视图</div>
+              <p><strong>设计目标：</strong> 从项目、workflow、模型、规则、知识维度展示成功率、失败率和稳定性趋势。</p>
+              <p><strong>设计价值：</strong> 帮团队找到不稳定来源和维护重点。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card" id="advantages">
+          <h2>4. 项目优势</h2>
+          <div class="three-col">
+            <div class="mini-card">
+              <div class="title"><span class="badge">1</span> 工程化 AI 资产</div>
+              <p>把 prompt、规则、技能、工作流、知识、评估统一纳入项目管理，形成可持续建设的工程体系。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">2</span> 项目级而非平台级强绑定</div>
+              <p>项目知识和配置尽量保留在仓库内，Nexus 负责管理、展示、导出和评估，不锁死 source of truth。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">3</span> 轻量可审查</div>
+              <p>优先采用 Markdown、模板、副本、hash、diff、OKF-compatible 知识结构，方便 review 与长期维护。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">4</span> 兼容多工具生态</div>
+              <p>适配 Codex、Claude Code、<code>.claude</code>、<code>.codex</code>、<code>.agents</code> 等入口，适合渐进接入。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">5</span> 可渐进落地</div>
+              <p>可以先接入一个项目、一个 workflow、一个知识库，再逐步扩展，不需要一次性推翻现有方式。</p>
+            </div>
+            <div class="mini-card">
+              <div class="title"><span class="badge">6</span> 面向真实项目规模</div>
+              <p>面向 btd-client、btd-game-server 这类需要长期维护、持续验证和多轮迭代的项目。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card" id="future">
+          <h2>5. 未来方向</h2>
+          <p class="section-lead">建议按阶段理解：先跑通一个项目，再复制到更多项目，最后把能力沉淀成控制台级平台能力。</p>
+          <div class="roadmap">
+            <div class="phase">
+              <div class="label">Phase 1</div>
+              <div class="desc">先在 btd-client 上完成试点。<span>验证导入、展示、校验、路由和维护闭环。</span></div>
+            </div>
+            <div class="phase">
+              <div class="label">Phase 2</div>
+              <div class="desc">再复用到 btd-game-server。<span>验证同一套机制在不同项目中的适用性。</span></div>
+            </div>
+            <div class="phase">
+              <div class="label">Phase 3</div>
+              <div class="desc">让 workflow eval 更深入地检查 Loaded Knowledge。<span>不只看结果，也看加载了什么、是否足够、有没有误用。</span></div>
+            </div>
+            <div class="phase">
+              <div class="label">Phase 4</div>
+              <div class="desc">让 Maintenance Report 从只读走向可提案。<span>从报告演进为 patch proposal，帮助更快转成可执行变更。</span></div>
+            </div>
+            <div class="phase">
+              <div class="label">Phase 5</div>
+              <div class="desc">将 QAnything / RAG 作为可选辅助层。<span>它们可以辅助检索，但不替代 Git 内的项目知识 source of truth。</span></div>
+            </div>
+            <div class="phase">
+              <div class="label">Target</div>
+              <div class="desc">让 Nexus Agents 成为项目级控制台。<span>统一管理 AI 开发配置、知识、工作流和评估，让项目在 AI 时代保持可维护、可审查、可演进。</span></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+</body>
+</html>
