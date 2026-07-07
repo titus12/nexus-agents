@@ -9,6 +9,14 @@ import type {
   EvaluationProposalsResponse,
   EvaluationProjectsResponse,
   InfrastructureItem,
+  KnowledgeExportData,
+  KnowledgeExportManifest,
+  KnowledgeMaintenanceReport,
+  KnowledgeRenderedDocument,
+  KnowledgeRetrievalResult,
+  KnowledgeRenderTree,
+  KnowledgeRoutePreview,
+  KnowledgeValidationReport,
   LearningCase,
   LearningCaseHit,
   StatisticsTasksResponse,
@@ -162,6 +170,44 @@ export function rebuildLearningCaseIndex(): Promise<{ indexed: number }> {
 
 export function fetchProjects(): Promise<Project[]> {
   return fetchJSON<Project[]>("/api/projects");
+}
+
+export function fetchProjectKnowledgeExport(projectId: string): Promise<KnowledgeExportData> {
+  return fetchJSON<KnowledgeExportData>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/export`);
+}
+
+export function refreshProjectKnowledgeExport(projectId: string): Promise<KnowledgeExportManifest> {
+  return fetchJSON<KnowledgeExportManifest>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/export/refresh`, {
+    method: "POST",
+  });
+}
+
+export function validateProjectKnowledge(projectId: string): Promise<KnowledgeValidationReport> {
+  return fetchJSON<KnowledgeValidationReport>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/validate`);
+}
+
+export function previewProjectKnowledgeRoute(projectId: string, task: string): Promise<KnowledgeRoutePreview> {
+  return fetchJSON<KnowledgeRoutePreview>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/route?task=${encodeURIComponent(task)}`);
+}
+
+export function retrieveProjectKnowledge(projectId: string, query: string, mode = "routing", maxTokens = 6000): Promise<KnowledgeRetrievalResult> {
+  return fetchJSON<KnowledgeRetrievalResult>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/retrieve?q=${encodeURIComponent(query)}&mode=${encodeURIComponent(mode)}&maxTokens=${encodeURIComponent(String(maxTokens))}`);
+}
+
+export function fetchProjectKnowledgeTree(projectId: string): Promise<KnowledgeRenderTree> {
+  return fetchJSON<KnowledgeRenderTree>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/render`);
+}
+
+export function fetchProjectKnowledgeDocument(projectId: string, path: string): Promise<KnowledgeRenderedDocument> {
+  return fetchJSON<KnowledgeRenderedDocument>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/render?path=${encodeURIComponent(path)}`);
+}
+
+export function fetchProjectKnowledgeExportDocument(projectId: string, path: string): Promise<KnowledgeRenderedDocument> {
+  return fetchJSON<KnowledgeRenderedDocument>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/export/doc?path=${encodeURIComponent(path)}`);
+}
+
+export function fetchProjectKnowledgeMaintenance(projectId: string): Promise<KnowledgeMaintenanceReport> {
+  return fetchJSON<KnowledgeMaintenanceReport>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/maintenance`);
 }
 
 export function fetchLocalDirectories(path?: string): Promise<LocalDirectoriesResponse> {

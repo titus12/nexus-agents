@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from "vue";
+import { computed, defineComponent, h, onMounted, ref, type PropType, type VNode } from "vue";
 import { NDataTable, type DataTableColumns } from "naive-ui";
 import {
   addProjectCopyFromTemplate,
@@ -28,7 +28,12 @@ import {
   fetchNativeLocalDirectory,
   fetchModelRoutes,
   fetchProjectConfig,
+  fetchProjectKnowledgeExport,
+  fetchProjectKnowledgeExportDocument,
   fetchProjectWorkflowGraph,
+  previewProjectKnowledgeRoute,
+  retrieveProjectKnowledge,
+  refreshProjectKnowledgeExport,
   fetchSyncPreview,
   fetchWorkflowGraph,
   fetchWorkflows,
@@ -65,6 +70,15 @@ import type {
   EvaluationSummary,
   LearningCase,
   InfrastructureItem,
+  KnowledgeExportData,
+  KnowledgeIssue,
+  KnowledgeMaintenanceReport,
+  KnowledgeRenderedDocument,
+  KnowledgeRetrievalResult,
+  KnowledgeRenderNode,
+  KnowledgeRenderTree,
+  KnowledgeRoutePreview,
+  KnowledgeValidationReport,
   LocalDirectoryEntry,
   LocalDirectoriesResponse,
   ModelRoute,
@@ -105,7 +119,8 @@ type Page =
   | "project-agents"
   | "project-rules"
   | "project-skills"
-  | "project-workflows";
+  | "project-workflows"
+  | "project-knowledge";
 
 type DrawerMode =
   | "template"
@@ -134,6 +149,76 @@ type WorkflowCard = {
     successRate: number;
   };
 };
+
+const KnowledgeTreeView = defineComponent({
+  name: "KnowledgeTreeView",
+  props: {
+    nodes: { type: Array as PropType<KnowledgeRenderNode[]>, required: true },
+    selectedPath: { type: String, default: "" },
+  },
+  emits: ["open"],
+  setup(props, { emit }) {
+    const manuallyOpen = ref<Set<string>>(new Set());
+    const manuallyClosed = ref<Set<string>>(new Set());
+    const nodeContainsSelected = (node: KnowledgeRenderNode): boolean => {
+      const target = node.kind === "directory" ? node.indexDocument || "" : node.path;
+      return target === props.selectedPath || (node.children ?? []).some(nodeContainsSelected);
+    };
+    const isOpen = (node: KnowledgeRenderNode) =>
+      node.kind !== "directory" ||
+      manuallyOpen.value.has(node.path) ||
+      (!manuallyClosed.value.has(node.path) && nodeContainsSelected(node));
+    const toggleDirectory = (node: KnowledgeRenderNode) => {
+      const nextOpen = new Set(manuallyOpen.value);
+      const nextClosed = new Set(manuallyClosed.value);
+      if (isOpen(node)) {
+        nextOpen.delete(node.path);
+        nextClosed.add(node.path);
+      } else {
+        nextClosed.delete(node.path);
+        nextOpen.add(node.path);
+      }
+      manuallyOpen.value = nextOpen;
+      manuallyClosed.value = nextClosed;
+    };
+    const renderNodes = (nodes: KnowledgeRenderNode[], depth = 0): VNode[] =>
+      nodes.map((node) => {
+        const target = node.kind === "directory" ? node.indexDocument || "" : node.path;
+        const active = !!target && props.selectedPath === target;
+        const isDirectory = node.kind === "directory";
+        const open = isOpen(node);
+        return h("div", { class: ["kb-tree-entry", isDirectory ? "directory" : "document"] }, [
+          h("div", { class: ["kb-tree-row", { active }], style: { paddingLeft: `${4 + depth * 14}px` } }, [
+            h(
+              "button",
+              {
+                class: ["kb-tree-toggle", { hidden: !isDirectory }],
+                type: "button",
+                onClick: () => isDirectory && toggleDirectory(node),
+                title: open ? "Collapse" : "Expand",
+              },
+              isDirectory ? (open ? "⌄" : "›") : "",
+            ),
+            h(
+              "button",
+              {
+                class: ["kb-tree-button", { active, disabled: !target }],
+                type: "button",
+                disabled: !target,
+                onClick: () => target && emit("open", node),
+              },
+              [
+                h("span", { class: "kb-tree-title" }, node.title),
+                node.type && !isDirectory ? h("span", { class: "kb-tree-type" }, node.type) : null,
+              ],
+            ),
+          ]),
+          ...(node.children?.length && open ? renderNodes(node.children, depth + 1) : []),
+        ]);
+      });
+    return () => h("div", { class: "kb-tree-view" }, renderNodes(props.nodes));
+  },
+});
 
 const emptyLibrary: TemplateLibrary = {
   agents: [],
@@ -198,6 +283,16 @@ const selectedTemplate = ref<TemplateItem | null>(null);
 const templateForm = ref<TemplateInput>({});
 const selectedProjectCopy = ref<ProjectCopy | null>(null);
 const syncPreview = ref<ProjectCopy[]>([]);
+const knowledgeExport = ref<KnowledgeExportData | null>(null);
+const knowledgeDocument = ref<KnowledgeRenderedDocument | null>(null);
+const knowledgeRoute = ref<KnowledgeRoutePreview | null>(null);
+const knowledgeRetrieval = ref<KnowledgeRetrievalResult | null>(null);
+const knowledgeRouteTask = ref("");
+const selectedKnowledgePath = ref("");
+const knowledgeSearch = ref("");
+const activeKnowledgeView = ref<"docs" | "check" | "routing" | "maintenance" | "source">("docs");
+const knowledgeBusy = ref(false);
+const knowledgeError = ref("");
 const selectedRoute = ref<ModelRoute | null>(null);
 const proxyResult = ref<ModelRouteResolution | null>(null);
 const proxyError = ref("");
@@ -837,6 +932,7 @@ function pageTitle(page: Page): string {
     "project-rules": "Rules",
     "project-skills": "Skills",
     "project-workflows": "Workflows",
+    "project-knowledge": "Knowledge Base",
   };
   return titles[page];
 }
@@ -1329,6 +1425,10 @@ async function openProjectResource(projectId: string, page: Page) {
   workflowEditorMode.value = false;
   workflowConnectMode.value = false;
   pendingConnectionFrom.value = "";
+  if (page === "project-knowledge") {
+    await loadKnowledgeExport(projectId);
+    return;
+  }
   const copies = await fetchProjectConfig(projectId);
   projectConfigSets.value = {
     ...projectConfigSets.value,
@@ -1338,6 +1438,218 @@ async function openProjectResource(projectId: string, page: Page) {
     const card = copies.filter((copy) => copy.kind === "workflow").map(projectCopyToWorkflowCard)[0];
     if (card) await selectWorkflowCard(card);
   }
+}
+
+async function loadKnowledgeExport(projectId = currentProject.value?.id ?? "") {
+  if (!projectId) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    knowledgeExport.value = await fetchProjectKnowledgeExport(projectId);
+    knowledgeDocument.value = null;
+    selectedKnowledgePath.value = "";
+    await openDefaultKnowledgeDocument();
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+async function refreshKnowledgeExportForCurrentProject() {
+  if (!currentProject.value) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    await refreshProjectKnowledgeExport(currentProject.value.id);
+    knowledgeExport.value = await fetchProjectKnowledgeExport(currentProject.value.id);
+    knowledgeDocument.value = null;
+    selectedKnowledgePath.value = "";
+    await openDefaultKnowledgeDocument();
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+async function openKnowledgeDocument(path: string) {
+  if (!currentProject.value) return;
+  knowledgeDocument.value = await fetchProjectKnowledgeExportDocument(currentProject.value.id, path);
+  selectedKnowledgePath.value = path;
+  activeKnowledgeView.value = "docs";
+}
+
+async function openDefaultKnowledgeDocument() {
+  const path = findDefaultKnowledgePath(knowledgeExport.value?.tree);
+  if (path) {
+    await openKnowledgeDocument(path);
+  }
+}
+
+async function previewKnowledgeRouteForCurrentProject() {
+  if (!currentProject.value) return;
+  const query = knowledgeRouteTask.value.trim();
+  if (!query) {
+    knowledgeError.value = "Enter a task or keyword to find relevant knowledge.";
+    return;
+  }
+  knowledgeError.value = "";
+  knowledgeRetrieval.value = await retrieveProjectKnowledge(currentProject.value.id, query, "routing", 6000);
+  knowledgeRoute.value = await previewProjectKnowledgeRoute(currentProject.value.id, query);
+}
+
+async function copyText(text: string) {
+  await navigator.clipboard?.writeText(text);
+  showToast("已复制");
+}
+
+function loadedKnowledgeMarkdown(): string {
+  if (knowledgeRetrieval.value?.loadedKnowledgeMarkdown) {
+    return knowledgeRetrieval.value.loadedKnowledgeMarkdown;
+  }
+  if (knowledgeRoute.value?.loadedKnowledgeMarkdown) {
+    return knowledgeRoute.value.loadedKnowledgeMarkdown;
+  }
+  const files = knowledgeRoute.value?.requiredFiles ?? [];
+  return ["## Loaded Knowledge", "", ...files.map((file) => `- \`${file}\``)].join("\n");
+}
+
+function knowledgeTreeNodes(tree?: KnowledgeRenderTree | null) {
+  return filterKnowledgeNodes(tree?.nodes ?? [], knowledgeSearch.value);
+}
+
+function filterKnowledgeNodes(nodes: KnowledgeRenderNode[], query: string): KnowledgeRenderNode[] {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) return nodes;
+  const filtered: KnowledgeRenderNode[] = [];
+  for (const node of nodes) {
+    const children = filterKnowledgeNodes(node.children ?? [], trimmed);
+    const matches = `${node.title} ${node.path} ${node.type ?? ""}`.toLowerCase().includes(trimmed);
+    if (matches || children.length > 0) {
+      filtered.push({ ...node, children });
+    }
+  }
+  return filtered;
+}
+
+function findDefaultKnowledgePath(tree?: KnowledgeRenderTree | null): string {
+  const nodes = tree?.nodes ?? [];
+  const flattened = flattenKnowledgeNodes(nodes);
+  return (
+    flattened.find((node) => node.path === "design/KnowledgeBase/index.md")?.path ||
+    flattened.find((node) => node.path === "design/KnowledgeBase/README.md")?.path ||
+    flattened.find((node) => node.kind === "document")?.path ||
+    ""
+  );
+}
+
+function flattenKnowledgeNodes(nodes: KnowledgeRenderNode[]): KnowledgeRenderNode[] {
+  const out: KnowledgeRenderNode[] = [];
+  for (const node of nodes) {
+    out.push(node);
+    out.push(...flattenKnowledgeNodes(node.children ?? []));
+  }
+  return out;
+}
+
+function knowledgeNodeTarget(node: KnowledgeRenderNode): string {
+  return node.kind === "directory" ? node.indexDocument || "" : node.path;
+}
+
+function knowledgeNodeClass(node: KnowledgeRenderNode) {
+  const target = knowledgeNodeTarget(node);
+  return {
+    active: !!target && selectedKnowledgePath.value === target,
+    directory: node.kind === "directory",
+    document: node.kind !== "directory",
+  };
+}
+
+async function openKnowledgeNode(node: KnowledgeRenderNode) {
+  const target = knowledgeNodeTarget(node);
+  if (target) {
+    await openKnowledgeDocument(target);
+  }
+}
+
+async function onKnowledgeRenderedClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  const link = target?.closest("[data-kb-link]") as HTMLElement | null;
+  const rawTarget = link?.dataset.kbLink;
+  if (!rawTarget || !knowledgeDocument.value) return;
+  event.preventDefault();
+  const resolved = resolveKnowledgeLink(knowledgeDocument.value.path, rawTarget);
+  if (resolved) {
+    await openKnowledgeDocument(resolved);
+  }
+}
+
+function resolveKnowledgeLink(fromPath: string, target: string): string {
+  const cleanTarget = target.split("#")[0];
+  if (!cleanTarget || cleanTarget.startsWith("http://") || cleanTarget.startsWith("https://")) {
+    return "";
+  }
+  const baseParts = fromPath.split("/").slice(0, -1);
+  for (const part of cleanTarget.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      baseParts.pop();
+    } else {
+      baseParts.push(part);
+    }
+  }
+  return baseParts.join("/");
+}
+
+function knowledgeValidationIssues(validation?: KnowledgeValidationReport | null): KnowledgeIssue[] {
+  return validation?.issues ?? [];
+}
+
+function currentKnowledgeIssues(): KnowledgeIssue[] {
+  return knowledgeValidationIssues(knowledgeExport.value?.validation).filter((issue) => issue.path === selectedKnowledgePath.value);
+}
+
+function knowledgeHeadings() {
+  const html = knowledgeDocument.value?.html ?? "";
+  const headings: Array<{ level: string; text: string }> = [];
+  const pattern = /<h([1-3])>(.*?)<\/h\1>/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(html)) !== null) {
+    headings.push({ level: match[1], text: match[2].replace(/<[^>]+>/g, "") });
+  }
+  return headings;
+}
+
+function knowledgeSiteStatus() {
+  const summary = knowledgeExport.value?.manifest.summary;
+  if (!summary?.exists) return "Missing";
+  if (summary.errors > 0) return `${summary.errors} errors`;
+  if (summary.warnings > 0) return `${summary.warnings} warnings`;
+  return "Healthy";
+}
+
+function knowledgeSourceText() {
+  if (!knowledgeExport.value) return "";
+  return JSON.stringify({
+    manifest: knowledgeExport.value.manifest,
+    currentDocument: knowledgeDocument.value
+      ? {
+          path: knowledgeDocument.value.path,
+          frontmatter: knowledgeDocument.value.frontmatter,
+          raw: knowledgeDocument.value.raw,
+        }
+      : null,
+  }, null, 2);
+}
+
+function knowledgeMaintenance(maintenance?: KnowledgeMaintenanceReport | null) {
+  return {
+    staleDocuments: maintenance?.staleDocuments ?? [],
+    largeDocuments: maintenance?.largeDocuments ?? [],
+    duplicateRules: maintenance?.duplicateRules ?? [],
+    suggestedActions: maintenance?.suggestedActions ?? [],
+  };
 }
 
 async function selectWorkflowCard(card: WorkflowCard) {
@@ -2231,6 +2543,7 @@ onMounted(loadData);
             <button class="project-child" :class="{ active: selectedProjectId === project.id && activePage === 'project-rules' }" type="button" @click="openProjectResource(project.id, 'project-rules')">Rules</button>
             <button class="project-child" :class="{ active: selectedProjectId === project.id && activePage === 'project-skills' }" type="button" @click="openProjectResource(project.id, 'project-skills')">Skills</button>
             <button class="project-child" :class="{ active: selectedProjectId === project.id && activePage === 'project-workflows' }" type="button" @click="openProjectResource(project.id, 'project-workflows')">Workflows</button>
+            <button class="project-child" :class="{ active: selectedProjectId === project.id && activePage === 'project-knowledge' }" type="button" @click="openProjectResource(project.id, 'project-knowledge')">Knowledge Base</button>
           </div>
         </div>
       </div>
@@ -2360,6 +2673,185 @@ onMounted(loadData);
                   <button class="project-kind-card" type="button" @click="openProjectResource(currentProject.id, 'project-workflows')"><span class="asset-icon asset-icon-process"></span><span><strong>Workflows</strong><span>{{ projectCopyCount('workflow') }} tracked</span></span><b>{{ currentProject.configSummary.workflows }}</b></button>
                 </div>
               </section>
+            </div>
+          </section>
+
+          <section v-else-if="activePage === 'project-knowledge' && currentProject" class="page active">
+            <div class="kiso-shell">
+              <header class="kiso-header">
+                <div>
+                  <div class="kiso-eyebrow">OKF Knowledge Site</div>
+                  <h1>{{ knowledgeDocument?.frontmatter.title || `${currentProject.name} Knowledge Base` }}</h1>
+                  <p>{{ knowledgeDocument?.frontmatter.description || 'Auto-generated project knowledge site for humans and AI agents.' }}</p>
+                  <div class="kiso-meta-row">
+                    <span class="chip" :class="knowledgeExport?.manifest.summary.errors ? 'chip-red' : 'chip-green'">{{ knowledgeSiteStatus() }}</span>
+                    <span class="chip chip-purple">{{ knowledgeExport?.manifest.documentCount ?? currentProject.knowledgeSummary?.documents ?? 0 }} docs</span>
+                    <span class="chip chip-teal">{{ knowledgeExport?.manifest.summary.domains ?? currentProject.knowledgeSummary?.domains ?? 0 }} domains</span>
+                    <span class="chip chip-orange">{{ knowledgeExport?.manifest.summary.workflows ?? currentProject.knowledgeSummary?.workflows ?? 0 }} workflows</span>
+                    <span class="chip chip-gray">exported {{ knowledgeExport?.manifest.exportedAt ? formatShortDate(knowledgeExport.manifest.exportedAt) : '-' }}</span>
+                  </div>
+                </div>
+                <div class="kiso-header-actions">
+                  <button class="btn-secondary" type="button" @click="copyText(loadedKnowledgeMarkdown())">Copy llms context</button>
+                  <button class="btn-secondary" type="button" @click="activeKnowledgeView = 'source'">Source</button>
+                  <button class="btn-primary" type="button" :disabled="knowledgeBusy" @click="refreshKnowledgeExportForCurrentProject">
+                    {{ knowledgeBusy ? "Generating..." : "Regenerate" }}
+                  </button>
+                </div>
+              </header>
+              <div v-if="knowledgeError" class="empty-state danger">{{ knowledgeError }}</div>
+              <nav class="kiso-tabs" aria-label="Knowledge views">
+                <button type="button" :class="{ active: activeKnowledgeView === 'docs' }" @click="activeKnowledgeView = 'docs'">Docs</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'check' }" @click="activeKnowledgeView = 'check'">Check</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'routing' }" @click="activeKnowledgeView = 'routing'">Routing</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'maintenance' }" @click="activeKnowledgeView = 'maintenance'">Maintenance</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'source' }" @click="activeKnowledgeView = 'source'">Source</button>
+              </nav>
+
+              <div class="kiso-layout">
+                <aside class="kiso-sidebar">
+                  <div class="kiso-filter-label">Filter by title</div>
+                  <input v-model="knowledgeSearch" class="field-input" type="search" placeholder="Filter" />
+                  <KnowledgeTreeView :nodes="knowledgeTreeNodes(knowledgeExport?.tree)" :selected-path="selectedKnowledgePath" @open="openKnowledgeNode" />
+                </aside>
+
+                <main class="kiso-main">
+                  <article v-if="activeKnowledgeView === 'docs'" class="kiso-article">
+                    <template v-if="knowledgeDocument">
+                      <div class="kiso-article-head">
+                        <div>
+                          <div class="kiso-path mono">{{ knowledgeDocument.path }}</div>
+                          <h2>{{ knowledgeDocument.title }}</h2>
+                        </div>
+                        <span v-if="knowledgeDocument.frontmatter.type" class="chip chip-purple">{{ knowledgeDocument.frontmatter.type }}</span>
+                      </div>
+                      <div v-if="knowledgeDocument.frontmatter.tags?.length" class="knowledge-tag-row">
+                        <span v-for="tag in knowledgeDocument.frontmatter.tags" :key="tag" class="chip chip-gray">{{ tag }}</span>
+                      </div>
+                      <div class="knowledge-actions">
+                        <button class="link-btn" type="button" @click="copyText(knowledgeDocument.path)">Copy Path</button>
+                        <button class="link-btn" type="button" @click="copyText(knowledgeDocument.raw)">Copy Markdown Source</button>
+                      </div>
+                      <div class="knowledge-html" @click="onKnowledgeRenderedClick" v-html="knowledgeDocument.html"></div>
+                    </template>
+                    <div v-else class="empty-state">Select a document from the navigation.</div>
+                  </article>
+
+                  <article v-else-if="activeKnowledgeView === 'check'" class="kiso-article">
+                    <div class="kiso-article-head"><h2>OKF validation</h2><span class="chip" :class="knowledgeExport?.manifest.summary.errors ? 'chip-red' : 'chip-green'">{{ knowledgeSiteStatus() }}</span></div>
+                    <div v-if="knowledgeValidationIssues(knowledgeExport?.validation).length === 0" class="empty-inline">No validation issues.</div>
+                    <ul v-else class="knowledge-list">
+                      <li v-for="issue in knowledgeValidationIssues(knowledgeExport?.validation)" :key="`${issue.code}-${issue.path}-${issue.line ?? 0}`" :class="`issue-${issue.severity}`">
+                        <strong>{{ issue.severity }}</strong> {{ issue.code }} — {{ issue.path }}<span v-if="issue.line">:{{ issue.line }}</span> — {{ issue.message }}
+                      </li>
+                    </ul>
+                  </article>
+
+                  <article v-else-if="activeKnowledgeView === 'routing'" class="kiso-article">
+                    <div class="kiso-article-head">
+                      <div>
+                        <h2>Agent Knowledge Routing</h2>
+                        <p class="muted">Find focused KnowledgeBase sections for an agent task. Results use SQLite FTS5, OKF routing, snippets, and a token budget.</p>
+                      </div>
+                      <button class="btn-secondary" type="button" @click="previewKnowledgeRouteForCurrentProject">Find knowledge</button>
+                    </div>
+                    <input v-model="knowledgeRouteTask" class="field-input" placeholder="例如：UI、弹窗、ViewModel、网络协议、玩法战斗" @keyup.enter="previewKnowledgeRouteForCurrentProject" />
+                    <div v-if="knowledgeRetrieval" class="knowledge-route-result">
+                      <div class="kiso-route-grid">
+                        <div class="route-metric">
+                          <div class="route-metric-label">Matched domain</div>
+                          <div class="route-value">{{ knowledgeRetrieval.matchedDomain || "project" }}</div>
+                        </div>
+                        <div class="route-metric">
+                          <div class="route-metric-label">Confidence</div>
+                          <div class="route-value">{{ Math.round(knowledgeRetrieval.confidence * 100) }}%</div>
+                        </div>
+                        <div class="route-metric">
+                          <div class="route-metric-label">Token budget</div>
+                          <div class="route-value">{{ knowledgeRetrieval.tokenBudget.usedTokens }} / {{ knowledgeRetrieval.tokenBudget.maxTokens }}</div>
+                        </div>
+                      </div>
+                      <p v-if="knowledgeRetrieval.matchedAlias?.alias" class="route-alias-note">
+                        Matched alias:
+                        <code>{{ knowledgeRetrieval.matchedAlias.alias }}</code>
+                        <template v-if="knowledgeRetrieval.matchedAlias.pairedAlias">
+                          ↔ <code>{{ knowledgeRetrieval.matchedAlias.pairedAlias }}</code>
+                        </template>
+                      </p>
+                      <p>{{ knowledgeRetrieval.reason }}</p>
+                      <div class="knowledge-terms">
+                        <span v-for="term in knowledgeRetrieval.terms" :key="term" class="chip chip-gray">{{ term }}</span>
+                      </div>
+                      <section>
+                        <h3>Required knowledge</h3>
+                        <div v-if="knowledgeRetrieval.required.length === 0" class="empty-inline">No required sections matched.</div>
+                        <div v-for="item in knowledgeRetrieval.required" :key="`${item.path}-${item.startLine}`" class="knowledge-match-card">
+                          <button class="link-btn mono" type="button" @click="openKnowledgeDocument(item.path)">{{ item.path }}</button>
+                          <div><strong>{{ item.heading || item.title }}</strong> <span class="muted">score {{ Math.round(item.score) }} · {{ item.tokens }} tokens</span></div>
+                          <div class="knowledge-terms"><span v-for="reason in item.reasons" :key="reason" class="chip chip-blue">{{ reason }}</span></div>
+                          <p v-if="item.snippet" class="knowledge-snippet" v-html="item.snippet"></p>
+                        </div>
+                      </section>
+                      <section>
+                        <h3>Optional / related</h3>
+                        <div v-if="knowledgeRetrieval.optional.length + knowledgeRetrieval.related.length === 0" class="empty-inline">No optional sections.</div>
+                        <div v-for="item in [...knowledgeRetrieval.optional, ...knowledgeRetrieval.related]" :key="`${item.path}-${item.startLine}`" class="knowledge-match-card compact">
+                          <button class="link-btn mono" type="button" @click="openKnowledgeDocument(item.path)">{{ item.path }}</button>
+                          <span class="muted">{{ item.heading || item.title }} · score {{ Math.round(item.score) }} · {{ item.tokens }} tokens</span>
+                        </div>
+                      </section>
+                      <section v-if="knowledgeRetrieval.missingFiles.length">
+                        <h3>Missing files</h3>
+                        <ul class="knowledge-list"><li v-for="file in knowledgeRetrieval.missingFiles" :key="file">{{ file }}</li></ul>
+                      </section>
+                      <section v-if="knowledgeRetrieval.omitted.length">
+                        <h3>Omitted by budget</h3>
+                        <ul class="knowledge-list"><li v-for="item in knowledgeRetrieval.omitted" :key="`${item.path}-${item.reason}`">{{ item.path }} — {{ item.reason }}</li></ul>
+                      </section>
+                      <button class="link-btn" type="button" @click="copyText(loadedKnowledgeMarkdown())">Copy Loaded Knowledge Section</button>
+                    </div>
+                  </article>
+
+                  <article v-else-if="activeKnowledgeView === 'maintenance'" class="kiso-article">
+                    <div class="kiso-article-head"><h2>Maintenance report</h2><span class="chip chip-gray">read-only</span></div>
+                    <div class="kiso-route-grid">
+                      <div>Stale: <strong>{{ knowledgeMaintenance(knowledgeExport?.maintenance).staleDocuments.length }}</strong></div>
+                      <div>Large: <strong>{{ knowledgeMaintenance(knowledgeExport?.maintenance).largeDocuments.length }}</strong></div>
+                      <div>Duplicate rules: <strong>{{ knowledgeMaintenance(knowledgeExport?.maintenance).duplicateRules.length }}</strong></div>
+                    </div>
+                    <ul class="knowledge-list">
+                      <li v-for="action in knowledgeMaintenance(knowledgeExport?.maintenance).suggestedActions" :key="action">{{ action }}</li>
+                    </ul>
+                  </article>
+
+                  <article v-else class="kiso-article">
+                    <div class="kiso-article-head"><h2>Generated source</h2><button class="link-btn" type="button" @click="copyText(knowledgeSourceText())">Copy JSON</button></div>
+                    <pre class="code-block">{{ knowledgeSourceText() }}</pre>
+                  </article>
+                </main>
+
+                <aside class="kiso-aside">
+                  <section>
+                    <h3>On this page</h3>
+                    <div v-if="knowledgeHeadings().length === 0" class="empty-inline">No headings.</div>
+                    <button v-for="heading in knowledgeHeadings()" :key="`${heading.level}-${heading.text}`" class="kiso-toc-item" :class="`level-${heading.level}`" type="button">{{ heading.text }}</button>
+                  </section>
+                  <section>
+                    <h3>Document</h3>
+                    <div class="kiso-doc-facts">
+                      <div><span>path</span><strong class="mono">{{ selectedKnowledgePath || '-' }}</strong></div>
+                      <div><span>type</span><strong>{{ knowledgeDocument?.frontmatter.type || '-' }}</strong></div>
+                      <div><span>timestamp</span><strong>{{ knowledgeDocument?.frontmatter.timestamp || '-' }}</strong></div>
+                    </div>
+                  </section>
+                  <section v-if="currentKnowledgeIssues().length">
+                    <h3>Current issues</h3>
+                    <ul class="knowledge-list">
+                      <li v-for="issue in currentKnowledgeIssues()" :key="issue.code" :class="`issue-${issue.severity}`">{{ issue.code }} — {{ issue.message }}</li>
+                    </ul>
+                  </section>
+                </aside>
+              </div>
             </div>
           </section>
 

@@ -9,10 +9,20 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"nexus-agents/internal/knowledgebase"
 )
 
 func ScanProjectConfigSet(projectRoot string, library TemplateLibrary) ([]ProjectCopy, error) {
 	return scanProjectConfigSetForProject("project", projectRoot, library)
+}
+
+func ScanProjectKnowledgeSummary(projectRoot string) knowledgebase.Summary {
+	report, err := knowledgebase.Validate(projectRoot)
+	if err != nil {
+		return knowledgebase.Summary{Exists: false, Root: knowledgebase.DefaultRoot, Issues: 1, Errors: 1}
+	}
+	return report.Summary
 }
 
 func scanProjectConfigSetForProject(projectToken string, projectRoot string, library TemplateLibrary) ([]ProjectCopy, error) {

@@ -21,6 +21,7 @@ import (
 
 	"nexus-agents/internal/catalog"
 	"nexus-agents/internal/codexrouter"
+	"nexus-agents/internal/knowledgebase"
 	"nexus-agents/internal/taskrunsubmit"
 	"nexus-agents/internal/workflowrunner"
 	webui "nexus-agents/web"
@@ -397,6 +398,7 @@ func (s *Server) handleWorkflowRunStart(w http.ResponseWriter, r *http.Request) 
 	if !decodeRequest(w, r, &input) {
 		return
 	}
+	s.attachWorkflowKnowledgeRetrieval(&input)
 	run, err := s.workflowRunner.StartRun(input)
 	if err != nil {
 		log.Printf("[workflow-session] start failed session_id=%s workflow_type=%s project=%s err=%v", sessionID, input.WorkflowType, input.ProjectID, err)
@@ -423,6 +425,40 @@ func (s *Server) handleWorkflowRunStart(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[workflow-session] bind session_id=%s workflow_run=%s workflow_type=%s project=%s", sessionID, run.ID, run.WorkflowType, run.ProjectID)
 	}
 	writeJSON(w, http.StatusCreated, run)
+}
+
+func (s *Server) attachWorkflowKnowledgeRetrieval(input *workflowrunner.StartInput) {
+	if input == nil || strings.TrimSpace(input.ProjectID) == "" || strings.TrimSpace(input.TaskTitle) == "" {
+		return
+	}
+	if input.Context == nil {
+		input.Context = map[string]any{}
+	}
+	if _, exists := input.Context["knowledgeRetrieval"]; exists {
+		return
+	}
+	projectRoot, ok := s.projectLocalPath(input.ProjectID)
+	if !ok {
+		return
+	}
+	result, err := knowledgebase.Retrieve(projectRoot, input.TaskTitle, knowledgebase.RetrieveOptions{Mode: knowledgebase.RetrieveModeContext, Limit: 8, MaxTokens: 6000})
+	if err != nil {
+		input.Context["knowledgeRetrieval"] = map[string]any{"query": input.TaskTitle, "error": err.Error()}
+		return
+	}
+	requiredPaths := make([]string, 0, len(result.Required))
+	for _, item := range result.Required {
+		requiredPaths = append(requiredPaths, item.Path)
+	}
+	input.Context["knowledgeRetrieval"] = map[string]any{
+		"query":                   result.Query,
+		"matchedDomain":           result.MatchedDomain,
+		"confidence":              result.Confidence,
+		"requiredPaths":           requiredPaths,
+		"usedTokens":              result.TokenBudget.UsedTokens,
+		"maxTokens":               result.TokenBudget.MaxTokens,
+		"loadedKnowledgeMarkdown": result.LoadedKnowledgeMarkdown,
+	}
 }
 
 func (s *Server) handleWorkflowRunPath(w http.ResponseWriter, r *http.Request) {
@@ -950,6 +986,11 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) >= 2 && parts[1] == "knowledge" {
+		s.handleProjectKnowledgePath(w, r, projectID, parts[2:])
+		return
+	}
+
 	if parts[1] != "config" {
 		http.NotFound(w, r)
 		return
@@ -1092,6 +1133,174 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func (s *Server) handleProjectKnowledgePath(w http.ResponseWriter, r *http.Request, projectID string, parts []string) {
+	projectRoot, ok := s.projectLocalPath(projectID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 0 {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		bundle, err := knowledgebase.ScanBundle(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, bundle)
+		return
+	}
+	switch parts[0] {
+	case "retrieve":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		maxTokens, _ := strconv.Atoi(r.URL.Query().Get("maxTokens"))
+		result, err := knowledgebase.Retrieve(projectRoot, r.URL.Query().Get("q"), knowledgebase.RetrieveOptions{
+			Mode:      r.URL.Query().Get("mode"),
+			Limit:     limit,
+			MaxTokens: maxTokens,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	case "validate":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		report, err := knowledgebase.Validate(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
+	case "route":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		preview, err := knowledgebase.PreviewRoute(projectRoot, r.URL.Query().Get("task"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, preview)
+	case "render":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		if docPath := r.URL.Query().Get("path"); docPath != "" {
+			doc, err := knowledgebase.RenderDocument(projectRoot, docPath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, doc)
+			return
+		}
+		tree, err := knowledgebase.BuildRenderTree(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, tree)
+	case "maintenance":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		report, err := knowledgebase.Maintenance(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
+	case "export":
+		s.handleProjectKnowledgeExport(w, r, projectID, projectRoot, parts[1:])
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleProjectKnowledgeExport(w http.ResponseWriter, r *http.Request, projectID string, projectRoot string, parts []string) {
+	exportRoot := projectKnowledgeExportRoot(projectID)
+	if len(parts) == 0 {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		data, err := knowledgebase.ReadFreshExport(projectID, projectRoot, exportRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, data)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "refresh" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		manifest, err := knowledgebase.ExportProjectKnowledge(projectID, projectRoot, exportRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, manifest)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "doc" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		doc, err := knowledgebase.ReadExportDocument(exportRoot, r.URL.Query().Get("path"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, doc)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) projectLocalPath(projectID string) (string, bool) {
+	project, ok := s.store.ProjectByID(projectID)
+	if !ok {
+		return "", false
+	}
+	localPath := strings.TrimSpace(project.LocalPath)
+	if localPath == "" {
+		localPath = strings.TrimSpace(project.Path)
+	}
+	return localPath, localPath != ""
+}
+
+func projectKnowledgeExportRoot(projectID string) string {
+	base := strings.TrimSpace(os.Getenv("NEXUS_KNOWLEDGE_EXPORT_DIR"))
+	if base == "" {
+		base = filepath.Join(".nexus-agents", "knowledge-exports")
+	}
+	return filepath.Join(base, slugifyForPath(projectID))
+}
+
+func slugifyForPath(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "project"
+	}
+	var builder strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			builder.WriteRune(r)
+		} else {
+			builder.WriteRune('_')
+		}
+	}
+	return builder.String()
+}
+
 func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	if !allowMethods(w, r, http.MethodPost) {
 		return
@@ -1104,6 +1313,9 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if project.KnowledgeSummary.Exists {
+		_, _ = knowledgebase.ExportProjectKnowledge(project.ID, project.LocalPath, projectKnowledgeExportRoot(project.ID))
 	}
 	writeJSON(w, http.StatusCreated, project)
 }

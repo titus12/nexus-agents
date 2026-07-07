@@ -1145,6 +1145,42 @@ func writeHTTPTestFile(t *testing.T, root string, relative string, content strin
 	}
 }
 
+func TestProjectKnowledgeRetrieveEndpoint(t *testing.T) {
+	root := t.TempDir()
+	writeHTTPTestFile(t, root, "design/KnowledgeBase/index.md", httpOKFDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)"))
+	writeHTTPTestFile(t, root, "design/KnowledgeBase/project/routing.md", httpOKFDoc("Routing", "Project Routing", "design/KnowledgeBase/project/routing.md", "# Routing\n\nUI tasks read `design/KnowledgeBase/domains/ui/routing.md`."))
+	writeHTTPTestFile(t, root, "design/KnowledgeBase/domains/ui/routing.md", httpOKFDoc("Routing", "UI Routing", "design/KnowledgeBase/domains/ui/routing.md", "# UI Routing\n\nRequired:\n- design/KnowledgeBase/domains/ui/coding_rules.md"))
+	writeHTTPTestFile(t, root, "design/KnowledgeBase/domains/ui/coding_rules.md", httpOKFDoc("CodingRules", "UI Coding Rules", "design/KnowledgeBase/domains/ui/coding_rules.md", "# Coding\n\n## ViewModel\n\n弹窗 UI 使用 ViewModel 管理状态。"))
+	store := catalog.NewStoreFromData(catalog.BootstrapData{Projects: []catalog.Project{{ID: "sample", Name: "sample", Path: root}}}, nil, nil)
+	server := NewServerWithStore(store)
+
+	response := requestJSON(t, server, http.MethodGet, "/api/projects/sample/knowledge/retrieve?q=UI&mode=routing&maxTokens=1000", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected retrieve status 200, got %d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		MatchedDomain string `json:"matchedDomain"`
+		Required      []struct {
+			Path    string   `json:"path"`
+			Snippet string   `json:"snippet"`
+			Reasons []string `json:"reasons"`
+		} `json:"required"`
+		TokenBudget struct {
+			MaxTokens  int `json:"maxTokens"`
+			UsedTokens int `json:"usedTokens"`
+		} `json:"tokenBudget"`
+		LoadedKnowledgeMarkdown string `json:"loadedKnowledgeMarkdown"`
+	}
+	decodeJSON(t, response, &body)
+	if body.MatchedDomain != "ui" || len(body.Required) == 0 || body.TokenBudget.UsedTokens > body.TokenBudget.MaxTokens || !strings.Contains(body.LoadedKnowledgeMarkdown, "Loaded Knowledge") {
+		t.Fatalf("unexpected retrieve response: %#v", body)
+	}
+}
+
+func httpOKFDoc(kind, title, resource, body string) string {
+	return "---\ntype: " + kind + "\ntitle: " + title + "\ndescription: Test.\nresource: " + resource + "\ntags: [test, ui]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n" + body
+}
+
 func TestModelRouteEndpoint(t *testing.T) {
 	server := NewServer()
 

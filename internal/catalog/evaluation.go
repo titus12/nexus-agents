@@ -974,12 +974,17 @@ func scoreTaskRun(run TaskRun) (map[string]any, map[string]any) {
 	efficiency := efficiencyScore(run)
 	tokenEfficiency := tokenEfficiencyScore(run)
 	routeHealth := routeHealthScore(run)
+	knowledgeFiles := detectLoadedKnowledgeEvidence(run)
+	knowledgeScore := 70.0
+	if len(knowledgeFiles) > 0 {
+		knowledgeScore = 90
+	}
 	workflowFit := 70.0
 	if run.WorkflowTemplateID != "" || run.WorkflowCopyID != "" {
 		workflowFit = 88
 	}
 	risk := riskControlScore(run.Evidence)
-	overall := completion*0.22 + verification*0.23 + efficiency*0.12 + tokenEfficiency*0.08 + routeHealth*0.08 + workflowFit*0.16 + risk*0.11
+	overall := completion*0.20 + verification*0.22 + efficiency*0.12 + tokenEfficiency*0.08 + routeHealth*0.08 + workflowFit*0.15 + risk*0.10 + knowledgeScore*0.05
 	scores := map[string]any{
 		"completionScore":      round1(completion),
 		"accuracyScore":        round1((completion + verification) / 2),
@@ -989,25 +994,66 @@ func scoreTaskRun(run TaskRun) (map[string]any, map[string]any) {
 		"verificationScore":    round1(verification),
 		"riskControlScore":     round1(risk),
 		"workflowFitScore":     round1(workflowFit),
+		"knowledgeLoadedScore": round1(knowledgeScore),
 		"overallScore":         round1(overall),
 	}
 	attribution := map[string]any{
-		"workflow": componentAttribution(workflowFit, workflowIssue(run)),
-		"agent":    componentAttribution(componentPresenceScore(run.Context, "agent"), nil),
-		"model":    componentAttribution(componentPresenceScore(run.Context, "model"), nil),
-		"rules":    componentAttribution(rulesScore(run), rulesIssues(run)),
-		"skills":   componentAttribution(componentPresenceScore(run.Context, "skills"), nil),
-		"context":  componentAttribution(contextScore(run), contextIssues(run)),
-		"tools":    componentAttribution(toolsScore(run), nil),
-		"tokens":   componentAttribution(tokenEfficiency, tokenIssues(run)),
-		"route":    componentAttribution(routeHealth, routeIssues(run)),
+		"workflow":  componentAttribution(workflowFit, workflowIssue(run)),
+		"agent":     componentAttribution(componentPresenceScore(run.Context, "agent"), nil),
+		"model":     componentAttribution(componentPresenceScore(run.Context, "model"), nil),
+		"rules":     componentAttribution(rulesScore(run), rulesIssues(run)),
+		"skills":    componentAttribution(componentPresenceScore(run.Context, "skills"), nil),
+		"context":   componentAttribution(contextScore(run), contextIssues(run)),
+		"tools":     componentAttribution(toolsScore(run), nil),
+		"tokens":    componentAttribution(tokenEfficiency, tokenIssues(run)),
+		"route":     componentAttribution(routeHealth, routeIssues(run)),
+		"knowledge": componentAttribution(knowledgeScore, knowledgeIssues(knowledgeFiles)),
 	}
 	analysis := map[string]any{
-		"confidence":    round1(confidenceForRun(run) / 100),
-		"primaryCauses": stringSliceToAny(primaryCauses(run, scores)),
-		"attribution":   attribution,
+		"confidence":      round1(confidenceForRun(run) / 100),
+		"primaryCauses":   stringSliceToAny(primaryCauses(run, scores)),
+		"attribution":     attribution,
+		"loadedKnowledge": stringSliceToAny(knowledgeFiles),
 	}
 	return scores, analysis
+}
+
+func detectLoadedKnowledgeEvidence(run TaskRun) []string {
+	var texts []string
+	for _, key := range []string{"summary", "finalSummary", "report", "result"} {
+		if value, ok := run.Evidence[key].(string); ok {
+			texts = append(texts, value)
+		}
+	}
+	for _, key := range []string{"context", "output"} {
+		if value, ok := run.Context[key].(string); ok {
+			texts = append(texts, value)
+		}
+	}
+	seen := map[string]bool{}
+	var files []string
+	for _, text := range texts {
+		for _, line := range strings.Split(text, "\n") {
+			if !strings.Contains(line, "design/KnowledgeBase/") {
+				continue
+			}
+			start := strings.Index(line, "design/KnowledgeBase/")
+			item := strings.Trim(line[start:], "` -*\t\r\n")
+			item = strings.TrimRight(item, "，。,.;；")
+			if item != "" && !seen[item] {
+				seen[item] = true
+				files = append(files, item)
+			}
+		}
+	}
+	return files
+}
+
+func knowledgeIssues(files []string) []string {
+	if len(files) == 0 {
+		return []string{"missing Loaded Knowledge section or design/KnowledgeBase references"}
+	}
+	return nil
 }
 
 func normalizeTaskStatus(status string) string {

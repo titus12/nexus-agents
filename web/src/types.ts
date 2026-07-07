@@ -51,6 +51,19 @@ export type ConfigSummary = {
   workflows: number;
 };
 
+export type KnowledgeSummary = {
+  exists: boolean;
+  root: string;
+  documents: number;
+  domains: number;
+  workflows: number;
+  issues: number;
+  errors: number;
+  warnings: number;
+  lastModified?: string;
+  lastExported?: string;
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -62,6 +75,168 @@ export type Project = {
   localPath?: string;
   localConfigPath?: string;
   localConfigIgnored?: boolean;
+  knowledgeSummary?: KnowledgeSummary;
+};
+
+export type KnowledgeFrontmatter = {
+  type?: string;
+  title?: string;
+  description?: string;
+  resource?: string;
+  tags?: string[];
+  dependsOn?: string[];
+  seeAlso?: string[];
+  status?: string;
+  owner?: string;
+  timestamp?: string;
+  routing?: {
+    aliases?: {
+      values?: string[];
+      zh?: string[];
+      en?: string[];
+      pairs?: Array<{ zh?: string; en?: string }>;
+    };
+    keywords?: {
+      values?: string[];
+      zh?: string[];
+      en?: string[];
+    };
+  };
+  raw?: string;
+};
+
+export type KnowledgeDocument = {
+  path: string;
+  name: string;
+  directory: string;
+  frontmatter: KnowledgeFrontmatter;
+  links: Array<{ text: string; target: string; line: number }>;
+  sizeBytes: number;
+  modifiedAt: string;
+  reserved: boolean;
+};
+
+export type KnowledgeIssue = {
+  severity: "error" | "warning" | string;
+  code: string;
+  path: string;
+  line?: number;
+  message: string;
+};
+
+export type KnowledgeValidationReport = {
+  root: string;
+  summary: KnowledgeSummary;
+  issues: KnowledgeIssue[];
+  checkedAt: string;
+};
+
+export type KnowledgeMaintenanceReport = {
+  root: string;
+  summary: KnowledgeSummary;
+  issues: KnowledgeIssue[];
+  staleDocuments: KnowledgeDocument[];
+  largeDocuments: KnowledgeDocument[];
+  duplicateRules: Array<{ text: string; paths: string[] }>;
+  suggestedActions: string[];
+  checkedAt: string;
+};
+
+export type KnowledgeRoutePreview = {
+  task: string;
+  matchedDomain?: string;
+  requiredFiles: string[];
+  optionalFiles: string[];
+  reason: string;
+  missingFiles: string[];
+  routingDocuments: string[];
+  matches?: KnowledgeContextItem[];
+  terms?: string[];
+  tokenBudget?: KnowledgeTokenBudget;
+  loadedKnowledgeMarkdown?: string;
+};
+
+export type KnowledgeTokenBudget = {
+  maxTokens: number;
+  usedTokens: number;
+};
+
+export type KnowledgeContextItem = {
+  path: string;
+  title: string;
+  type?: string;
+  domain?: string;
+  heading?: string;
+  startLine?: number;
+  endLine?: number;
+  score: number;
+  tokens: number;
+  required: boolean;
+  reasons: string[];
+  snippet?: string;
+};
+
+export type KnowledgeRetrievalResult = {
+  query: string;
+  mode: string;
+  matchedDomain?: string;
+  matchedAlias?: {
+    alias?: string;
+    pairedAlias?: string;
+    domain?: string;
+    source?: string;
+  };
+  confidence: number;
+  terms: string[];
+  required: KnowledgeContextItem[];
+  optional: KnowledgeContextItem[];
+  related: KnowledgeContextItem[];
+  missingFiles: string[];
+  omitted: Array<{ path: string; reason: string }>;
+  routingDocuments: string[];
+  loadedKnowledgeMarkdown: string;
+  tokenBudget: KnowledgeTokenBudget;
+  reason: string;
+};
+
+export type KnowledgeRenderNode = {
+  path: string;
+  title: string;
+  type?: string;
+  kind?: "directory" | "document" | string;
+  indexDocument?: string;
+  children?: KnowledgeRenderNode[];
+};
+
+export type KnowledgeRenderTree = {
+  root: string;
+  nodes: KnowledgeRenderNode[];
+};
+
+export type KnowledgeRenderedDocument = {
+  path: string;
+  title: string;
+  frontmatter: KnowledgeFrontmatter;
+  html: string;
+  raw: string;
+};
+
+export type KnowledgeExportManifest = {
+  projectId: string;
+  projectRoot: string;
+  sourceRoot: string;
+  exportRoot: string;
+  documentCount: number;
+  sourceHash: string;
+  exportedAt: string;
+  summary: KnowledgeSummary;
+};
+
+export type KnowledgeExportData = {
+  manifest: KnowledgeExportManifest;
+  tree: KnowledgeRenderTree;
+  validation: KnowledgeValidationReport;
+  maintenance: KnowledgeMaintenanceReport;
 };
 
 export type ProjectInput = {

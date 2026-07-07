@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"nexus-agents/internal/codexrouter"
+	"nexus-agents/internal/knowledgebase"
 )
 
 type BootstrapData struct {
@@ -60,16 +61,17 @@ type TemplateInput struct {
 }
 
 type Project struct {
-	ID                 string        `json:"id"`
-	Name               string        `json:"name"`
-	Path               string        `json:"path"`
-	Status             string        `json:"status"`
-	UpdatedAt          string        `json:"updatedAt"`
-	ConfigSummary      ConfigSummary `json:"configSummary"`
-	RepoKey            string        `json:"repoKey,omitempty"`
-	LocalPath          string        `json:"localPath,omitempty"`
-	LocalConfigPath    string        `json:"localConfigPath,omitempty"`
-	LocalConfigIgnored bool          `json:"localConfigIgnored,omitempty"`
+	ID                 string                `json:"id"`
+	Name               string                `json:"name"`
+	Path               string                `json:"path"`
+	Status             string                `json:"status"`
+	UpdatedAt          string                `json:"updatedAt"`
+	ConfigSummary      ConfigSummary         `json:"configSummary"`
+	RepoKey            string                `json:"repoKey,omitempty"`
+	LocalPath          string                `json:"localPath,omitempty"`
+	LocalConfigPath    string                `json:"localConfigPath,omitempty"`
+	LocalConfigIgnored bool                  `json:"localConfigIgnored,omitempty"`
+	KnowledgeSummary   knowledgebase.Summary `json:"knowledgeSummary"`
 }
 
 type ProjectInput struct {
@@ -272,14 +274,15 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 		return Project{}, err
 	}
 	project := Project{
-		ID:            id,
-		Name:          name,
-		Path:          localPath,
-		Status:        "draft",
-		UpdatedAt:     nowStamp(),
-		ConfigSummary: summarizeProjectCopies(copies),
-		RepoKey:       repoKey,
-		LocalPath:     localPath,
+		ID:               id,
+		Name:             name,
+		Path:             localPath,
+		Status:           "draft",
+		UpdatedAt:        nowStamp(),
+		ConfigSummary:    summarizeProjectCopies(copies),
+		RepoKey:          repoKey,
+		LocalPath:        localPath,
+		KnowledgeSummary: ScanProjectKnowledgeSummary(localPath),
 	}
 	for index := range s.data.Projects {
 		if s.data.Projects[index].ID == id {
@@ -337,6 +340,7 @@ func (s *Store) RescanProject(projectID string) (Project, []ProjectCopy, bool, e
 	project.LocalPath = localPath
 	project.RepoKey = repoKey
 	project.ConfigSummary = summarizeProjectCopies(copies)
+	project.KnowledgeSummary = ScanProjectKnowledgeSummary(localPath)
 	project.UpdatedAt = latestProjectConfigStamp(localPath)
 
 	s.mu.Lock()
