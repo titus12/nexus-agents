@@ -1,0 +1,3 @@
+﻿name = "unity-regression-evaluator"
+model = "deepseek-v4-pro"
+model_reasoning_effort = "high"

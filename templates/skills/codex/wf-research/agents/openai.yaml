@@ -2,3 +2,9 @@ interface:
   display_name: "WF Research"
   short_description: "Run the research workflow."
   default_prompt: "$wf-research Investigate code or external documentation."
+workflow_run_header_protocol:
+  required_headers:
+    - X-Nexus-Workflow-Run-Id
+    - X-Nexus-Workflow-Role
+  notes: "Start or reuse one Nexus workflow run ID for the full workflow; update only the role header between stages."
+

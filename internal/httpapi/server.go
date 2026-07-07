@@ -3,9 +3,11 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -13,13 +15,46 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"nexus-agents/internal/catalog"
 	"nexus-agents/internal/codexrouter"
+	"nexus-agents/internal/knowledgebase"
+	"nexus-agents/internal/taskrunsubmit"
+	"nexus-agents/internal/workflowrunner"
 	webui "nexus-agents/web"
 )
+
+type workflowRouterRecorder struct {
+	evaluationStore *catalog.EvaluationStore
+	sessionStore    *catalog.ActiveWorkflowSessionStore
+}
+
+func (r *workflowRouterRecorder) RecordTokenUsage(event codexrouter.TokenUsageEvent) error {
+	return r.evaluationStore.RecordTokenUsage(event)
+}
+
+func (r *workflowRouterRecorder) RecordWorkflowRouteEvent(event codexrouter.WorkflowRouteEvent) error {
+	return r.evaluationStore.RecordWorkflowRouteEvent(event)
+}
+
+func (r *workflowRouterRecorder) LookupWorkflowSession(sessionID string) (codexrouter.WorkflowSessionContext, bool, error) {
+	if r == nil || r.sessionStore == nil {
+		return codexrouter.WorkflowSessionContext{}, false, nil
+	}
+	session, ok, err := r.sessionStore.Lookup(sessionID)
+	if err != nil || !ok {
+		return codexrouter.WorkflowSessionContext{}, ok, err
+	}
+	return codexrouter.WorkflowSessionContext{WorkflowRunID: session.WorkflowRunID, Role: session.CurrentRole}, true, nil
+}
+
+func roleString(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
 
 type healthResponse struct {
 	Service string `json:"service"`
@@ -56,9 +91,12 @@ func (f LocalDirectoryPickerFunc) PickDirectory() (string, bool, error) {
 
 type Server struct {
 	store                *catalog.Store
+	evaluationStore      *catalog.EvaluationStore
+	sessionStore         *catalog.ActiveWorkflowSessionStore
 	infrastructure       *catalog.InfrastructureService
 	codexRouter          *codexrouter.Service
 	localDirectoryPicker LocalDirectoryPicker
+	workflowRunner       *workflowrunner.Runner
 	mux                  *http.ServeMux
 	webFS                fs.FS
 	webFileServer        http.Handler
@@ -81,14 +119,18 @@ func NewServerWithCodexRouter(router *codexrouter.Service) http.Handler {
 }
 
 func NewServerWithLocalDirectoryPicker(picker LocalDirectoryPicker) http.Handler {
-	return newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), codexrouter.NewService(codexrouter.DefaultConfig()), picker)
+	return newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), codexrouter.NewService(codexrouter.DefaultConfig()), picker, nil)
 }
 
 func newServer(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service) http.Handler {
-	return newServerWithOptions(store, infrastructure, router, defaultLocalDirectoryPicker{})
+	return newServerWithOptions(store, infrastructure, router, defaultLocalDirectoryPicker{}, nil)
 }
 
-func newServerWithOptions(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service, picker LocalDirectoryPicker) http.Handler {
+func NewServerWithEvaluationStore(evaluationStore *catalog.EvaluationStore) http.Handler {
+	return newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), codexrouter.NewService(codexrouter.DefaultConfig()), defaultLocalDirectoryPicker{}, evaluationStore)
+}
+
+func newServerWithOptions(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service, picker LocalDirectoryPicker, evaluationStore *catalog.EvaluationStore) http.Handler {
 	if infrastructure == nil {
 		infrastructure = catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{})
 	}
@@ -98,12 +140,29 @@ func newServerWithOptions(store *catalog.Store, infrastructure *catalog.Infrastr
 	if picker == nil {
 		picker = defaultLocalDirectoryPicker{}
 	}
+	if evaluationStore == nil {
+		var err error
+		evaluationStore, err = catalog.NewDefaultEvaluationStore()
+		if err != nil {
+			evaluationStore, _ = catalog.NewEvaluationStore(filepath.Join(os.TempDir(), "nexus-agents-evaluation.json"))
+		}
+	}
+	sessionStore, err := catalog.NewDefaultActiveWorkflowSessionStore()
+	if err != nil {
+		sessionStore, _ = catalog.NewActiveWorkflowSessionStore(filepath.Join(os.TempDir(), "nexus-agents-active-workflow-sessions.json"))
+	}
+	if router != nil && evaluationStore != nil && sessionStore != nil {
+		router.SetTokenUsageRecorder(&workflowRouterRecorder{evaluationStore: evaluationStore, sessionStore: sessionStore})
+	}
 	webFS := webui.Dist()
 	server := &Server{
 		store:                store,
+		evaluationStore:      evaluationStore,
 		infrastructure:       infrastructure,
+		sessionStore:         sessionStore,
 		codexRouter:          router,
 		localDirectoryPicker: picker,
+		workflowRunner:       workflowrunner.New(taskrunsubmit.Submitter{Store: evaluationStore, TokenLookup: evaluationStore}),
 		mux:                  http.NewServeMux(),
 		webFS:                webFS,
 		webFileServer:        http.FileServer(http.FS(webFS)),
@@ -118,6 +177,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
+	s.mux.HandleFunc("/api/task-runs", s.handleTaskRuns)
+	s.mux.HandleFunc("/api/task-runs/", s.handleTaskRunPath)
+	s.mux.HandleFunc("/api/workflow-runs/start", s.handleWorkflowRunStart)
+	s.mux.HandleFunc("/api/workflow-runs/", s.handleWorkflowRunPath)
+	s.mux.HandleFunc("/api/evaluations", s.handleEvaluations)
+	s.mux.HandleFunc("/api/evaluations/", s.handleEvaluationPath)
+	s.mux.HandleFunc("/api/evaluation/", s.handleEvaluationReviewPath)
+	s.mux.HandleFunc("/api/statistics/", s.handleStatisticsPath)
+	s.mux.HandleFunc("/api/learning-cases", s.handleLearningCases)
+	s.mux.HandleFunc("/api/learning-cases/", s.handleLearningCasePath)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
 	s.mux.HandleFunc("/api/infrastructure/catalog", s.handleInfrastructureCatalog)
 	s.mux.HandleFunc("/api/infrastructure", s.handleInfrastructure)
@@ -179,6 +248,427 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Service: "nexus-agents",
 		Status:  "ok",
 	})
+}
+
+func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		runs, err := s.evaluationStore.TaskRuns()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, runs)
+	case http.MethodPost:
+		var input catalog.TaskRunInput
+		if !decodeRequest(w, r, &input) {
+			return
+		}
+		input = s.withServerTaskRunMetrics(r, input)
+		run, err := s.evaluationStore.SubmitTaskRun(input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if sessionID := sessionIDForTaskRun(r, input); sessionID != "" && s.sessionStore != nil {
+			_ = s.sessionStore.Complete(sessionID)
+		}
+		writeJSON(w, http.StatusCreated, run)
+	default:
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s *Server) withServerTaskRunMetrics(r *http.Request, input catalog.TaskRunInput) catalog.TaskRunInput {
+	metrics := catalogCloneMap(input.Metrics)
+	delete(metrics, "tokenUsage")
+	delete(metrics, "routeMetrics")
+	sessionID := sessionIDForTaskRun(r, input)
+	if sessionID == "" {
+		log.Printf("[workflow-session] task-run submit has no Session-Id; tokenUsage and routeMetrics remain server-only and absent")
+		input.Metrics = metrics
+		return input
+	}
+	if s == nil || s.sessionStore == nil || s.evaluationStore == nil {
+		log.Printf("[workflow-session] task-run submit session_id=%s cannot enrich metrics because stores are unavailable", sessionID)
+		input.Metrics = metrics
+		return input
+	}
+	session, ok, err := s.sessionStore.Lookup(sessionID)
+	if err != nil {
+		log.Printf("[workflow-session] task-run submit session lookup error session_id=%s err=%v", sessionID, err)
+	} else if !ok || strings.TrimSpace(session.WorkflowRunID) == "" {
+		log.Printf("[workflow-session] task-run submit session lookup miss session_id=%s", sessionID)
+	} else {
+		workflowRunID := strings.TrimSpace(session.WorkflowRunID)
+		if usage, ok, err := s.evaluationStore.TokenUsageForWorkflowRun(workflowRunID); err != nil {
+			log.Printf("[workflow-session] task-run submit token usage lookup error session_id=%s workflow_run=%s err=%v", sessionID, workflowRunID, err)
+		} else if ok {
+			metrics["tokenUsage"] = usage
+		}
+		if routeMetrics, ok, err := s.evaluationStore.RouteMetricsForWorkflowRun(workflowRunID); err != nil {
+			log.Printf("[workflow-session] task-run submit route metrics lookup error session_id=%s workflow_run=%s err=%v", sessionID, workflowRunID, err)
+		} else if ok {
+			metrics["routeMetrics"] = routeMetrics
+		}
+		if metrics["tokenUsage"] != nil || metrics["routeMetrics"] != nil {
+			log.Printf("[workflow-session] task-run submit enriched session_id=%s workflow_run=%s token_usage=%t route_metrics=%t", sessionID, workflowRunID, metrics["tokenUsage"] != nil, metrics["routeMetrics"] != nil)
+			input.Metrics = metrics
+			return input
+		}
+		log.Printf("[workflow-session] task-run submit workflow_run=%s had no telemetry; trying session time window session_id=%s", workflowRunID, sessionID)
+	}
+	if strings.TrimSpace(input.StartedAt) == "" {
+		log.Printf("[workflow-session] task-run submit session window attribution skipped session_id=%s reason=missing startedAt", sessionID)
+		input.Metrics = metrics
+		return input
+	}
+	if usage, ok, err := s.evaluationStore.TokenUsageForSessionWindow(sessionID, input.StartedAt, input.EndedAt); err != nil {
+		log.Printf("[workflow-session] task-run submit session window token usage lookup error session_id=%s started_at=%s ended_at=%s err=%v", sessionID, input.StartedAt, input.EndedAt, err)
+	} else if ok {
+		metrics["tokenUsage"] = usage
+	}
+	if routeMetrics, ok, err := s.evaluationStore.RouteMetricsForSessionWindow(sessionID, input.StartedAt, input.EndedAt); err != nil {
+		log.Printf("[workflow-session] task-run submit session window route metrics lookup error session_id=%s started_at=%s ended_at=%s err=%v", sessionID, input.StartedAt, input.EndedAt, err)
+	} else if ok {
+		metrics["routeMetrics"] = routeMetrics
+	}
+	log.Printf("[workflow-session] task-run submit session window enriched session_id=%s started_at=%s ended_at=%s token_usage=%t route_metrics=%t", sessionID, input.StartedAt, input.EndedAt, metrics["tokenUsage"] != nil, metrics["routeMetrics"] != nil)
+	input.Metrics = metrics
+	return input
+}
+
+func sessionIDForTaskRun(r *http.Request, input catalog.TaskRunInput) string {
+	if r != nil {
+		if sessionID := strings.TrimSpace(r.Header.Get("Session-Id")); sessionID != "" {
+			return sessionID
+		}
+	}
+	if sessionID := strings.TrimSpace(input.SessionID); sessionID != "" {
+		return sessionID
+	}
+	if input.Context != nil {
+		if sessionID, ok := input.Context["sessionId"].(string); ok {
+			return strings.TrimSpace(sessionID)
+		}
+	}
+	return ""
+}
+
+func catalogCloneMap(values map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func (s *Server) handleTaskRunPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/task-runs/"), "/"), "/")
+	if len(parts) != 1 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowMethods(w, r, http.MethodDelete) {
+		return
+	}
+	ok, err := s.evaluationStore.DeleteTaskRun(parts[0])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleWorkflowRunStart(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodPost) {
+		return
+	}
+	sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
+	if sessionID == "" {
+		log.Printf("[workflow-session] start rejected because Session-Id header is missing")
+		http.Error(w, "Session-Id header is required", http.StatusBadRequest)
+		return
+	}
+	var input workflowrunner.StartInput
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	s.attachWorkflowKnowledgeRetrieval(&input)
+	run, err := s.workflowRunner.StartRun(input)
+	if err != nil {
+		log.Printf("[workflow-session] start failed session_id=%s workflow_type=%s project=%s err=%v", sessionID, input.WorkflowType, input.ProjectID, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.sessionStore != nil {
+		if err := s.sessionStore.Bind(catalog.ActiveWorkflowSession{
+			SessionID:          sessionID,
+			WorkflowRunID:      run.ID,
+			ProjectID:          run.ProjectID,
+			WorkflowTemplateID: run.WorkflowTemplateID,
+			WorkflowCopyID:     run.WorkflowCopyID,
+			WorkflowType:       run.WorkflowType,
+			TaskTitle:          run.TaskTitle,
+			CurrentRole:        roleString(input.Context["role"]),
+			StartedAt:          run.StartedAt,
+			Status:             "active",
+		}); err != nil {
+			log.Printf("[workflow-session] bind failed session_id=%s workflow_run=%s workflow_type=%s project=%s err=%v", sessionID, run.ID, run.WorkflowType, run.ProjectID, err)
+			http.Error(w, "failed to bind workflow session", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("[workflow-session] bind session_id=%s workflow_run=%s workflow_type=%s project=%s", sessionID, run.ID, run.WorkflowType, run.ProjectID)
+	}
+	writeJSON(w, http.StatusCreated, run)
+}
+
+func (s *Server) attachWorkflowKnowledgeRetrieval(input *workflowrunner.StartInput) {
+	if input == nil || strings.TrimSpace(input.ProjectID) == "" || strings.TrimSpace(input.TaskTitle) == "" {
+		return
+	}
+	if input.Context == nil {
+		input.Context = map[string]any{}
+	}
+	if _, exists := input.Context["knowledgeRetrieval"]; exists {
+		return
+	}
+	projectRoot, ok := s.projectLocalPath(input.ProjectID)
+	if !ok {
+		return
+	}
+	result, err := knowledgebase.Retrieve(projectRoot, input.TaskTitle, knowledgebase.RetrieveOptions{Mode: knowledgebase.RetrieveModeContext, Limit: 8, MaxTokens: 6000})
+	if err != nil {
+		input.Context["knowledgeRetrieval"] = map[string]any{"query": input.TaskTitle, "error": err.Error()}
+		return
+	}
+	requiredPaths := make([]string, 0, len(result.Required))
+	for _, item := range result.Required {
+		requiredPaths = append(requiredPaths, item.Path)
+	}
+	input.Context["knowledgeRetrieval"] = map[string]any{
+		"query":                   result.Query,
+		"matchedDomain":           result.MatchedDomain,
+		"confidence":              result.Confidence,
+		"requiredPaths":           requiredPaths,
+		"usedTokens":              result.TokenBudget.UsedTokens,
+		"maxTokens":               result.TokenBudget.MaxTokens,
+		"loadedKnowledgeMarkdown": result.LoadedKnowledgeMarkdown,
+	}
+}
+
+func (s *Server) handleWorkflowRunPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/workflow-runs/"), "/"), "/")
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	runID := parts[0]
+	action := parts[1]
+	if !allowMethods(w, r, http.MethodPost) {
+		return
+	}
+	var input workflowrunner.FinishInput
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	switch action {
+	case "complete":
+		run, taskRun, err := s.workflowRunner.CompleteRun(runID, input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"run": run, "taskRun": taskRun})
+	case "fail":
+		run, taskRun, err := s.workflowRunner.FailRun(runID, input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"run": run, "taskRun": taskRun})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleEvaluations(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodGet) {
+		return
+	}
+	evaluations, err := s.evaluationStore.Evaluations()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, evaluations)
+}
+
+func (s *Server) handleEvaluationPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/evaluations/"), "/"), "/")
+	if len(parts) == 1 && parts[0] == "summary" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		summary, err := s.evaluationStore.Summary()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "run-pending" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		count, err := s.evaluationStore.EvaluatePending(20)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int{"evaluated": count})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "review" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		var input catalog.EvaluationReviewInput
+		if !decodeRequest(w, r, &input) {
+			return
+		}
+		review, err := s.evaluationStore.ReviewEvaluation(parts[0], input)
+		if err == sql.ErrNoRows {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusCreated, review)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleEvaluationReviewPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/evaluation/"), "/"), "/")
+	if len(parts) == 1 && parts[0] == "projects" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		projects, err := s.evaluationStore.EvaluationProjects()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, projects)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "proposals" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		items, err := s.evaluationStore.EvaluationProposals(r.URL.Query().Get("projectId"), r.URL.Query().Get("status"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
+	if len(parts) == 3 && parts[0] == "proposals" && parts[2] == "review" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		var input catalog.EvaluationProposalReviewInput
+		if !decodeRequest(w, r, &input) {
+			return
+		}
+		proposal, err := s.evaluationStore.ReviewEvaluationProposal(parts[1], input)
+		if err == sql.ErrNoRows {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, proposal)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleStatisticsPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/statistics/"), "/"), "/")
+	if len(parts) == 1 && parts[0] == "tasks" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		items, err := s.evaluationStore.StatisticsTasks(r.URL.Query().Get("view"), r.URL.Query().Get("range"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleLearningCases(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodGet) {
+		return
+	}
+	cases, err := s.evaluationStore.LearningCases()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, cases)
+}
+
+func (s *Server) handleLearningCasePath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/learning-cases/"), "/"), "/")
+	if len(parts) == 1 && parts[0] == "search" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		limit := 5
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		hits, err := s.evaluationStore.SearchLearningCases(query, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, hits)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "rebuild-index" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		count, err := s.evaluationStore.RebuildLearningCaseIndex()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int{"indexed": count})
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (s *Server) handleInfrastructure(w http.ResponseWriter, r *http.Request) {
@@ -496,6 +986,11 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) >= 2 && parts[1] == "knowledge" {
+		s.handleProjectKnowledgePath(w, r, projectID, parts[2:])
+		return
+	}
+
 	if parts[1] != "config" {
 		http.NotFound(w, r)
 		return
@@ -638,6 +1133,174 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func (s *Server) handleProjectKnowledgePath(w http.ResponseWriter, r *http.Request, projectID string, parts []string) {
+	projectRoot, ok := s.projectLocalPath(projectID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 0 {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		bundle, err := knowledgebase.ScanBundle(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, bundle)
+		return
+	}
+	switch parts[0] {
+	case "retrieve":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		maxTokens, _ := strconv.Atoi(r.URL.Query().Get("maxTokens"))
+		result, err := knowledgebase.Retrieve(projectRoot, r.URL.Query().Get("q"), knowledgebase.RetrieveOptions{
+			Mode:      r.URL.Query().Get("mode"),
+			Limit:     limit,
+			MaxTokens: maxTokens,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	case "validate":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		report, err := knowledgebase.Validate(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
+	case "route":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		preview, err := knowledgebase.PreviewRoute(projectRoot, r.URL.Query().Get("task"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, preview)
+	case "render":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		if docPath := r.URL.Query().Get("path"); docPath != "" {
+			doc, err := knowledgebase.RenderDocument(projectRoot, docPath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, doc)
+			return
+		}
+		tree, err := knowledgebase.BuildRenderTree(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, tree)
+	case "maintenance":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		report, err := knowledgebase.Maintenance(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
+	case "export":
+		s.handleProjectKnowledgeExport(w, r, projectID, projectRoot, parts[1:])
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleProjectKnowledgeExport(w http.ResponseWriter, r *http.Request, projectID string, projectRoot string, parts []string) {
+	exportRoot := projectKnowledgeExportRoot(projectID)
+	if len(parts) == 0 {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		data, err := knowledgebase.ReadFreshExport(projectID, projectRoot, exportRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, data)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "refresh" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		manifest, err := knowledgebase.ExportProjectKnowledge(projectID, projectRoot, exportRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, manifest)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "doc" {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		doc, err := knowledgebase.ReadExportDocument(exportRoot, r.URL.Query().Get("path"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, doc)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) projectLocalPath(projectID string) (string, bool) {
+	project, ok := s.store.ProjectByID(projectID)
+	if !ok {
+		return "", false
+	}
+	localPath := strings.TrimSpace(project.LocalPath)
+	if localPath == "" {
+		localPath = strings.TrimSpace(project.Path)
+	}
+	return localPath, localPath != ""
+}
+
+func projectKnowledgeExportRoot(projectID string) string {
+	base := strings.TrimSpace(os.Getenv("NEXUS_KNOWLEDGE_EXPORT_DIR"))
+	if base == "" {
+		base = filepath.Join(".nexus-agents", "knowledge-exports")
+	}
+	return filepath.Join(base, slugifyForPath(projectID))
+}
+
+func slugifyForPath(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "project"
+	}
+	var builder strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			builder.WriteRune(r)
+		} else {
+			builder.WriteRune('_')
+		}
+	}
+	return builder.String()
+}
+
 func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	if !allowMethods(w, r, http.MethodPost) {
 		return
@@ -650,6 +1313,9 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if project.KnowledgeSummary.Exists {
+		_, _ = knowledgebase.ExportProjectKnowledge(project.ID, project.LocalPath, projectKnowledgeExportRoot(project.ID))
 	}
 	writeJSON(w, http.StatusCreated, project)
 }

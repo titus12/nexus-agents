@@ -51,6 +51,19 @@ export type ConfigSummary = {
   workflows: number;
 };
 
+export type KnowledgeSummary = {
+  exists: boolean;
+  root: string;
+  documents: number;
+  domains: number;
+  workflows: number;
+  issues: number;
+  errors: number;
+  warnings: number;
+  lastModified?: string;
+  lastExported?: string;
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -62,6 +75,168 @@ export type Project = {
   localPath?: string;
   localConfigPath?: string;
   localConfigIgnored?: boolean;
+  knowledgeSummary?: KnowledgeSummary;
+};
+
+export type KnowledgeFrontmatter = {
+  type?: string;
+  title?: string;
+  description?: string;
+  resource?: string;
+  tags?: string[];
+  dependsOn?: string[];
+  seeAlso?: string[];
+  status?: string;
+  owner?: string;
+  timestamp?: string;
+  routing?: {
+    aliases?: {
+      values?: string[];
+      zh?: string[];
+      en?: string[];
+      pairs?: Array<{ zh?: string; en?: string }>;
+    };
+    keywords?: {
+      values?: string[];
+      zh?: string[];
+      en?: string[];
+    };
+  };
+  raw?: string;
+};
+
+export type KnowledgeDocument = {
+  path: string;
+  name: string;
+  directory: string;
+  frontmatter: KnowledgeFrontmatter;
+  links: Array<{ text: string; target: string; line: number }>;
+  sizeBytes: number;
+  modifiedAt: string;
+  reserved: boolean;
+};
+
+export type KnowledgeIssue = {
+  severity: "error" | "warning" | string;
+  code: string;
+  path: string;
+  line?: number;
+  message: string;
+};
+
+export type KnowledgeValidationReport = {
+  root: string;
+  summary: KnowledgeSummary;
+  issues: KnowledgeIssue[];
+  checkedAt: string;
+};
+
+export type KnowledgeMaintenanceReport = {
+  root: string;
+  summary: KnowledgeSummary;
+  issues: KnowledgeIssue[];
+  staleDocuments: KnowledgeDocument[];
+  largeDocuments: KnowledgeDocument[];
+  duplicateRules: Array<{ text: string; paths: string[] }>;
+  suggestedActions: string[];
+  checkedAt: string;
+};
+
+export type KnowledgeRoutePreview = {
+  task: string;
+  matchedDomain?: string;
+  requiredFiles: string[];
+  optionalFiles: string[];
+  reason: string;
+  missingFiles: string[];
+  routingDocuments: string[];
+  matches?: KnowledgeContextItem[];
+  terms?: string[];
+  tokenBudget?: KnowledgeTokenBudget;
+  loadedKnowledgeMarkdown?: string;
+};
+
+export type KnowledgeTokenBudget = {
+  maxTokens: number;
+  usedTokens: number;
+};
+
+export type KnowledgeContextItem = {
+  path: string;
+  title: string;
+  type?: string;
+  domain?: string;
+  heading?: string;
+  startLine?: number;
+  endLine?: number;
+  score: number;
+  tokens: number;
+  required: boolean;
+  reasons: string[];
+  snippet?: string;
+};
+
+export type KnowledgeRetrievalResult = {
+  query: string;
+  mode: string;
+  matchedDomain?: string;
+  matchedAlias?: {
+    alias?: string;
+    pairedAlias?: string;
+    domain?: string;
+    source?: string;
+  };
+  confidence: number;
+  terms: string[];
+  required: KnowledgeContextItem[];
+  optional: KnowledgeContextItem[];
+  related: KnowledgeContextItem[];
+  missingFiles: string[];
+  omitted: Array<{ path: string; reason: string }>;
+  routingDocuments: string[];
+  loadedKnowledgeMarkdown: string;
+  tokenBudget: KnowledgeTokenBudget;
+  reason: string;
+};
+
+export type KnowledgeRenderNode = {
+  path: string;
+  title: string;
+  type?: string;
+  kind?: "directory" | "document" | string;
+  indexDocument?: string;
+  children?: KnowledgeRenderNode[];
+};
+
+export type KnowledgeRenderTree = {
+  root: string;
+  nodes: KnowledgeRenderNode[];
+};
+
+export type KnowledgeRenderedDocument = {
+  path: string;
+  title: string;
+  frontmatter: KnowledgeFrontmatter;
+  html: string;
+  raw: string;
+};
+
+export type KnowledgeExportManifest = {
+  projectId: string;
+  projectRoot: string;
+  sourceRoot: string;
+  exportRoot: string;
+  documentCount: number;
+  sourceHash: string;
+  exportedAt: string;
+  summary: KnowledgeSummary;
+};
+
+export type KnowledgeExportData = {
+  manifest: KnowledgeExportManifest;
+  tree: KnowledgeRenderTree;
+  validation: KnowledgeValidationReport;
+  maintenance: KnowledgeMaintenanceReport;
 };
 
 export type ProjectInput = {
@@ -207,4 +382,309 @@ export type InfrastructureItem = {
   executablePath?: string;
   lastCheckedAt?: string;
   output?: string;
+};
+
+export type TaskRun = {
+  id: string;
+  projectId: string;
+  workflowTemplateId?: string;
+  workflowCopyId?: string;
+  workflowType: string;
+  taskTitle?: string;
+  submittedStatus: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  evaluationStatus: string;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TaskRunInput = {
+  projectId: string;
+  sessionId?: string;
+  workflowTemplateId?: string;
+  workflowCopyId?: string;
+  workflowType: string;
+  taskTitle?: string;
+  submittedStatus: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+};
+
+export type WorkflowRunSubmitOptions = {
+  projectId?: string;
+  sessionId?: string;
+  workflowCopyId?: string;
+  workflowTemplateId?: string;
+  workflowId?: string;
+  workflowName?: string;
+  workflowSummary?: string;
+  workflowTrigger?: string;
+  graph?: WorkflowGraph | null;
+  context?: {
+    sessionId?: string;
+    model?: string;
+    rules?: string[];
+    skills?: string[];
+    tools?: string[];
+    agent?: string;
+  };
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+  submittedStatus?: "success" | "partial_success" | "failed" | "cancelled";
+  taskTitle?: string;
+  startedAt?: string;
+  endedAt?: string;
+};
+
+export type Evaluation = {
+  id: string;
+  runId: string;
+  rubricId: string;
+  rubricVersion: string;
+  evaluationLevel: number;
+  finalStatus: string;
+  overallScore: number;
+  confidence: number;
+  scores: Record<string, unknown>;
+  analysis: Record<string, unknown>;
+  modelJudgements?: Record<string, unknown>;
+  modelPolicy?: Record<string, unknown>;
+  createdAt: string;
+  latestReviewStatus?: string;
+  latestReviewScore?: number;
+  latestReviewComment?: string;
+};
+
+export type EvaluationReviewInput = {
+  reviewer?: string;
+  overrideStatus?: string;
+  overrideScore?: number;
+  review?: Record<string, unknown>;
+};
+
+export type EvaluationSummary = {
+  totalRuns: number;
+  evaluatedRuns: number;
+  pendingRuns: number;
+  workflowMetrics: WorkflowEvaluationStat[];
+  topIssues: { issue: string; count: number }[];
+  componentStats: Record<string, { sampleCount: number; averageScore: number }>;
+  dimensionStats: EvaluationDimensionStat[];
+};
+
+export type WorkflowEvaluationStat = {
+  workflowTemplateId: string;
+  workflowType: string;
+  sampleCount: number;
+  averageScore: number;
+  successRate: number;
+};
+
+export type EvaluationDimensionStat = {
+  dimension: "agent" | "model" | "rules" | string;
+  name: string;
+  sampleCount: number;
+  averageScore: number;
+  successRate: number;
+};
+
+export type LearningCase = {
+  id: string;
+  runId: string;
+  evaluationId: string;
+  caseType: string;
+  projectId: string;
+  workflowTemplateId?: string;
+  workflowType: string;
+  title: string;
+  summary: string;
+  path: string[];
+  components: Record<string, unknown>;
+  scores: Record<string, unknown>;
+  tags: string[];
+  retentionClass: string;
+  createdAt: string;
+};
+
+export type LearningCaseHit = {
+  case: LearningCase;
+  similarity: number;
+};
+
+
+export type EvaluationProjectHealth = {
+  projectId: string;
+  totalRuns: number;
+  successRate: number;
+  averageScore: number;
+  failedCount: number;
+  pendingCount: number;
+  proposalCount: number;
+};
+
+export type EvaluationProjectsResponse = {
+  projects: EvaluationProjectHealth[];
+};
+
+export type EvaluationProposal = {
+  id: string;
+  projectId: string;
+  sourceRunId: string;
+  sourceEvaluationId: string;
+  target: string;
+  action: string;
+  reason: string;
+  severity: string;
+  status: string;
+  arbiterModel?: string;
+  escalationModel?: string;
+  needsEscalation?: boolean;
+  escalationReasons?: string[];
+  highRiskWorkflow?: boolean;
+  failedTask?: boolean;
+  createdAt: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+};
+
+export type EvaluationProposalsResponse = {
+  items: EvaluationProposal[];
+};
+
+export type EvaluationProposalReviewInput = {
+  status: "approved" | "rejected" | "later" | "pending" | string;
+  reviewNote?: string;
+};
+
+export type TokenUsageRoleRollup = {
+  requestCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheHitRate: number;
+  outputInputRatio: number;
+  models: Record<string, number>;
+};
+
+export type WorkflowTokenUsage = {
+  workflowRunId: string;
+  requestCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheHitRate: number;
+  outputInputRatio: number;
+  roles: Record<string, TokenUsageRoleRollup>;
+  updatedAt?: string;
+};
+
+export type RouteMetricRoleRollup = {
+  requestCount: number;
+  successCount: number;
+  errorCount: number;
+  errorRate: number;
+  durationMs: number;
+  averageRequestDurationMs: number;
+  requestBytes: number;
+  toolCount: number;
+  inputItemCount: number;
+  toolCallCount: number;
+  models: Record<string, number>;
+};
+
+export type WorkflowRouteMetrics = {
+  workflowRunId: string;
+  requestCount: number;
+  successCount: number;
+  errorCount: number;
+  errorRate: number;
+  durationMs: number;
+  averageRequestDurationMs: number;
+  requestBytes: number;
+  toolCount: number;
+  inputItemCount: number;
+  toolCallCount: number;
+  roles: Record<string, RouteMetricRoleRollup>;
+  updatedAt?: string;
+};
+
+export type StatisticsTaskItem = {
+  runId: string;
+  evaluationId?: string;
+  projectId: string;
+  taskTitle: string;
+  workflowType: string;
+  status: string;
+  score: number;
+  confidence: number;
+  agent?: string;
+  model?: string;
+  rules?: string[];
+  arbiterModel?: string;
+  escalationModel?: string;
+  needsEscalation?: boolean;
+  escalationReasons?: string[];
+  highRiskWorkflow?: boolean;
+  failedTask?: boolean;
+  tokenUsage?: WorkflowTokenUsage;
+  routeMetrics?: WorkflowRouteMetrics;
+  durationMs?: number;
+  createdAt: string;
+};
+
+export type StatisticsTasksResponse = {
+  items: StatisticsTaskItem[];
+};
+
+export type EvaluationEvidenceRow = {
+  runId: string;
+  taskRun?: TaskRun;
+  evaluation?: Evaluation;
+  statistics?: StatisticsTaskItem;
+};
+
+export type WorkflowRunRecord = {
+  id: string;
+  projectId: string;
+  workflowTemplateId: string;
+  workflowCopyID?: string;
+  workflowType: string;
+  taskTitle?: string;
+  status: "running" | "completed" | "failed" | string;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+  taskRunId?: string;
+};
+
+export type WorkflowRunStartInput = {
+  projectId: string;
+  workflowTemplateId?: string;
+  workflowCopyId?: string;
+  workflowType: string;
+  taskTitle?: string;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+};
+
+export type WorkflowRunFinishInput = {
+  submittedStatus?: string;
+  context?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
 };

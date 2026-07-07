@@ -175,6 +175,214 @@ func TestProjectEndpoints(t *testing.T) {
 	}
 }
 
+func TestEvaluationEndpoints(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore).(*Server)
+
+	createResponse := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
+		"projectId":"sample",
+		"workflowTemplateId":"bugfix",
+		"workflowCopyId":"proj_workflow_sample_bugfix",
+		"workflowType":"bugfix",
+		"taskTitle":"fix panic",
+		"submittedStatus":"success",
+		"durationMs":1200000,
+		"context":{"agent":"debugger","model":"gpt-5.4","rules":["bugfix-core"],"tools":["shell"]},
+		"metrics":{"testRunCount":2,"retryCount":0},
+		"evidence":{"verification":{"hasVerification":true,"passed":true}}
+	}`)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("expected task run create status 201, got %d body=%s", createResponse.Code, createResponse.Body.String())
+	}
+	var created catalog.TaskRun
+	decodeJSON(t, createResponse, &created)
+	if created.ID == "" || created.EvaluationStatus != "pending" {
+		t.Fatalf("expected pending task run, got %#v", created)
+	}
+
+	runResponse := requestJSON(t, server, http.MethodPost, "/api/evaluations/run-pending", "")
+	if runResponse.Code != http.StatusOK {
+		t.Fatalf("expected run pending status 200, got %d", runResponse.Code)
+	}
+	var runBody struct {
+		Evaluated int `json:"evaluated"`
+	}
+	decodeJSON(t, runResponse, &runBody)
+	if runBody.Evaluated != 1 {
+		t.Fatalf("expected one evaluated task run, got %#v", runBody)
+	}
+
+	var evaluations []catalog.Evaluation
+	getJSON(t, server, "/api/evaluations", &evaluations)
+	if len(evaluations) != 1 || evaluations[0].RunID != created.ID || evaluations[0].RubricID != "bugfix-rubric" {
+		t.Fatalf("unexpected evaluations: %#v", evaluations)
+	}
+
+	score := 80.0
+	reviewResponse := requestJSON(t, server, http.MethodPost, "/api/evaluations/"+evaluations[0].ID+"/review", `{"reviewer":"user","overrideStatus":"partial_success","overrideScore":80,"review":{"comment":"needs one more regression case"}}`)
+	if reviewResponse.Code != http.StatusCreated {
+		t.Fatalf("expected review status 201, got %d body=%s", reviewResponse.Code, reviewResponse.Body.String())
+	}
+	var review catalog.EvaluationReview
+	decodeJSON(t, reviewResponse, &review)
+	if review.OverrideScore == nil || *review.OverrideScore != score || review.OverrideStatus != "partial_success" {
+		t.Fatalf("unexpected review: %#v", review)
+	}
+
+	var summary catalog.EvaluationSummary
+	getJSON(t, server, "/api/evaluations/summary", &summary)
+	if summary.TotalRuns != 1 || summary.EvaluatedRuns != 1 || len(summary.WorkflowMetrics) != 1 {
+		t.Fatalf("unexpected summary: %#v", summary)
+	}
+	if len(summary.DimensionStats) == 0 {
+		t.Fatalf("expected agent/model/rules dimension stats, got %#v", summary)
+	}
+
+	rebuildResponse := requestJSON(t, server, http.MethodPost, "/api/learning-cases/rebuild-index", "")
+	if rebuildResponse.Code != http.StatusOK {
+		t.Fatalf("expected rebuild index status 200, got %d body=%s", rebuildResponse.Code, rebuildResponse.Body.String())
+	}
+	var cases []catalog.LearningCase
+	getJSON(t, server, "/api/learning-cases", &cases)
+	if len(cases) != 1 || cases[0].CaseType != "success" {
+		t.Fatalf("expected archived success learning case, got %#v", cases)
+	}
+	var hits []catalog.LearningCaseHit
+	getJSON(t, server, "/api/learning-cases/search?q=panic", &hits)
+	if len(hits) != 1 || hits[0].Case.ID != cases[0].ID {
+		t.Fatalf("expected learning case search hit, got %#v", hits)
+	}
+}
+
+func TestTaskRunsEndpointAcceptsWorkflowSubmitterPayload(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore).(*Server)
+
+	response := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
+		"projectId":"btd-client",
+		"workflowTemplateId":"unity-ui-feature-development",
+		"workflowCopyId":"copy-123",
+		"workflowType":"ui-feature-development",
+		"taskTitle":"Implement shop popup",
+		"submittedStatus":"success",
+		"context":{"agent":"unity-ui-developer","model":"gpt-5.4","rules":["unity-00-routing"],"skills":["wf-unity-ui-feature"],"tools":["unity-mcp"]},
+		"metrics":{"toolCallCount":12,"nodeCount":3},
+		"evidence":{"summary":"workflow submitter auto-uploaded result","verification":{"hasVerification":true,"passed":true}}
+	}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected workflow submitter payload status 201, got %d body=%s", response.Code, response.Body.String())
+	}
+	var created catalog.TaskRun
+	decodeJSON(t, response, &created)
+	if created.ProjectID != "btd-client" || created.WorkflowType != "ui-feature-development" || created.WorkflowCopyID != "copy-123" {
+		t.Fatalf("unexpected created run: %#v", created)
+	}
+}
+
+func TestWorkflowRunnerEndpointsStartAndCompleteSubmitTaskRun(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore)
+
+	startReq := httptest.NewRequest(http.MethodPost, "/api/workflow-runs/start", strings.NewReader(`{
+		"projectId":"btd-client",
+		"workflowTemplateId":"ui-feature-development",
+		"workflowType":"ui-feature-development",
+		"taskTitle":"Implement popup",
+		"context":{"agent":"unity-ui-developer"}
+	}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("Session-Id", "sess-workflow-1")
+	start := httptest.NewRecorder()
+	server.ServeHTTP(start, startReq)
+	if start.Code != http.StatusCreated {
+		t.Fatalf("expected workflow start status 201, got %d body=%s", start.Code, start.Body.String())
+	}
+	var started struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	decodeJSON(t, start, &started)
+	if started.ID == "" || started.Status != "running" {
+		t.Fatalf("unexpected started run: %#v", started)
+	}
+
+	complete := requestJSON(t, server, http.MethodPost, "/api/workflow-runs/"+started.ID+"/complete", `{
+		"submittedStatus":"success",
+		"evidence":{"summary":"workflow completed"}
+	}`)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("expected workflow complete status 200, got %d body=%s", complete.Code, complete.Body.String())
+	}
+	var finished struct {
+		Run struct {
+			Status    string `json:"status"`
+			TaskRunID string `json:"taskRunId"`
+		} `json:"run"`
+		TaskRun catalog.TaskRun `json:"taskRun"`
+	}
+	decodeJSON(t, complete, &finished)
+	if finished.Run.Status != "completed" || finished.Run.TaskRunID == "" || finished.TaskRun.WorkflowType != "ui-feature-development" {
+		t.Fatalf("unexpected workflow completion payload: %#v", finished)
+	}
+}
+
+func TestEvaluationProjectProposalAndStatisticsEndpoints(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore)
+
+	weakResponse := requestJSON(t, server, http.MethodPost, "/api/task-runs", `{
+		"projectId":"sample",
+		"workflowTemplateId":"research",
+		"workflowType":"research",
+		"taskTitle":"research model routing",
+		"submittedStatus":"partial_success",
+		"context":{"agent":"oracle","model":"deepseek-v4-flash","rules":[]},
+		"metrics":{"errorCount":1},
+		"evidence":{"contextMissing":true}
+	}`)
+	if weakResponse.Code != http.StatusCreated {
+		t.Fatalf("expected weak task run status 201, got %d body=%s", weakResponse.Code, weakResponse.Body.String())
+	}
+	if response := requestJSON(t, server, http.MethodPost, "/api/evaluations/run-pending", ""); response.Code != http.StatusOK {
+		t.Fatalf("expected run pending status 200, got %d", response.Code)
+	}
+
+	var projects catalog.EvaluationProjectsResponse
+	getJSON(t, server, "/api/evaluation/projects", &projects)
+	if len(projects.Projects) != 1 || projects.Projects[0].ProjectID != "sample" || projects.Projects[0].ProposalCount != 0 {
+		t.Fatalf("expected sample project health without auto proposals, got %#v", projects)
+	}
+
+	var proposals catalog.EvaluationProposalsResponse
+	getJSON(t, server, "/api/evaluation/proposals?projectId=sample&status=pending", &proposals)
+	if len(proposals.Items) != 0 {
+		t.Fatalf("expected no auto proposals in objective evaluation mode, got %#v", proposals)
+	}
+
+	var failed catalog.StatisticsTasksResponse
+	getJSON(t, server, "/api/statistics/tasks?view=failed&range=all", &failed)
+	if len(failed.Items) != 0 {
+		t.Fatalf("partial success should not appear in failed view, got %#v", failed)
+	}
+	var low catalog.StatisticsTasksResponse
+	getJSON(t, server, "/api/statistics/tasks?view=low_scored&range=all", &low)
+	if len(low.Items) != 1 || low.Items[0].ProjectID != "sample" || low.Items[0].EvaluationID == "" || low.Items[0].Agent != "oracle" {
+		t.Fatalf("expected low scored task view joined with run metadata, got %#v", low)
+	}
+}
+
 func TestProjectImportAndDeleteEndpoints(t *testing.T) {
 	root := t.TempDir()
 	home := t.TempDir()
@@ -318,9 +526,15 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "agents", agents, []string{
 		"debugger", "gatekeeper", "hephaestus", "librarian", "oracle", "prometheus",
 		"quick", "reviewer-logic", "reviewer-perf", "reviewer-security", "sisyphus", "worker",
+		"workflow-evaluator", "learning-curator", "model-arbiter",
+		"unity-debugger", "unity-bugfix-developer", "unity-bugfix-reviewer", "unity-logic-developer", "unity-logic-reviewer", "unity-ui-developer",
+		"unity-asset-safety-evaluator", "unity-regression-evaluator", "unity-workflow-evaluator",
 	})
 	for _, agent := range agents {
 		displayName := "go-" + agent.ID
+		if strings.HasPrefix(agent.ID, "unity-") {
+			displayName = agent.ID
+		}
 		if agent.Name != displayName || agent.Slug != displayName {
 			t.Fatalf("expected agent template identity to preserve go- filename prefix, got %#v", agent)
 		}
@@ -343,7 +557,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		Content     string   `json:"content"`
 	}
 	getJSON(t, server, "/api/templates/rules", &rules)
-	assertTemplateIDs(t, "rules", rules, []string{"00-routing", "01-communication", "02-safety", "03-project-model"})
+	assertTemplateIDs(t, "rules", rules, []string{"00-routing", "01-communication", "02-safety", "03-project-model", "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety"})
 	for _, rule := range rules {
 		displayName := strings.TrimSuffix(strings.TrimPrefix(rule.SourcePaths[0], "templates/rules/"), ".md")
 		if rule.Name != displayName || rule.Slug != displayName {
@@ -365,6 +579,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "skills", skills, []string{
 		"coding-rules", "cross-client", "cross-config", "cross-gate", "cross-social", "dev-workflow",
 		"high-risk-api", "pmconf-pattern", "quest-system", "review-feedback", "skill-standard", "test-first-and-worktree", "testing",
+		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver", "csharp-behaviour-tree",
 	})
 	for _, skill := range skills {
 		if strings.HasPrefix(skill.SourcePaths[0], "templates/skills/go-") {
@@ -391,6 +606,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "workflows", workflows, []string{
 		"feature-development", "modify-existing", "bugfix", "code-review", "design",
 		"research", "commit-gate", "refactor", "lark-integration", "subagent-driven-development",
+		"bug-investigation", "logic-modification", "ui-feature-development",
 	})
 	for _, workflow := range workflows {
 		if strings.HasPrefix(workflow.Entry, "templates/workflows/go-") {
@@ -402,7 +618,11 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		if workflow.Entry == "" || !strings.HasPrefix(workflow.Entry, "templates/workflows/") || !strings.HasSuffix(workflow.Entry, ".md") {
 			t.Fatalf("expected workflow entry to be copied markdown under templates/workflows, got %#v", workflow)
 		}
-		if workflow.Source != "Expanded workflow markdown" || workflow.Content == "" || !containsString(workflow.SourcePaths, "templates/rules/go-00-routing.md") {
+		routingPath := "templates/rules/go-00-routing.md"
+		if strings.HasPrefix(workflow.Entry, "templates/workflows/unity-") {
+			routingPath = "templates/rules/unity-00-routing.md"
+		}
+		if workflow.Source != "Expanded workflow markdown" || workflow.Content == "" || !containsString(workflow.SourcePaths, routingPath) {
 			t.Fatalf("expected btd workflow content and routing lineage, got %#v", workflow)
 		}
 		if !containsString(workflow.SourcePaths, workflow.Entry) {
@@ -925,6 +1145,42 @@ func writeHTTPTestFile(t *testing.T, root string, relative string, content strin
 	}
 }
 
+func TestProjectKnowledgeRetrieveEndpoint(t *testing.T) {
+	root := t.TempDir()
+	writeHTTPTestFile(t, root, "design/KnowledgeBase/index.md", httpOKFDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)"))
+	writeHTTPTestFile(t, root, "design/KnowledgeBase/project/routing.md", httpOKFDoc("Routing", "Project Routing", "design/KnowledgeBase/project/routing.md", "# Routing\n\nUI tasks read `design/KnowledgeBase/domains/ui/routing.md`."))
+	writeHTTPTestFile(t, root, "design/KnowledgeBase/domains/ui/routing.md", httpOKFDoc("Routing", "UI Routing", "design/KnowledgeBase/domains/ui/routing.md", "# UI Routing\n\nRequired:\n- design/KnowledgeBase/domains/ui/coding_rules.md"))
+	writeHTTPTestFile(t, root, "design/KnowledgeBase/domains/ui/coding_rules.md", httpOKFDoc("CodingRules", "UI Coding Rules", "design/KnowledgeBase/domains/ui/coding_rules.md", "# Coding\n\n## ViewModel\n\n弹窗 UI 使用 ViewModel 管理状态。"))
+	store := catalog.NewStoreFromData(catalog.BootstrapData{Projects: []catalog.Project{{ID: "sample", Name: "sample", Path: root}}}, nil, nil)
+	server := NewServerWithStore(store)
+
+	response := requestJSON(t, server, http.MethodGet, "/api/projects/sample/knowledge/retrieve?q=UI&mode=routing&maxTokens=1000", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected retrieve status 200, got %d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		MatchedDomain string `json:"matchedDomain"`
+		Required      []struct {
+			Path    string   `json:"path"`
+			Snippet string   `json:"snippet"`
+			Reasons []string `json:"reasons"`
+		} `json:"required"`
+		TokenBudget struct {
+			MaxTokens  int `json:"maxTokens"`
+			UsedTokens int `json:"usedTokens"`
+		} `json:"tokenBudget"`
+		LoadedKnowledgeMarkdown string `json:"loadedKnowledgeMarkdown"`
+	}
+	decodeJSON(t, response, &body)
+	if body.MatchedDomain != "ui" || len(body.Required) == 0 || body.TokenBudget.UsedTokens > body.TokenBudget.MaxTokens || !strings.Contains(body.LoadedKnowledgeMarkdown, "Loaded Knowledge") {
+		t.Fatalf("unexpected retrieve response: %#v", body)
+	}
+}
+
+func httpOKFDoc(kind, title, resource, body string) string {
+	return "---\ntype: " + kind + "\ntitle: " + title + "\ndescription: Test.\nresource: " + resource + "\ntags: [test, ui]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n" + body
+}
+
 func TestModelRouteEndpoint(t *testing.T) {
 	server := NewServer()
 
@@ -938,8 +1194,8 @@ func TestModelRouteEndpoint(t *testing.T) {
 	}
 	getJSON(t, server, "/api/model-routes", &routes)
 
-	if len(routes) != 7 {
-		t.Fatalf("expected seven Codex model routes, got %d routes: %#v", len(routes), routes)
+	if len(routes) != 8 {
+		t.Fatalf("expected eight Codex model routes, got %d routes: %#v", len(routes), routes)
 	}
 
 	wantTargets := map[string]string{
@@ -950,6 +1206,7 @@ func TestModelRouteEndpoint(t *testing.T) {
 		"deepseek-v4-flash": "deepseek-v4-flash",
 		"glm-5.2":           "glm-5.2",
 		"glm-5.1":           "glm-5.1",
+		"claude-sonnet-5":   "claude-sonnet-5",
 	}
 	for _, route := range routes {
 		if route.Client != "Codex Responses" {
@@ -970,6 +1227,9 @@ func TestModelRouteEndpoint(t *testing.T) {
 		}
 		if strings.HasPrefix(route.Source, "glm-") && route.Provider != "Winky GLM" {
 			t.Fatalf("expected GLM route to use Winky GLM provider, got %#v", route)
+		}
+		if strings.HasPrefix(route.Source, "claude-") && route.Provider != "Winky Claude" {
+			t.Fatalf("expected Claude route to use Winky Claude provider, got %#v", route)
 		}
 		delete(wantTargets, route.Source)
 	}
@@ -1356,6 +1616,12 @@ func TestModelRouteResolveEndpoint(t *testing.T) {
 			wantProvider: "Winky GLM",
 			wantTarget:   "glm-5.1",
 		},
+		{
+			name:         "codex claude sonnet 5 to winky",
+			path:         "/api/model-routes/resolve?client=codex&model=claude-sonnet-5",
+			wantProvider: "Winky Claude",
+			wantTarget:   "claude-sonnet-5",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1405,6 +1671,7 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 	foundGPT := false
 	foundDeepSeek := false
 	foundGLM := false
+	foundClaude := false
 	for _, model := range catalogBody.Models {
 		if model.Slug == "gpt-5.5" {
 			foundGPT = model.DisplayName != "" && model.ApplyPatchToolType == "freeform"
@@ -1417,9 +1684,12 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 		if model.Slug == "glm-5.2" {
 			foundGLM = model.DisplayName == "GLM-5.2" && model.DefaultReasoningLevel == "none"
 		}
+		if model.Slug == "claude-sonnet-5" {
+			foundClaude = model.DisplayName == "Claude Sonnet 5" && model.DefaultReasoningLevel == "high"
+		}
 	}
-	if !foundGPT || !foundDeepSeek || !foundGLM {
-		t.Fatalf("expected catalog to include GPT subscription, DeepSeek, and GLM models, got %#v", catalogBody.Models)
+	if !foundGPT || !foundDeepSeek || !foundGLM || !foundClaude {
+		t.Fatalf("expected catalog to include GPT subscription, DeepSeek, GLM, and Claude models, got %#v", catalogBody.Models)
 	}
 
 	var modelsBody struct {
@@ -1434,13 +1704,15 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 	foundModelGPT := false
 	foundModelDeepSeek := false
 	foundModelGLM := false
+	foundModelClaude := false
 	for _, model := range modelsBody.Data {
 		foundModelGPT = foundModelGPT || model.ID == "gpt-5.5"
 		foundModelDeepSeek = foundModelDeepSeek || model.ID == "deepseek-v4-flash"
 		foundModelGLM = foundModelGLM || model.ID == "glm-5.2"
+		foundModelClaude = foundModelClaude || model.ID == "claude-sonnet-5"
 	}
-	if modelsBody.Object != "list" || !foundModelGPT || !foundModelDeepSeek || !foundModelGLM {
-		t.Fatalf("expected OpenAI-compatible model list with GPT, DeepSeek, and GLM models, got %#v", modelsBody)
+	if modelsBody.Object != "list" || !foundModelGPT || !foundModelDeepSeek || !foundModelGLM || !foundModelClaude {
+		t.Fatalf("expected OpenAI-compatible model list with GPT, DeepSeek, GLM, and Claude models, got %#v", modelsBody)
 	}
 }
 
@@ -1562,6 +1834,254 @@ func TestCodexRouterResponsesPassesGPTSubscriptionBearer(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "hello from subscription") {
 		t.Fatalf("expected passthrough body, got %s", response.Body.String())
+	}
+}
+
+func TestCodexRouterTokenUsageHeadersAttachToWorkflowCompletion(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":      "chatcmpl_token",
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "done"}}},
+			"usage": map[string]any{
+				"prompt_tokens":         100,
+				"completion_tokens":     20,
+				"total_tokens":          120,
+				"prompt_tokens_details": map[string]any{"cached_tokens": 60},
+			},
+		})
+	}))
+	defer upstream.Close()
+	router := codexrouter.NewService(codexrouter.Config{
+		DefaultModel: "deepseek-v4-pro",
+		Routes: []codexrouter.Route{{
+			ID:       "deepseek-v4-pro",
+			API:      "chat_completions",
+			BaseURL:  upstream.URL,
+			Model:    "deepseek-v4-pro",
+			AuthMode: "api_key",
+			APIKey:   "provider-key",
+		}},
+	})
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), router, defaultLocalDirectoryPicker{}, evaluationStore)
+
+	startReq := httptest.NewRequest(http.MethodPost, "/api/workflow-runs/start", strings.NewReader(`{"projectId":"sample","workflowType":"bugfix","workflowTemplateId":"bugfix"}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("Session-Id", "sess-token-1")
+	start := httptest.NewRecorder()
+	server.ServeHTTP(start, startReq)
+	if start.Code != http.StatusCreated {
+		t.Fatalf("start workflow status=%d body=%s", start.Code, start.Body.String())
+	}
+	var started struct {
+		ID string `json:"id"`
+	}
+	decodeJSON(t, start, &started)
+
+	request := httptest.NewRequest(http.MethodPost, "/proxy/codex/v1/responses", strings.NewReader(`{"model":"deepseek-v4-pro","input":"hello","stream":false}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Session-Id", "sess-token-1")
+	request.Header.Set("X-Nexus-Workflow-Role", "worker")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("proxy response status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	complete := requestJSON(t, server, http.MethodPost, "/api/workflow-runs/"+started.ID+"/complete", `{"submittedStatus":"success"}`)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete workflow status=%d body=%s", complete.Code, complete.Body.String())
+	}
+	var finished struct {
+		TaskRun catalog.TaskRun `json:"taskRun"`
+	}
+	decodeJSON(t, complete, &finished)
+	usage, ok := finished.TaskRun.Metrics["tokenUsage"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected token usage metric, got %#v", finished.TaskRun.Metrics)
+	}
+	if usage["workflowRunId"] != started.ID || int(usage["requestCount"].(float64)) != 1 || int(usage["totalTokens"].(float64)) != 120 {
+		t.Fatalf("unexpected token usage metric: %#v", usage)
+	}
+	routeMetrics, ok := finished.TaskRun.Metrics["routeMetrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected route metrics, got %#v", finished.TaskRun.Metrics)
+	}
+	if routeMetrics["workflowRunId"] != started.ID || int(routeMetrics["requestCount"].(float64)) != 1 || int(routeMetrics["successCount"].(float64)) != 1 {
+		t.Fatalf("unexpected route metrics: %#v", routeMetrics)
+	}
+	roles, ok := routeMetrics["roles"].(map[string]any)
+	if !ok || roles["worker"] == nil {
+		t.Fatalf("expected worker role route metrics, got %#v", routeMetrics)
+	}
+}
+
+func TestTaskRunSubmitEnrichesMetricsFromBoundSession(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	if err := evaluationStore.RecordTokenUsage(codexrouter.TokenUsageEvent{
+		WorkflowRunID: "wf_run_session_submit",
+		Role:          "worker",
+		Model:         "gpt-test",
+		InputTokens:   100,
+		OutputTokens:  20,
+		TotalTokens:   120,
+	}); err != nil {
+		t.Fatalf("record token usage: %v", err)
+	}
+	if err := evaluationStore.RecordWorkflowRouteEvent(codexrouter.WorkflowRouteEvent{
+		WorkflowRunID:  "wf_run_session_submit",
+		Role:           "worker",
+		Model:          "gpt-test",
+		StatusCode:     200,
+		DurationMS:     1500,
+		RequestBytes:   2048,
+		ToolCount:      3,
+		InputItemCount: 2,
+		ToolCallCount:  1,
+	}); err != nil {
+		t.Fatalf("record route event: %v", err)
+	}
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore).(*Server)
+	if err := server.sessionStore.Bind(catalog.ActiveWorkflowSession{
+		SessionID:     "sess-submit-1",
+		WorkflowRunID: "wf_run_session_submit",
+		ProjectID:     "sample",
+		WorkflowType:  "bugfix",
+		Status:        "active",
+	}); err != nil {
+		t.Fatalf("bind session: %v", err)
+	}
+
+	body := `{
+		"projectId":"sample",
+		"workflowType":"bugfix",
+		"submittedStatus":"success",
+		"metrics":{
+			"toolCallCount":7,
+			"tokenUsage":{"workflowRunId":"client_fake","requestCount":99},
+			"routeMetrics":{"workflowRunId":"client_fake","requestCount":99}
+		}
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/api/task-runs", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Session-Id", "sess-submit-1")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("submit task run status=%d body=%s", response.Code, response.Body.String())
+	}
+	var run catalog.TaskRun
+	decodeJSON(t, response, &run)
+	if numberValueForHTTPTest(run.Metrics["toolCallCount"]) != 7 {
+		t.Fatalf("expected original tool metric to remain, got %#v", run.Metrics)
+	}
+	usage, ok := run.Metrics["tokenUsage"].(map[string]any)
+	if !ok || usage["workflowRunId"] != "wf_run_session_submit" || int(numberValueForHTTPTest(usage["requestCount"])) != 1 || int(numberValueForHTTPTest(usage["totalTokens"])) != 120 {
+		t.Fatalf("expected server token usage, got %#v", run.Metrics["tokenUsage"])
+	}
+	routeMetrics, ok := run.Metrics["routeMetrics"].(map[string]any)
+	if !ok || routeMetrics["workflowRunId"] != "wf_run_session_submit" || int(numberValueForHTTPTest(routeMetrics["requestCount"])) != 1 || int(numberValueForHTTPTest(routeMetrics["toolCallCount"])) != 1 {
+		t.Fatalf("expected server route metrics, got %#v", run.Metrics["routeMetrics"])
+	}
+	if _, ok, err := server.sessionStore.Lookup("sess-submit-1"); err != nil || ok {
+		t.Fatalf("expected session to be completed, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestTaskRunSubmitEnrichesMetricsFromSessionTimeWindow(t *testing.T) {
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new evaluation store: %v", err)
+	}
+	if err := evaluationStore.RecordTokenUsage(codexrouter.TokenUsageEvent{
+		SessionID:    "sess-window-1",
+		Role:         "worker",
+		Model:        "gpt-window",
+		InputTokens:  80,
+		OutputTokens: 16,
+		TotalTokens:  96,
+		CreatedAt:    "2026-07-02T08:00:03Z",
+	}); err != nil {
+		t.Fatalf("record token usage: %v", err)
+	}
+	if err := evaluationStore.RecordTokenUsage(codexrouter.TokenUsageEvent{
+		SessionID:    "sess-window-1",
+		Role:         "worker",
+		Model:        "gpt-window",
+		InputTokens:  999,
+		OutputTokens: 1,
+		TotalTokens:  1000,
+		CreatedAt:    "2026-07-02T09:00:00Z",
+	}); err != nil {
+		t.Fatalf("record out-of-window token usage: %v", err)
+	}
+	if err := evaluationStore.RecordWorkflowRouteEvent(codexrouter.WorkflowRouteEvent{
+		SessionID:      "sess-window-1",
+		Role:           "worker",
+		Model:          "gpt-window",
+		StatusCode:     200,
+		DurationMS:     2500,
+		RequestBytes:   1024,
+		ToolCount:      4,
+		InputItemCount: 3,
+		ToolCallCount:  2,
+		CreatedAt:      "2026-07-02T08:00:04Z",
+	}); err != nil {
+		t.Fatalf("record route event: %v", err)
+	}
+	server := newServerWithOptions(catalog.NewStore(), catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}), nil, defaultLocalDirectoryPicker{}, evaluationStore).(*Server)
+
+	body := `{
+		"projectId":"sample",
+		"workflowType":"bugfix",
+		"submittedStatus":"success",
+		"startedAt":"2026-07-02T08:00:00Z",
+		"endedAt":"2026-07-02T08:00:10Z",
+		"sessionId":"sess-window-1",
+		"metrics":{
+			"toolCallCount":7,
+			"tokenUsage":{"workflowRunId":"client_fake","requestCount":99},
+			"routeMetrics":{"workflowRunId":"client_fake","requestCount":99}
+		}
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/api/task-runs", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("submit task run status=%d body=%s", response.Code, response.Body.String())
+	}
+	var run catalog.TaskRun
+	decodeJSON(t, response, &run)
+	usage, ok := run.Metrics["tokenUsage"].(map[string]any)
+	if !ok || usage["sessionId"] != "sess-window-1" || int(numberValueForHTTPTest(usage["requestCount"])) != 1 || int(numberValueForHTTPTest(usage["totalTokens"])) != 96 {
+		t.Fatalf("expected session-window token usage, got %#v", run.Metrics["tokenUsage"])
+	}
+	routeMetrics, ok := run.Metrics["routeMetrics"].(map[string]any)
+	if !ok || routeMetrics["sessionId"] != "sess-window-1" || int(numberValueForHTTPTest(routeMetrics["requestCount"])) != 1 || int(numberValueForHTTPTest(routeMetrics["toolCallCount"])) != 2 {
+		t.Fatalf("expected session-window route metrics, got %#v", run.Metrics["routeMetrics"])
+	}
+}
+
+func numberValueForHTTPTest(value any) float64 {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float64:
+		return typed
+	case json.Number:
+		result, _ := typed.Float64()
+		return result
+	default:
+		return 0
 	}
 }
 

@@ -1,6 +1,25 @@
 import type {
   BootstrapData,
+  Evaluation,
+  EvaluationReviewInput,
+  EvaluationSummary,
+  EvaluationProjectHealth,
+  EvaluationProposal,
+  EvaluationProposalReviewInput,
+  EvaluationProposalsResponse,
+  EvaluationProjectsResponse,
   InfrastructureItem,
+  KnowledgeExportData,
+  KnowledgeExportManifest,
+  KnowledgeMaintenanceReport,
+  KnowledgeRenderedDocument,
+  KnowledgeRetrievalResult,
+  KnowledgeRenderTree,
+  KnowledgeRoutePreview,
+  KnowledgeValidationReport,
+  LearningCase,
+  LearningCaseHit,
+  StatisticsTasksResponse,
   LocalDirectoryPickerResponse,
   LocalDirectoriesResponse,
   ModelRoute,
@@ -14,8 +33,13 @@ import type {
   TemplateInput,
   TemplateItem,
   TemplateKind,
+  TaskRun,
+  TaskRunInput,
+  WorkflowRunFinishInput,
   WorkflowGraph,
   WorkflowInput,
+  WorkflowRunRecord,
+  WorkflowRunStartInput,
   WorkflowSummary,
 } from "./types";
 
@@ -41,8 +65,149 @@ export function fetchBootstrap(): Promise<BootstrapData> {
   return fetchJSON<BootstrapData>("/api/bootstrap");
 }
 
+export function createTaskRun(input: TaskRunInput): Promise<TaskRun> {
+  const sessionId =
+    (typeof input.sessionId === "string" ? input.sessionId.trim() : "") ||
+    (typeof input.context?.sessionId === "string" ? input.context.sessionId.trim() : "");
+  return fetchJSON<TaskRun>("/api/task-runs", {
+    method: "POST",
+    headers: sessionId ? { "Session-Id": sessionId } : undefined,
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchTaskRuns(): Promise<TaskRun[]> {
+  return fetchJSON<TaskRun[]>("/api/task-runs");
+}
+
+export async function deleteTaskRun(taskRunId: string): Promise<void> {
+  await fetchJSON<void>(`/api/task-runs/${encodeURIComponent(taskRunId)}`, {
+    method: "DELETE",
+  });
+}
+
+export function startWorkflowRun(input: WorkflowRunStartInput): Promise<WorkflowRunRecord> {
+  return fetchJSON<WorkflowRunRecord>("/api/workflow-runs/start", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function completeWorkflowRun(runId: string, input: WorkflowRunFinishInput): Promise<{ run: WorkflowRunRecord; taskRun: TaskRun }> {
+  return fetchJSON<{ run: WorkflowRunRecord; taskRun: TaskRun }>(`/api/workflow-runs/${encodeURIComponent(runId)}/complete`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function failWorkflowRun(runId: string, input: WorkflowRunFinishInput): Promise<{ run: WorkflowRunRecord; taskRun: TaskRun }> {
+  return fetchJSON<{ run: WorkflowRunRecord; taskRun: TaskRun }>(`/api/workflow-runs/${encodeURIComponent(runId)}/fail`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchEvaluations(): Promise<Evaluation[]> {
+  return fetchJSON<Evaluation[]>("/api/evaluations");
+}
+
+export function runPendingEvaluations(): Promise<{ evaluated: number }> {
+  return fetchJSON<{ evaluated: number }>("/api/evaluations/run-pending", {
+    method: "POST",
+  });
+}
+
+export function fetchEvaluationSummary(): Promise<EvaluationSummary> {
+  return fetchJSON<EvaluationSummary>("/api/evaluations/summary");
+}
+
+export function reviewEvaluation(evaluationId: string, input: EvaluationReviewInput): Promise<unknown> {
+  return fetchJSON<unknown>(`/api/evaluations/${encodeURIComponent(evaluationId)}/review`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+
+export function fetchEvaluationProjects(): Promise<EvaluationProjectsResponse> {
+  return fetchJSON<EvaluationProjectsResponse>("/api/evaluation/projects");
+}
+
+export function fetchEvaluationProposals(projectId?: string, status?: string): Promise<EvaluationProposalsResponse> {
+  const params = new URLSearchParams();
+  if (projectId) params.set("projectId", projectId);
+  if (status) params.set("status", status);
+  const query = params.toString();
+  return fetchJSON<EvaluationProposalsResponse>(`/api/evaluation/proposals${query ? `?${query}` : ""}`);
+}
+
+export function reviewEvaluationProposal(proposalId: string, input: EvaluationProposalReviewInput): Promise<EvaluationProposal> {
+  return fetchJSON<EvaluationProposal>(`/api/evaluation/proposals/${encodeURIComponent(proposalId)}/review`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchStatisticsTasks(view: string, range: string): Promise<StatisticsTasksResponse> {
+  const params = new URLSearchParams({ view, range });
+  return fetchJSON<StatisticsTasksResponse>(`/api/statistics/tasks?${params.toString()}`);
+}
+
+export function fetchLearningCases(): Promise<LearningCase[]> {
+  return fetchJSON<LearningCase[]>("/api/learning-cases");
+}
+
+export function searchLearningCases(query: string, limit = 5): Promise<LearningCaseHit[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return fetchJSON<LearningCaseHit[]>(`/api/learning-cases/search?${params.toString()}`);
+}
+
+export function rebuildLearningCaseIndex(): Promise<{ indexed: number }> {
+  return fetchJSON<{ indexed: number }>("/api/learning-cases/rebuild-index", {
+    method: "POST",
+  });
+}
+
 export function fetchProjects(): Promise<Project[]> {
   return fetchJSON<Project[]>("/api/projects");
+}
+
+export function fetchProjectKnowledgeExport(projectId: string): Promise<KnowledgeExportData> {
+  return fetchJSON<KnowledgeExportData>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/export`);
+}
+
+export function refreshProjectKnowledgeExport(projectId: string): Promise<KnowledgeExportManifest> {
+  return fetchJSON<KnowledgeExportManifest>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/export/refresh`, {
+    method: "POST",
+  });
+}
+
+export function validateProjectKnowledge(projectId: string): Promise<KnowledgeValidationReport> {
+  return fetchJSON<KnowledgeValidationReport>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/validate`);
+}
+
+export function previewProjectKnowledgeRoute(projectId: string, task: string): Promise<KnowledgeRoutePreview> {
+  return fetchJSON<KnowledgeRoutePreview>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/route?task=${encodeURIComponent(task)}`);
+}
+
+export function retrieveProjectKnowledge(projectId: string, query: string, mode = "routing", maxTokens = 6000): Promise<KnowledgeRetrievalResult> {
+  return fetchJSON<KnowledgeRetrievalResult>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/retrieve?q=${encodeURIComponent(query)}&mode=${encodeURIComponent(mode)}&maxTokens=${encodeURIComponent(String(maxTokens))}`);
+}
+
+export function fetchProjectKnowledgeTree(projectId: string): Promise<KnowledgeRenderTree> {
+  return fetchJSON<KnowledgeRenderTree>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/render`);
+}
+
+export function fetchProjectKnowledgeDocument(projectId: string, path: string): Promise<KnowledgeRenderedDocument> {
+  return fetchJSON<KnowledgeRenderedDocument>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/render?path=${encodeURIComponent(path)}`);
+}
+
+export function fetchProjectKnowledgeExportDocument(projectId: string, path: string): Promise<KnowledgeRenderedDocument> {
+  return fetchJSON<KnowledgeRenderedDocument>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/export/doc?path=${encodeURIComponent(path)}`);
+}
+
+export function fetchProjectKnowledgeMaintenance(projectId: string): Promise<KnowledgeMaintenanceReport> {
+  return fetchJSON<KnowledgeMaintenanceReport>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/maintenance`);
 }
 
 export function fetchLocalDirectories(path?: string): Promise<LocalDirectoriesResponse> {

@@ -1,0 +1,1 @@
+﻿# unity-logic-developer`n`nModify existing Unity C# logic safely: locate callers, preserve compatibility, add targeted tests when practical, and avoid UI/Prefab/Scene/generated changes unless explicitly required.

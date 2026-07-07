@@ -17,6 +17,7 @@ export const workflowNodePresets: WorkflowNodePreset[] = [
   { key: "sequence", title: "Sequence", type: "sequence", category: "control", label: "sequence", agent: "orchestrator", detail: "Run child steps in order and pass outputs forward." },
   { key: "parallel", title: "Parallel", type: "parallel", category: "control", label: "parallel", agent: "orchestrator", detail: "Fan out to multiple agents or branches at the same time." },
   { key: "condition", title: "Condition Gate", type: "condition", category: "condition", label: "condition", agent: "router", detail: "Choose the next branch from context or agent output." },
+  { key: "loop", title: "Loop / Repeat", type: "loop", category: "condition", label: "loop control", agent: "orchestrator", detail: "Repeat a bounded section until success, retry budget exhaustion, or an exit condition." },
   { key: "transform", title: "Transform", type: "transform", category: "data", label: "transform", agent: "mapper", detail: "Map, merge, or reshape data for the next node." },
   { key: "join", title: "Join", type: "join", category: "data", label: "join", agent: "orchestrator", detail: "Merge branch outputs and deduplicate results." },
   { key: "human", title: "Human Approval", type: "human_approval", category: "human", label: "approval", agent: "owner", detail: "Pause until a human reviews risk or scope." },

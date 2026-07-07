@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"nexus-agents/internal/codexrouter"
+	"nexus-agents/internal/knowledgebase"
 )
 
 type BootstrapData struct {
@@ -60,16 +61,17 @@ type TemplateInput struct {
 }
 
 type Project struct {
-	ID                 string        `json:"id"`
-	Name               string        `json:"name"`
-	Path               string        `json:"path"`
-	Status             string        `json:"status"`
-	UpdatedAt          string        `json:"updatedAt"`
-	ConfigSummary      ConfigSummary `json:"configSummary"`
-	RepoKey            string        `json:"repoKey,omitempty"`
-	LocalPath          string        `json:"localPath,omitempty"`
-	LocalConfigPath    string        `json:"localConfigPath,omitempty"`
-	LocalConfigIgnored bool          `json:"localConfigIgnored,omitempty"`
+	ID                 string                `json:"id"`
+	Name               string                `json:"name"`
+	Path               string                `json:"path"`
+	Status             string                `json:"status"`
+	UpdatedAt          string                `json:"updatedAt"`
+	ConfigSummary      ConfigSummary         `json:"configSummary"`
+	RepoKey            string                `json:"repoKey,omitempty"`
+	LocalPath          string                `json:"localPath,omitempty"`
+	LocalConfigPath    string                `json:"localConfigPath,omitempty"`
+	LocalConfigIgnored bool                  `json:"localConfigIgnored,omitempty"`
+	KnowledgeSummary   knowledgebase.Summary `json:"knowledgeSummary"`
 }
 
 type ProjectInput struct {
@@ -272,14 +274,15 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 		return Project{}, err
 	}
 	project := Project{
-		ID:            id,
-		Name:          name,
-		Path:          localPath,
-		Status:        "draft",
-		UpdatedAt:     nowStamp(),
-		ConfigSummary: summarizeProjectCopies(copies),
-		RepoKey:       repoKey,
-		LocalPath:     localPath,
+		ID:               id,
+		Name:             name,
+		Path:             localPath,
+		Status:           "draft",
+		UpdatedAt:        nowStamp(),
+		ConfigSummary:    summarizeProjectCopies(copies),
+		RepoKey:          repoKey,
+		LocalPath:        localPath,
+		KnowledgeSummary: ScanProjectKnowledgeSummary(localPath),
 	}
 	for index := range s.data.Projects {
 		if s.data.Projects[index].ID == id {
@@ -337,6 +340,7 @@ func (s *Store) RescanProject(projectID string) (Project, []ProjectCopy, bool, e
 	project.LocalPath = localPath
 	project.RepoKey = repoKey
 	project.ConfigSummary = summarizeProjectCopies(copies)
+	project.KnowledgeSummary = ScanProjectKnowledgeSummary(localPath)
 	project.UpdatedAt = latestProjectConfigStamp(localPath)
 
 	s.mu.Lock()
@@ -581,6 +585,12 @@ func workflowSkillTemplateID(workflowID string) (string, bool) {
 		return "wf-lark", true
 	case "subagent-driven-development":
 		return "wf-subagents", true
+	case "bug-investigation":
+		return "wf-unity-bugfix", true
+	case "logic-modification":
+		return "wf-unity-logic-mod", true
+	case "ui-feature-development":
+		return "wf-unity-ui-feature", true
 	default:
 		return "", false
 	}
@@ -1389,7 +1399,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "prometheus",
 			summary:   "战略规划角色，负责方案设计、架构决策、选型评估，开始实现前使用。",
-			model:     "gpt-5.5",
+			model:     "deepseek-v4-pro",
 			effort:    "high",
 			skills:    []string{"dev-workflow", "skill-standard", "pmconf-pattern"},
 			tools:     []string{"rg", "codegraph", "read-only-shell"},
@@ -1422,7 +1432,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "oracle",
 			summary:   "架构分析与复杂调试角色，负责深度代码追踪、复杂 bug 诊断和影响评估。",
-			model:     "gpt-5.5",
+			model:     "deepseek-v4-pro",
 			effort:    "high",
 			skills:    []string{"coding-rules", "testing", "review-feedback"},
 			tools:     []string{"rg", "git", "codegraph"},
@@ -1507,38 +1517,174 @@ func btdAgentTemplates() []TemplateItem {
 			content:   "Scan staged or working-tree diff for destructive, auth, currency, goroutine, lock, and ignored-error risks.",
 			updatedAt: "2026-06-20 10:22",
 		},
+		{
+			id:        "workflow-evaluator",
+			summary:   "工作流评估入口角色，负责读取 Task Run Evidence，按 rubric 生成归因矩阵和质量评分。",
+			model:     "gpt-5.4",
+			effort:    "high",
+			skills:    []string{"review-feedback", "skill-standard"},
+			tools:     []string{"evaluation-store", "chromem-go", "model-policy"},
+			mcp:       []string{"codegraph"},
+			content:   "Balance accuracy and cost: run deterministic scoring first, use gpt-5.4 for high-risk analysis, and escalate to gpt-5.5 only for failed or low-confidence cases.",
+			updatedAt: "2026-06-23 15:40",
+		},
+		{
+			id:        "learning-curator",
+			summary:   "学习案例整理角色，负责把高分成功和代表性失败任务压缩为可检索 learning case。",
+			model:     "gpt-5.4-mini",
+			effort:    "medium",
+			skills:    []string{"skill-standard", "review-feedback"},
+			tools:     []string{"chromem-go", "evaluation-store"},
+			mcp:       []string{},
+			content:   "Extract concise case summaries, successful paths, component combinations, tags, and retention class for future retrieval.",
+			updatedAt: "2026-06-23 15:41",
+		},
+		{
+			id:        "model-arbiter",
+			summary:   "模型评估仲裁角色，在多模型评估分歧或低置信度时判断准确性与成本取舍。",
+			model:     "deepseek-v4-pro",
+			effort:    "high",
+			skills:    []string{"review-feedback", "high-risk-api"},
+			tools:     []string{"model-policy", "evaluation-store"},
+			mcp:       []string{},
+			content:   "Use deepseek-v4-pro as the default arbiter, then escalate to gpt-5.5 only for failed, low-confidence, high-risk, or recurring cross-project cases.",
+			updatedAt: "2026-06-23 15:42",
+		},
+		{
+			id:        "unity-debugger",
+			summary:   "Unity failure reproduction and root-cause analysis role for Console, tests, scenes, objects, and asset evidence.",
+			model:     "deepseek-v4-pro",
+			effort:    "high",
+			skills:    []string{"unity-mcp-skill", "unity-debugger", "unity-testing", "unity-asset-safety"},
+			tools:     []string{"rg", "git", "unity-mcp"},
+			mcp:       []string{"unityMCP", "codegraph"},
+			content:   "Reproduce first, capture exact Unity evidence, identify root cause, and avoid speculative edits.",
+			updatedAt: "2026-06-23 19:30",
+		},
+		{
+			id:        "unity-bugfix-developer",
+			summary:   "Unity bugfix implementation role for the smallest confirmed root-cause C# or asset fix.",
+			model:     "gpt-5.4",
+			effort:    "high",
+			skills:    []string{"unity-bugfix-developer", "unity-testing", "unity-asset-safety"},
+			tools:     []string{"shell", "apply_patch", "rg", "unity-mcp"},
+			mcp:       []string{"unityMCP", "codegraph"},
+			content:   "Implement the smallest root-cause Unity fix and verify compile, Console, reproduction, and regression paths.",
+			updatedAt: "2026-06-23 19:31",
+		},
+		{
+			id:        "unity-bugfix-reviewer",
+			summary:   "Unity bugfix reviewer for root-cause alignment, diff scope, asset safety, and verification evidence.",
+			model:     "deepseek-v4-pro",
+			effort:    "high",
+			skills:    []string{"unity-bugfix-review", "unity-asset-safety", "review-feedback"},
+			tools:     []string{"rg", "git", "unity-mcp"},
+			mcp:       []string{"unityMCP", "codegraph"},
+			content:   "Review Unity bugfix diffs for root-cause alignment, lifecycle risks, asset safety, and temporary residue.",
+			updatedAt: "2026-06-23 19:32",
+		},
+		{
+			id:        "unity-logic-developer",
+			summary:   "Unity existing C# logic modification role for scoped behavior changes and compatibility verification.",
+			model:     "gpt-5.4",
+			effort:    "high",
+			skills:    []string{"unity-logic-developer", "unity-testing"},
+			tools:     []string{"shell", "apply_patch", "rg", "unity-mcp"},
+			mcp:       []string{"unityMCP", "codegraph"},
+			content:   "Locate callers, summarize current and target behavior, implement the smallest compatible logic change.",
+			updatedAt: "2026-06-23 19:33",
+		},
+		{
+			id:        "unity-logic-reviewer",
+			summary:   "Unity logic reviewer for compatibility, boundary, lifecycle, exception, and performance risks.",
+			model:     "deepseek-v4-pro",
+			effort:    "high",
+			skills:    []string{"unity-logic-review", "unity-testing", "review-feedback"},
+			tools:     []string{"rg", "git", "unity-mcp"},
+			mcp:       []string{"unityMCP", "codegraph"},
+			content:   "Review Unity logic changes for old/new behavior, null/lifecycle/cancel/timeout risks, and verification quality.",
+			updatedAt: "2026-06-23 19:34",
+		},
+		{
+			id:        "unity-ui-developer",
+			summary:   "Unity UI development role for UGUI, TMP, UIArchitect, Resolver, Prefab, and interaction work.",
+			model:     "gpt-5.4",
+			effort:    "high",
+			skills:    []string{"unity-ui-developer", "unity-ui-resolver", "unity-testing", "unity-asset-safety"},
+			tools:     []string{"shell", "apply_patch", "rg", "unity-mcp"},
+			mcp:       []string{"unityMCP", "codegraph"},
+			content:   "Reuse UIArchitect patterns, avoid hand-editing generated Views, and verify UI states and input-lock release paths.",
+			updatedAt: "2026-06-23 19:35",
+		},
+		{
+			id:        "unity-asset-safety-evaluator",
+			summary:   "Unity asset safety evaluator for Prefab, Scene, .meta, generated file, imported asset, and serialized-reference risks.",
+			model:     "deepseek-v4-pro",
+			effort:    "high",
+			skills:    []string{"unity-asset-safety", "review-feedback"},
+			tools:     []string{"git", "rg", "unity-mcp"},
+			mcp:       []string{"unityMCP"},
+			content:   "Evaluate asset and serialized-reference risk from changed files and evidence; escalate high-risk asset changes.",
+			updatedAt: "2026-06-23 19:36",
+		},
+		{
+			id:        "unity-regression-evaluator",
+			summary:   "Unity regression evaluator for compile, Console, EditMode/PlayMode, reproduction, and manual verification evidence.",
+			model:     "deepseek-v4-pro",
+			effort:    "high",
+			skills:    []string{"unity-testing", "unity-mcp-skill", "review-feedback"},
+			tools:     []string{"unity-mcp", "rg", "git"},
+			mcp:       []string{"unityMCP"},
+			content:   "Score Unity verification evidence and identify missing compile, Console, test, or reproduction coverage.",
+			updatedAt: "2026-06-23 19:37",
+		},
+		{
+			id:        "unity-workflow-evaluator",
+			summary:   "Unity workflow evaluation entry role for Task Run Evidence scoring, attribution, and escalation recommendations.",
+			model:     "deepseek-v4-flash",
+			effort:    "high",
+			skills:    []string{"unity-testing", "unity-asset-safety", "review-feedback"},
+			tools:     []string{"evaluation-store", "model-policy", "unity-mcp"},
+			mcp:       []string{"unityMCP", "codegraph"},
+			content:   "Evaluate Unity workflow adherence, verification evidence, asset safety, and final report quality; escalate risky cases.",
+			updatedAt: "2026-06-23 19:38",
+		},
 	}
 
 	items := make([]TemplateItem, 0, len(specs))
 	for _, spec := range specs {
 		items = append(items, TemplateItem{
-			ID:            spec.id,
-			Kind:          "agent",
-			Slug:          spec.id,
-			Name:          spec.id,
-			Version:       1,
-			Summary:       spec.summary,
-			UpdatedAt:     spec.updatedAt,
-			Status:        "ready",
-			ModelTier:     spec.model,
-			RulesCount:    4,
-			SkillsCount:   len(spec.skills),
-			RelatedRules:  []string{"00-routing", "01-communication", "02-safety", "03-project-model"},
-			RelatedSkills: append([]string(nil), spec.skills...),
-			Tools:         append([]string(nil), spec.tools...),
-			MCP:           append([]string(nil), spec.mcp...),
-			SourcePaths: []string{
-				"templates/agents/claude/go-" + spec.id + ".md",
-				"templates/agents/codex/go-" + spec.id + ".toml",
-				".claude/agents/" + spec.id + ".md",
-				".codex/agents/" + spec.id + ".toml",
-			},
+			ID:              spec.id,
+			Kind:            "agent",
+			Slug:            spec.id,
+			Name:            spec.id,
+			Version:         1,
+			Summary:         spec.summary,
+			UpdatedAt:       spec.updatedAt,
+			Status:          "ready",
+			ModelTier:       spec.model,
+			RulesCount:      4,
+			SkillsCount:     len(spec.skills),
+			RelatedRules:    []string{"00-routing", "01-communication", "02-safety", "03-project-model"},
+			RelatedSkills:   append([]string(nil), spec.skills...),
+			Tools:           append([]string(nil), spec.tools...),
+			MCP:             append([]string(nil), spec.mcp...),
+			SourcePaths:     agentTemplateSourcePaths(spec.id),
 			Content:         spec.content,
 			CodexProjection: fmt.Sprintf("name = %q\nmodel = %q\nmodel_reasoning_effort = %q", spec.id, spec.model, spec.effort),
-			ClaudeSource:    "templates/agents/claude/go-" + spec.id + ".md",
+			ClaudeSource:    agentTemplateSourcePaths(spec.id)[0],
 		})
 	}
 	return items
+}
+
+func agentTemplateSourcePaths(id string) []string {
+	claudePath := "templates/agents/claude/" + id + ".md"
+	codexPath := "templates/agents/codex/" + id + ".toml"
+	if _, err := os.Stat(resolveDataPath(claudePath)); err == nil {
+		return []string{claudePath, codexPath, ".claude/agents/" + id + ".md", ".codex/agents/" + id + ".toml"}
+	}
+	return []string{"templates/agents/claude/go-" + id + ".md", "templates/agents/codex/go-" + id + ".toml", ".claude/agents/" + id + ".md", ".codex/agents/" + id + ".toml"}
 }
 
 func btdRuleTemplates() []TemplateItem {
@@ -1571,6 +1717,36 @@ func btdRuleTemplates() []TemplateItem {
 			summary:   "定义 btd-game-server 的 Actor 模型、xbean 事务、配置层和 Manager 模式约束。",
 			content:   "玩家状态只能在自己的 actor 内修改；数据变更必须走 DoTransaction；配置使用 WithContext；go 命令带 actor_id_uint64 tag。",
 			updatedAt: "2026-06-20 10:27",
+		},
+		{
+			id:        "unity-00-routing",
+			summary:   "Unity workflow routing rule for bugfix, logic modification, and UI feature entries.",
+			content:   "Unity work enters through $wf-unity-bugfix, $wf-unity-logic-mod, and $wf-unity-ui-feature.",
+			updatedAt: "2026-06-23 19:40",
+		},
+		{
+			id:        "unity-01-project-model",
+			summary:   "Unity project model rule for Runtime/Editor boundaries, Prefab, Scene, .meta, generated files, and serialized references.",
+			content:   "Separate Runtime and Editor code; do not hand-edit generated Views; Prefab, Scene, .meta, and asset changes require evidence.",
+			updatedAt: "2026-06-23 19:41",
+		},
+		{
+			id:        "unity-id-bugfix-safety",
+			summary:   "Unity bugfix safety rule requiring reproduction, root cause, smallest fix, and regression evidence.",
+			content:   "Reproduce first, identify root cause, avoid speculative fixes, and verify compile, Console, tests, and reproduction path.",
+			updatedAt: "2026-06-23 19:42",
+		},
+		{
+			id:        "unity-id-logic-mod-safety",
+			summary:   "Unity logic modification safety rule for scope, compatibility, lifecycle, async, and boundary risks.",
+			content:   "Describe current and target behavior before editing; avoid accidental UI, asset, or generated-file changes.",
+			updatedAt: "2026-06-23 19:43",
+		},
+		{
+			id:        "unity-id-ui-safety",
+			summary:   "Unity UI safety rule for UIArchitect, UGUI, TMP, input locks, adaptation, and interaction risks.",
+			content:   "Reuse existing UI patterns and verify open, close, repeat open, input-lock release, Safe Area, anchors, overflow, and list bounds.",
+			updatedAt: "2026-06-23 19:44",
 		},
 	}
 
@@ -1767,6 +1943,104 @@ func btdSkillTemplates() []TemplateItem {
 			applicableAgents: []string{"prometheus", "hephaestus", "reviewer-logic", "reviewer-perf", "reviewer-security"},
 			updatedAt:        "2026-06-22 16:30",
 		},
+		{
+			id:               "unity-mcp-skill",
+			summary:          "Unity MCP tool guide for Console, compile, tests, scenes, objects, assets, Prefabs, and screenshots.",
+			content:          "Prefer read-only inspection before mutations and record Console, tests, evidence, and skipped checks.",
+			applicableAgents: []string{"unity-debugger", "unity-bugfix-developer", "unity-logic-developer", "unity-ui-developer", "unity-workflow-evaluator"},
+			updatedAt:        "2026-06-23 19:45",
+		},
+		{
+			id:               "unity-testing",
+			summary:          "Unity testing and verification guide for compile, Console, EditMode/PlayMode, reproduction, and manual verification.",
+			content:          "Run EditMode or PlayMode tests when practical; otherwise record scene, steps, expected, actual, Console, and risk.",
+			applicableAgents: []string{"unity-debugger", "unity-bugfix-developer", "unity-logic-developer", "unity-ui-developer", "unity-regression-evaluator"},
+			updatedAt:        "2026-06-23 19:46",
+		},
+		{
+			id:               "unity-asset-safety",
+			summary:          "Unity asset safety guide for Prefab, Scene, .meta, generated files, imported assets, and serialized references.",
+			content:          "Do not rewrite asset trees without evidence; preserve .meta identity and inspect serialized references.",
+			applicableAgents: []string{"unity-ui-developer", "unity-bugfix-reviewer", "unity-asset-safety-evaluator"},
+			updatedAt:        "2026-06-23 19:47",
+		},
+		{
+			id:               "unity-debugger",
+			summary:          "Unity debugging skill for reproduction, evidence collection, and root-cause isolation.",
+			content:          "Console, stack traces, test failures, scene paths, object paths, and asset paths are core evidence.",
+			applicableAgents: []string{"unity-debugger"},
+			updatedAt:        "2026-06-23 19:48",
+		},
+		{
+			id:               "unity-bugfix-developer",
+			summary:          "Unity bugfix development skill for minimal root-cause fixes and regression verification.",
+			content:          "The implementation must match the root cause, avoid unrelated refactors, and verify reproduction and regression paths.",
+			applicableAgents: []string{"unity-bugfix-developer"},
+			updatedAt:        "2026-06-23 19:49",
+		},
+		{
+			id:               "unity-bugfix-review",
+			summary:          "Unity bugfix review skill for root cause, scope, asset safety, lifecycle, and temporary residue.",
+			content:          "Review root-cause alignment, diff scope, asset safety, null/lifecycle/destroyed-object risks, and verification evidence.",
+			applicableAgents: []string{"unity-bugfix-reviewer"},
+			updatedAt:        "2026-06-23 19:50",
+		},
+		{
+			id:               "unity-logic-developer",
+			summary:          "Unity logic development skill for existing C# behavior changes and caller compatibility.",
+			content:          "Locate callers, describe current and target behavior, make the smallest compatible change, and avoid UI/asset edits.",
+			applicableAgents: []string{"unity-logic-developer"},
+			updatedAt:        "2026-06-23 19:51",
+		},
+		{
+			id:               "unity-logic-review",
+			summary:          "Unity logic review skill for compatibility, boundaries, lifecycle, exceptions, and performance risks.",
+			content:          "Review new and old behavior, nulls, exceptions, cancellation, timeout, destroyed objects, and hot-path risks.",
+			applicableAgents: []string{"unity-logic-reviewer"},
+			updatedAt:        "2026-06-23 19:52",
+		},
+		{
+			id:               "unity-ui-developer",
+			summary:          "Unity UI development skill for UGUI, TMP, UIArchitect, Presenter, ViewModel, Resolver, and bindings.",
+			content:          "Reuse existing UI patterns, do not hand-edit generated Views, and verify open, close, interactions, and states.",
+			applicableAgents: []string{"unity-ui-developer"},
+			updatedAt:        "2026-06-23 19:53",
+		},
+		{
+			id:               "unity-ui-resolver",
+			summary:          "UIArchitect PSD Component Resolver skill for creating or modifying Resolvers.",
+			content:          "Prefer existing Resolver patterns, keep generated output reproducible, and avoid unrelated UI changes.",
+			applicableAgents: []string{"unity-ui-developer"},
+			updatedAt:        "2026-06-23 19:54",
+		},
+		{
+			id:               "csharp-behaviour-tree",
+			summary:          "Behavior tree skill for Battle AI, BonsaiBT, monster, boss, or behavior-tree Unity logic.",
+			content:          "Read existing behavior tree nodes and monster references before making minimal logic changes.",
+			applicableAgents: []string{"unity-debugger", "unity-logic-developer"},
+			updatedAt:        "2026-06-23 19:55",
+		},
+		{
+			id:               "wf-unity-bugfix",
+			summary:          "Codex skill entry for the Unity bug investigation workflow.",
+			content:          "Invoke with $wf-unity-bugfix to load templates/workflows/unity-bug-investigation.md and follow the Unity bug investigation workflow.",
+			applicableAgents: []string{"unity-debugger", "unity-bugfix-developer", "unity-bugfix-reviewer"},
+			updatedAt:        "2026-06-23 19:56",
+		},
+		{
+			id:               "wf-unity-logic-mod",
+			summary:          "Codex skill entry for the Unity logic modification workflow.",
+			content:          "Invoke with $wf-unity-logic-mod to load templates/workflows/unity-logic-modification.md and follow the Unity logic modification workflow.",
+			applicableAgents: []string{"unity-logic-developer", "unity-logic-reviewer"},
+			updatedAt:        "2026-06-23 19:57",
+		},
+		{
+			id:               "wf-unity-ui-feature",
+			summary:          "Codex skill entry for the Unity UI feature development workflow.",
+			content:          "Invoke with $wf-unity-ui-feature to load templates/workflows/unity-ui-feature-development.md and follow the Unity UI feature workflow.",
+			applicableAgents: []string{"unity-ui-developer", "unity-asset-safety-evaluator", "unity-regression-evaluator"},
+			updatedAt:        "2026-06-23 19:58",
+		},
 	}
 
 	items := make([]TemplateItem, 0, len(specs))
@@ -1808,6 +2082,8 @@ func btdRuleTemplatePath(id string) string {
 		return "templates/rules/go-02-safety.md"
 	case "03-project-model":
 		return "templates/rules/go-03-project-model.md"
+	case "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety":
+		return "templates/rules/" + id + ".md"
 	default:
 		return "templates/rules/" + id + ".md"
 	}
@@ -1817,7 +2093,7 @@ func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "dev-workflow", "coding-rules", "testing", "pmconf-pattern", "quest-system", "cross-config":
 		return "templates/skills/go-" + id + ".md"
-	case "wf-go-feat", "wf-go-mod", "wf-go-bugfix", "wf-go-review", "wf-go-refactor", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents":
+	case "wf-go-feat", "wf-go-mod", "wf-go-bugfix", "wf-go-review", "wf-go-refactor", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature":
 		return "templates/skills/codex/" + id + "/SKILL.md"
 	default:
 		return "templates/skills/" + id + ".md"
@@ -1840,17 +2116,40 @@ func btdWorkflowTemplates() []TemplateItem {
 			UpdatedAt:   spec.updatedAt,
 			Status:      "ready",
 			Source:      "Expanded workflow markdown",
-			SourcePaths: []string{btdWorkflowTemplatePath(spec.id), btdWorkflowGraphTemplatePath(spec.id), "templates/rules/go-00-routing.md", ".claude/rules/go-00-routing.md"},
+			SourcePaths: workflowTemplateSourcePaths(spec.id),
 			Content:     spec.content,
 		})
 	}
 	return items
 }
 
+func workflowTemplateSourcePaths(id string) []string {
+	routing := "templates/rules/go-00-routing.md"
+	if isUnityWorkflowID(id) {
+		routing = "templates/rules/unity-00-routing.md"
+	}
+	return []string{btdWorkflowTemplatePath(id), btdWorkflowGraphTemplatePath(id), routing}
+}
+
+func isUnityWorkflowID(id string) bool {
+	switch id {
+	case "bug-investigation", "logic-modification", "ui-feature-development":
+		return true
+	default:
+		return false
+	}
+}
+
 func btdWorkflowTemplatePath(id string) string {
 	switch id {
 	case "feature-development", "modify-existing", "bugfix", "code-review", "refactor":
 		return "templates/workflows/go-" + id + ".md"
+	case "bug-investigation":
+		return "templates/workflows/unity-bug-investigation.md"
+	case "logic-modification":
+		return "templates/workflows/unity-logic-modification.md"
+	case "ui-feature-development":
+		return "templates/workflows/unity-ui-feature-development.md"
 	default:
 		return "templates/workflows/" + id + ".md"
 	}
@@ -1898,11 +2197,11 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 		},
 		{
 			id:        "bugfix",
-			name:      "$wf-go-bugfix Bug 排查修复",
+			name:      "$wf-go-bugfix Bug \u6392\u67e5\u4fee\u590d",
 			trigger:   "$wf-go-bugfix",
 			owner:     "debugger",
-			summary:   "报错、异常或 crash 排查，先定位根因再修复，禁止猜测性修改。",
-			content:   "debugger 日志优先排查；复杂或跨模块升级 oracle；定位根因后加载 coding-rules 修复；用复现路径和 build 验证。",
+			summary:   "Go \u62a5\u9519\u3001\u5d29\u6e83\u3001\u5931\u8d25\u6d4b\u8bd5\u6216\u884c\u4e3a\u7c7b bug \u6392\u67e5\uff1b\u4ee5\u590d\u73b0\u548c\u8bc1\u636e\u4e3a\u5148\uff0c\u56f4\u7ed5\u6700\u5c0f\u6839\u56e0\u4fee\u590d\u505a\u6709\u754c loop\u3002",
+			content:   "Bugfix Owner \u7ef4\u62a4 Loop Capsule \u548c\u9000\u51fa\u6761\u4ef6\uff1b\u5148\u590d\u73b0\u548c\u8bca\u65ad\uff0c\u6ca1\u53ef\u9760\u7ebf\u7d22\u5148\u52a0\u5173\u952e\u65e5\u5fd7\uff1b\u6709\u8bc1\u636e\u540e\u6700\u5c0f\u4fee\u590d\u5e76\u9a8c\u8bc1\uff0c\u5931\u8d25\u5219\u538b\u7f29\u4e0a\u4e0b\u6587\u8fdb\u5165\u4e0b\u4e00\u8f6e\u6216\u9000\u51fa\u63d0\u4ea4\u8bc1\u636e\u3002",
 			tags:      []string{"routing", "bugfix", "root-cause"},
 			status:    "ready",
 			updatedAt: "2026-06-20 11:02",
@@ -1983,6 +2282,39 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 			tags:      []string{"routing", "subagent", "parallel", "delegation"},
 			status:    "ready",
 			updatedAt: "2026-06-22 15:11",
+		},
+		{
+			id:        "bug-investigation",
+			name:      "$wf-unity-bugfix Unity Bug Investigation",
+			trigger:   "$wf-unity-bugfix",
+			owner:     "unity-debugger",
+			summary:   "Investigate and fix Unity compile, Console, runtime, UI, asset, or test failures with reproduction-first discipline.",
+			content:   "debugger reproduces and finds root cause; bugfix developer fixes; regression evaluator verifies; bugfix reviewer reviews.",
+			tags:      []string{"unity", "bugfix", "root-cause", "evaluation"},
+			status:    "ready",
+			updatedAt: "2026-06-23 20:00",
+		},
+		{
+			id:        "logic-modification",
+			name:      "$wf-unity-logic-mod Unity Logic Modification",
+			trigger:   "$wf-unity-logic-mod",
+			owner:     "unity-logic-developer",
+			summary:   "Modify existing non-UI Unity C# logic after current and target behavior are clear.",
+			content:   "logic developer implements; regression evaluator verifies new and old behavior; logic reviewer checks boundaries and compatibility.",
+			tags:      []string{"unity", "logic", "verification", "evaluation"},
+			status:    "ready",
+			updatedAt: "2026-06-23 20:01",
+		},
+		{
+			id:        "ui-feature-development",
+			name:      "$wf-unity-ui-feature Unity UI Feature Development",
+			trigger:   "$wf-unity-ui-feature",
+			owner:     "unity-ui-developer",
+			summary:   "Develop Unity UI pages, popups, Presenter, ViewModel, Resolver, Prefab, or interaction features.",
+			content:   "ui developer implements; asset safety evaluator checks assets; regression evaluator verifies interactions; evaluator archives evidence.",
+			tags:      []string{"unity", "ui", "asset-safety", "evaluation"},
+			status:    "ready",
+			updatedAt: "2026-06-23 20:02",
 		},
 	}
 }
@@ -2106,6 +2438,42 @@ func btdWorkflowGraphs() map[string]WorkflowGraph {
 }
 
 func workflowGraphFromRoutingSpec(spec btdWorkflowSpec) WorkflowGraph {
+	if spec.id == "bugfix" {
+		return WorkflowGraph{
+			ID:   spec.id,
+			Name: spec.name,
+			Nodes: []WorkflowNode{
+				{ID: "start", Type: "input", Category: "event", Label: "\u5f00\u59cb", Agent: "-", Detail: "\u7528\u6237 bug \u63cf\u8ff0\u6216\u5931\u8d25\u6d4b\u8bd5\u8fdb\u5165 $wf-go-bugfix\u3002", X: 430, Y: 40},
+				{ID: "owner", Type: "agent", Category: "action", Label: "Bugfix \u4e3b\u63a7", Agent: "bugfix-owner", Detail: "\u521b\u5efa workflow run\uff0c\u52a0\u8f7d\u89c4\u5219\u4e0e skill\uff0c\u7ef4\u62a4 Loop \u80f6\u56ca\u4e0e\u9000\u51fa\u9884\u7b97\u3002", X: 430, Y: 190},
+				{ID: "reproduce", Type: "agent", Category: "action", Label: "\u590d\u73b0\u5931\u8d25", Agent: "reproducer", Detail: "\u8bb0\u5f55\u547d\u4ee4\u3001\u8f93\u5165\u3001\u9519\u8bef\u4e0e\u73af\u5883\uff1b\u4f18\u5148\u6784\u9020\u6700\u5c0f\u5931\u8d25\u56de\u5f52\u6d4b\u8bd5\u3002", X: 430, Y: 340},
+				{ID: "evidence_gate", Type: "condition", Category: "condition", Label: "\u7ebf\u7d22\u662f\u5426\u53ef\u9760", Agent: "debugger", Detail: "\u5224\u65ad\u6839\u56e0\u7ebf\u7d22\u662f\u5426\u8db3\u591f\u53ef\u9760\uff1b\u4f4e\u7f6e\u4fe1\u5ea6\u4e0d\u80fd\u76f4\u63a5\u6539\u884c\u4e3a\u3002", X: 430, Y: 520},
+				{ID: "probe", Type: "transform", Category: "action", Label: "\u52a0\u5173\u952e\u65e5\u5fd7/\u63a2\u9488", Agent: "debugger", Detail: "\u65e0\u53ef\u9760\u7ebf\u7d22\u65f6\uff0c\u5148\u52a0\u6700\u5c0f\u8bca\u65ad\u65e5\u5fd7\u6216\u63a2\u9488\uff0c\u7b49\u5f85\u65b0\u7684\u8fd0\u884c\u65f6\u8bc1\u636e\u3002", X: 90, Y: 520},
+				{ID: "diagnose", Type: "agent", Category: "action", Label: "\u8bca\u65ad\u6839\u56e0", Agent: "debugger", Detail: "\u5f62\u6210\u6839\u56e0\u5047\u8bbe\uff0c\u8bb0\u5f55\u7f6e\u4fe1\u5ea6\u3001\u652f\u6301\u8bc1\u636e\u4e0e\u53cd\u5bf9\u8bc1\u636e\u3002", X: 430, Y: 700},
+				{ID: "patch", Type: "agent", Category: "action", Label: "\u6700\u5c0f\u4fee\u590d", Agent: "implementer", Detail: "\u53ea\u4fee\u6839\u56e0\uff0c\u4e0d\u505a\u987a\u624b\u91cd\u6784\uff1b\u8bb0\u5f55 patch \u610f\u56fe\u4e0e\u6539\u52a8\u6587\u4ef6\u3002", X: 430, Y: 850},
+				{ID: "verify", Type: "agent", Category: "action", Label: "\u9a8c\u8bc1\u4fee\u590d", Agent: "verifier", Detail: "\u8fd0\u884c\u590d\u73b0\u3001\u56de\u5f52\u3001\u53d7\u5f71\u54cd package \u6216\u6784\u5efa\u9a8c\u8bc1\u3002", X: 430, Y: 1000},
+				{ID: "loop_control", Type: "loop", Category: "condition", Label: "Loop \u63a7\u5236", Agent: "bugfix-owner", Detail: "\u9a8c\u8bc1\u540e\u7edf\u4e00\u51b3\u7b56\uff1a\u901a\u8fc7\u5c31\u9000\u51fa\uff1b\u5931\u8d25\u4e14\u4ecd\u6709\u9884\u7b97\u5c31\u8fdb\u5165\u4e0b\u4e00\u8f6e\u3002", X: 430, Y: 1180},
+				{ID: "capsule", Type: "transform", Category: "data", Label: "\u538b\u7f29\u4e0a\u4e0b\u6587", Agent: "bugfix-owner", Detail: "\u538b\u7f29\u672c\u8f6e\u5931\u8d25\u4fe1\u606f\uff0c\u4f5c\u4e3a\u4e0b\u4e00\u8f6e\u8bca\u65ad\u8f93\u5165\u3002", X: 430, Y: 1360},
+				{ID: "exit_gate", Type: "condition", Category: "condition", Label: "\u9000\u51fa\u68c0\u67e5", Agent: "bugfix-owner", Detail: "\u786e\u8ba4\u9000\u51fa\u539f\u56e0\uff1a\u6210\u529f\u3001\u9884\u7b97\u8017\u5c3d\u3001\u540c\u9519\u91cd\u590d\u3001\u4f4e\u7f6e\u4fe1\u5ea6\u6216\u9a8c\u8bc1\u963b\u585e\u3002", X: 770, Y: 1180},
+				{ID: "submit", Type: "output", Category: "data", Label: "\u63d0\u4ea4\u8bc1\u636e", Agent: "learning-curator", Detail: "\u63d0\u4ea4 Task Run Evidence\uff0c\u72b6\u6001\u4e3a success\u3001partial_success\u3001failed\u3001cancelled \u6216 blocked\u3002", X: 770, Y: 1360},
+			},
+			Edges: []WorkflowEdge{
+				{From: "start", To: "owner", Label: "\u542f\u52a8"},
+				{From: "owner", To: "reproduce", Label: "\u521d\u59cb\u5316"},
+				{From: "reproduce", To: "evidence_gate", Label: "\u5931\u8d25\u8bc1\u636e"},
+				{From: "evidence_gate", To: "probe", Label: "\u65e0\u53ef\u9760\u7ebf\u7d22"},
+				{From: "evidence_gate", To: "diagnose", Label: "\u7ebf\u7d22\u53ef\u9760"},
+				{From: "probe", To: "exit_gate", Label: "\u7b49\u5f85\u8fd0\u884c\u65f6\u590d\u73b0"},
+				{From: "diagnose", To: "patch", Label: "\u6839\u56e0\u6210\u7acb"},
+				{From: "patch", To: "verify", Label: "\u5019\u9009\u4fee\u590d"},
+				{From: "verify", To: "loop_control", Label: "\u9a8c\u8bc1\u7ed3\u679c"},
+				{From: "loop_control", To: "capsule", Label: "\u7ee7\u7eed\u4e0b\u4e00\u8f6e"},
+				{From: "capsule", To: "diagnose", Label: "\u56de\u5230\u8bca\u65ad"},
+				{From: "loop_control", To: "exit_gate", Label: "\u9000\u51fa"},
+				{From: "exit_gate", To: "submit", Label: "\u63d0\u4ea4"},
+			},
+		}
+	}
+
 	nodes := []WorkflowNode{
 		{ID: "trigger", Type: "input", Category: "event", Label: spec.trigger, Agent: "-", Detail: "Workflow skill " + spec.trigger + " receives the request and forwards the rest as workflow input.", X: 48, Y: 210},
 		{ID: "route", Type: "condition", Category: "condition", Label: "workflow skill", Agent: "sisyphus", Detail: "The wf-* skill points to this workflow file as the source of truth.", X: 300, Y: 210},

@@ -1,0 +1,128 @@
+﻿{
+    "id":  "ui-feature-development",
+    "name":  "unity-ui-feature-development",
+    "nodes":  [
+                  {
+                      "id":  "trigger",
+                      "y":  210,
+                      "agent":  "-",
+                      "category":  "event",
+                      "type":  "input",
+                      "x":  48,
+                      "label":  "$wf-unity-ui-feature",
+                      "detail":  "Unity workflow entry receives the request."
+                  },
+                  {
+                      "id":  "route",
+                      "y":  210,
+                      "agent":  "skill resolver",
+                      "category":  "condition",
+                      "type":  "condition",
+                      "x":  300,
+                      "label":  "unity workflow skill",
+                      "detail":  "Load Unity workflow rules and skills."
+                  },
+                  {
+                      "id":  "owner",
+                      "y":  210,
+                      "agent":  "unity-ui-developer",
+                      "category":  "action",
+                      "type":  "agent",
+                      "x":  560,
+                      "label":  "unity-ui-developer",
+                      "detail":  "Develop Unity UI feature with UIArchitect, UGUI, TMP, and asset safety."
+                  },
+                  {
+                      "id":  "asset",
+                      "y":  80,
+                      "agent":  "unity-asset-safety-evaluator",
+                      "category":  "action",
+                      "type":  "agent",
+                      "x":  820,
+                      "label":  "unity-asset-safety-evaluator",
+                      "detail":  "Check Prefab, Scene, .meta, generated, and asset risks."
+                  },
+                  {
+                      "id":  "tester",
+                      "y":  340,
+                      "agent":  "unity-regression-evaluator",
+                      "category":  "action",
+                      "type":  "agent",
+                      "x":  820,
+                      "label":  "unity-regression-evaluator",
+                      "detail":  "Verify compile, Console, interactions, input locks, and UI states."
+                  },
+                  {
+                      "id":  "review",
+                      "y":  210,
+                      "agent":  "unity-asset-safety-evaluator",
+                      "category":  "action",
+                      "type":  "agent",
+                      "x":  1080,
+                      "label":  "ui-reviewer",
+                      "detail":  "Merge UI quality and asset safety findings."
+                  },
+                  {
+                      "id":  "eval",
+                      "y":  210,
+                      "agent":  "unity-workflow-evaluator",
+                      "category":  "action",
+                      "type":  "agent",
+                      "x":  1340,
+                      "label":  "unity-workflow-evaluator",
+                      "detail":  "Evaluate Task Run Evidence, verification, and risk signals."
+                  },
+                  {
+                      "id":  "output",
+                      "y":  210,
+                      "agent":  "unity-ui-developer",
+                      "category":  "data",
+                      "type":  "output",
+                      "x":  1600,
+                      "label":  "deliver",
+                      "detail":  "Return result, evidence, skipped checks, and remaining risks."
+                  }
+              ],
+    "edges":  [
+                  {
+                      "label":  "command",
+                      "from":  "trigger",
+                      "to":  "route"
+                  },
+                  {
+                      "label":  "matched",
+                      "from":  "route",
+                      "to":  "owner"
+                  },
+                  {
+                      "label":  "assets",
+                      "from":  "owner",
+                      "to":  "asset"
+                  },
+                  {
+                      "label":  "behavior",
+                      "from":  "owner",
+                      "to":  "tester"
+                  },
+                  {
+                      "label":  "asset findings",
+                      "from":  "asset",
+                      "to":  "review"
+                  },
+                  {
+                      "label":  "verification",
+                      "from":  "tester",
+                      "to":  "review"
+                  },
+                  {
+                      "label":  "evidence",
+                      "from":  "review",
+                      "to":  "eval"
+                  },
+                  {
+                      "label":  "score",
+                      "from":  "eval",
+                      "to":  "output"
+                  }
+              ]
+}

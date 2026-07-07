@@ -1,0 +1,48 @@
+{
+  "projectId": "replace-with-project-id",
+  "workflowTemplateId": "replace-with-workflow-template-id",
+  "workflowCopyId": "",
+  "workflowType": "replace-with-workflow-type",
+  "taskTitle": "replace-with-task-title",
+  "submittedStatus": "success",
+  "startedAt": "2026-06-23T00:00:00Z",
+  "endedAt": "2026-06-23T00:05:00Z",
+  "durationMs": 300000,
+  "context": {
+    "agent": "replace-with-primary-agent",
+    "model": "replace-with-model-id",
+    "rules": [
+      "replace-with-rule-id"
+    ],
+    "skills": [
+      "replace-with-skill-id"
+    ],
+    "tools": [
+      "replace-with-tool-id"
+    ]
+  },
+  "metrics": {
+    "turnCount": 0,
+    "toolCallCount": 0,
+    "testRunCount": 0,
+    "retryCount": 0,
+    "errorCount": 0,
+    "filesChangedCount": 0
+  },
+  "evidence": {
+    "summary": "replace-with-summary",
+    "finalResult": "replace-with-final-result",
+    "verification": {
+      "hasVerification": true,
+      "passed": true,
+      "types": [
+        "manual_check"
+      ],
+      "commands": []
+    },
+    "changedFiles": [],
+    "skippedChecks": [],
+    "remainingRisks": [],
+    "contextMissing": false
+  }
+}

@@ -1,30 +1,48 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, defineComponent, h, onMounted, ref, type PropType, type VNode } from "vue";
+import { NDataTable, type DataTableColumns } from "naive-ui";
 import {
   addProjectCopyFromTemplate,
   createTemplate,
+  createTaskRun,
   createProjectWorkflow,
   createWorkflow as createWorkflowApi,
   deleteProject as deleteProjectApi,
   deleteProjectWorkflow,
+  deleteTaskRun,
   deleteTemplate,
   deleteWorkflow as deleteWorkflowApi,
   detachProjectCopy,
   duplicateWorkflow as duplicateWorkflowApi,
   fetchBootstrap,
+  fetchEvaluations,
+  fetchEvaluationProjects,
+  fetchEvaluationProposals,
+  fetchEvaluationSummary,
+  fetchLearningCases,
+  fetchStatisticsTasks,
+  fetchTaskRuns,
   fetchInfrastructure,
   fetchInfrastructureCatalog,
   fetchLocalDirectories,
   fetchNativeLocalDirectory,
   fetchModelRoutes,
   fetchProjectConfig,
+  fetchProjectKnowledgeExport,
+  fetchProjectKnowledgeExportDocument,
   fetchProjectWorkflowGraph,
+  previewProjectKnowledgeRoute,
+  retrieveProjectKnowledge,
+  refreshProjectKnowledgeExport,
   fetchSyncPreview,
   fetchWorkflowGraph,
   fetchWorkflows,
   installInfrastructure,
   importProject,
+  rebuildLearningCaseIndex,
   resolveModelRoute,
+  reviewEvaluationProposal,
+  runPendingEvaluations,
   rescanProject,
   syncProjectCopy,
   updateTemplate,
@@ -33,6 +51,7 @@ import {
   updateWorkflowGraph,
   updateProjectWorkflowGraph,
 } from "./api";
+import { buildWorkflowRunDraft } from "./workflow-task-run";
 import {
   addWorkflowEdge,
   addWorkflowNode,
@@ -44,7 +63,22 @@ import {
 import { projectDeleteImpactMessage, upsertProject } from "./project-state";
 import type {
   BootstrapData,
+  Evaluation,
+  EvaluationEvidenceRow,
+  EvaluationProjectHealth,
+  EvaluationProposal,
+  EvaluationSummary,
+  LearningCase,
   InfrastructureItem,
+  KnowledgeExportData,
+  KnowledgeIssue,
+  KnowledgeMaintenanceReport,
+  KnowledgeRenderedDocument,
+  KnowledgeRetrievalResult,
+  KnowledgeRenderNode,
+  KnowledgeRenderTree,
+  KnowledgeRoutePreview,
+  KnowledgeValidationReport,
   LocalDirectoryEntry,
   LocalDirectoriesResponse,
   ModelRoute,
@@ -57,7 +91,13 @@ import type {
   TemplateInput,
   TemplateItem,
   TemplateKind,
+  StatisticsTaskItem,
+  TaskRun,
   TemplateLibrary,
+  RouteMetricRoleRollup,
+  TokenUsageRoleRollup,
+  WorkflowRouteMetrics,
+  WorkflowTokenUsage,
   WorkflowGraph,
   WorkflowEdge,
   WorkflowNode,
@@ -73,11 +113,14 @@ type Page =
   | "workflows"
   | "infrastructure"
   | "model-routes"
+  | "statistics"
+  | "evaluation"
   | "project-detail"
   | "project-agents"
   | "project-rules"
   | "project-skills"
-  | "project-workflows";
+  | "project-workflows"
+  | "project-knowledge";
 
 type DrawerMode =
   | "template"
@@ -88,6 +131,7 @@ type DrawerMode =
   | "workflow-run"
   | "infrastructure"
   | "infrastructure-catalog"
+  | "evidence-dossier"
   | null;
 
 type WorkflowCard = {
@@ -99,7 +143,82 @@ type WorkflowCard = {
   nodeCount: number;
   edgeCount: number;
   copy?: ProjectCopy;
+  evaluation?: {
+    sampleCount: number;
+    averageScore: number;
+    successRate: number;
+  };
 };
+
+const KnowledgeTreeView = defineComponent({
+  name: "KnowledgeTreeView",
+  props: {
+    nodes: { type: Array as PropType<KnowledgeRenderNode[]>, required: true },
+    selectedPath: { type: String, default: "" },
+  },
+  emits: ["open"],
+  setup(props, { emit }) {
+    const manuallyOpen = ref<Set<string>>(new Set());
+    const manuallyClosed = ref<Set<string>>(new Set());
+    const nodeContainsSelected = (node: KnowledgeRenderNode): boolean => {
+      const target = node.kind === "directory" ? node.indexDocument || "" : node.path;
+      return target === props.selectedPath || (node.children ?? []).some(nodeContainsSelected);
+    };
+    const isOpen = (node: KnowledgeRenderNode) =>
+      node.kind !== "directory" ||
+      manuallyOpen.value.has(node.path) ||
+      (!manuallyClosed.value.has(node.path) && nodeContainsSelected(node));
+    const toggleDirectory = (node: KnowledgeRenderNode) => {
+      const nextOpen = new Set(manuallyOpen.value);
+      const nextClosed = new Set(manuallyClosed.value);
+      if (isOpen(node)) {
+        nextOpen.delete(node.path);
+        nextClosed.add(node.path);
+      } else {
+        nextClosed.delete(node.path);
+        nextOpen.add(node.path);
+      }
+      manuallyOpen.value = nextOpen;
+      manuallyClosed.value = nextClosed;
+    };
+    const renderNodes = (nodes: KnowledgeRenderNode[], depth = 0): VNode[] =>
+      nodes.map((node) => {
+        const target = node.kind === "directory" ? node.indexDocument || "" : node.path;
+        const active = !!target && props.selectedPath === target;
+        const isDirectory = node.kind === "directory";
+        const open = isOpen(node);
+        return h("div", { class: ["kb-tree-entry", isDirectory ? "directory" : "document"] }, [
+          h("div", { class: ["kb-tree-row", { active }], style: { paddingLeft: `${4 + depth * 14}px` } }, [
+            h(
+              "button",
+              {
+                class: ["kb-tree-toggle", { hidden: !isDirectory }],
+                type: "button",
+                onClick: () => isDirectory && toggleDirectory(node),
+                title: open ? "Collapse" : "Expand",
+              },
+              isDirectory ? (open ? "⌄" : "›") : "",
+            ),
+            h(
+              "button",
+              {
+                class: ["kb-tree-button", { active, disabled: !target }],
+                type: "button",
+                disabled: !target,
+                onClick: () => target && emit("open", node),
+              },
+              [
+                h("span", { class: "kb-tree-title" }, node.title),
+                node.type && !isDirectory ? h("span", { class: "kb-tree-type" }, node.type) : null,
+              ],
+            ),
+          ]),
+          ...(node.children?.length && open ? renderNodes(node.children, depth + 1) : []),
+        ]);
+      });
+    return () => h("div", { class: "kb-tree-view" }, renderNodes(props.nodes));
+  },
+});
 
 const emptyLibrary: TemplateLibrary = {
   agents: [],
@@ -141,24 +260,63 @@ const workflowStageRef = ref<HTMLElement | null>(null);
 const infrastructureItems = ref<InfrastructureItem[]>([]);
 const availableInfrastructureItems = ref<InfrastructureItem[]>([]);
 const modelRoutes = ref<ModelRoute[]>([]);
+const evaluationSummary = ref<EvaluationSummary | null>(null);
+const evaluationBusy = ref(false);
+const learningCases = ref<LearningCase[]>([]);
+const learningCaseBusy = ref(false);
+const evaluationProjects = ref<EvaluationProjectHealth[]>([]);
+const evaluationProposals = ref<EvaluationProposal[]>([]);
+const taskRuns = ref<TaskRun[]>([]);
+const evaluations = ref<Evaluation[]>([]);
+const selectedEvaluationProjectId = ref("");
+const selectedEvidenceRunId = ref("");
+const evidenceDeleteBusy = ref(false);
+const proposalBusyId = ref("");
+const proposalReviewNote = ref("");
+const statisticsRange = ref<"24h" | "7d" | "30d" | "all">("7d");
+const statisticsView = ref<"failed" | "successful" | "top_scored" | "low_scored">("failed");
+const statisticsTasks = ref<StatisticsTaskItem[]>([]);
+const statisticsLoading = ref(false);
 
 const selectedTemplateKind = ref<TemplateKind>("agents");
 const selectedTemplate = ref<TemplateItem | null>(null);
 const templateForm = ref<TemplateInput>({});
 const selectedProjectCopy = ref<ProjectCopy | null>(null);
 const syncPreview = ref<ProjectCopy[]>([]);
+const knowledgeExport = ref<KnowledgeExportData | null>(null);
+const knowledgeDocument = ref<KnowledgeRenderedDocument | null>(null);
+const knowledgeRoute = ref<KnowledgeRoutePreview | null>(null);
+const knowledgeRetrieval = ref<KnowledgeRetrievalResult | null>(null);
+const knowledgeRouteTask = ref("");
+const selectedKnowledgePath = ref("");
+const knowledgeSearch = ref("");
+const activeKnowledgeView = ref<"docs" | "check" | "routing" | "maintenance" | "source">("docs");
+const knowledgeBusy = ref(false);
+const knowledgeError = ref("");
 const selectedRoute = ref<ModelRoute | null>(null);
 const proxyResult = ref<ModelRouteResolution | null>(null);
 const proxyError = ref("");
+const workflowRunPayload = ref<Record<string, unknown> | null>(null);
+const workflowRunSubmitting = ref(false);
+const workflowRunError = ref("");
+const workflowRunResult = ref<{ id: string; workflowType: string; projectId: string } | null>(null);
 const routeSaveFeedback = ref("");
 const selectedInfrastructure = ref<InfrastructureItem | null>(null);
 const infrastructureBusy = ref(false);
 const infrastructureFeedback = ref("");
+const WORKFLOW_NODE_WIDTH = 236;
+const WORKFLOW_NODE_HEIGHT = 126;
+const WORKFLOW_STAGE_PADDING = 20;
+const WORKFLOW_DRAG_THRESHOLD = 4;
+const workflowCanvasRef = ref<HTMLElement | null>(null);
 const nodeDragState = ref<{
   nodeId: string;
   pointerId: number;
   offsetX: number;
   offsetY: number;
+  startX: number;
+  startY: number;
+  dragging: boolean;
 } | null>(null);
 
 const importForm = ref<ProjectInput>({
@@ -237,6 +395,7 @@ const visibleWorkflowCards = computed<WorkflowCard[]>(() => {
           summary: workflow.summary,
           nodeCount: workflow.nodeCount,
           edgeCount: workflow.edgeCount,
+          evaluation: workflowEvaluationFor(workflow.id, workflow.id),
         }));
 
   if (!query) return cards;
@@ -267,9 +426,491 @@ const breadcrumb = computed(() => {
   }
   if (activePage.value === "infrastructure") return ["System", "Infrastructure"];
   if (activePage.value === "model-routes") return ["System", "Model Proxy"];
+  if (activePage.value === "statistics") return ["System", "Statistics"];
+  if (activePage.value === "evaluation") return ["System", "Evaluation"];
   if (activePage.value === "projects") return ["Projects"];
   return ["Template Library", pageTitle(activePage.value)];
 });
+
+const dimensionStatsByType = computed(() => {
+  const groups: Record<string, { dimension: string; name: string; sampleCount: number; averageScore: number; successRate: number }[]> = {
+    agent: [],
+    model: [],
+    rules: [],
+  };
+  for (const stat of evaluationSummary.value?.dimensionStats ?? []) {
+    if (stat.dimension === "agent" || stat.dimension === "model" || stat.dimension === "rules") {
+      groups[stat.dimension].push(stat);
+    }
+  }
+  return groups;
+});
+
+const componentStatsList = computed(() => {
+  return Object.entries(evaluationSummary.value?.componentStats ?? {}).map(([component, stat]) => ({
+    component,
+    sampleCount: stat.sampleCount,
+    averageScore: stat.averageScore,
+  }));
+});
+
+const statisticsLineChart = computed(() => {
+  const items = statisticsTasks.value.slice(0, 8).reverse();
+  const series = items.length > 0 ? items.map((item) => Math.round(item.score || 0)) : [62, 68, 72, 79, 84, 88];
+  const labels =
+    items.length > 0
+      ? items.map((item) => formatShortDate(item.createdAt))
+      : ["-5", "-4", "-3", "-2", "-1", "Now"];
+  const width = 640;
+  const height = 220;
+  const padding = 28;
+  const min = Math.min(50, ...series);
+  const max = Math.max(100, ...series);
+  const points = series.map((value, index) => {
+    const x = padding + (index * (width - padding * 2)) / Math.max(1, series.length - 1);
+    const y = height - padding - ((value - min) * (height - padding * 2)) / Math.max(1, max - min);
+    return { x, y, value, label: labels[index] };
+  });
+  return {
+    width,
+    height,
+    points,
+    path: points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" "),
+  };
+});
+
+const selectedEvaluationProject = computed(() => {
+  return evaluationProjects.value.find((item) => item.projectId === selectedEvaluationProjectId.value) ?? null;
+});
+
+const evaluationProjectOptions = computed(() => {
+  return evaluationProjects.value.map((item) => ({
+    ...item,
+    pendingBadge: `${item.pendingCount} pending`,
+  }));
+});
+
+const visibleLearningCases = computed(() => (Array.isArray(learningCases.value) ? learningCases.value.slice(0, 4) : []));
+
+const selectedProjectProposals = computed(() => {
+  if (!selectedEvaluationProjectId.value) return evaluationProposals.value;
+  return evaluationProposals.value.filter((item) => item.projectId === selectedEvaluationProjectId.value);
+});
+
+
+const evaluationEvidenceRows = computed<EvaluationEvidenceRow[]>(() => {
+  const byRun = new Map<string, EvaluationEvidenceRow>();
+  for (const taskRun of taskRuns.value) {
+    byRun.set(taskRun.id, { runId: taskRun.id, taskRun });
+  }
+  for (const evaluation of evaluations.value) {
+    const row = byRun.get(evaluation.runId) ?? { runId: evaluation.runId };
+    row.evaluation = evaluation;
+    byRun.set(evaluation.runId, row);
+  }
+  for (const statistic of statisticsTasks.value) {
+    const row = byRun.get(statistic.runId) ?? { runId: statistic.runId };
+    row.statistics = statistic;
+    byRun.set(statistic.runId, row);
+  }
+  return Array.from(byRun.values())
+    .sort((left, right) => new Date(evidenceCreatedAt(right)).getTime() - new Date(evidenceCreatedAt(left)).getTime());
+});
+
+const selectedEvidenceRow = computed(() => {
+  return evaluationEvidenceRows.value.find((row) => row.runId === selectedEvidenceRunId.value) ?? evaluationEvidenceRows.value[0] ?? null;
+});
+
+const evidenceTableColumns = computed<DataTableColumns<EvaluationEvidenceRow>>(() => [
+  {
+    title: "Task / Summary",
+    key: "task",
+    width: 280,
+    render: (row) => renderEvidenceCell(evidenceTaskSummary(row), row.runId, true),
+  },
+  {
+    title: "Workflow",
+    key: "workflow",
+    width: 260,
+    render: (row) => renderEvidenceCell(evidenceWorkflowIdentity(row), evidenceWorkflowType(row), false, evidenceWorkflowIdentity(row).startsWith("Missing")),
+  },
+  {
+    title: "Project",
+    key: "project",
+    width: 160,
+    render: (row) => renderEvidenceCell(evidenceProjectId(row)),
+  },
+  {
+    title: "Agent / Model",
+    key: "agentModel",
+    width: 220,
+    render: (row) => renderEvidenceCell(evidenceAgentModel(row)),
+  },
+  {
+    title: "Rules / Skills / Tools",
+    key: "rulesSkillsTools",
+    width: 280,
+    render: (row) => renderEvidenceCell(evidenceRulesSkillsTools(row)),
+  },
+  {
+    title: "Verification",
+    key: "verification",
+    width: 250,
+    render: (row) => renderEvidenceCell(evidenceVerification(row), undefined, false, evidenceVerification(row).startsWith("Missing")),
+  },
+  {
+    title: "Path",
+    key: "path",
+    width: 220,
+    render: (row) => renderEvidenceCell(evidencePath(row), undefined, false, evidencePath(row).startsWith("Missing")),
+  },
+  {
+    title: "Risks",
+    key: "risks",
+    width: 220,
+    render: (row) => renderEvidenceCell(evidenceRisks(row)),
+  },
+  {
+    title: "Token / Route",
+    key: "tokenRoute",
+    width: 270,
+    render: (row) => renderEvidenceCell(evidenceTokenRoute(row), undefined, false, evidenceTokenRoute(row).includes("Missing")),
+  },
+  {
+    title: "Duration",
+    key: "duration",
+    width: 150,
+    render: (row) => renderEvidenceCell(evidenceDuration(row)),
+  },
+  {
+    title: "Rounds",
+    key: "rounds",
+    width: 150,
+    render: (row) => renderEvidenceCell(evidenceRounds(row), "model requests / turns"),
+  },
+  {
+    title: "Scores",
+    key: "scores",
+    width: 230,
+    render: (row) => h("span", { class: ["chip", evidenceStatusClass(row)] }, evidenceScores(row)),
+  },
+  {
+    title: "Gaps / Causes",
+    key: "gapsCauses",
+    width: 300,
+    render: (row) => renderEvidenceCell(evidenceGapsCauses(row), undefined, false, /missing/i.test(evidenceGapsCauses(row))),
+  },
+  {
+    title: "Time",
+    key: "time",
+    width: 190,
+    render: (row) => renderEvidenceCell(formatDateTime(evidenceCreatedAt(row))),
+  },
+]);
+
+const evidenceTableRowProps = (row: EvaluationEvidenceRow) => ({
+  class: selectedEvidenceRow.value?.runId === row.runId ? "selected-evidence-row" : "",
+  onClick: () => selectEvidenceRow(row),
+});
+
+function evidenceRowKey(row: EvaluationEvidenceRow): string {
+  return row.runId;
+}
+
+function learningCaseTags(item: LearningCase): string[] {
+  return Array.isArray(item.tags) ? item.tags.slice(0, 3) : [];
+}
+
+function formatShortDate(value: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function formatDateTime(value: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+
+function asWorkflowTokenUsage(value: unknown): WorkflowTokenUsage | null {
+  if (!value || typeof value !== "object") return null;
+  return value as WorkflowTokenUsage;
+}
+
+function asWorkflowRouteMetrics(value: unknown): WorkflowRouteMetrics | null {
+  if (!value || typeof value !== "object") return null;
+  return value as WorkflowRouteMetrics;
+}
+
+function formatNumber(value: number | undefined | null): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "-";
+  return new Intl.NumberFormat().format(Math.round(value));
+}
+
+function formatDurationMinutes(value: number | undefined | null): string {
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "-";
+  if (value < 1000) return `${Math.round(value)} ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} s`;
+  return `${(value / 60_000).toFixed(1)} min`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["id", "name", "model", "templateId", "title"]) {
+      const candidate = stringValue(record[key]);
+      if (candidate) return candidate;
+    }
+  }
+  return "";
+}
+
+function stringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap((item) => stringList(item)).filter(Boolean);
+  const single = stringValue(value);
+  return single ? [single] : [];
+}
+
+function compactList(values: string[], missing = "Missing"): string {
+  const clean = values.map((value) => value.trim()).filter(Boolean);
+  if (clean.length === 0) return missing;
+  const visible = clean.slice(0, 3).join(", ");
+  return clean.length > 3 ? `${visible} +${clean.length - 3}` : visible;
+}
+
+function jsonPreview(value: unknown): string {
+  if (value === undefined || value === null) return "Missing";
+  if (typeof value === "string") return value || "Missing";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function renderEvidenceCell(primary: string, secondary?: string, monoSecondary = false, missing = false) {
+  return h("div", { class: "evidence-cell" }, [
+    h("span", { class: missing ? "missing-text evidence-cell-primary" : "evidence-cell-primary" }, primary || "Missing"),
+    secondary
+      ? h("div", { class: ["table-subtext", monoSecondary ? "mono" : ""].filter(Boolean) }, secondary)
+      : null,
+  ]);
+}
+
+function evidenceTaskSummary(row: EvaluationEvidenceRow): string {
+  const evidence = asRecord(row.taskRun?.evidence);
+  return stringValue(evidence.summary) || row.taskRun?.taskTitle || row.statistics?.taskTitle || row.runId;
+}
+
+function evidenceProjectId(row: EvaluationEvidenceRow): string {
+  return row.taskRun?.projectId || row.statistics?.projectId || "Missing";
+}
+
+function evidenceCreatedAt(row: EvaluationEvidenceRow): string {
+  return row.evaluation?.createdAt || row.statistics?.createdAt || row.taskRun?.createdAt || "";
+}
+
+function evidenceWorkflowType(row: EvaluationEvidenceRow): string {
+  return row.taskRun?.workflowType || row.statistics?.workflowType || "Missing";
+}
+
+function evidenceWorkflowIdentity(row: EvaluationEvidenceRow): string {
+  const templateId = row.taskRun?.workflowTemplateId;
+  const copyId = row.taskRun?.workflowCopyId;
+  if (!templateId && !copyId) return "Missing workflow identity";
+  return [templateId, copyId, evidenceWorkflowType(row)].filter(Boolean).join(" / ");
+}
+
+function evidenceContext(row: EvaluationEvidenceRow): Record<string, unknown> {
+  return asRecord(row.taskRun?.context);
+}
+
+function evidenceMetrics(row: EvaluationEvidenceRow): Record<string, unknown> {
+  return asRecord(row.taskRun?.metrics);
+}
+
+function evidenceMap(row: EvaluationEvidenceRow): Record<string, unknown> {
+  return asRecord(row.taskRun?.evidence);
+}
+
+function evidenceAgentModel(row: EvaluationEvidenceRow): string {
+  const context = evidenceContext(row);
+  const agent = stringValue(context.agent) || row.statistics?.agent || "Missing agent";
+  const model = stringValue(context.model) || row.statistics?.model || "Missing model";
+  return `${agent} / ${model}`;
+}
+
+function evidenceRulesSkillsTools(row: EvaluationEvidenceRow): string {
+  const context = evidenceContext(row);
+  const rules = stringList(context.rules);
+  const skills = stringList(context.skills);
+  const tools = stringList(context.tools);
+  const parts = [
+    `Rules: ${compactList(rules)}`,
+    `Skills: ${compactList(skills)}`,
+    `Tools: ${compactList(tools)}`,
+  ];
+  return parts.join(" | ");
+}
+
+function evidenceVerification(row: EvaluationEvidenceRow): string {
+  const verification = asRecord(evidenceMap(row).verification);
+  if (Object.keys(verification).length === 0) return "Missing verification";
+  const passed = typeof verification.passed === "boolean" ? String(verification.passed) : "unknown";
+  const hasVerification = typeof verification.hasVerification === "boolean" ? String(verification.hasVerification) : "unknown";
+  const types = compactList(stringList(verification.types), "no types");
+  return `passed=${passed}; has=${hasVerification}; ${types}`;
+}
+
+function evidencePath(row: EvaluationEvidenceRow): string {
+  return compactList(stringList(evidenceMap(row).successfulPath), "Missing path");
+}
+
+function evidenceRisks(row: EvaluationEvidenceRow): string {
+  return compactList(stringList(evidenceMap(row).risks), "No risks recorded");
+}
+
+function evidenceTokenRoute(row: EvaluationEvidenceRow): string {
+  const metrics = evidenceMetrics(row);
+  const tokenUsage = asRecord(metrics.tokenUsage ?? row.statistics?.tokenUsage);
+  const routeMetrics = asRecord(metrics.routeMetrics ?? row.statistics?.routeMetrics);
+  const tokenText = Object.keys(tokenUsage).length > 0
+    ? `tokens ${formatNumber(Number(tokenUsage.totalTokens ?? 0))}; req ${formatNumber(Number(tokenUsage.requestCount ?? 0))}`
+    : "tokens Missing";
+  const routeText = Object.keys(routeMetrics).length > 0
+    ? `route errors ${formatNumber(Number(routeMetrics.errorCount ?? 0))}; rate ${routeMetrics.errorRate ?? 0}%`
+    : "route Missing";
+  return `${tokenText} | ${routeText}`;
+}
+
+function firstPositiveNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return undefined;
+}
+
+function evidenceDuration(row: EvaluationEvidenceRow): string {
+  const metrics = evidenceMetrics(row);
+  const routeMetrics = asRecord(metrics.routeMetrics ?? row.statistics?.routeMetrics);
+  return formatDurationMinutes(firstPositiveNumber(
+    row.taskRun?.durationMs,
+    row.statistics?.durationMs,
+    routeMetrics.durationMs,
+    metrics.durationMs,
+  ));
+}
+
+function evidenceRounds(row: EvaluationEvidenceRow): string {
+  const metrics = evidenceMetrics(row);
+  const routeMetrics = asRecord(metrics.routeMetrics ?? row.statistics?.routeMetrics);
+  const tokenUsage = asRecord(metrics.tokenUsage ?? row.statistics?.tokenUsage);
+  const routeRequests = Number(routeMetrics.requestCount ?? 0);
+  const tokenRequests = Number(tokenUsage.requestCount ?? 0);
+  const directRequests = Number(metrics.requestCount ?? 0);
+  const rounds = routeRequests || tokenRequests || directRequests;
+  return rounds > 0 ? formatNumber(rounds) : "Missing";
+}
+
+function evidenceScores(row: EvaluationEvidenceRow): string {
+  const evaluation = row.evaluation;
+  if (!evaluation) return row.taskRun?.evaluationStatus === "pending" ? "Pending evaluation" : "Missing evaluation";
+  return `${evaluation.finalStatus}; score ${Number(evaluation.overallScore || 0).toFixed(1)}; conf ${Number(evaluation.confidence || 0).toFixed(2)}`;
+}
+
+function evidenceGapsCauses(row: EvaluationEvidenceRow): string {
+  const analysis = asRecord(row.evaluation?.analysis);
+  const causes = stringList(analysis.primaryCauses);
+  const attribution = asRecord(analysis.attribution);
+  const issues: string[] = [];
+  for (const item of Object.values(attribution)) {
+    issues.push(...stringList(asRecord(item).issues));
+  }
+  if (evidenceWorkflowIdentity(row).startsWith("Missing")) issues.unshift("workflow identity missing");
+  if (evidenceVerification(row).startsWith("Missing")) issues.unshift("verification evidence missing");
+  return compactList([...causes, ...issues], "No gaps recorded");
+}
+
+function evidenceStatusClass(row: EvaluationEvidenceRow): string {
+  const status = row.evaluation?.finalStatus || row.statistics?.status || row.taskRun?.submittedStatus || "";
+  return status === "success" ? "chip-green" : status === "failed" ? "chip-red" : status ? "chip-orange" : "chip-purple";
+}
+
+function selectEvidenceRow(row: EvaluationEvidenceRow) {
+  selectedEvidenceRunId.value = row.runId;
+  drawerMode.value = "evidence-dossier";
+}
+
+function roleMetricEntries(record: Record<string, unknown> | undefined | null): Array<[string, unknown]> {
+  if (!record || typeof record !== "object") return [];
+  return Object.entries(record).sort((left, right) => left[0].localeCompare(right[0]));
+}
+
+function topModelsLabel(models: Record<string, number> | undefined | null): string {
+  if (!models || typeof models !== "object") return "-";
+  const entries = Object.entries(models).sort((left, right) => right[1] - left[1]).slice(0, 2);
+  if (entries.length === 0) return "-";
+  return entries.map(([model, count]) => `${model} ?${count}`).join(", ");
+}
+
+function statisticsViewLabel(view: string): string {
+  return {
+    failed: "Failed",
+    successful: "Successful",
+    top_scored: "Top Scored",
+    low_scored: "Low Scored",
+  }[view] ?? view;
+}
+
+function proposalSeverityClass(severity: string): string {
+  switch ((severity || "").toLowerCase()) {
+    case "high":
+      return "chip-red";
+    case "medium":
+      return "chip-orange";
+    default:
+      return "chip-teal";
+  }
+}
+
+function escalationFlags(item: { needsEscalation?: boolean; highRiskWorkflow?: boolean; failedTask?: boolean; escalationReasons?: string[] }): string[] {
+  const flags: string[] = [];
+  if (item.needsEscalation) flags.push("needs-escalation");
+  if (item.highRiskWorkflow) flags.push("high-risk");
+  if (item.failedTask) flags.push("failed-task");
+  for (const reason of item.escalationReasons ?? []) {
+    if (!flags.includes(reason)) flags.push(reason);
+  }
+  return flags;
+}
+
+function boolLabel(value?: boolean): string {
+  return value ? "Yes" : "No";
+}
+
+function proposalStatusClass(status: string): string {
+  switch ((status || "").toLowerCase()) {
+    case "approved":
+      return "chip-green";
+    case "rejected":
+      return "chip-red";
+    case "later":
+      return "chip-purple";
+    default:
+      return "chip-orange";
+  }
+}
 
 const templateDrawerReadOnly = computed(() => {
   return selectedTemplate.value?.kind === "rule" || selectedTemplate.value?.kind === "skill";
@@ -284,11 +925,14 @@ function pageTitle(page: Page): string {
     workflows: "Workflows",
     infrastructure: "Infrastructure",
     "model-routes": "Model Proxy",
+    statistics: "Statistics",
+    evaluation: "Evaluation",
     "project-detail": "Overview",
     "project-agents": "Agents",
     "project-rules": "Rules",
     "project-skills": "Skills",
     "project-workflows": "Workflows",
+    "project-knowledge": "Knowledge Base",
   };
   return titles[page];
 }
@@ -319,7 +963,19 @@ function projectCopyToWorkflowCard(copy: ProjectCopy): WorkflowCard {
     summary: summary?.summary ?? "Project workflow copy with manual sync metadata.",
     nodeCount: isSelectedProjectGraph && workflowGraph.value ? workflowGraph.value.nodes.length : summary?.nodeCount ?? 0,
     edgeCount: isSelectedProjectGraph && workflowGraph.value ? workflowGraph.value.edges.length : summary?.edgeCount ?? 0,
+    evaluation: workflowEvaluationFor(graphId, graphId),
     copy,
+  };
+}
+
+function workflowEvaluationFor(templateId: string, workflowType: string) {
+  const metrics = evaluationSummary.value?.workflowMetrics ?? [];
+  const found = metrics.find((metric) => metric.workflowTemplateId === templateId || metric.workflowType === workflowType);
+  if (!found) return undefined;
+  return {
+    sampleCount: found.sampleCount,
+    averageScore: found.averageScore,
+    successRate: found.successRate,
   };
 }
 
@@ -365,9 +1021,11 @@ function templateFooterChips(item: TemplateItem): string[] {
   return [`v${item.version}`];
 }
 
+const systemAgentIds = new Set(["workflow-evaluator", "learning-curator", "model-arbiter", "unity-asset-safety-evaluator", "unity-regression-evaluator", "unity-workflow-evaluator"]);
+
 function agentModelClass(item: TemplateItem): string {
   if (item.kind !== "agent") return "";
-  return modelClassForTier(item.modelTier);
+  return [modelClassForTier(item.modelTier), systemAgentIds.has(item.id) ? "system-agent" : ""].filter(Boolean).join(" ");
 }
 
 function projectCopyModelClass(copy: ProjectCopy): string {
@@ -421,19 +1079,39 @@ function projectCopyFooterChips(copy: ProjectCopy): string[] {
 function workflowEdgePath(edge: WorkflowEdge): string {
   const endpoints = workflowEdgeEndpoints(edge);
   if (!endpoints) return "";
-  const { startX, startY, endX, endY } = endpoints;
-  const curve = Math.max(90, Math.abs(endX - startX) * 0.48);
-  return `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`;
+  const { startX, startY, endX, endY, startSide, endSide } = endpoints;
+  if ((startSide === "bottom" && endSide === "top") || (startSide === "top" && endSide === "bottom")) {
+    const midY = startY + (endY - startY) / 2;
+    return `M ${startX} ${startY} L ${startX} ${midY} L ${endX} ${midY} L ${endX} ${endY}`;
+  }
+  if ((startSide === "right" && endSide === "left") || (startSide === "left" && endSide === "right")) {
+    const midX = startX + (endX - startX) / 2;
+    return `M ${startX} ${startY} L ${midX} ${startY} L ${midX} ${endY} L ${endX} ${endY}`;
+  }
+  const horizontalGap = Math.abs(endX - startX);
+  const verticalGap = Math.abs(endY - startY);
+  if (verticalGap >= horizontalGap) {
+    const midY = startY + (endY - startY) / 2;
+    return `M ${startX} ${startY} L ${startX} ${midY} L ${endX} ${midY} L ${endX} ${endY}`;
+  }
+  const midX = startX + (endX - startX) / 2;
+  return `M ${startX} ${startY} L ${midX} ${startY} L ${midX} ${endY} L ${endX} ${endY}`;
 }
 
 function workflowEdgeLabelX(edge: WorkflowEdge): number {
   const endpoints = workflowEdgeEndpoints(edge);
-  return endpoints ? (endpoints.startX + endpoints.endX) / 2 : 0;
+  if (!endpoints) return 0;
+  return (endpoints.startX + endpoints.endX) / 2;
 }
 
 function workflowEdgeLabelY(edge: WorkflowEdge): number {
   const endpoints = workflowEdgeEndpoints(edge);
-  return endpoints ? (endpoints.startY + endpoints.endY) / 2 - 10 : 0;
+  if (!endpoints) return 0;
+  const horizontalGap = Math.abs(endpoints.endX - endpoints.startX);
+  const verticalGap = Math.abs(endpoints.endY - endpoints.startY);
+  return verticalGap >= horizontalGap
+    ? endpoints.startY + (endpoints.endY - endpoints.startY) / 2 - 10
+    : (endpoints.startY + endpoints.endY) / 2 - 10;
 }
 
 function workflowEdgeEndpoints(edge: WorkflowEdge) {
@@ -441,16 +1119,115 @@ function workflowEdgeEndpoints(edge: WorkflowEdge) {
   const from = nodes.find((node) => node.id === edge.from);
   const to = nodes.find((node) => node.id === edge.to);
   if (!from || !to) return null;
+  const fromCenterX = from.x + WORKFLOW_NODE_WIDTH / 2;
+  const fromCenterY = from.y + WORKFLOW_NODE_HEIGHT / 2;
+  const toCenterX = to.x + WORKFLOW_NODE_WIDTH / 2;
+  const toCenterY = to.y + WORKFLOW_NODE_HEIGHT / 2;
+  const dx = toCenterX - fromCenterX;
+  const dy = toCenterY - fromCenterY;
+
+  let startSide: "top" | "bottom" | "left" | "right";
+  let endSide: "top" | "bottom" | "left" | "right";
+  const preferredAnchors = workflowPreferredAnchors(edge);
+  if (preferredAnchors) {
+    startSide = preferredAnchors.startSide;
+    endSide = preferredAnchors.endSide;
+  } else if (Math.abs(dy) >= Math.abs(dx)) {
+    startSide = dy >= 0 ? "bottom" : "top";
+    endSide = dy >= 0 ? "top" : "bottom";
+  } else {
+    startSide = dx >= 0 ? "right" : "left";
+    endSide = dx >= 0 ? "left" : "right";
+  }
+
+  const start = workflowNodeAnchor(from, startSide);
+  const end = workflowNodeAnchor(to, endSide);
   return {
-    startX: from.x + 236,
-    startY: from.y + 63,
-    endX: to.x,
-    endY: to.y + 63,
+    startX: start.x,
+    startY: start.y,
+    endX: end.x,
+    endY: end.y,
+    startSide,
+    endSide,
   };
 }
 
+function workflowPreferredAnchors(edge: WorkflowEdge):
+  | { startSide: "top" | "bottom" | "left" | "right"; endSide: "top" | "bottom" | "left" | "right" }
+  | null {
+  const verticalFlow = new Set([
+    "start->owner",
+    "owner->reproduce",
+    "reproduce->evidence_gate",
+    "evidence_gate->diagnose",
+    "diagnose->patch",
+    "patch->verify",
+    "verify->loop_control",
+    "loop_control->capsule",
+  ]);
+  const rightBranch = new Set([
+    "verify->review",
+    "review->loop_control",
+    "loop_control->exit_gate",
+    "exit_gate->submit",
+  ]);
+  const leftBranch = new Set([
+    "evidence_gate->probe",
+    "probe->exit_gate",
+    "capsule->diagnose",
+  ]);
+  const key = `${edge.from}->${edge.to}`;
+  if (verticalFlow.has(key)) {
+    return { startSide: "bottom", endSide: "top" };
+  }
+  if (rightBranch.has(key)) {
+    return { startSide: "right", endSide: "left" };
+  }
+  if (leftBranch.has(key)) {
+    return { startSide: "left", endSide: "right" };
+  }
+  return null;
+}
+
+function workflowNodeAnchor(node: WorkflowNode, side: "top" | "bottom" | "left" | "right") {
+  switch (side) {
+    case "top":
+      return { x: node.x + WORKFLOW_NODE_WIDTH / 2, y: node.y };
+    case "bottom":
+      return { x: node.x + WORKFLOW_NODE_WIDTH / 2, y: node.y + WORKFLOW_NODE_HEIGHT };
+    case "left":
+      return { x: node.x, y: node.y + WORKFLOW_NODE_HEIGHT / 2 };
+    case "right":
+    default:
+      return { x: node.x + WORKFLOW_NODE_WIDTH, y: node.y + WORKFLOW_NODE_HEIGHT / 2 };
+  }
+}
+
+const workflowStageWidth = computed(() => {
+  const nodes = workflowGraph.value?.nodes ?? [];
+  const maxRight = nodes.reduce((max, node) => Math.max(max, node.x + WORKFLOW_NODE_WIDTH), 0);
+  return Math.max(1180, maxRight + 80);
+});
+
+const workflowStageHeight = computed(() => {
+  const nodes = workflowGraph.value?.nodes ?? [];
+  const maxBottom = nodes.reduce((max, node) => Math.max(max, node.y + WORKFLOW_NODE_HEIGHT), 0);
+  return Math.max(960, maxBottom + 100);
+});
+
 function workflowEdgeKey(edge: WorkflowEdge, index: number): string {
   return `${edge.from}->${edge.to}:${index}`;
+}
+
+function workflowNodeDisplayName(nodeId: string): string {
+  const node = workflowGraph.value?.nodes.find((item) => item.id === nodeId);
+  return node?.label || nodeId;
+}
+
+function workflowEdgeDisplay(edge: WorkflowEdge): string {
+  const from = workflowNodeDisplayName(edge.from);
+  const to = workflowNodeDisplayName(edge.to);
+  return edge.label ? `${from} --${edge.label}--> ${to}` : `${from} -> ${to}`;
 }
 
 function selectWorkflowEdge(edge: WorkflowEdge, index: number) {
@@ -497,6 +1274,9 @@ function startWorkflowNodeDrag(event: PointerEvent, node: WorkflowNode) {
     pointerId: event.pointerId,
     offsetX: point.x - node.x,
     offsetY: point.y - node.y,
+    startX: point.x,
+    startY: point.y,
+    dragging: false,
   };
   (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
 }
@@ -504,8 +1284,22 @@ function startWorkflowNodeDrag(event: PointerEvent, node: WorkflowNode) {
 function dragWorkflowNode(event: PointerEvent) {
   if (!nodeDragState.value || !workflowGraph.value) return;
   const point = workflowStagePoint(event);
-  const nextX = clamp(point.x - nodeDragState.value.offsetX, 20, 1244);
-  const nextY = clamp(point.y - nodeDragState.value.offsetY, 20, 474);
+  const movedX = point.x - nodeDragState.value.startX;
+  const movedY = point.y - nodeDragState.value.startY;
+  if (!nodeDragState.value.dragging && Math.hypot(movedX, movedY) < WORKFLOW_DRAG_THRESHOLD) {
+    return;
+  }
+  nodeDragState.value.dragging = true;
+  const nextX = clamp(
+    point.x - nodeDragState.value.offsetX,
+    WORKFLOW_STAGE_PADDING,
+    workflowStageWidth.value - WORKFLOW_NODE_WIDTH - WORKFLOW_STAGE_PADDING,
+  );
+  const nextY = clamp(
+    point.y - nodeDragState.value.offsetY,
+    WORKFLOW_STAGE_PADDING,
+    workflowStageHeight.value - WORKFLOW_NODE_HEIGHT - WORKFLOW_STAGE_PADDING,
+  );
   workflowGraph.value = moveWorkflowNode(workflowGraph.value, nodeDragState.value.nodeId, nextX, nextY);
 }
 
@@ -521,10 +1315,11 @@ function endWorkflowNodeDrag(event: PointerEvent) {
 
 function workflowStagePoint(event: PointerEvent) {
   const rect = workflowStageRef.value?.getBoundingClientRect();
-  if (!rect) return { x: 0, y: 0 };
+  const canvasRect = workflowCanvasRef.value?.getBoundingClientRect();
+  if (!rect || !canvasRect) return { x: 0, y: 0 };
   return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top,
+    x: event.clientX - canvasRect.left + (workflowCanvasRef.value?.scrollLeft ?? 0),
+    y: event.clientY - canvasRect.top + (workflowCanvasRef.value?.scrollTop ?? 0),
   };
 }
 
@@ -630,6 +1425,10 @@ async function openProjectResource(projectId: string, page: Page) {
   workflowEditorMode.value = false;
   workflowConnectMode.value = false;
   pendingConnectionFrom.value = "";
+  if (page === "project-knowledge") {
+    await loadKnowledgeExport(projectId);
+    return;
+  }
   const copies = await fetchProjectConfig(projectId);
   projectConfigSets.value = {
     ...projectConfigSets.value,
@@ -639,6 +1438,218 @@ async function openProjectResource(projectId: string, page: Page) {
     const card = copies.filter((copy) => copy.kind === "workflow").map(projectCopyToWorkflowCard)[0];
     if (card) await selectWorkflowCard(card);
   }
+}
+
+async function loadKnowledgeExport(projectId = currentProject.value?.id ?? "") {
+  if (!projectId) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    knowledgeExport.value = await fetchProjectKnowledgeExport(projectId);
+    knowledgeDocument.value = null;
+    selectedKnowledgePath.value = "";
+    await openDefaultKnowledgeDocument();
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+async function refreshKnowledgeExportForCurrentProject() {
+  if (!currentProject.value) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    await refreshProjectKnowledgeExport(currentProject.value.id);
+    knowledgeExport.value = await fetchProjectKnowledgeExport(currentProject.value.id);
+    knowledgeDocument.value = null;
+    selectedKnowledgePath.value = "";
+    await openDefaultKnowledgeDocument();
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+async function openKnowledgeDocument(path: string) {
+  if (!currentProject.value) return;
+  knowledgeDocument.value = await fetchProjectKnowledgeExportDocument(currentProject.value.id, path);
+  selectedKnowledgePath.value = path;
+  activeKnowledgeView.value = "docs";
+}
+
+async function openDefaultKnowledgeDocument() {
+  const path = findDefaultKnowledgePath(knowledgeExport.value?.tree);
+  if (path) {
+    await openKnowledgeDocument(path);
+  }
+}
+
+async function previewKnowledgeRouteForCurrentProject() {
+  if (!currentProject.value) return;
+  const query = knowledgeRouteTask.value.trim();
+  if (!query) {
+    knowledgeError.value = "Enter a task or keyword to find relevant knowledge.";
+    return;
+  }
+  knowledgeError.value = "";
+  knowledgeRetrieval.value = await retrieveProjectKnowledge(currentProject.value.id, query, "routing", 6000);
+  knowledgeRoute.value = await previewProjectKnowledgeRoute(currentProject.value.id, query);
+}
+
+async function copyText(text: string) {
+  await navigator.clipboard?.writeText(text);
+  showToast("已复制");
+}
+
+function loadedKnowledgeMarkdown(): string {
+  if (knowledgeRetrieval.value?.loadedKnowledgeMarkdown) {
+    return knowledgeRetrieval.value.loadedKnowledgeMarkdown;
+  }
+  if (knowledgeRoute.value?.loadedKnowledgeMarkdown) {
+    return knowledgeRoute.value.loadedKnowledgeMarkdown;
+  }
+  const files = knowledgeRoute.value?.requiredFiles ?? [];
+  return ["## Loaded Knowledge", "", ...files.map((file) => `- \`${file}\``)].join("\n");
+}
+
+function knowledgeTreeNodes(tree?: KnowledgeRenderTree | null) {
+  return filterKnowledgeNodes(tree?.nodes ?? [], knowledgeSearch.value);
+}
+
+function filterKnowledgeNodes(nodes: KnowledgeRenderNode[], query: string): KnowledgeRenderNode[] {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) return nodes;
+  const filtered: KnowledgeRenderNode[] = [];
+  for (const node of nodes) {
+    const children = filterKnowledgeNodes(node.children ?? [], trimmed);
+    const matches = `${node.title} ${node.path} ${node.type ?? ""}`.toLowerCase().includes(trimmed);
+    if (matches || children.length > 0) {
+      filtered.push({ ...node, children });
+    }
+  }
+  return filtered;
+}
+
+function findDefaultKnowledgePath(tree?: KnowledgeRenderTree | null): string {
+  const nodes = tree?.nodes ?? [];
+  const flattened = flattenKnowledgeNodes(nodes);
+  return (
+    flattened.find((node) => node.path === "design/KnowledgeBase/index.md")?.path ||
+    flattened.find((node) => node.path === "design/KnowledgeBase/README.md")?.path ||
+    flattened.find((node) => node.kind === "document")?.path ||
+    ""
+  );
+}
+
+function flattenKnowledgeNodes(nodes: KnowledgeRenderNode[]): KnowledgeRenderNode[] {
+  const out: KnowledgeRenderNode[] = [];
+  for (const node of nodes) {
+    out.push(node);
+    out.push(...flattenKnowledgeNodes(node.children ?? []));
+  }
+  return out;
+}
+
+function knowledgeNodeTarget(node: KnowledgeRenderNode): string {
+  return node.kind === "directory" ? node.indexDocument || "" : node.path;
+}
+
+function knowledgeNodeClass(node: KnowledgeRenderNode) {
+  const target = knowledgeNodeTarget(node);
+  return {
+    active: !!target && selectedKnowledgePath.value === target,
+    directory: node.kind === "directory",
+    document: node.kind !== "directory",
+  };
+}
+
+async function openKnowledgeNode(node: KnowledgeRenderNode) {
+  const target = knowledgeNodeTarget(node);
+  if (target) {
+    await openKnowledgeDocument(target);
+  }
+}
+
+async function onKnowledgeRenderedClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  const link = target?.closest("[data-kb-link]") as HTMLElement | null;
+  const rawTarget = link?.dataset.kbLink;
+  if (!rawTarget || !knowledgeDocument.value) return;
+  event.preventDefault();
+  const resolved = resolveKnowledgeLink(knowledgeDocument.value.path, rawTarget);
+  if (resolved) {
+    await openKnowledgeDocument(resolved);
+  }
+}
+
+function resolveKnowledgeLink(fromPath: string, target: string): string {
+  const cleanTarget = target.split("#")[0];
+  if (!cleanTarget || cleanTarget.startsWith("http://") || cleanTarget.startsWith("https://")) {
+    return "";
+  }
+  const baseParts = fromPath.split("/").slice(0, -1);
+  for (const part of cleanTarget.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      baseParts.pop();
+    } else {
+      baseParts.push(part);
+    }
+  }
+  return baseParts.join("/");
+}
+
+function knowledgeValidationIssues(validation?: KnowledgeValidationReport | null): KnowledgeIssue[] {
+  return validation?.issues ?? [];
+}
+
+function currentKnowledgeIssues(): KnowledgeIssue[] {
+  return knowledgeValidationIssues(knowledgeExport.value?.validation).filter((issue) => issue.path === selectedKnowledgePath.value);
+}
+
+function knowledgeHeadings() {
+  const html = knowledgeDocument.value?.html ?? "";
+  const headings: Array<{ level: string; text: string }> = [];
+  const pattern = /<h([1-3])>(.*?)<\/h\1>/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(html)) !== null) {
+    headings.push({ level: match[1], text: match[2].replace(/<[^>]+>/g, "") });
+  }
+  return headings;
+}
+
+function knowledgeSiteStatus() {
+  const summary = knowledgeExport.value?.manifest.summary;
+  if (!summary?.exists) return "Missing";
+  if (summary.errors > 0) return `${summary.errors} errors`;
+  if (summary.warnings > 0) return `${summary.warnings} warnings`;
+  return "Healthy";
+}
+
+function knowledgeSourceText() {
+  if (!knowledgeExport.value) return "";
+  return JSON.stringify({
+    manifest: knowledgeExport.value.manifest,
+    currentDocument: knowledgeDocument.value
+      ? {
+          path: knowledgeDocument.value.path,
+          frontmatter: knowledgeDocument.value.frontmatter,
+          raw: knowledgeDocument.value.raw,
+        }
+      : null,
+  }, null, 2);
+}
+
+function knowledgeMaintenance(maintenance?: KnowledgeMaintenanceReport | null) {
+  return {
+    staleDocuments: maintenance?.staleDocuments ?? [],
+    largeDocuments: maintenance?.largeDocuments ?? [],
+    duplicateRules: maintenance?.duplicateRules ?? [],
+    suggestedActions: maintenance?.suggestedActions ?? [],
+  };
 }
 
 async function selectWorkflowCard(card: WorkflowCard) {
@@ -1133,7 +2144,47 @@ async function duplicateWorkflow(card: WorkflowCard) {
 }
 
 function runWorkflow() {
+  workflowRunError.value = "";
+  workflowRunResult.value = null;
+  const draft = buildWorkflowRunDraft({
+    projectId: currentProject.value?.id || (activePage.value === "project-workflows" ? "selected-project" : "global-workflows"),
+    workflowCopyId: selectedWorkflowCard.value?.copy?.id,
+    workflowTemplateId: selectedWorkflowCard.value?.graphId || selectedWorkflowId.value || workflowGraph.value?.id,
+    workflowId: selectedWorkflowId.value || workflowGraph.value?.id,
+    workflowName: selectedWorkflowCard.value?.name || workflowGraph.value?.name,
+    workflowSummary: selectedWorkflowCard.value?.summary,
+    graph: workflowGraph.value
+      ? {
+          id: workflowGraph.value.id,
+          name: workflowGraph.value.name,
+          nodes: workflowGraph.value.nodes,
+          edges: workflowGraph.value.edges,
+        }
+      : null,
+  });
+  workflowRunPayload.value = draft.payload;
   drawerMode.value = "workflow-run";
+}
+
+async function submitWorkflowRun() {
+  if (!workflowRunPayload.value || workflowRunSubmitting.value) return;
+  workflowRunSubmitting.value = true;
+  workflowRunError.value = "";
+  workflowRunResult.value = null;
+  try {
+    const created = await createTaskRun(workflowRunPayload.value as any);
+    workflowRunResult.value = {
+      id: created.id,
+      workflowType: created.workflowType,
+      projectId: created.projectId,
+    };
+    showToast(`已自动提交 Task Run：${created.workflowType}`);
+  } catch (err) {
+    workflowRunError.value = errorMessage(err);
+    showToast(workflowRunError.value);
+  } finally {
+    workflowRunSubmitting.value = false;
+  }
 }
 
 async function runProxyTest() {
@@ -1190,9 +2241,15 @@ async function loadData() {
     fetchModelRoutes(),
     fetchInfrastructure(),
     fetchInfrastructureCatalog(),
+    fetchEvaluationSummary(),
+    fetchLearningCases(),
+    fetchEvaluationProjects(),
+    fetchStatisticsTasks(statisticsView.value, statisticsRange.value),
+    fetchTaskRuns(),
+    fetchEvaluations(),
   ]);
 
-  const [bootstrap, workflowList, routeList, infraList, infraCatalog] = bootstrapResult;
+  const [bootstrap, workflowList, routeList, infraList, infraCatalog, evalSummary, caseList, projectHealth, statsTasks, taskRunList, evaluationList] = bootstrapResult;
 
   if (bootstrap.status === "fulfilled") {
     applyBootstrap(bootstrap.value);
@@ -1238,8 +2295,171 @@ async function loadData() {
     failures.push(errorMessage(infraCatalog.reason));
   }
 
+  if (evalSummary.status === "fulfilled") {
+    evaluationSummary.value = evalSummary.value;
+  }
+
+  if (caseList.status === "fulfilled") {
+    learningCases.value = Array.isArray(caseList.value) ? caseList.value : [];
+  }
+
+  if (projectHealth.status === "fulfilled") {
+    evaluationProjects.value = Array.isArray(projectHealth.value.projects) ? projectHealth.value.projects : [];
+    if (!selectedEvaluationProjectId.value && evaluationProjects.value.length > 0) {
+      selectedEvaluationProjectId.value = evaluationProjects.value[0].projectId;
+    }
+  }
+
+  if (statsTasks.status === "fulfilled") {
+    statisticsTasks.value = Array.isArray(statsTasks.value.items) ? statsTasks.value.items : [];
+  }
+
+  if (taskRunList.status === "fulfilled") {
+    taskRuns.value = Array.isArray(taskRunList.value) ? taskRunList.value : [];
+  }
+
+  if (evaluationList.status === "fulfilled") {
+    evaluations.value = Array.isArray(evaluationList.value) ? evaluationList.value : [];
+  }
+
+  if (selectedEvaluationProjectId.value) {
+    try {
+      await loadEvaluationProposals("pending");
+    } catch (err) {
+      failures.push(errorMessage(err));
+    }
+  }
+
   error.value = failures.length > 0 ? failures.join("; ") : "";
   loading.value = false;
+}
+
+async function loadEvaluationProjects() {
+  const result = await fetchEvaluationProjects();
+  evaluationProjects.value = Array.isArray(result.projects) ? result.projects : [];
+  if (!selectedEvaluationProjectId.value && evaluationProjects.value.length > 0) {
+    selectedEvaluationProjectId.value = evaluationProjects.value[0].projectId;
+  }
+  if (selectedEvaluationProjectId.value && !evaluationProjects.value.some((item) => item.projectId === selectedEvaluationProjectId.value)) {
+    selectedEvaluationProjectId.value = evaluationProjects.value[0]?.projectId ?? "";
+  }
+}
+
+async function loadEvaluationProposals(status = "pending") {
+  const projectId = selectedEvaluationProjectId.value || undefined;
+  const result = await fetchEvaluationProposals(projectId, status);
+  evaluationProposals.value = Array.isArray(result.items) ? result.items : [];
+}
+
+async function loadStatisticsTasks() {
+  statisticsLoading.value = true;
+  try {
+    const result = await fetchStatisticsTasks(statisticsView.value, statisticsRange.value);
+    statisticsTasks.value = Array.isArray(result.items) ? result.items : [];
+  } finally {
+    statisticsLoading.value = false;
+  }
+}
+
+async function loadEvaluationEvidence() {
+  const [runsResult, evaluationsResult] = await Promise.all([fetchTaskRuns(), fetchEvaluations()]);
+  taskRuns.value = Array.isArray(runsResult) ? runsResult : [];
+  evaluations.value = Array.isArray(evaluationsResult) ? evaluationsResult : [];
+}
+
+async function deleteSelectedEvidenceRun() {
+  const row = selectedEvidenceRow.value;
+  if (!row) return;
+  if (!window.confirm(`Delete task run ${row.runId}? This also removes its evaluation, reviews, learning cases, and proposals.`)) {
+    return;
+  }
+  evidenceDeleteBusy.value = true;
+  try {
+    await deleteTaskRun(row.runId);
+    selectedEvidenceRunId.value = "";
+    closeDrawer();
+    await Promise.all([
+      loadEvaluationEvidence(),
+      loadEvaluationProjects(),
+      loadEvaluationProposals("pending"),
+      loadStatisticsTasks(),
+      fetchEvaluationSummary().then((summary) => {
+        evaluationSummary.value = summary;
+      }),
+      fetchLearningCases().then((items) => {
+        learningCases.value = Array.isArray(items) ? items : [];
+      }),
+    ]);
+    showToast(`Deleted task run ${row.runId}`);
+  } catch (err) {
+    showToast(errorMessage(err));
+  } finally {
+    evidenceDeleteBusy.value = false;
+  }
+}
+
+async function selectEvaluationProject(projectId: string) {
+  selectedEvaluationProjectId.value = projectId;
+  selectedEvidenceRunId.value = "";
+  await loadEvaluationProposals("pending");
+}
+
+async function reviewProposal(proposal: EvaluationProposal, status: "approved" | "rejected" | "later") {
+  proposalBusyId.value = proposal.id;
+  try {
+    await reviewEvaluationProposal(proposal.id, {
+      status,
+      reviewNote: proposalReviewNote.value.trim() || `${status} via Evaluation panel`,
+    });
+    proposalReviewNote.value = "";
+    await Promise.all([loadEvaluationProjects(), loadEvaluationProposals("pending")]);
+    showToast(`Proposal ${status}: ${proposal.action}`);
+  } catch (err) {
+    showToast(errorMessage(err));
+  } finally {
+    proposalBusyId.value = "";
+  }
+}
+
+function setStatisticsView(view: "failed" | "successful" | "top_scored" | "low_scored") {
+  statisticsView.value = view;
+  void loadStatisticsTasks();
+}
+
+function setStatisticsRange(range: "24h" | "7d" | "30d" | "all") {
+  statisticsRange.value = range;
+  void loadStatisticsTasks();
+}
+
+async function evaluatePendingRuns() {
+  evaluationBusy.value = true;
+  try {
+    const result = await runPendingEvaluations();
+    evaluationSummary.value = await fetchEvaluationSummary();
+    learningCases.value = await fetchLearningCases().then((items) => (Array.isArray(items) ? items : []));
+    await Promise.all([loadEvaluationProjects(), loadStatisticsTasks(), loadEvaluationEvidence()]);
+    if (selectedEvaluationProjectId.value) {
+      await loadEvaluationProposals("pending");
+    }
+    showToast(`Evaluated ${result.evaluated} task runs`);
+  } catch (err) {
+    showToast(errorMessage(err));
+  } finally {
+    evaluationBusy.value = false;
+  }
+}
+
+async function rebuildLearningCases() {
+  learningCaseBusy.value = true;
+  try {
+    const result = await rebuildLearningCaseIndex();
+    learningCases.value = await fetchLearningCases().then((items) => (Array.isArray(items) ? items : []));
+    showToast(`已重建 ${result.indexed} 条学习案例索引`);
+  } catch (err) {
+    showToast(errorMessage(err));
+  } finally {
+    learningCaseBusy.value = false;
+  }
 }
 
 function errorMessage(err: unknown): string {
@@ -1291,6 +2511,12 @@ onMounted(loadData);
         <button class="sidebar-item" :class="{ active: activePage === 'model-routes' }" type="button" @click="openPage('model-routes')">
           <span class="sidebar-icon">M</span><span>Model Proxy</span>
         </button>
+        <button class="sidebar-item" :class="{ active: activePage === 'statistics' }" type="button" @click="openPage('statistics')">
+          <span class="sidebar-icon">?</span><span>Statistics</span>
+        </button>
+        <button class="sidebar-item" :class="{ active: activePage === 'evaluation' }" type="button" @click="openPage('evaluation')">
+          <span class="sidebar-icon">E</span><span>Evaluation</span>
+        </button>
       </div>
 
       <div class="sidebar-section compact">
@@ -1317,6 +2543,7 @@ onMounted(loadData);
             <button class="project-child" :class="{ active: selectedProjectId === project.id && activePage === 'project-rules' }" type="button" @click="openProjectResource(project.id, 'project-rules')">Rules</button>
             <button class="project-child" :class="{ active: selectedProjectId === project.id && activePage === 'project-skills' }" type="button" @click="openProjectResource(project.id, 'project-skills')">Skills</button>
             <button class="project-child" :class="{ active: selectedProjectId === project.id && activePage === 'project-workflows' }" type="button" @click="openProjectResource(project.id, 'project-workflows')">Workflows</button>
+            <button class="project-child" :class="{ active: selectedProjectId === project.id && activePage === 'project-knowledge' }" type="button" @click="openProjectResource(project.id, 'project-knowledge')">Knowledge Base</button>
           </div>
         </div>
       </div>
@@ -1387,6 +2614,7 @@ onMounted(loadData);
                 <div class="asset-card-body">
                   <div class="asset-desc">{{ item.summary }}</div>
                   <div class="asset-template-meta">
+                    <span v-if="systemAgentIds.has(item.id)">system-level evaluator</span>
                     <span v-if="item.kind === 'agent'">{{ item.modelTier }}</span>
                     <span v-else-if="item.kind === 'rule'">{{ item.source || item.entry }}</span>
                     <span v-else-if="item.kind === 'skill'">{{ item.source || item.entry }}</span>
@@ -1448,6 +2676,185 @@ onMounted(loadData);
             </div>
           </section>
 
+          <section v-else-if="activePage === 'project-knowledge' && currentProject" class="page active">
+            <div class="kiso-shell">
+              <header class="kiso-header">
+                <div>
+                  <div class="kiso-eyebrow">OKF Knowledge Site</div>
+                  <h1>{{ knowledgeDocument?.frontmatter.title || `${currentProject.name} Knowledge Base` }}</h1>
+                  <p>{{ knowledgeDocument?.frontmatter.description || 'Auto-generated project knowledge site for humans and AI agents.' }}</p>
+                  <div class="kiso-meta-row">
+                    <span class="chip" :class="knowledgeExport?.manifest.summary.errors ? 'chip-red' : 'chip-green'">{{ knowledgeSiteStatus() }}</span>
+                    <span class="chip chip-purple">{{ knowledgeExport?.manifest.documentCount ?? currentProject.knowledgeSummary?.documents ?? 0 }} docs</span>
+                    <span class="chip chip-teal">{{ knowledgeExport?.manifest.summary.domains ?? currentProject.knowledgeSummary?.domains ?? 0 }} domains</span>
+                    <span class="chip chip-orange">{{ knowledgeExport?.manifest.summary.workflows ?? currentProject.knowledgeSummary?.workflows ?? 0 }} workflows</span>
+                    <span class="chip chip-gray">exported {{ knowledgeExport?.manifest.exportedAt ? formatShortDate(knowledgeExport.manifest.exportedAt) : '-' }}</span>
+                  </div>
+                </div>
+                <div class="kiso-header-actions">
+                  <button class="btn-secondary" type="button" @click="copyText(loadedKnowledgeMarkdown())">Copy llms context</button>
+                  <button class="btn-secondary" type="button" @click="activeKnowledgeView = 'source'">Source</button>
+                  <button class="btn-primary" type="button" :disabled="knowledgeBusy" @click="refreshKnowledgeExportForCurrentProject">
+                    {{ knowledgeBusy ? "Generating..." : "Regenerate" }}
+                  </button>
+                </div>
+              </header>
+              <div v-if="knowledgeError" class="empty-state danger">{{ knowledgeError }}</div>
+              <nav class="kiso-tabs" aria-label="Knowledge views">
+                <button type="button" :class="{ active: activeKnowledgeView === 'docs' }" @click="activeKnowledgeView = 'docs'">Docs</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'check' }" @click="activeKnowledgeView = 'check'">Check</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'routing' }" @click="activeKnowledgeView = 'routing'">Routing</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'maintenance' }" @click="activeKnowledgeView = 'maintenance'">Maintenance</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'source' }" @click="activeKnowledgeView = 'source'">Source</button>
+              </nav>
+
+              <div class="kiso-layout">
+                <aside class="kiso-sidebar">
+                  <div class="kiso-filter-label">Filter by title</div>
+                  <input v-model="knowledgeSearch" class="field-input" type="search" placeholder="Filter" />
+                  <KnowledgeTreeView :nodes="knowledgeTreeNodes(knowledgeExport?.tree)" :selected-path="selectedKnowledgePath" @open="openKnowledgeNode" />
+                </aside>
+
+                <main class="kiso-main">
+                  <article v-if="activeKnowledgeView === 'docs'" class="kiso-article">
+                    <template v-if="knowledgeDocument">
+                      <div class="kiso-article-head">
+                        <div>
+                          <div class="kiso-path mono">{{ knowledgeDocument.path }}</div>
+                          <h2>{{ knowledgeDocument.title }}</h2>
+                        </div>
+                        <span v-if="knowledgeDocument.frontmatter.type" class="chip chip-purple">{{ knowledgeDocument.frontmatter.type }}</span>
+                      </div>
+                      <div v-if="knowledgeDocument.frontmatter.tags?.length" class="knowledge-tag-row">
+                        <span v-for="tag in knowledgeDocument.frontmatter.tags" :key="tag" class="chip chip-gray">{{ tag }}</span>
+                      </div>
+                      <div class="knowledge-actions">
+                        <button class="link-btn" type="button" @click="copyText(knowledgeDocument.path)">Copy Path</button>
+                        <button class="link-btn" type="button" @click="copyText(knowledgeDocument.raw)">Copy Markdown Source</button>
+                      </div>
+                      <div class="knowledge-html" @click="onKnowledgeRenderedClick" v-html="knowledgeDocument.html"></div>
+                    </template>
+                    <div v-else class="empty-state">Select a document from the navigation.</div>
+                  </article>
+
+                  <article v-else-if="activeKnowledgeView === 'check'" class="kiso-article">
+                    <div class="kiso-article-head"><h2>OKF validation</h2><span class="chip" :class="knowledgeExport?.manifest.summary.errors ? 'chip-red' : 'chip-green'">{{ knowledgeSiteStatus() }}</span></div>
+                    <div v-if="knowledgeValidationIssues(knowledgeExport?.validation).length === 0" class="empty-inline">No validation issues.</div>
+                    <ul v-else class="knowledge-list">
+                      <li v-for="issue in knowledgeValidationIssues(knowledgeExport?.validation)" :key="`${issue.code}-${issue.path}-${issue.line ?? 0}`" :class="`issue-${issue.severity}`">
+                        <strong>{{ issue.severity }}</strong> {{ issue.code }} — {{ issue.path }}<span v-if="issue.line">:{{ issue.line }}</span> — {{ issue.message }}
+                      </li>
+                    </ul>
+                  </article>
+
+                  <article v-else-if="activeKnowledgeView === 'routing'" class="kiso-article">
+                    <div class="kiso-article-head">
+                      <div>
+                        <h2>Agent Knowledge Routing</h2>
+                        <p class="muted">Find focused KnowledgeBase sections for an agent task. Results use SQLite FTS5, OKF routing, snippets, and a token budget.</p>
+                      </div>
+                      <button class="btn-secondary" type="button" @click="previewKnowledgeRouteForCurrentProject">Find knowledge</button>
+                    </div>
+                    <input v-model="knowledgeRouteTask" class="field-input" placeholder="例如：UI、弹窗、ViewModel、网络协议、玩法战斗" @keyup.enter="previewKnowledgeRouteForCurrentProject" />
+                    <div v-if="knowledgeRetrieval" class="knowledge-route-result">
+                      <div class="kiso-route-grid">
+                        <div class="route-metric">
+                          <div class="route-metric-label">Matched domain</div>
+                          <div class="route-value">{{ knowledgeRetrieval.matchedDomain || "project" }}</div>
+                        </div>
+                        <div class="route-metric">
+                          <div class="route-metric-label">Confidence</div>
+                          <div class="route-value">{{ Math.round(knowledgeRetrieval.confidence * 100) }}%</div>
+                        </div>
+                        <div class="route-metric">
+                          <div class="route-metric-label">Token budget</div>
+                          <div class="route-value">{{ knowledgeRetrieval.tokenBudget.usedTokens }} / {{ knowledgeRetrieval.tokenBudget.maxTokens }}</div>
+                        </div>
+                      </div>
+                      <p v-if="knowledgeRetrieval.matchedAlias?.alias" class="route-alias-note">
+                        Matched alias:
+                        <code>{{ knowledgeRetrieval.matchedAlias.alias }}</code>
+                        <template v-if="knowledgeRetrieval.matchedAlias.pairedAlias">
+                          ↔ <code>{{ knowledgeRetrieval.matchedAlias.pairedAlias }}</code>
+                        </template>
+                      </p>
+                      <p>{{ knowledgeRetrieval.reason }}</p>
+                      <div class="knowledge-terms">
+                        <span v-for="term in knowledgeRetrieval.terms" :key="term" class="chip chip-gray">{{ term }}</span>
+                      </div>
+                      <section>
+                        <h3>Required knowledge</h3>
+                        <div v-if="knowledgeRetrieval.required.length === 0" class="empty-inline">No required sections matched.</div>
+                        <div v-for="item in knowledgeRetrieval.required" :key="`${item.path}-${item.startLine}`" class="knowledge-match-card">
+                          <button class="link-btn mono" type="button" @click="openKnowledgeDocument(item.path)">{{ item.path }}</button>
+                          <div><strong>{{ item.heading || item.title }}</strong> <span class="muted">score {{ Math.round(item.score) }} · {{ item.tokens }} tokens</span></div>
+                          <div class="knowledge-terms"><span v-for="reason in item.reasons" :key="reason" class="chip chip-blue">{{ reason }}</span></div>
+                          <p v-if="item.snippet" class="knowledge-snippet" v-html="item.snippet"></p>
+                        </div>
+                      </section>
+                      <section>
+                        <h3>Optional / related</h3>
+                        <div v-if="knowledgeRetrieval.optional.length + knowledgeRetrieval.related.length === 0" class="empty-inline">No optional sections.</div>
+                        <div v-for="item in [...knowledgeRetrieval.optional, ...knowledgeRetrieval.related]" :key="`${item.path}-${item.startLine}`" class="knowledge-match-card compact">
+                          <button class="link-btn mono" type="button" @click="openKnowledgeDocument(item.path)">{{ item.path }}</button>
+                          <span class="muted">{{ item.heading || item.title }} · score {{ Math.round(item.score) }} · {{ item.tokens }} tokens</span>
+                        </div>
+                      </section>
+                      <section v-if="knowledgeRetrieval.missingFiles.length">
+                        <h3>Missing files</h3>
+                        <ul class="knowledge-list"><li v-for="file in knowledgeRetrieval.missingFiles" :key="file">{{ file }}</li></ul>
+                      </section>
+                      <section v-if="knowledgeRetrieval.omitted.length">
+                        <h3>Omitted by budget</h3>
+                        <ul class="knowledge-list"><li v-for="item in knowledgeRetrieval.omitted" :key="`${item.path}-${item.reason}`">{{ item.path }} — {{ item.reason }}</li></ul>
+                      </section>
+                      <button class="link-btn" type="button" @click="copyText(loadedKnowledgeMarkdown())">Copy Loaded Knowledge Section</button>
+                    </div>
+                  </article>
+
+                  <article v-else-if="activeKnowledgeView === 'maintenance'" class="kiso-article">
+                    <div class="kiso-article-head"><h2>Maintenance report</h2><span class="chip chip-gray">read-only</span></div>
+                    <div class="kiso-route-grid">
+                      <div>Stale: <strong>{{ knowledgeMaintenance(knowledgeExport?.maintenance).staleDocuments.length }}</strong></div>
+                      <div>Large: <strong>{{ knowledgeMaintenance(knowledgeExport?.maintenance).largeDocuments.length }}</strong></div>
+                      <div>Duplicate rules: <strong>{{ knowledgeMaintenance(knowledgeExport?.maintenance).duplicateRules.length }}</strong></div>
+                    </div>
+                    <ul class="knowledge-list">
+                      <li v-for="action in knowledgeMaintenance(knowledgeExport?.maintenance).suggestedActions" :key="action">{{ action }}</li>
+                    </ul>
+                  </article>
+
+                  <article v-else class="kiso-article">
+                    <div class="kiso-article-head"><h2>Generated source</h2><button class="link-btn" type="button" @click="copyText(knowledgeSourceText())">Copy JSON</button></div>
+                    <pre class="code-block">{{ knowledgeSourceText() }}</pre>
+                  </article>
+                </main>
+
+                <aside class="kiso-aside">
+                  <section>
+                    <h3>On this page</h3>
+                    <div v-if="knowledgeHeadings().length === 0" class="empty-inline">No headings.</div>
+                    <button v-for="heading in knowledgeHeadings()" :key="`${heading.level}-${heading.text}`" class="kiso-toc-item" :class="`level-${heading.level}`" type="button">{{ heading.text }}</button>
+                  </section>
+                  <section>
+                    <h3>Document</h3>
+                    <div class="kiso-doc-facts">
+                      <div><span>path</span><strong class="mono">{{ selectedKnowledgePath || '-' }}</strong></div>
+                      <div><span>type</span><strong>{{ knowledgeDocument?.frontmatter.type || '-' }}</strong></div>
+                      <div><span>timestamp</span><strong>{{ knowledgeDocument?.frontmatter.timestamp || '-' }}</strong></div>
+                    </div>
+                  </section>
+                  <section v-if="currentKnowledgeIssues().length">
+                    <h3>Current issues</h3>
+                    <ul class="knowledge-list">
+                      <li v-for="issue in currentKnowledgeIssues()" :key="issue.code" :class="`issue-${issue.severity}`">{{ issue.code }} — {{ issue.message }}</li>
+                    </ul>
+                  </section>
+                </aside>
+              </div>
+            </div>
+          </section>
+
           <section v-else-if="activePage === 'project-agents' || activePage === 'project-rules' || activePage === 'project-skills'" class="page active">
             <div class="page-description">Project Config Set 中的项目副本。卡片保持模板库样式，版本、hash 和同步操作放在详情抽屉里。</div>
             <div class="asset-grid">
@@ -1474,6 +2881,12 @@ onMounted(loadData);
               <div class="page-description">{{ activePage === 'workflows' ? '全局工作流模板库，用来沉淀可复用的 AI 开发工序。' : '项目工作流展示该项目的 Project Config Set 副本和同步状态。' }}</div>
               <div v-if="activePage === 'workflows'" class="page-actions">
                 <button class="btn-secondary" type="button" @click="runWorkflow">模拟运行</button>
+                <button class="btn-secondary" type="button" :disabled="evaluationBusy" @click="evaluatePendingRuns">
+                  {{ evaluationBusy ? '评估中...' : '评估待处理' }}
+                </button>
+                <button class="btn-secondary" type="button" :disabled="learningCaseBusy" @click="rebuildLearningCases">
+                  {{ learningCaseBusy ? '索引中...' : '重建案例索引' }}
+                </button>
                 <button class="btn-primary" type="button" @click="createWorkflow">新建工作流</button>
               </div>
             </div>
@@ -1508,6 +2921,9 @@ onMounted(loadData);
                         <div class="workflow-card-meta">
                           <span class="chip" :class="`chip-${statusTone(card.status)}`">{{ card.status }}</span>
                           <span class="chip chip-purple">{{ card.nodeCount }} nodes</span>
+                          <span v-if="card.evaluation" class="chip chip-teal">{{ card.evaluation.sampleCount }} runs</span>
+                          <span v-if="card.evaluation" class="chip chip-orange">score {{ card.evaluation.averageScore }}</span>
+                          <span v-if="card.evaluation" class="chip chip-green">{{ card.evaluation.successRate }}% success</span>
                         </div>
                       </button>
                       <div class="workflow-card-actions">
@@ -1529,9 +2945,14 @@ onMounted(loadData);
                   <button class="btn-secondary" type="button" @click="addWorkflowTemplateToProject">从模板添加</button>
                   <button class="btn-primary" type="button" @click="createWorkflow">新建工作流</button>
                 </div>
-                <div class="workflow-canvas">
-                  <div v-if="workflowGraph" ref="workflowStageRef" class="workflow-stage">
-                  <svg class="workflow-edges" viewBox="0 0 1500 620" aria-hidden="true">
+                <div ref="workflowCanvasRef" class="workflow-canvas">
+                  <div
+                    v-if="workflowGraph"
+                    ref="workflowStageRef"
+                    class="workflow-stage"
+                    :style="{ width: `${workflowStageWidth}px`, minWidth: `${workflowStageWidth}px`, height: `${workflowStageHeight}px`, minHeight: `${workflowStageHeight}px` }"
+                  >
+                  <svg class="workflow-edges" :viewBox="`0 0 ${workflowStageWidth} ${workflowStageHeight}`" :style="{ width: `${workflowStageWidth}px`, height: `${workflowStageHeight}px` }" aria-hidden="true">
                     <defs>
                       <marker id="workflow-edge-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
                         <path d="M 0 0 L 10 5 L 0 10 z"></path>
@@ -1617,8 +3038,8 @@ onMounted(loadData);
                       <input class="field-input" :value="selectedEdge.label" :readonly="!workflowEditorMode" @input="updateSelectedWorkflowEdgeLabel(inputValue($event))" />
                     </label>
                     <div class="detail-list">
-                      <div><span>From</span><strong>{{ selectedEdge.from }}</strong></div>
-                      <div><span>To</span><strong>{{ selectedEdge.to }}</strong></div>
+                      <div><span>From</span><strong>{{ workflowNodeDisplayName(selectedEdge.from) }}</strong></div>
+                      <div><span>To</span><strong>{{ workflowNodeDisplayName(selectedEdge.to) }}</strong></div>
                     </div>
                     <button v-if="workflowEditorMode" class="btn-secondary danger full" type="button" @click="deleteSelectedWorkflowEdge">删除连线</button>
                   </template>
@@ -1635,12 +3056,173 @@ onMounted(loadData);
                       <div><span>path</span><strong>{{ selectedWorkflowCard.copy.path }}</strong></div>
                     </div>
                     <pre v-if="selectedWorkflowCard?.copy?.diff" class="code-block">{{ selectedWorkflowCard.copy.diff }}</pre>
-                    <pre class="code-block">{{ workflowGraph.edges.map((edge) => `${edge.from} -> ${edge.to}`).join('\n') }}</pre>
+                    <pre class="code-block">{{ workflowGraph.edges.map(workflowEdgeDisplay).join('\n') }}</pre>
                   </template>
                   <button v-if="workflowEditorMode" class="btn-primary full" type="button" @click="saveWorkflow">保存修改</button>
                 </div>
               </aside>
             </div>
+          </section>
+
+          <section v-else-if="activePage === 'statistics'" class="page active">
+            <div class="page-header">
+              <div>
+                <div class="page-title">Statistics</div>
+                <div class="page-description">Query task results and trend signals by time range and score view.</div>
+              </div>
+              <div class="page-actions">
+                <button class="btn-secondary" type="button" :disabled="evaluationBusy" @click="evaluatePendingRuns">
+                  {{ evaluationBusy ? 'Evaluating...' : 'Evaluate Pending' }}
+                </button>
+              </div>
+            </div>
+
+            <section class="panel statistics-panel">
+              <div class="panel-body statistics-panel-body">
+                <div class="statistics-toolbar">
+                  <div class="statistics-filter-group">
+                    <span class="toolbar-label">Time Range</span>
+                    <div class="chip-row">
+                      <button class="btn-secondary" :class="{ active: statisticsRange === '24h' }" type="button" @click="setStatisticsRange('24h')">Last 24h</button>
+                      <button class="btn-secondary" :class="{ active: statisticsRange === '7d' }" type="button" @click="setStatisticsRange('7d')">Last 7d</button>
+                      <button class="btn-secondary" :class="{ active: statisticsRange === '30d' }" type="button" @click="setStatisticsRange('30d')">Last 30d</button>
+                      <button class="btn-secondary" :class="{ active: statisticsRange === 'all' }" type="button" @click="setStatisticsRange('all')">All</button>
+                    </div>
+                  </div>
+                  <div class="statistics-filter-group">
+                    <span class="toolbar-label">View</span>
+                    <div class="chip-row">
+                      <button class="btn-secondary" :class="{ active: statisticsView === 'failed' }" type="button" @click="setStatisticsView('failed')">Failed</button>
+                      <button class="btn-secondary" :class="{ active: statisticsView === 'successful' }" type="button" @click="setStatisticsView('successful')">Successful</button>
+                      <button class="btn-secondary" :class="{ active: statisticsView === 'top_scored' }" type="button" @click="setStatisticsView('top_scored')">Top Scored</button>
+                      <button class="btn-secondary" :class="{ active: statisticsView === 'low_scored' }" type="button" @click="setStatisticsView('low_scored')">Low Scored</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="statistics-line-card compact">
+                  <div class="statistics-line-head">
+                    <div>
+                      <div class="section-title">Score Trend</div>
+                      <div class="drawer-subtitle">Recent scores for the selected statistics view.</div>
+                    </div>
+                    <span class="chip chip-green">{{ statisticsViewLabel(statisticsView) }}</span>
+                  </div>
+                  <svg class="statistics-line-chart" :viewBox="`0 0 ${statisticsLineChart.width} ${statisticsLineChart.height}`" role="img" aria-label="statistics score trend">
+                    <line x1="28" y1="192" x2="612" y2="192" class="chart-grid-line" />
+                    <line x1="28" y1="28" x2="28" y2="192" class="chart-grid-line" />
+                    <path :d="statisticsLineChart.path" class="chart-trend-line" />
+                    <g v-for="point in statisticsLineChart.points" :key="`${point.label}-${point.x}`">
+                      <circle :cx="point.x" :cy="point.y" r="5" class="chart-point" />
+                      <text :x="point.x" :y="point.y - 12" class="chart-value" text-anchor="middle">{{ point.value }}</text>
+                      <text :x="point.x" y="210" class="chart-label" text-anchor="middle">{{ point.label }}</text>
+                    </g>
+                  </svg>
+                </div>
+
+                <div class="table-shell">
+                  <table class="task-table">
+                    <thead>
+                      <tr>
+                        <th>Task</th>
+                        <th>Project</th>
+                        <th>Workflow</th>
+                        <th>Status</th>
+                        <th>Score</th>
+                        <th>Model</th>
+                        <th>Arbiter</th>
+                        <th>Flags</th>
+                        <th>Agent</th>
+                        <th>Time</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in statisticsTasks" :key="item.runId">
+                        <td>
+                          <div class="task-title-cell">{{ item.taskTitle || item.runId }}</div>
+                          <div class="table-subtext">{{ item.evaluationId || 'pending evaluation' }}</div>
+                        </td>
+                        <td>{{ item.projectId }}</td>
+                        <td>{{ item.workflowType }}</td>
+                        <td><span class="chip" :class="item.status === 'success' ? 'chip-green' : 'chip-orange'">{{ item.status }}</span></td>
+                        <td>{{ Number(item.score || 0).toFixed(1) }}</td>
+                        <td>{{ item.model || '-' }}</td>
+                        <td>
+                          <div class="task-title-cell">{{ item.arbiterModel || '-' }}</div>
+                          <div class="table-subtext">Escalation: {{ item.escalationModel || '-' }}</div>
+                        </td>
+                        <td>
+                          <div class="flag-list">
+                            <span v-for="flag in escalationFlags(item)" :key="`${item.runId}-${flag}`" class="chip chip-teal">{{ flag }}</span>
+                            <span v-if="escalationFlags(item).length === 0" class="table-subtext">-</span>
+                          </div>
+                          <div class="table-subtext">Escalate: {{ boolLabel(item.needsEscalation) }}</div>
+                        </td>
+                        <td>{{ item.agent || '-' }}</td>
+                        <td>{{ formatDateTime(item.createdAt) }}</td>
+                      </tr>
+                      <tr v-if="!statisticsLoading && statisticsTasks.length === 0">
+                        <td colspan="10">
+                          <div class="empty-inline">No task runs found for this view and time range.</div>
+                        </td>
+                      </tr>
+                      <tr v-if="statisticsLoading">
+                        <td colspan="10">
+                          <div class="empty-inline">Loading statistics...</div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <section v-else-if="activePage === 'evaluation'" class="page active">
+            <div class="page-header">
+              <div>
+                <div class="page-title">Evaluation Evidence Table</div>
+                <div class="page-description">High-density customer evidence review: task summary, workflow identity, execution context, verification, risks, metrics, scores, and raw evidence.</div>
+              </div>
+              <div class="page-actions">
+                <span class="chip chip-purple">{{ evaluationEvidenceRows.length }} evidence rows</span>
+                <span class="chip chip-orange">{{ evaluationSummary?.pendingRuns ?? 0 }} pending</span>
+                <button class="btn-secondary" type="button" :disabled="evaluationBusy" @click="evaluatePendingRuns">
+                  {{ evaluationBusy ? 'Evaluating...' : 'Evaluate Pending' }}
+                </button>
+              </div>
+            </div>
+
+            <section class="panel evidence-table-panel">
+              <div class="panel-header compact-header">
+                <div>
+                  <div class="panel-title">Customer Evidence</div>
+                  <div class="drawer-subtitle">Header row lists fields; second row explains what each field audits; data starts from the third row. Click any row to open the evidence dossier drawer.</div>
+                </div>
+              </div>
+              <div class="panel-body evidence-table-body">
+                <div class="evidence-audit-help-row">
+                  <span>Task: audit customer-facing summary</span>
+                  <span>Workflow: audit identity and traceability</span>
+                  <span>Verification: audit proof and outcome</span>
+                  <span>Gaps: audit missing evidence and main causes</span>
+                </div>
+                <n-data-table
+                  class="evidence-data-table"
+                  :columns="evidenceTableColumns"
+                  :data="evaluationEvidenceRows"
+                  :row-key="evidenceRowKey"
+                  :row-props="evidenceTableRowProps"
+                  scroll-x="3300"
+                  flex-height
+                  :scrollbar-props="{ trigger: 'none' }"
+                  :single-line="false"
+                  :bordered="false"
+                  size="small"
+                />
+                <div v-if="evaluationEvidenceRows.length === 0" class="empty-inline">No task runs or evaluations found.</div>
+              </div>
+            </section>
           </section>
 
           <section v-else-if="activePage === 'infrastructure'" class="page active">
@@ -1695,13 +3277,13 @@ onMounted(loadData);
               </section>
               <section class="panel panel-pad">
                 <div class="section-title">Model Catalog</div>
-                <span class="chip chip-green">GPT + DeepSeek + GLM</span>
+                <span class="chip chip-green">GPT + DeepSeek + GLM + Claude</span>
                 <div class="form-hint mono">http://127.0.0.1:8766/proxy/codex/model-catalog.json</div>
               </section>
               <section class="panel panel-pad">
                 <div class="section-title">Auth Policy</div>
                 <span class="chip chip-orange">Runtime env</span>
-                <div class="form-hint">GPT routes reuse Codex bearer auth. DeepSeek and GLM routes share the server-side Winky API key env var.</div>
+                <div class="form-hint">GPT routes reuse Codex bearer auth. DeepSeek, GLM, and Claude routes share the server-side Winky API key env var.</div>
               </section>
             </div>
             <section class="panel panel-pad">
@@ -1858,8 +3440,75 @@ requires_openai_auth = true</pre>
     </div>
 
     <div v-if="drawerMode" class="drawer-backdrop" @click.self="closeDrawer">
-      <aside class="drawer">
-        <template v-if="drawerMode === 'template' && selectedTemplate">
+      <aside class="drawer" :class="{ 'evidence-drawer': drawerMode === 'evidence-dossier' }">
+        <template v-if="drawerMode === 'evidence-dossier' && selectedEvidenceRow">
+          <div class="drawer-header">
+            <div>
+              <div class="drawer-title">Evidence Dossier</div>
+              <div class="drawer-subtitle">{{ evidenceTaskSummary(selectedEvidenceRow) }} / {{ selectedEvidenceRow.runId }}</div>
+            </div>
+            <button class="icon-btn" type="button" @click="closeDrawer">x</button>
+          </div>
+          <div class="drawer-body evidence-dossier">
+            <section class="task-metric-section">
+              <div class="task-metric-title">Task Summary</div>
+              <div class="detail-list compact-detail-list">
+                <div><span>Task</span><strong>{{ evidenceTaskSummary(selectedEvidenceRow) }}</strong></div>
+                <div><span>Run ID</span><strong class="mono">{{ selectedEvidenceRow.runId }}</strong></div>
+                <div><span>Evaluation ID</span><strong class="mono">{{ selectedEvidenceRow.evaluation?.id || 'Missing' }}</strong></div>
+                <div><span>Status</span><strong>{{ selectedEvidenceRow.evaluation?.finalStatus || selectedEvidenceRow.taskRun?.submittedStatus || 'Missing' }}</strong></div>
+                <div><span>Duration</span><strong>{{ formatDurationMinutes(selectedEvidenceRow.taskRun?.durationMs) }}</strong></div>
+              </div>
+            </section>
+
+            <section class="task-metric-section">
+              <div class="task-metric-title">Workflow & Execution</div>
+              <div class="detail-list compact-detail-list">
+                <div><span>Workflow</span><strong>{{ evidenceWorkflowIdentity(selectedEvidenceRow) }}</strong></div>
+                <div><span>Workflow Type</span><strong>{{ evidenceWorkflowType(selectedEvidenceRow) }}</strong></div>
+                <div><span>Agent / Model</span><strong>{{ evidenceAgentModel(selectedEvidenceRow) }}</strong></div>
+                <div><span>Rules / Skills / Tools</span><strong>{{ evidenceRulesSkillsTools(selectedEvidenceRow) }}</strong></div>
+              </div>
+            </section>
+
+            <section class="task-metric-section">
+              <div class="task-metric-title">Evaluation Judgement</div>
+              <div class="proposal-routing-grid">
+                <div><span>Result</span><strong>{{ evidenceScores(selectedEvidenceRow) }}</strong></div>
+                <div><span>Gaps / Causes</span><strong>{{ evidenceGapsCauses(selectedEvidenceRow) }}</strong></div>
+                <div><span>Verification</span><strong>{{ evidenceVerification(selectedEvidenceRow) }}</strong></div>
+                <div><span>Risk</span><strong>{{ evidenceRisks(selectedEvidenceRow) }}</strong></div>
+                <div><span>Path</span><strong>{{ evidencePath(selectedEvidenceRow) }}</strong></div>
+                <div><span>Token / Route</span><strong>{{ evidenceTokenRoute(selectedEvidenceRow) }}</strong></div>
+              </div>
+            </section>
+
+            <details class="raw-json-block" open>
+              <summary>Raw Evidence JSON</summary>
+              <pre>{{ jsonPreview(selectedEvidenceRow.taskRun?.evidence) }}</pre>
+            </details>
+            <details class="raw-json-block">
+              <summary>Raw Context JSON</summary>
+              <pre>{{ jsonPreview(selectedEvidenceRow.taskRun?.context) }}</pre>
+            </details>
+            <details class="raw-json-block">
+              <summary>Raw Metrics JSON</summary>
+              <pre>{{ jsonPreview(selectedEvidenceRow.taskRun?.metrics) }}</pre>
+            </details>
+            <details class="raw-json-block">
+              <summary>Scores / Analysis / Model Policy JSON</summary>
+              <pre>{{ jsonPreview({ scores: selectedEvidenceRow.evaluation?.scores, analysis: selectedEvidenceRow.evaluation?.analysis, modelPolicy: selectedEvidenceRow.evaluation?.modelPolicy }) }}</pre>
+            </details>
+          </div>
+          <div class="drawer-footer">
+            <button class="btn-secondary" type="button" @click="closeDrawer">Close</button>
+            <button class="btn-secondary danger" type="button" :disabled="evidenceDeleteBusy" @click="deleteSelectedEvidenceRun">
+              {{ evidenceDeleteBusy ? 'Deleting...' : 'Delete Task Run' }}
+            </button>
+          </div>
+        </template>
+
+        <template v-else-if="drawerMode === 'template' && selectedTemplate">
           <div class="drawer-header">
             <div><div class="drawer-title">{{ selectedTemplate.name }}</div><div class="drawer-subtitle">{{ kindLabel(selectedTemplate.kind) }} Template / {{ selectedTemplate.id }}</div></div>
             <button class="icon-btn" type="button" @click="closeDrawer">×</button>
@@ -2082,6 +3731,16 @@ requires_openai_auth = true</pre>
               <div class="run-step active">合并 findings</div>
               <div class="run-step">等待 human approval</div>
             </div>
+            <div class="notice">当前已产品化为自动提交 Task Run。点击下方按钮会把当前 Go / Unity workflow 结果自动 POST 到 <code>/api/task-runs</code>。</div>
+            <div v-if="workflowRunError" class="notice danger">{{ workflowRunError }}</div>
+            <div v-if="workflowRunResult" class="notice">已提交：run={{ workflowRunResult.id }} / workflow={{ workflowRunResult.workflowType }} / project={{ workflowRunResult.projectId }}</div>
+            <pre v-if="workflowRunPayload" class="code-block drawer-preview-block compact">{{ JSON.stringify(workflowRunPayload, null, 2) }}</pre>
+          </div>
+          <div class="drawer-footer">
+            <button class="btn-secondary" type="button" @click="closeDrawer">关闭</button>
+            <button class="btn-primary" type="button" :disabled="workflowRunSubmitting || !workflowRunPayload" @click="submitWorkflowRun">
+              {{ workflowRunSubmitting ? '提交中...' : '自动上传 Task Run' }}
+            </button>
           </div>
         </template>
       </aside>

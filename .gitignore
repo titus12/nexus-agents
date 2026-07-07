@@ -3,3 +3,7 @@ web/node_modules/
 web/.tmp-tests/
 web/tsconfig.tsbuildinfo
 restart_local*.ps1
+
+.logs/
+.nexus/
+.nexus-agents/
