@@ -12,7 +12,7 @@ Nexus Agents 是一个 AI 开发配置管理台。设计原型在 `design/` 目�
 - 项目配置集：含来源追溯、本地版本、基础哈希、手动同步、解绑操作
 - 工作流列表/画布：支持创建、编辑、节点选择和模拟运行抽屉
 - Codex/Claude 模型路由表与路由解析
-- **Codex 路由器（混合模式）**：Codex Desktop 本地代理——GPT 订阅模型走 ChatGPT Codex 后端，DeepSeek 模型走 Winky API 并做 Chat Completions 协议转换
+- **Codex 路由器（混合模式）**：Codex Desktop 本地代理——GPT 订阅模型走 ChatGPT Codex 后端，DeepSeek 模型走 API 并做 Chat Completions 协议转换
 
 ## 模板目录结构
 ```text
@@ -39,7 +39,7 @@ cd ..
 
 ## 启动服务
 
-推荐使用本地启动脚本，它会自动设置 Winky API Key 并清理端口：
+推荐使用本地启动脚本，它会自动设置 API Key 并清理端口：
 
 ```powershell
 .\restart_local.ps1
@@ -49,14 +49,14 @@ cd ..
 
 ```powershell
 # restart_local.ps1（不会提交到 git）
-$env:DEEPSEEK_API_KEY = "你的-winky-key"
+$env:DEEPSEEK_API_KEY = "你的-key"
 # ... 脚本其余部分
 ```
 
 也可以手动启动：
 
 ```powershell
-$env:DEEPSEEK_API_KEY = "你的-winky-key"
+$env:DEEPSEEK_API_KEY = "你的-key"
 $env:NEXUS_ADDR = ":8766"
 go run .\cmd\nexus-agents
 ```
@@ -101,7 +101,7 @@ Codex Desktop
                        │    ├─ instructions → system message
                        │    ├─ input 条目 + previous_response_id 历史 → messages[]
                        │    └─ Responses tools → Chat Completions functions
-                       ├─ POST /chat/completions → Winky（使用 DEEPSEEK_API_KEY）
+                       ├─ POST /chat/completions → （使用 DEEPSEEK_API_KEY）
                        └─ chatResponseToResponse() + responseToSSE()   响应方向转换
                             ├─ chat message → Responses output item
                             ├─ tool_calls → function_call / custom_tool_call 条目
@@ -115,13 +115,13 @@ Codex Desktop
 | `gpt-5.5` | GPT-5.5 | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
 | `gpt-5.4` | GPT-5.4 | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
 | `gpt-5.4-mini` | GPT-5.4 Mini | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
-| `deepseek-v4-pro` | DeepSeek V4 Pro | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` | — |
-| `deepseek-v4-flash` | DeepSeek V4 Flash | `lumos.diandian.info/winky/deepseek/v1` | `DEEPSEEK_API_KEY` | — |
-| `glm-5.2` | GLM-5.2 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY` | — |
-| `glm-5.1` | GLM-5.1 | `lumos.diandian.info/winky/glm/v1` | `DEEPSEEK_API_KEY` | — |
-| `claude-sonnet-5` | Claude Sonnet 5 | `lumos.diandian.info/winky/claude/v1` | `DEEPSEEK_API_KEY` | — |
+| `deepseek-v4-pro` | DeepSeek V4 Pro | `proxy/deepseek/v1` | `DEEPSEEK_API_KEY` | — |
+| `deepseek-v4-flash` | DeepSeek V4 Flash | `proxy/deepseek/v1` | `DEEPSEEK_API_KEY` | — |
+| `glm-5.2` | GLM-5.2 | `proxy/glm/v1` | `DEEPSEEK_API_KEY` | — |
+| `glm-5.1` | GLM-5.1 | `proxy/glm/v1` | `DEEPSEEK_API_KEY` | — |
+| `claude-sonnet-5` | Claude Sonnet 5 | `proxy/claude/v1` | `DEEPSEEK_API_KEY` | — |
 
-> GPT 路由（`api = "responses"`）走 ChatGPT 官方 Codex 后端，支持图片输入。DeepSeek / GLM / Claude 路由（`api = "chat_completions"`）走 Winky 代理，`DEEPSEEK_API_KEY` 是 Winky 统一 key，目前仅支持文本。
+> GPT 路由（`api = "responses"`）走 ChatGPT 官方 Codex 后端，支持图片输入。DeepSeek / GLM / Claude 路由（`api = "chat_completions"`）走  代理，`DEEPSEEK_API_KEY` 是  统一 key，目前仅支持文本。
 
 ### 关键实现文件
 
@@ -155,7 +155,7 @@ sandbox = "unelevated"
 
 **各配置项说明：**
 
-- `requires_openai_auth = true`：让 Codex 把 ChatGPT 订阅 bearer token 带在请求头里。GPT 路由会原样转发这个 token 到 `chatgpt.com`；DeepSeek / GLM / Claude 路由忽略它，改用服务端的 `DEEPSEEK_API_KEY`（Winky 统一 key）。
+- `requires_openai_auth = true`：让 Codex 把 ChatGPT 订阅 bearer token 带在请求头里。GPT 路由会原样转发这个 token 到 `chatgpt.com`；DeepSeek / GLM / Claude 路由忽略它，改用服务端的 `DEEPSEEK_API_KEY`（ 统一 key）。
 
 - `model_catalog_json`：必须填**本地文件路径**，不能填 HTTP URL（Codex Desktop 不读远程 URL）。服务每次启动时自动写入该文件并设为**只读**，防止 Codex 在工作时覆盖。若需更新，重启服务即可。
 
