@@ -109,6 +109,50 @@ func TestRetrieveUsesOKFRoutingAliasesBeforeFallbackSynonyms(t *testing.T) {
 	}
 }
 
+func TestRetrieveChineseQueryUsesRewriteTermsForEnglishKnowledge(t *testing.T) {
+	root := t.TempDir()
+	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)"))
+	writeTestFile(t, filepath.Join(kb, "project", "routing.md"), okfDoc("Routing", "Project Routing", "design/KnowledgeBase/project/routing.md", "# Routing\n\nGameplay tasks read `design/KnowledgeBase/domains/gameplay/routing.md`."))
+	writeTestFile(t, filepath.Join(kb, "domains", "gameplay", "routing.md"), okfDoc("Routing", "Gameplay Routing", "design/KnowledgeBase/domains/gameplay/routing.md", "# Gameplay Routing\n\nCharacter movement and combat tasks read `design/KnowledgeBase/domains/gameplay/movement.md`."))
+	writeTestFile(t, filepath.Join(kb, "domains", "gameplay", "movement.md"), okfDoc("Movement", "Character Movement", "design/KnowledgeBase/domains/gameplay/movement.md", "# Character Movement\n\nUse frame time profiling when character movement stutter or animation jitter appears."))
+
+	client := &mockQueryRewriteClient{result: QueryRewriteResult{
+		EnglishQuery: "character movement stutter",
+		Keywords:     []string{"character movement", "stutter", "animation jitter", "gameplay"},
+	}}
+	result, err := Retrieve(root, "角色移动卡顿", RetrieveOptions{
+		Mode:      RetrieveModeRouting,
+		Limit:     8,
+		MaxTokens: 1200,
+		QueryRewrite: QueryRewriteOptions{
+			Client: client,
+			Model:  "deepseek-v4-flash",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("expected one rewrite call, got %d", client.calls)
+	}
+	if !result.QueryRewrite.Used || result.QueryRewrite.EnglishQuery != "character movement stutter" {
+		t.Fatalf("expected rewrite metadata, got %#v", result.QueryRewrite)
+	}
+	if result.MatchedDomain != "gameplay" {
+		t.Fatalf("expected gameplay domain from rewrite terms, got %#v", result)
+	}
+	if !hasContextPath(result.Required, "design/KnowledgeBase/domains/gameplay/routing.md") {
+		t.Fatalf("expected gameplay routing in required: %#v", result.Required)
+	}
+	if !hasContextPath(result.Required, "design/KnowledgeBase/domains/gameplay/movement.md") {
+		t.Fatalf("expected movement doc in required: %#v", result.Required)
+	}
+	if !containsString(result.Terms, "character") || !containsString(result.Terms, "stutter") {
+		t.Fatalf("expected English rewrite terms in result terms: %#v", result.Terms)
+	}
+}
+
 func TestRetrieveUnknownQueryKeepsContextSmall(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))

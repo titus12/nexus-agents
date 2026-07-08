@@ -136,9 +136,10 @@ type RoutePreview struct {
 }
 
 type RetrieveOptions struct {
-	Mode      string `json:"mode"`
-	Limit     int    `json:"limit"`
-	MaxTokens int    `json:"maxTokens"`
+	Mode         string              `json:"mode"`
+	Limit        int                 `json:"limit"`
+	MaxTokens    int                 `json:"maxTokens"`
+	QueryRewrite QueryRewriteOptions `json:"queryRewrite,omitempty"`
 }
 
 type RetrievalResult struct {
@@ -155,8 +156,34 @@ type RetrievalResult struct {
 	Omitted                 []KnowledgeOmittedItem `json:"omitted"`
 	RoutingDocuments        []string               `json:"routingDocuments"`
 	LoadedKnowledgeMarkdown string                 `json:"loadedKnowledgeMarkdown"`
+	QueryRewrite            QueryRewriteResult     `json:"queryRewrite,omitempty"`
 	TokenBudget             TokenBudget            `json:"tokenBudget"`
 	Reason                  string                 `json:"reason"`
+}
+
+type QueryRewriteOptions struct {
+	Enabled     *bool              `json:"enabled,omitempty"`
+	Model       string             `json:"model,omitempty"`
+	BaseURL     string             `json:"baseUrl,omitempty"`
+	APIKey      string             `json:"-"`
+	APIKeyEnv   string             `json:"apiKeyEnv,omitempty"`
+	TimeoutMS   int                `json:"timeoutMs,omitempty"`
+	MaxKeywords int                `json:"maxKeywords,omitempty"`
+	Client      QueryRewriteClient `json:"-"`
+}
+
+type QueryRewriteClient interface {
+	RewriteKnowledgeQuery(query string, options QueryRewriteOptions) (QueryRewriteResult, error)
+}
+
+type QueryRewriteResult struct {
+	OriginalQuery string   `json:"originalQuery,omitempty"`
+	EnglishQuery  string   `json:"englishQuery,omitempty"`
+	Keywords      []string `json:"keywords,omitempty"`
+	Model         string   `json:"model,omitempty"`
+	Used          bool     `json:"used"`
+	Triggered     bool     `json:"triggered,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 type KnowledgeContextItem struct {

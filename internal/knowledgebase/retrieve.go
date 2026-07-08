@@ -2,6 +2,7 @@ package knowledgebase
 
 import (
 	"fmt"
+	"log"
 	"path"
 	"regexp"
 	"sort"
@@ -47,7 +48,11 @@ func Retrieve(projectRoot string, query string, options RetrieveOptions) (Retrie
 		sectionByID[section.ID] = section
 		sectionsByPath[section.Path] = append(sectionsByPath[section.Path], section)
 	}
+	queryRewrite := rewriteKnowledgeQuery(query, options.QueryRewrite)
 	terms := expandQueryTerms(query)
+	if queryRewrite.Used {
+		terms = mergeQueryTerms(terms, termsFromQueryRewrite(queryRewrite))
+	}
 	aliasIndex := buildRoutingAliasIndex(bundle)
 	matchedDomain, matchedAlias := inferMatchedDomain(terms, sections, aliasIndex)
 	routingDocs, routingTargets, missing := parseRoutingKnowledge(bundle, matchedDomain)
@@ -142,10 +147,12 @@ func Retrieve(projectRoot string, query string, options RetrieveOptions) (Retrie
 		MissingFiles:            missing,
 		Omitted:                 omitted,
 		RoutingDocuments:        routingDocs,
+		QueryRewrite:            queryRewrite,
 		TokenBudget:             TokenBudget{MaxTokens: options.MaxTokens, UsedTokens: usedTokens},
 		Reason:                  retrievalReason(matchedDomain, required),
 		LoadedKnowledgeMarkdown: buildLoadedKnowledgeMarkdown(required),
 	}
+	logRetrievalResult(result)
 	_ = docByPath
 	return normalizeRetrievalResult(result), nil
 }
@@ -161,6 +168,44 @@ func normalizeRetrieveOptions(options RetrieveOptions) RetrieveOptions {
 		options.MaxTokens = defaultRetrieveMaxTokens
 	}
 	return options
+}
+
+func logRetrievalResult(result RetrievalResult) {
+	log.Printf("[knowledge] retrieve query=%q mode=%s rewrite_triggered=%t rewrite_used=%t rewrite_model=%s rewrite_english=%q rewrite_keywords=%q rewrite_error=%q matched_domain=%s confidence=%.2f terms=%q required=%s optional=%s related=%s missing=%q reason=%q",
+		result.Query,
+		result.Mode,
+		result.QueryRewrite.Triggered,
+		result.QueryRewrite.Used,
+		result.QueryRewrite.Model,
+		result.QueryRewrite.EnglishQuery,
+		strings.Join(result.QueryRewrite.Keywords, ", "),
+		result.QueryRewrite.Error,
+		result.MatchedDomain,
+		result.Confidence,
+		strings.Join(result.Terms, ", "),
+		logContextItems(result.Required, 5),
+		logContextItems(result.Optional, 3),
+		logContextItems(result.Related, 3),
+		strings.Join(result.MissingFiles, ", "),
+		result.Reason,
+	)
+}
+
+func logContextItems(items []KnowledgeContextItem, limit int) string {
+	if len(items) == 0 {
+		return "[]"
+	}
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	parts := make([]string, 0, limit)
+	for _, item := range items[:limit] {
+		parts = append(parts, fmt.Sprintf("{path:%s score:%.1f required:%t reasons:%s}", item.Path, item.Score, item.Required, strings.Join(item.Reasons, "|")))
+	}
+	if len(items) > limit {
+		parts = append(parts, fmt.Sprintf("...+%d", len(items)-limit))
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 func contextItemFromSection(section KnowledgeSection) KnowledgeContextItem {
