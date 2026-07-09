@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, onMounted, ref, type PropType, type VNode } from "vue";
-import { NDataTable, type DataTableColumns } from "naive-ui";
+import { NDataTable, NTooltip, type DataTableColumns } from "naive-ui";
 import {
   addProjectCopyFromTemplate,
   createTemplate,
@@ -651,6 +651,12 @@ function formatNumber(value: number | undefined | null): string {
   return new Intl.NumberFormat().format(Math.round(value));
 }
 
+function formatPercentValue(value: unknown): string {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return `${number.toFixed(number % 1 === 0 ? 0 : 1)}%`;
+}
+
 function formatDurationMinutes(value: number | undefined | null): string {
   if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "-";
   if (value < 1000) return `${Math.round(value)} ms`;
@@ -699,12 +705,30 @@ function jsonPreview(value: unknown): string {
 }
 
 function renderEvidenceCell(primary: string, secondary?: string, monoSecondary = false, missing = false) {
-  return h("div", { class: "evidence-cell" }, [
+  const primaryText = primary || "Missing";
+  const cell = h("div", { class: "evidence-cell" }, [
     h("span", { class: missing ? "missing-text evidence-cell-primary" : "evidence-cell-primary" }, primary || "Missing"),
     secondary
       ? h("div", { class: ["table-subtext", monoSecondary ? "mono" : ""].filter(Boolean) }, secondary)
       : null,
   ]);
+  return h(
+    NTooltip,
+    {
+      trigger: "hover",
+      placement: "top",
+      style: { maxWidth: "560px" },
+    },
+    {
+      trigger: () => cell,
+      default: () => h("div", { class: "evidence-cell-tooltip" }, [
+        h("div", { class: missing ? "missing-text evidence-cell-tooltip-primary" : "evidence-cell-tooltip-primary" }, primaryText),
+        secondary
+          ? h("div", { class: ["evidence-cell-tooltip-secondary", monoSecondary ? "mono" : ""].filter(Boolean) }, secondary)
+          : null,
+      ]),
+    },
+  );
 }
 
 function evidenceTaskSummary(row: EvaluationEvidenceRow): string {
@@ -727,8 +751,9 @@ function evidenceWorkflowType(row: EvaluationEvidenceRow): string {
 function evidenceWorkflowIdentity(row: EvaluationEvidenceRow): string {
   const templateId = row.taskRun?.workflowTemplateId;
   const copyId = row.taskRun?.workflowCopyId;
-  if (!templateId && !copyId) return "Missing workflow identity";
-  return [templateId, copyId, evidenceWorkflowType(row)].filter(Boolean).join(" / ");
+  const workflowType = evidenceWorkflowType(row);
+  if (!templateId && !copyId) return workflowType === "Missing" ? "Missing workflow" : workflowType;
+  return [templateId, copyId, workflowType].filter(Boolean).join(" / ");
 }
 
 function evidenceContext(row: EvaluationEvidenceRow): Record<string, unknown> {
@@ -764,7 +789,14 @@ function evidenceRulesSkillsTools(row: EvaluationEvidenceRow): string {
 }
 
 function evidenceVerification(row: EvaluationEvidenceRow): string {
-  const verification = asRecord(evidenceMap(row).verification);
+  const rawVerification = evidenceMap(row).verification;
+  if (Array.isArray(rawVerification)) {
+    const checks = stringList(rawVerification);
+    if (checks.length > 0) return `${checks.length} checks: ${compactList(checks, "checks recorded")}`;
+  }
+  const verificationText = stringValue(rawVerification);
+  if (verificationText) return verificationText;
+  const verification = asRecord(rawVerification);
   if (Object.keys(verification).length === 0) return "Missing verification";
   const passed = typeof verification.passed === "boolean" ? String(verification.passed) : "unknown";
   const hasVerification = typeof verification.hasVerification === "boolean" ? String(verification.hasVerification) : "unknown";
@@ -773,11 +805,19 @@ function evidenceVerification(row: EvaluationEvidenceRow): string {
 }
 
 function evidencePath(row: EvaluationEvidenceRow): string {
-  return compactList(stringList(evidenceMap(row).successfulPath), "Missing path");
+  const evidence = evidenceMap(row);
+  return compactList([
+    ...stringList(evidence.successfulPath),
+    ...stringList(evidence.changedFiles),
+  ], "Missing path");
 }
 
 function evidenceRisks(row: EvaluationEvidenceRow): string {
-  return compactList(stringList(evidenceMap(row).risks), "No risks recorded");
+  const evidence = evidenceMap(row);
+  return compactList([
+    ...stringList(evidence.risks),
+    ...stringList(evidence.remainingRisks),
+  ], "No risks recorded");
 }
 
 function evidenceTokenRoute(row: EvaluationEvidenceRow): string {
@@ -785,10 +825,22 @@ function evidenceTokenRoute(row: EvaluationEvidenceRow): string {
   const tokenUsage = asRecord(metrics.tokenUsage ?? row.statistics?.tokenUsage);
   const routeMetrics = asRecord(metrics.routeMetrics ?? row.statistics?.routeMetrics);
   const tokenText = Object.keys(tokenUsage).length > 0
-    ? `tokens ${formatNumber(Number(tokenUsage.totalTokens ?? 0))}; req ${formatNumber(Number(tokenUsage.requestCount ?? 0))}`
+    ? [
+        `tokens ${formatNumber(Number(tokenUsage.totalTokens ?? 0))}`,
+        `in ${formatNumber(Number(tokenUsage.inputTokens ?? 0))}`,
+        `cached ${formatNumber(Number(tokenUsage.cachedInputTokens ?? 0))}`,
+        `out ${formatNumber(Number(tokenUsage.outputTokens ?? 0))}`,
+        `cache ${formatPercentValue(tokenUsage.cacheHitRate)}`,
+        `req ${formatNumber(Number(tokenUsage.requestCount ?? 0))}`,
+      ].join("; ")
     : "tokens Missing";
   const routeText = Object.keys(routeMetrics).length > 0
-    ? `route errors ${formatNumber(Number(routeMetrics.errorCount ?? 0))}; rate ${routeMetrics.errorRate ?? 0}%`
+    ? [
+        `route errors ${formatNumber(Number(routeMetrics.errorCount ?? 0))}`,
+        `rate ${formatPercentValue(routeMetrics.errorRate ?? 0)}`,
+        `route req ${formatNumber(Number(routeMetrics.requestCount ?? 0))}`,
+        `duration ${formatDurationMinutes(Number(routeMetrics.durationMs ?? 0))}`,
+      ].join("; ")
     : "route Missing";
   return `${tokenText} | ${routeText}`;
 }
@@ -830,6 +882,16 @@ function evidenceScores(row: EvaluationEvidenceRow): string {
 }
 
 function evidenceGapsCauses(row: EvaluationEvidenceRow): string {
+  const evidence = evidenceMap(row);
+  if (!row.evaluation) {
+    const pendingEvidence = [
+      ...stringList(evidence.skippedChecks),
+      ...stringList(evidence.remainingRisks),
+      ...stringList(evidence.risks),
+    ];
+    if (pendingEvidence.length === 0) return "Pending evaluation; no judgement gaps yet";
+    return `Pending evaluation; ${compactList(pendingEvidence, "no judgement gaps yet")}`;
+  }
   const analysis = asRecord(row.evaluation?.analysis);
   const causes = stringList(analysis.primaryCauses);
   const attribution = asRecord(analysis.attribution);
@@ -837,9 +899,14 @@ function evidenceGapsCauses(row: EvaluationEvidenceRow): string {
   for (const item of Object.values(attribution)) {
     issues.push(...stringList(asRecord(item).issues));
   }
-  if (evidenceWorkflowIdentity(row).startsWith("Missing")) issues.unshift("workflow identity missing");
+  if (evidenceWorkflowIdentity(row).startsWith("Missing")) issues.unshift("workflow missing");
   if (evidenceVerification(row).startsWith("Missing")) issues.unshift("verification evidence missing");
-  return compactList([...causes, ...issues], "No gaps recorded");
+  return compactList([
+    ...causes,
+    ...issues,
+    ...stringList(evidence.skippedChecks),
+    ...stringList(evidence.remainingRisks),
+  ], "No gaps recorded");
 }
 
 function evidenceStatusClass(row: EvaluationEvidenceRow): string {

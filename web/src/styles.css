@@ -1351,23 +1351,57 @@ tr:last-child td { border-bottom: none; }
 
 .evidence-cell {
   min-width: 0;
+  max-height: 54px;
   white-space: normal;
+  overflow: hidden;
   overflow-wrap: anywhere;
   word-break: break-word;
   line-height: 1.35;
 }
 
 .evidence-cell-primary {
-  display: inline-block;
+  display: -webkit-box;
+  max-height: 36px;
   color: var(--text-primary);
   font-weight: 700;
-  white-space: normal;
+  overflow: hidden;
   overflow-wrap: anywhere;
   word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.evidence-cell .table-subtext {
+  display: -webkit-box;
+  max-height: 18px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
 }
 
 .evidence-cell .table-subtext {
   color: var(--text-dim);
+}
+
+.evidence-cell-tooltip {
+  max-width: 560px;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
+}
+
+.evidence-cell-tooltip-primary {
+  font-weight: 700;
+}
+
+.evidence-cell-tooltip-secondary {
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.72);
 }
 
 .evidence-data-table .n-data-table-tr {
