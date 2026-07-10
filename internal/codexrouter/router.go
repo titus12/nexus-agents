@@ -1285,6 +1285,8 @@ func copyCodexHeaders(target http.Header, source http.Header) {
 		"Openai-Beta",
 		"Openai-Organization",
 		"Openai-Project",
+		"Originator",
+		"User-Agent",
 	} {
 		if value := source.Get(name); value != "" {
 			target.Set(name, value)
