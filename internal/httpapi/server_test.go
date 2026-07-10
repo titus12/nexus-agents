@@ -1861,6 +1861,79 @@ func TestCodexRouterResponsesPassesGPTSubscriptionBearer(t *testing.T) {
 	}
 }
 
+func TestCodexModelProbeRequiresLocalRequest(t *testing.T) {
+	server := NewServer()
+
+	remote := httptest.NewRequest(http.MethodPost, "/api/debug/codex-model-probe", strings.NewReader(`{"models":["gpt-5.6-luna"]}`))
+	remote.RemoteAddr = "203.0.113.9:12345"
+	remote.Header.Set("Content-Type", "application/json")
+	remote.Header.Set("Authorization", "Bearer codex-token")
+	remoteResponse := httptest.NewRecorder()
+	server.ServeHTTP(remoteResponse, remote)
+	if remoteResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected remote status 403, got %d", remoteResponse.Code)
+	}
+}
+
+func TestCodexModelProbeEndpointProbesCandidates(t *testing.T) {
+	var capturedModels []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("expected Codex backend responses path, got %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer codex-token" {
+			t.Fatalf("expected Codex bearer passthrough, got %q", r.Header.Get("Authorization"))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		capturedModels = append(capturedModels, body["model"].(string))
+		if body["model"] == "gpt-5.6-luna-preview" {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "completed"})
+			return
+		}
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "Model not found"})
+	}))
+	defer upstream.Close()
+
+	server := NewServerWithCodexRouter(codexrouter.NewService(codexrouter.Config{
+		DefaultModel: "gpt-5.5",
+		Routes: []codexrouter.Route{{
+			ID:       "gpt-5.5",
+			API:      "responses",
+			BaseURL:  upstream.URL + "/backend-api/codex",
+			Model:    "gpt-5.5",
+			AuthMode: "codex_openai",
+		}},
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "/api/debug/codex-model-probe", strings.NewReader(`{"models":["gpt-5.6-luna","gpt-5.6-luna-preview"]}`))
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer codex-token")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected probe status 200, got %d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Results []struct {
+			Model      string `json:"model"`
+			StatusCode int    `json:"statusCode"`
+			Body       string `json:"body"`
+		} `json:"results"`
+	}
+	decodeJSON(t, response, &body)
+	if len(body.Results) != 2 || body.Results[0].StatusCode != http.StatusNotFound || body.Results[1].StatusCode != http.StatusOK {
+		t.Fatalf("unexpected probe response: %#v", body)
+	}
+	if strings.Join(capturedModels, ",") != "gpt-5.6-luna,gpt-5.6-luna-preview" {
+		t.Fatalf("unexpected probed models: %#v", capturedModels)
+	}
+}
+
 func TestCodexRouterTokenUsageHeadersAttachToWorkflowCompletion(t *testing.T) {
 	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -193,6 +194,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/infrastructure/", s.handleInfrastructurePath)
 	s.mux.HandleFunc("/api/local-directories", s.handleLocalDirectories)
 	s.mux.HandleFunc("/api/local-directory-picker", s.handleLocalDirectoryPicker)
+	s.mux.HandleFunc("/api/debug/codex-model-probe", s.handleCodexModelProbe)
 	s.mux.HandleFunc("/api/model-routes/resolve", s.handleModelRouteResolve)
 	s.mux.HandleFunc("/api/model-routes", s.handleModelRoutes)
 	s.mux.HandleFunc("/api/projects", s.handleProjects)
@@ -1493,6 +1495,42 @@ func (s *Server) handleModelRouteResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, resolution)
+}
+
+func (s *Server) handleCodexModelProbe(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodPost) {
+		return
+	}
+	if !isLocalRequest(r) {
+		http.Error(w, "codex model probe is only available from localhost", http.StatusForbidden)
+		return
+	}
+	var input codexrouter.ModelProbeRequest
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	if len(input.Models) == 0 {
+		http.Error(w, "models is required", http.StatusBadRequest)
+		return
+	}
+	results := s.codexRouter.ProbeModels(r.Context(), input, strings.TrimSpace(r.Header.Get("Authorization")), r.Header)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results": results,
+	})
+}
+
+func isLocalRequest(r *http.Request) bool {
+	host := r.RemoteAddr
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		host = strings.TrimSpace(strings.Split(forwarded, ",")[0])
+	}
+	if strings.Contains(host, ":") {
+		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+			host = parsedHost
+		}
+	}
+	parsed := net.ParseIP(strings.Trim(host, "[]"))
+	return parsed != nil && parsed.IsLoopback()
 }
 
 func allowMethods(w http.ResponseWriter, r *http.Request, methods ...string) bool {

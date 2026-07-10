@@ -1,6 +1,7 @@
 package codexrouter
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -475,8 +476,8 @@ func TestResponsesToAnthropicRequest(t *testing.T) {
 func TestResponsesToAnthropicRequestMaxTokens(t *testing.T) {
 	history := newResponseHistory()
 	raw := map[string]any{
-		"model":            "claude-sonnet-5",
-		"input":            "hi",
+		"model":             "claude-sonnet-5",
+		"input":             "hi",
 		"max_output_tokens": float64(8),
 	}
 	req := responseRequest{Model: "claude-sonnet-5", Input: "hi", Raw: raw}
@@ -635,3 +636,93 @@ func TestProxyAnthropicMessagesEndToEnd(t *testing.T) {
 	}
 }
 
+func TestProbeModelsUsesCodexResponsesAuthAndCandidateModel(t *testing.T) {
+	var capturedAuthorization string
+	var capturedSessionID string
+	var capturedBodies []map[string]any
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuthorization = r.Header.Get("Authorization")
+		capturedSessionID = r.Header.Get("Session-Id")
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		capturedBodies = append(capturedBodies, body)
+		if body["model"] == "gpt-5.6-luna-preview" {
+			writeJSON(w, http.StatusOK, map[string]any{"id": "resp_probe", "status": "completed"})
+			return
+		}
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "Model not found " + body["model"].(string)})
+	}))
+	defer fake.Close()
+
+	service := NewService(Config{Routes: []Route{{
+		ID:       "gpt-5.5",
+		Model:    "gpt-5.5",
+		API:      "responses",
+		BaseURL:  fake.URL + "/backend-api/codex",
+		AuthMode: "codex_openai",
+	}}})
+	headers := http.Header{}
+	headers.Set("Session-Id", "probe-session")
+
+	results := service.ProbeModels(context.Background(), ModelProbeRequest{
+		Models: []string{"gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna-preview"},
+		Raw:    map[string]any{"metadata": map[string]any{"probe": true}},
+	}, "Bearer codex-token", headers)
+
+	if len(results) != 2 {
+		t.Fatalf("expected duplicate candidates to be compacted, got %#v", results)
+	}
+	if results[0].Model != "gpt-5.6-luna" || results[0].StatusCode != http.StatusNotFound {
+		t.Fatalf("unexpected first result: %#v", results[0])
+	}
+	if results[1].Model != "gpt-5.6-luna-preview" || results[1].StatusCode != http.StatusOK {
+		t.Fatalf("unexpected second result: %#v", results[1])
+	}
+	if capturedAuthorization != "Bearer codex-token" {
+		t.Fatalf("expected authorization passthrough, got %q", capturedAuthorization)
+	}
+	if capturedSessionID != "probe-session" {
+		t.Fatalf("expected session id passthrough, got %q", capturedSessionID)
+	}
+	if len(capturedBodies) != 2 || capturedBodies[0]["model"] != "gpt-5.6-luna" || capturedBodies[1]["model"] != "gpt-5.6-luna-preview" {
+		t.Fatalf("unexpected captured bodies: %#v", capturedBodies)
+	}
+	if capturedBodies[0]["stream"] != true || capturedBodies[0]["store"] != false {
+		t.Fatalf("probe should use Codex-compatible stream/store fields, got %#v", capturedBodies[0])
+	}
+}
+
+func TestProbeModelsCanReuseLastCodexCredentials(t *testing.T) {
+	var capturedAuthorization string
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuthorization = r.Header.Get("Authorization")
+		writeJSON(w, http.StatusOK, map[string]any{"status": "completed"})
+	}))
+	defer fake.Close()
+
+	service := NewService(Config{Routes: []Route{{
+		ID:       "gpt-5.5",
+		Model:    "gpt-5.5",
+		API:      "responses",
+		BaseURL:  fake.URL + "/backend-api/codex",
+		AuthMode: "codex_openai",
+	}}})
+
+	req := httptest.NewRequest("POST", "/proxy/codex/v1/responses", strings.NewReader(`{"model":"gpt-5.5","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer remembered-token")
+	rec := httptest.NewRecorder()
+	service.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected warmup response 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	results := service.ProbeModels(context.Background(), ModelProbeRequest{Models: []string{"gpt-5.6-luna"}}, "", nil)
+	if len(results) != 1 || results[0].StatusCode != http.StatusOK {
+		t.Fatalf("unexpected probe results: %#v", results)
+	}
+	if capturedAuthorization != "Bearer remembered-token" {
+		t.Fatalf("expected remembered authorization, got %q", capturedAuthorization)
+	}
+}

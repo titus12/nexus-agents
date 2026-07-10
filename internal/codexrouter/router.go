@@ -2,6 +2,7 @@ package codexrouter
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -88,10 +90,26 @@ type Route struct {
 }
 
 type Service struct {
-	config        Config
-	client        *http.Client
-	history       *responseHistory
-	usageRecorder TokenUsageRecorder
+	config           Config
+	client           *http.Client
+	history          *responseHistory
+	usageRecorder    TokenUsageRecorder
+	authMu           sync.RWMutex
+	lastCodexAuth    string
+	lastCodexHeaders http.Header
+}
+
+type ModelProbeRequest struct {
+	Models []string       `json:"models"`
+	Input  any            `json:"input,omitempty"`
+	Raw    map[string]any `json:"raw,omitempty"`
+}
+
+type ModelProbeResult struct {
+	Model      string `json:"model"`
+	StatusCode int    `json:"statusCode"`
+	Error      string `json:"error,omitempty"`
+	Body       string `json:"body,omitempty"`
 }
 
 func NewService(config Config) *Service {
@@ -132,15 +150,15 @@ func DefaultConfig() Config {
 	claudeBaseURL := getenvDefault("NEXUS_CLAUDE_BASE_URL", "https://lumos.diandian.info/winky/claude/v1")
 	claudeProvider := getenvDefault("NEXUS_CLAUDE_PROVIDER", "Winky Claude")
 	return Config{
-		DefaultModel: "gpt-5.6",
+		DefaultModel: "gpt-5.5",
 		Routes: []Route{
 			{
-				ID:          "gpt-5.6",
+				ID:          "gpt-5.6-sol",
 				DisplayName: "GPT-5.6 Sol",
 				Description: "GPT subscription model through ChatGPT Codex backend.",
 				API:         "responses",
 				BaseURL:     "https://chatgpt.com/backend-api/codex",
-				Model:       "gpt-5.6",
+				Model:       "gpt-5.6-sol",
 				Provider:    "Codex subscription",
 				AuthMode:    "codex_openai",
 				Priority:    0,
@@ -337,6 +355,123 @@ func (s *Service) ModelsList() map[string]any {
 	return map[string]any{"object": "list", "data": data}
 }
 
+func (s *Service) ProbeModels(ctx context.Context, input ModelProbeRequest, authorization string, sourceHeaders http.Header) []ModelProbeResult {
+	models := compactProbeModels(input.Models)
+	results := make([]ModelProbeResult, 0, len(models))
+	if strings.TrimSpace(authorization) == "" {
+		authorization, sourceHeaders = s.lastCodexCredentials()
+	}
+	for _, model := range models {
+		results = append(results, s.probeModel(ctx, model, input, authorization, sourceHeaders))
+	}
+	return results
+}
+
+func (s *Service) probeModel(ctx context.Context, model string, input ModelProbeRequest, authorization string, sourceHeaders http.Header) ModelProbeResult {
+	route := s.routeForModel(model)
+	if route.API != "responses" || route.AuthMode != "codex_openai" {
+		route = s.firstCodexResponsesRoute()
+	}
+	route.ID = model
+	route.Model = model
+	route.API = "responses"
+	route.AuthMode = "codex_openai"
+
+	payload := map[string]any{
+		"model": model,
+		"input": firstDefined(input.Input, []map[string]any{{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "Respond with ok.",
+			}},
+		}}),
+		"store":  false,
+		"stream": true,
+	}
+	for key, value := range input.Raw {
+		payload[key] = value
+	}
+	payload["model"] = model
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ModelProbeResult{Model: model, Error: "marshal probe request: " + err.Error()}
+	}
+
+	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, joinUpstreamURL(responsesBaseURLForRoute(route), "/responses"), bytes.NewReader(data))
+	if err != nil {
+		return ModelProbeResult{Model: model, Error: err.Error()}
+	}
+	upstream.Header.Set("Content-Type", "application/json")
+	if stream, _ := payload["stream"].(bool); stream {
+		upstream.Header.Set("Accept", "text/event-stream")
+	}
+	if err := setUpstreamAuth(upstream.Header, route, authorization); err != nil {
+		return ModelProbeResult{Model: model, Error: err.Error()}
+	}
+	copyCodexHeaders(upstream.Header, sourceHeaders)
+
+	t0 := time.Now()
+	response, err := s.client.Do(upstream)
+	if err != nil {
+		return ModelProbeResult{Model: model, Error: err.Error()}
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+	log.Printf("[codex-probe] model=%s status=%d duration_ms=%d", model, response.StatusCode, time.Since(t0).Milliseconds())
+	return ModelProbeResult{
+		Model:      model,
+		StatusCode: response.StatusCode,
+		Body:       strings.TrimSpace(string(body)),
+	}
+}
+
+func (s *Service) firstCodexResponsesRoute() Route {
+	for _, route := range s.config.Routes {
+		if route.API == "responses" && route.AuthMode == "codex_openai" {
+			return route
+		}
+	}
+	return Route{
+		ID:       "codex-probe",
+		API:      "responses",
+		BaseURL:  chatgptCodexBaseURL,
+		Provider: "Codex subscription",
+		AuthMode: "codex_openai",
+	}
+}
+
+func compactProbeModels(models []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" || seen[model] {
+			continue
+		}
+		seen[model] = true
+		out = append(out, model)
+	}
+	return out
+}
+
+func (s *Service) rememberCodexCredentials(auth string, headers http.Header) {
+	auth = strings.TrimSpace(auth)
+	if auth == "" {
+		return
+	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	s.lastCodexAuth = auth
+	s.lastCodexHeaders = headers.Clone()
+}
+
+func (s *Service) lastCodexCredentials() (string, http.Header) {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return s.lastCodexAuth, s.lastCodexHeaders.Clone()
+}
+
 func (s *Service) handleResponses(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -349,6 +484,9 @@ func (s *Service) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	route := s.routeForModel(request.Model)
+	if route.API == "responses" && route.AuthMode == "codex_openai" {
+		s.rememberCodexCredentials(r.Header.Get("Authorization"), r.Header)
+	}
 	reqStats := requestLogStats(request.Raw, len(body))
 	sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
 	workflowRunID, workflowRole := s.workflowContext(r)
@@ -380,6 +518,26 @@ func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request
 		return
 	}
 
+	// For codex_openai routes, fall back to cached credentials when the incoming
+	// request carries no Authorization header (e.g. after a proxy restart).
+	incomingAuth := r.Header.Get("Authorization")
+	if strings.TrimSpace(incomingAuth) == "" && route.AuthMode == "codex_openai" {
+		cachedAuth, cachedHeaders := s.lastCodexCredentials()
+		if strings.TrimSpace(cachedAuth) != "" {
+			log.Printf("[codex] proxyResponses: no auth in request for route=%s, using cached codex credentials", route.ID)
+			incomingAuth = cachedAuth
+			// Inject cached codex-specific headers into the incoming request so
+			// copyCodexHeaders below picks them up correctly.
+			for key, vals := range cachedHeaders {
+				if r.Header.Get(key) == "" {
+					for _, v := range vals {
+						r.Header.Set(key, v)
+					}
+				}
+			}
+		}
+	}
+
 	baseURL := responsesBaseURLForRoute(route)
 	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, joinUpstreamURL(baseURL, "/responses"), bytes.NewReader(data))
 	if err != nil {
@@ -390,7 +548,7 @@ func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request
 	if request.Stream {
 		upstream.Header.Set("Accept", "text/event-stream")
 	}
-	if err := setUpstreamAuth(upstream.Header, route, r.Header.Get("Authorization")); err != nil {
+	if err := setUpstreamAuth(upstream.Header, route, incomingAuth); err != nil {
 		writeJSON(w, http.StatusUnauthorized, openAIError(err.Error(), http.StatusUnauthorized))
 		return
 	}
