@@ -1194,11 +1194,14 @@ func TestModelRouteEndpoint(t *testing.T) {
 	}
 	getJSON(t, server, "/api/model-routes", &routes)
 
-	if len(routes) != 8 {
-		t.Fatalf("expected eight Codex model routes, got %d routes: %#v", len(routes), routes)
+	if len(routes) != 11 {
+		t.Fatalf("expected eleven Codex model routes, got %d routes: %#v", len(routes), routes)
 	}
 
 	wantTargets := map[string]string{
+		"gpt-5.6":           "gpt-5.6",
+		"gpt-5.6-terra":     "gpt-5.6-terra",
+		"gpt-5.6-luna":      "gpt-5.6-luna",
 		"gpt-5.5":           "gpt-5.5",
 		"gpt-5.4":           "gpt-5.4",
 		"gpt-5.4-mini":      "gpt-5.4-mini",
@@ -1585,6 +1588,27 @@ func TestModelRouteResolveEndpoint(t *testing.T) {
 		wantPassthrough bool
 	}{
 		{
+			name:            "codex gpt-5.6 passthrough",
+			path:            "/api/model-routes/resolve?client=codex&model=gpt-5.6",
+			wantProvider:    "ChatGPT Subscription",
+			wantTarget:      "gpt-5.6",
+			wantPassthrough: true,
+		},
+		{
+			name:            "codex gpt-5.6 terra passthrough",
+			path:            "/api/model-routes/resolve?client=codex&model=gpt-5.6-terra",
+			wantProvider:    "ChatGPT Subscription",
+			wantTarget:      "gpt-5.6-terra",
+			wantPassthrough: true,
+		},
+		{
+			name:            "codex gpt-5.6 luna passthrough",
+			path:            "/api/model-routes/resolve?client=codex&model=gpt-5.6-luna",
+			wantProvider:    "ChatGPT Subscription",
+			wantTarget:      "gpt-5.6-luna",
+			wantPassthrough: true,
+		},
+		{
 			name:            "codex gpt-5.5 passthrough",
 			path:            "/api/model-routes/resolve?client=codex&model=gpt-5.5",
 			wantProvider:    "ChatGPT Subscription",
@@ -1673,7 +1697,7 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 	foundGLM := false
 	foundClaude := false
 	for _, model := range catalogBody.Models {
-		if model.Slug == "gpt-5.5" {
+		if model.Slug == "gpt-5.6" {
 			foundGPT = model.DisplayName != "" && model.ApplyPatchToolType == "freeform"
 		}
 		// Hybrid mode: DeepSeek is exposed under a built-in GPT slug so the
@@ -1706,7 +1730,7 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 	foundModelGLM := false
 	foundModelClaude := false
 	for _, model := range modelsBody.Data {
-		foundModelGPT = foundModelGPT || model.ID == "gpt-5.5"
+		foundModelGPT = foundModelGPT || model.ID == "gpt-5.6"
 		foundModelDeepSeek = foundModelDeepSeek || model.ID == "deepseek-v4-flash"
 		foundModelGLM = foundModelGLM || model.ID == "glm-5.2"
 		foundModelClaude = foundModelClaude || model.ID == "claude-sonnet-5"

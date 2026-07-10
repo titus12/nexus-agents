@@ -132,8 +132,41 @@ func DefaultConfig() Config {
 	claudeBaseURL := getenvDefault("NEXUS_CLAUDE_BASE_URL", "https://lumos.diandian.info/winky/claude/v1")
 	claudeProvider := getenvDefault("NEXUS_CLAUDE_PROVIDER", "Winky Claude")
 	return Config{
-		DefaultModel: "gpt-5.5",
+		DefaultModel: "gpt-5.6",
 		Routes: []Route{
+			{
+				ID:          "gpt-5.6",
+				DisplayName: "GPT-5.6 Sol",
+				Description: "GPT subscription model through ChatGPT Codex backend.",
+				API:         "responses",
+				BaseURL:     "https://chatgpt.com/backend-api/codex",
+				Model:       "gpt-5.6",
+				Provider:    "Codex subscription",
+				AuthMode:    "codex_openai",
+				Priority:    0,
+			},
+			{
+				ID:          "gpt-5.6-terra",
+				DisplayName: "GPT-5.6 Terra",
+				Description: "GPT subscription model through ChatGPT Codex backend.",
+				API:         "responses",
+				BaseURL:     "https://chatgpt.com/backend-api/codex",
+				Model:       "gpt-5.6-terra",
+				Provider:    "Codex subscription",
+				AuthMode:    "codex_openai",
+				Priority:    1,
+			},
+			{
+				ID:          "gpt-5.6-luna",
+				DisplayName: "GPT-5.6 Luna",
+				Description: "GPT subscription model through ChatGPT Codex backend.",
+				API:         "responses",
+				BaseURL:     "https://chatgpt.com/backend-api/codex",
+				Model:       "gpt-5.6-luna",
+				Provider:    "Codex subscription",
+				AuthMode:    "codex_openai",
+				Priority:    2,
+			},
 			{
 				ID:          "gpt-5.5",
 				DisplayName: "GPT-5.5",
@@ -143,7 +176,7 @@ func DefaultConfig() Config {
 				Model:       "gpt-5.5",
 				Provider:    "Codex subscription",
 				AuthMode:    "codex_openai",
-				Priority:    0,
+				Priority:    3,
 			},
 			{
 				ID:          "gpt-5.4",
@@ -154,7 +187,7 @@ func DefaultConfig() Config {
 				Model:       "gpt-5.4",
 				Provider:    "Codex subscription",
 				AuthMode:    "codex_openai",
-				Priority:    1,
+				Priority:    4,
 			},
 			{
 				ID:          "gpt-5.4-mini",
@@ -165,7 +198,7 @@ func DefaultConfig() Config {
 				Model:       "gpt-5.4-mini",
 				Provider:    "Codex subscription",
 				AuthMode:    "codex_openai",
-				Priority:    2,
+				Priority:    5,
 			},
 			{
 				ID:          "deepseek-v4-pro",
@@ -177,7 +210,7 @@ func DefaultConfig() Config {
 				Provider:    deepSeekProvider,
 				AuthMode:    "api_key",
 				APIKeyEnv:   "DEEPSEEK_API_KEY",
-				Priority:    3,
+				Priority:    6,
 				DropParams:  []string{"response_format", "parallel_tool_calls"},
 			},
 			{
@@ -190,7 +223,7 @@ func DefaultConfig() Config {
 				Provider:    deepSeekProvider,
 				AuthMode:    "api_key",
 				APIKeyEnv:   "DEEPSEEK_API_KEY",
-				Priority:    4,
+				Priority:    7,
 				DropParams:  []string{"response_format", "parallel_tool_calls"},
 			},
 			{
@@ -203,7 +236,7 @@ func DefaultConfig() Config {
 				Provider:    glmProvider,
 				AuthMode:    "api_key",
 				APIKeyEnv:   "DEEPSEEK_API_KEY",
-				Priority:    5,
+				Priority:    8,
 				DropParams:  []string{"response_format", "parallel_tool_calls"},
 			},
 			{
@@ -216,27 +249,27 @@ func DefaultConfig() Config {
 				Provider:    glmProvider,
 				AuthMode:    "api_key",
 				APIKeyEnv:   "DEEPSEEK_API_KEY",
-				Priority:    6,
+				Priority:    9,
 				DropParams:  []string{"response_format", "parallel_tool_calls"},
 			},
-		{
-			ID:          "claude-sonnet-5",
-			DisplayName: "Claude Sonnet 5",
-			Description: getenvDefault("NEXUS_CLAUDE_SONNET_5_DESCRIPTION", "Claude Sonnet 5 via Winky API."),
-			// claude-sonnet-5 is only valid on the Anthropic Messages protocol
-			// (/v1/messages), not on the OpenAI Chat Completions protocol
-			// (/v1/chat/completions) exposed by the same Winky upstream. Using
-			// chat_completions here makes the upstream reject the model name
-			// with a ValidationException, so route through the native
-			// Anthropic Messages adapter instead.
-			API:       "anthropic_messages",
-			BaseURL:   claudeBaseURL,
-			Model:     "claude-sonnet-5",
-			Provider:  claudeProvider,
-			AuthMode:  "api_key",
-			APIKeyEnv: "DEEPSEEK_API_KEY",
-			Priority:  7,
-		},
+			{
+				ID:          "claude-sonnet-5",
+				DisplayName: "Claude Sonnet 5",
+				Description: getenvDefault("NEXUS_CLAUDE_SONNET_5_DESCRIPTION", "Claude Sonnet 5 via Winky API."),
+				// claude-sonnet-5 is only valid on the Anthropic Messages protocol
+				// (/v1/messages), not on the OpenAI Chat Completions protocol
+				// (/v1/chat/completions) exposed by the same Winky upstream. Using
+				// chat_completions here makes the upstream reject the model name
+				// with a ValidationException, so route through the native
+				// Anthropic Messages adapter instead.
+				API:       "anthropic_messages",
+				BaseURL:   claudeBaseURL,
+				Model:     "claude-sonnet-5",
+				Provider:  claudeProvider,
+				AuthMode:  "api_key",
+				APIKeyEnv: "DEEPSEEK_API_KEY",
+				Priority:  10,
+			},
 		},
 	}
 }
