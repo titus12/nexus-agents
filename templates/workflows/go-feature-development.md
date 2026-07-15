@@ -148,7 +148,7 @@ Task 2：目标 / 范围 / 验收 / 验证 / 风险
 | 质量门 | Reviewer Logic | 检查逻辑、边界、并发、事务和错误处理；高风险时再按需加入 Reviewer Perf 与 Reviewer Security。 |
 | 集成与最终交付 | Sisyphus | 合并结果，执行总体目标门、质量门和最终验证。 |
 
-## 知识库建议门
+## KnowledgeBase Recommendation Gate
 
 工作流结束前判断本次是否发现了可复用的稳定知识，例如领域入口、代码模式、反模式、验证路径或 routing 规则。只输出建议，不自动修改知识库：
 
@@ -192,50 +192,4 @@ Windows 可使用：
 powershell -ExecutionPolicy Bypass -File .agents\skills\nexus-taskrun-submit\submit-workflow-result.ps1 -PayloadFile .nexus\task-run-feature-development.json -ContextFile .nexus\workflow-context-feature-development.json
 ```
 
-Submit endpoint:
-
-```text
-POST http://127.0.0.1:8766/api/task-runs
-```
-
-提交 body 使用 `sessionId + startedAt + endedAt` 让 Nexus 归因 token/route metrics。现有 workflow-run headers 只用于路由 telemetry，最终 payload 不得包含 `workflowId`、`workflowRunId`、`workflowTemplateId`、`workflowCopyId` 或 `X-Nexus-Workflow-Run-Id`。证据必须包含实际执行的验证命令、结果和未验证范围；不得把计划中的验证写成已通过。
-
-```json
-{
-  "projectId": "<nexus project id or repo name>",
-  "workflowType": "feature-development",
-  "taskTitle": "<short task title>",
-  "submittedStatus": "<success|partial_success|failed|cancelled>",
-  "sessionId": "<codex session id>",
-  "startedAt": "<ISO-8601 if known>",
-  "endedAt": "<ISO-8601 if known>",
-  "durationMs": 0,
-  "context": {
-    "agent": "<primary agent>",
-    "model": "<model id>",
-    "rules": ["<rule ids loaded>"],
-    "skills": ["<skill ids loaded>"],
-    "tools": ["<tools used>"]
-  },
-  "metrics": {
-    "turnCount": 0,
-    "toolCallCount": 0,
-    "testRunCount": 0,
-    "retryCount": 0,
-    "errorCount": 0,
-    "filesChangedCount": 0
-  },
-  "evidence": {
-    "summary": "<what was done>",
-    "verification": {
-      "hasVerification": true,
-      "passed": true,
-      "types": ["test", "build", "manual_check"],
-      "commands": ["<commands actually run>"]
-    },
-    "changedFiles": [],
-    "skippedChecks": [],
-    "remainingRisks": []
-  }
-}
-```
+最终 payload 字段、禁止字段、紧凑证据规则和提交 endpoint 以 `$nexus-taskrun-submit` 为唯一来源。现有 workflow-run headers 只用于路由 telemetry；最终 payload 不得包含任何 workflow ID。证据必须包含实际执行的验证命令、结果和未验证范围；不得把计划中的验证写成已通过。

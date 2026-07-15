@@ -27,33 +27,37 @@ func TestUnityWorkflowTemplatesIncludeTaskRunProtocol(t *testing.T) {
 			t.Fatalf("read %s: %v", file, err)
 		}
 		text := string(data)
-		required := []string{
-			"## Task Run Evidence Protocol",
-			"POST http://127.0.0.1:8766/api/task-runs",
-			"\"projectId\"",
-			"\"workflowType\"",
-			"\"submittedStatus\"",
-			"\"context\"",
-			"\"metrics\"",
-			"\"evidence\"",
-		}
-		if strings.HasSuffix(file, "go-bugfix.md") || strings.HasSuffix(file, "go-feature-development.md") {
-			required = append(required,
+		isGoWorkflow := strings.HasSuffix(file, "go-bugfix.md") || strings.HasSuffix(file, "go-feature-development.md")
+		var required []string
+		if isGoWorkflow {
+			required = []string{
+				"## Task Run Evidence Protocol",
 				"## Nexus TaskRun Start Gate",
 				"taskrun.mjs start",
-				"\"sessionId\"",
-				"\"changedFiles\"",
+				"taskrun.mjs submit",
+				"sessionId",
 				"workflowRunId",
-			)
+				"$nexus-taskrun-submit",
+			}
 		} else {
-			required = append(required, "\"workflowTemplateId\"")
+			required = []string{
+				"## Task Run Evidence Protocol",
+				"POST http://127.0.0.1:8766/api/task-runs",
+				"\"projectId\"",
+				"\"workflowTemplateId\"",
+				"\"workflowType\"",
+				"\"submittedStatus\"",
+				"\"context\"",
+				"\"metrics\"",
+				"\"evidence\"",
+			}
 		}
 		for _, needle := range required {
 			if !strings.Contains(text, needle) {
 				t.Fatalf("expected %s to contain %q", file, needle)
 			}
 		}
-		if strings.HasSuffix(file, "go-bugfix.md") || strings.HasSuffix(file, "go-feature-development.md") {
+		if isGoWorkflow {
 			if !strings.Contains(text, "taskrun.mjs submit") {
 				t.Fatalf("expected %s to mention local TaskRun submission automation", file)
 			}

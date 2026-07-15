@@ -148,7 +148,7 @@ Task 2：目标 / 范围 / 验收 / 验证 / 风险
 
 - 完整工具历史、大段日志、旧 diff、无关文件阅读、被否定假设的详细推理、重复 workflow 文本、无关 learning cases。
 
-## 知识库建议门
+## KnowledgeBase Recommendation Gate
 
 工作流结束前判断本次是否发现可复用的稳定知识，例如故障模式、反模式、诊断路径、验证路径或 routing 规则。只输出建议，不自动修改知识库：
 
@@ -201,52 +201,4 @@ Windows 可使用：
 powershell -ExecutionPolicy Bypass -File .agents\skills\nexus-taskrun-submit\submit-workflow-result.ps1 -PayloadFile .nexus\task-run-bugfix.json -ContextFile .nexus\workflow-context-bugfix.json
 ```
 
-Submit endpoint:
-
-```text
-POST http://127.0.0.1:8766/api/task-runs
-```
-
-提交 body 使用 `sessionId + startedAt + endedAt` 让 Nexus 归因 token/route metrics。现有 workflow-run headers 只用于路由 telemetry，最终 payload 不得包含 `workflowId`、`workflowRunId`、`workflowTemplateId`、`workflowCopyId` 或 `X-Nexus-Workflow-Run-Id`。
-
-Payload shape：
-
-```json
-{
-  "projectId": "<nexus project id or repo name>",
-  "workflowType": "bugfix",
-  "taskTitle": "<short task title>",
-  "submittedStatus": "<success|partial_success|failed|cancelled>",
-  "sessionId": "<codex session id>",
-  "startedAt": "<ISO-8601 if known>",
-  "endedAt": "<ISO-8601 if known>",
-  "durationMs": 0,
-  "context": {
-    "agent": "bugfix-owner",
-    "model": "<model id>",
-    "rules": ["<rule ids loaded>"],
-    "skills": ["<skill ids loaded>"],
-    "tools": ["<tools used>"]
-  },
-  "metrics": {
-    "turnCount": 0,
-    "toolCallCount": 0,
-    "testRunCount": 0,
-    "retryCount": 0,
-    "errorCount": 0,
-    "filesChangedCount": 0
-  },
-  "evidence": {
-    "summary": "<what was done>",
-    "verification": {
-      "hasVerification": true,
-      "passed": true,
-      "types": ["test", "build", "manual_check"],
-      "commands": ["<commands run>"]
-    },
-    "changedFiles": [],
-    "skippedChecks": [],
-    "remainingRisks": []
-  }
-}
-```
+最终 payload 字段、禁止字段、紧凑证据规则和提交 endpoint 以 `$nexus-taskrun-submit` 为唯一来源。现有 workflow-run headers 只用于路由 telemetry；最终 payload 不得包含任何 workflow ID。

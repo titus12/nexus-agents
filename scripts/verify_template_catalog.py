@@ -66,10 +66,10 @@ GO_FEATURE_WORKFLOW_TOKENS = [
     "## 需求来源与事实冲突",
     "## Diagnosis-First 方案",
     "## 探索上下文包",
-    "## 知识库建议门",
+    "## KnowledgeBase Recommendation Gate",
     "## Nexus TaskRun Start Gate",
     "taskrun.mjs start",
-    "\"sessionId\"",
+    "sessionId",
     "success | partial_success | blocked | failed | cancelled",
 ]
 
@@ -78,11 +78,11 @@ GO_BUGFIX_WORKFLOW_TOKENS = [
     "## Diagnosis-First 方案",
     "## 修复范围与拆分决策",
     "go-04-task-decomposition.md",
-    "## 知识库建议门",
+    "## KnowledgeBase Recommendation Gate",
     "KB Recommendation:",
     "## Nexus TaskRun Start Gate",
     "taskrun.mjs start",
-    "\"sessionId\"",
+    "sessionId",
 ]
 
 CORE_WORKFLOW_FILES = [
