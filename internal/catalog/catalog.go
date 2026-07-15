@@ -567,8 +567,6 @@ func workflowSkillTemplateID(workflowID string) (string, bool) {
 	switch workflowID {
 	case "feature-development":
 		return "wf-go-feat", true
-	case "modify-existing":
-		return "wf-go-mod", true
 	case "bugfix":
 		return "wf-go-bugfix", true
 	case "code-review":
@@ -1910,17 +1908,10 @@ func btdSkillTemplates() []TemplateItem {
 		},
 		{
 			id:               "wf-go-feat",
-			summary:          "Codex skill entry for the Go feature-development workflow.",
-			content:          "Invoke with $wf-go-feat to load templates/workflows/go-feature-development.md and follow the Go development workflow.",
-			applicableAgents: []string{"sisyphus", "prometheus", "hephaestus"},
-			updatedAt:        "2026-06-22 16:30",
-		},
-		{
-			id:               "wf-go-mod",
-			summary:          "Codex skill entry for the Go existing-feature modification workflow.",
-			content:          "Invoke with $wf-go-mod to load templates/workflows/go-modify-existing.md and follow the scoped Go modification workflow.",
-			applicableAgents: []string{"hephaestus", "quick", "worker"},
-			updatedAt:        "2026-06-22 16:30",
+			summary:          "Codex skill entry for the unified Go business-change workflow.",
+			content:          "Invoke with $wf-go-feat to load templates/workflows/go-feature-development.md and follow the bounded Go business-change workflow for new features or existing behavior modifications.",
+			applicableAgents: []string{"sisyphus", "prometheus", "hephaestus", "quick", "worker"},
+			updatedAt:        "2026-07-15 00:00",
 		},
 		{
 			id:               "wf-go-bugfix",
@@ -2093,7 +2084,7 @@ func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "dev-workflow", "coding-rules", "testing", "pmconf-pattern", "quest-system", "cross-config":
 		return "templates/skills/go-" + id + ".md"
-	case "wf-go-feat", "wf-go-mod", "wf-go-bugfix", "wf-go-review", "wf-go-refactor", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature":
+	case "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-go-refactor", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature":
 		return "templates/skills/codex/" + id + "/SKILL.md"
 	default:
 		return "templates/skills/" + id + ".md"
@@ -2142,7 +2133,7 @@ func isUnityWorkflowID(id string) bool {
 
 func btdWorkflowTemplatePath(id string) string {
 	switch id {
-	case "feature-development", "modify-existing", "bugfix", "code-review", "refactor":
+	case "feature-development", "bugfix", "code-review", "refactor":
 		return "templates/workflows/go-" + id + ".md"
 	case "bug-investigation":
 		return "templates/workflows/unity-bug-investigation.md"
@@ -2175,25 +2166,14 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 	return []btdWorkflowSpec{
 		{
 			id:        "feature-development",
-			name:      "$wf-go-feat 新功能开发",
+			name:      "$wf-go-feat Go 业务变更",
 			trigger:   "$wf-go-feat",
 			owner:     "sisyphus",
-			summary:   "全新功能或较大模块开发，加载 dev-workflow 并按九步流程推进。",
-			content:   "步骤 1 前澄清需求边界；实现阶段加载 coding-rules；写测试时遵循先失败、再实现、再通过。",
-			tags:      []string{"routing", "feature", "sequence"},
+			summary:   "统一处理 Go 新功能、既有行为修改和跨文件业务调整；先探索知识与真实代码，再经目标门和质量门交付。",
+			content:   "加载规则、知识库路由和真实代码后生成待审核目标契约；必要时等待用户确认；复杂任务使用有边界的 Task Capsule Loop；每轮都通过目标门和质量门，并受证据和重试上限约束。",
+			tags:      []string{"routing", "feature", "modification", "quality-gate", "bounded-loop"},
 			status:    "ready",
-			updatedAt: "2026-06-20 11:00",
-		},
-		{
-			id:        "modify-existing",
-			name:      "$wf-go-mod 功能调整",
-			trigger:   "$wf-go-mod",
-			owner:     "hephaestus",
-			summary:   "已有功能调整，先摸清影响范围，再按单文件或多文件路径执行。",
-			content:   "codegraph/Grep 定位影响范围；读模块 skill；多文件交给 hephaestus，单文件交给 quick；最后 build 和相关 test。",
-			tags:      []string{"routing", "modify", "verification"},
-			status:    "ready",
-			updatedAt: "2026-06-20 11:01",
+			updatedAt: "2026-07-15 00:00",
 		},
 		{
 			id:        "bugfix",
@@ -2365,7 +2345,7 @@ func btdCopyStatus(templateID string) string {
 	switch templateID {
 	case "worker", "00-routing", "feature-development", "code-review":
 		return "template_updated"
-	case "quick", "03-project-model", "quest-system", "modify-existing", "bugfix":
+	case "quick", "03-project-model", "quest-system", "bugfix":
 		return "project_modified"
 	case "high-risk-api", "refactor":
 		return "diverged"
@@ -2394,8 +2374,6 @@ func btdCopyDiff(templateID string) string {
 		return "+ project: added local quest pool capacity checklist."
 	case "high-risk-api":
 		return "- template: generic high-risk checklist\n+ project: payment rollback and GM currency checklist"
-	case "modify-existing":
-		return "+ project: local module-impact checklist added before implementation."
 	case "bugfix":
 		return "+ project: local log capture path added for btd runtime crashes."
 	case "refactor":
