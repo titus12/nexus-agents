@@ -63,6 +63,10 @@ GO_FEATURE_WORKFLOW_TOKENS = [
     "每个子任务最多 2 次",
     "## 任务拆分决策",
     "## 角色与阶段",
+    "## 需求来源与事实冲突",
+    "## Diagnosis-First 方案",
+    "## 探索上下文包",
+    "## 知识库建议门",
     "success | partial_success | blocked | failed | cancelled",
 ]
 
