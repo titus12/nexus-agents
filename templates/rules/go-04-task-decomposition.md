@@ -66,7 +66,7 @@ Task 名称：
 
 ## subagent 编排约束
 
-`$wf-go-feat` 和 `$wf-go-bugfix` 是 subagent 编排工作流。选择这些 workflow 即授权 Owner 按角色拆分探索、诊断、实现、验证和复核任务；不需要用户为每一个 Capsule 重复授权。
+`$wf-go-feat`、`$wf-go-bugfix` 和 `$wf-go-review` 是 subagent 编排工作流。选择这些 workflow 即授权 Owner 按角色拆分探索、诊断、实现、验证和复核任务；不需要用户为每一个 Capsule 重复授权。
 
 Owner 不应把大任务直接交给一个 subagent。先按本规则拆分，再派发边界清晰的 Capsule。默认由 Owner 负责任务拆分、上下文压缩、集成、目标门、质量门和最终交付。
 

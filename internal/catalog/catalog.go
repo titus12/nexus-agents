@@ -2119,7 +2119,7 @@ func workflowTemplateSourcePaths(id string) []string {
 		routing = "templates/rules/unity-00-routing.md"
 	}
 	paths := []string{btdWorkflowTemplatePath(id), btdWorkflowGraphTemplatePath(id), routing}
-	if id == "feature-development" || id == "bugfix" {
+	if id == "feature-development" || id == "bugfix" || id == "code-review" {
 		paths = append(paths, "templates/rules/go-04-task-decomposition.md")
 	}
 	return paths

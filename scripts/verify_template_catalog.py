@@ -85,6 +85,18 @@ GO_BUGFIX_WORKFLOW_TOKENS = [
     "sessionId",
 ]
 
+GO_REVIEW_WORKFLOW_TOKENS = [
+    "## Nexus TaskRun Start Gate",
+    "## 强约束",
+    "## 审查上下文包",
+    "## 审查范围与拆分决策",
+    "Reviewer Logic",
+    "Reviewer Perf",
+    "Reviewer Security",
+    "## KnowledgeBase Recommendation Gate",
+    "taskrun.mjs submit",
+]
+
 CORE_WORKFLOW_FILES = [
     "design.md",
     "research.md",
@@ -186,6 +198,10 @@ def main() -> None:
     require_tokens(
         "templates/workflows/go-bugfix.md",
         GO_BUGFIX_WORKFLOW_TOKENS,
+    )
+    require_tokens(
+        "templates/workflows/go-code-review.md",
+        GO_REVIEW_WORKFLOW_TOKENS,
     )
 
     for rel in [

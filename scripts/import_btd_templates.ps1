@@ -172,14 +172,11 @@ Use for review of the current change set.
 
 Workflow:
 
-1. Dispatch reviewers in parallel:
-   - ``go-reviewer-logic``
-   - ``go-reviewer-perf``
-   - ``go-reviewer-security``
-2. Merge findings.
-3. Deduplicate repeated issues.
-4. Sort by severity.
-5. Report concrete file and line references when available.
+1. Initialize a local TaskRun payload before reading the diff.
+2. Build a minimal review context from goals, diff, verification evidence, risks and requested focus areas.
+3. Load ``go-04-task-decomposition.md`` and split a large diff into bounded review Capsules.
+4. Dispatch logic, performance and security reviewers with only their relevant Capsule.
+5. Sisyphus deduplicates findings, classifies severity, records coverage gaps and submits the final TaskRun payload once.
 "@
   "design.md" = @"
 # design

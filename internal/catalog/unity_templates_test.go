@@ -15,6 +15,7 @@ func TestUnityWorkflowTemplatesIncludeTaskRunProtocol(t *testing.T) {
 		filepath.Join(root, "templates", "workflows", "unity-ui-feature-development.md"),
 		filepath.Join(root, "templates", "workflows", "go-bugfix.md"),
 		filepath.Join(root, "templates", "workflows", "go-feature-development.md"),
+		filepath.Join(root, "templates", "workflows", "go-code-review.md"),
 		filepath.Join(root, "templates", "skills", "codex", "wf-unity-bugfix", "SKILL.md"),
 		filepath.Join(root, "templates", "skills", "codex", "wf-unity-logic-mod", "SKILL.md"),
 		filepath.Join(root, "templates", "skills", "codex", "wf-unity-ui-feature", "SKILL.md"),
@@ -27,7 +28,7 @@ func TestUnityWorkflowTemplatesIncludeTaskRunProtocol(t *testing.T) {
 			t.Fatalf("read %s: %v", file, err)
 		}
 		text := string(data)
-		isGoWorkflow := strings.HasSuffix(file, "go-bugfix.md") || strings.HasSuffix(file, "go-feature-development.md")
+		isGoWorkflow := strings.HasSuffix(file, "go-bugfix.md") || strings.HasSuffix(file, "go-feature-development.md") || strings.HasSuffix(file, "go-code-review.md")
 		var required []string
 		if isGoWorkflow {
 			required = []string{

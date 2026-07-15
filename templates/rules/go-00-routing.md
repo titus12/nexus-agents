@@ -16,7 +16,7 @@
 
 - 新功能、既有行为修改和跨文件业务调整统一使用 `$wf-go-feat`。
 - `$wf-go-feat` 在方案阶段必须加载 `go-04-task-decomposition.md`，输出任务拆分决策后才能实施。
-- `$wf-go-feat` 和 `$wf-go-bugfix` 选择后默认按角色编排 subagent；Owner 必须先按 `go-04-task-decomposition.md` 拆分，禁止将超过预算的大任务直接派给单个 subagent。
+- `$wf-go-feat`、`$wf-go-bugfix` 和 `$wf-go-review` 选择后默认按角色编排 subagent；Owner 必须先按 `go-04-task-decomposition.md` 拆分，禁止将超过预算的大任务或大 diff 直接派给单个 subagent。
 - 修改前必须先加载适用 Rules、知识库 routing 和真实代码证据，并生成待审核目标契约。
 
 ## 全局底线
