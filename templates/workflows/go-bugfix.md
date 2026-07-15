@@ -7,6 +7,16 @@
 
 适用于 Go 运行时错误、崩溃、失败测试和行为类 bug；目标是交付一个小范围的根因修复。
 
+## Nexus TaskRun Start Gate
+
+在知识检索、复现、诊断、任务拆分、subagent 派发或编辑前，初始化本地 TaskRun payload。优先使用跨平台 Node helper，任务标题使用 ASCII：
+
+```text
+node .agents/skills/nexus-taskrun-submit/taskrun.mjs start --projectId <projectId> --workflowType bugfix --taskTitle "<ascii task title>" --payloadFile .nexus/task-run-bugfix.json --contextFile .nexus/workflow-context-bugfix.json
+```
+
+仅当 payload 存在且包含 `sessionId` 与 `startedAt` 后继续。初始化失败时停止工作流并报告精确错误。
+
 ## Codex 执行说明
 
 - 默认由一个主线程担任 **Bugfix Owner**，并按角色编排 subagent。选择 `$wf-go-bugfix` 即授权 Owner 派发复现、诊断、实现、验证和复核 Capsule；禁止把超过预算的大 bugfix 直接交给单个 subagent。
@@ -177,36 +187,37 @@ Role 应反映当前阶段，例如：`owner`、`debugger`、`reproducer`、`imp
 
 ## Task Run Evidence Protocol
 
-工作流结束时，向 Nexus 提交 Task Run Evidence，而不是在模型回复中自行打分。如果本地 API 不可用，则在最终回复中附上同样的 JSON payload，方便用户稍后提交。
+工作流结束时，完成同一个 `.nexus/task-run-bugfix.json` payload，并调用 `$nexus-taskrun-submit` **只提交一次**。payload 不得删除；成功或失败后都在最终回复中报告 payload/context 文件路径。
 
-推荐通过 `$nexus-taskrun-submit` 自动提交：
-
-```text
-go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-go-bugfix.json
-```
-
-如果 Nexus 未运行但希望直接写入本地 evaluation store：
+优先使用：
 
 ```text
-go run .\cmd\nexus-agents submit-task-run --file .nexus\task-run-go-bugfix.json --use-store
+node .agents/skills/nexus-taskrun-submit/taskrun.mjs submit --payloadFile .nexus/task-run-bugfix.json --contextFile .nexus/workflow-context-bugfix.json
 ```
 
-Endpoint：
+Windows 可使用：
+
+```text
+powershell -ExecutionPolicy Bypass -File .agents\skills\nexus-taskrun-submit\submit-workflow-result.ps1 -PayloadFile .nexus\task-run-bugfix.json -ContextFile .nexus\workflow-context-bugfix.json
+```
+
+Submit endpoint:
 
 ```text
 POST http://127.0.0.1:8766/api/task-runs
 ```
+
+提交 body 使用 `sessionId + startedAt + endedAt` 让 Nexus 归因 token/route metrics。现有 workflow-run headers 只用于路由 telemetry，最终 payload 不得包含 `workflowId`、`workflowRunId`、`workflowTemplateId`、`workflowCopyId` 或 `X-Nexus-Workflow-Run-Id`。
 
 Payload shape：
 
 ```json
 {
   "projectId": "<nexus project id or repo name>",
-  "workflowTemplateId": "go-bugfix",
-  "workflowCopyId": "<project workflow copy id if known>",
   "workflowType": "bugfix",
   "taskTitle": "<short task title>",
-  "submittedStatus": "<success|partial_success|failed|cancelled|blocked>",
+  "submittedStatus": "<success|partial_success|failed|cancelled>",
+  "sessionId": "<codex session id>",
   "startedAt": "<ISO-8601 if known>",
   "endedAt": "<ISO-8601 if known>",
   "durationMs": 0,
@@ -227,16 +238,15 @@ Payload shape：
   },
   "evidence": {
     "summary": "<what was done>",
-    "finalResult": "<delivered result>",
     "verification": {
       "hasVerification": true,
       "passed": true,
       "types": ["test", "build", "manual_check"],
       "commands": ["<commands run>"]
     },
-    "unfinishedItems": [],
-    "risks": [],
-    "contextMissing": false
+    "changedFiles": [],
+    "skippedChecks": [],
+    "remainingRisks": []
   }
 }
 ```

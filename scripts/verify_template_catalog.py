@@ -67,6 +67,9 @@ GO_FEATURE_WORKFLOW_TOKENS = [
     "## Diagnosis-First 方案",
     "## 探索上下文包",
     "## 知识库建议门",
+    "## Nexus TaskRun Start Gate",
+    "taskrun.mjs start",
+    "\"sessionId\"",
     "success | partial_success | blocked | failed | cancelled",
 ]
 
@@ -77,6 +80,9 @@ GO_BUGFIX_WORKFLOW_TOKENS = [
     "go-04-task-decomposition.md",
     "## 知识库建议门",
     "KB Recommendation:",
+    "## Nexus TaskRun Start Gate",
+    "taskrun.mjs start",
+    "\"sessionId\"",
 ]
 
 CORE_WORKFLOW_FILES = [

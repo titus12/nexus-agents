@@ -6,6 +6,16 @@ Entry skill: `$wf-go-feat`
 
 适用于 Go 新功能、既有行为修改和跨文件业务调整。
 
+## Nexus TaskRun Start Gate
+
+在知识检索、代码探索、任务拆分、subagent 派发或编辑前，初始化本地 TaskRun payload。优先使用跨平台 Node helper，任务标题使用 ASCII：
+
+```text
+node .agents/skills/nexus-taskrun-submit/taskrun.mjs start --projectId <projectId> --workflowType feature-development --taskTitle "<ascii task title>" --payloadFile .nexus/task-run-feature-development.json --contextFile .nexus/workflow-context-feature-development.json
+```
+
+仅当 payload 存在且包含 `sessionId` 与 `startedAt` 后继续。初始化失败时停止工作流并报告精确错误。
+
 ## 强约束
 
 1. **先探索，后实施。** 未加载适用 Rules、知识库 routing 和真实代码证据，且未生成待审核目标契约前，禁止修改代码。
@@ -168,24 +178,35 @@ X-Nexus-Workflow-Role: <current role>
 
 ## Task Run Evidence Protocol
 
-结束时调用 `$nexus-taskrun-submit` 提交真实的 Task Run Evidence；若本地 API 不可用，在最终回复中提供同一 JSON payload，供用户稍后提交。
+结束时完成同一个 `.nexus/task-run-feature-development.json` payload，并调用 `$nexus-taskrun-submit` **只提交一次**。payload 不得删除；成功或失败后都在最终回复中报告 payload/context 文件路径。
 
-Endpoint:
+优先使用：
+
+```text
+node .agents/skills/nexus-taskrun-submit/taskrun.mjs submit --payloadFile .nexus/task-run-feature-development.json --contextFile .nexus/workflow-context-feature-development.json
+```
+
+Windows 可使用：
+
+```text
+powershell -ExecutionPolicy Bypass -File .agents\skills\nexus-taskrun-submit\submit-workflow-result.ps1 -PayloadFile .nexus\task-run-feature-development.json -ContextFile .nexus\workflow-context-feature-development.json
+```
+
+Submit endpoint:
 
 ```text
 POST http://127.0.0.1:8766/api/task-runs
 ```
 
-`submittedStatus` 保持 API 状态词汇：`success | partial_success | failed | cancelled`。当工作流退出为 `blocked` 时，记录阻塞原因、未完成项和风险，并使用与实际交付相符的 API 状态。证据必须包含实际执行的验证命令、结果和未验证范围；不得把计划中的验证写成已通过。
+提交 body 使用 `sessionId + startedAt + endedAt` 让 Nexus 归因 token/route metrics。现有 workflow-run headers 只用于路由 telemetry，最终 payload 不得包含 `workflowId`、`workflowRunId`、`workflowTemplateId`、`workflowCopyId` 或 `X-Nexus-Workflow-Run-Id`。证据必须包含实际执行的验证命令、结果和未验证范围；不得把计划中的验证写成已通过。
 
 ```json
 {
   "projectId": "<nexus project id or repo name>",
-  "workflowTemplateId": "<workflow template id>",
-  "workflowCopyId": "<project workflow copy id if known>",
   "workflowType": "feature-development",
   "taskTitle": "<short task title>",
   "submittedStatus": "<success|partial_success|failed|cancelled>",
+  "sessionId": "<codex session id>",
   "startedAt": "<ISO-8601 if known>",
   "endedAt": "<ISO-8601 if known>",
   "durationMs": 0,
@@ -206,16 +227,15 @@ POST http://127.0.0.1:8766/api/task-runs
   },
   "evidence": {
     "summary": "<what was done>",
-    "finalResult": "<delivered result>",
     "verification": {
       "hasVerification": true,
       "passed": true,
       "types": ["test", "build", "manual_check"],
       "commands": ["<commands actually run>"]
     },
-    "unfinishedItems": [],
-    "risks": [],
-    "contextMissing": false
+    "changedFiles": [],
+    "skippedChecks": [],
+    "remainingRisks": []
   }
 }
 ```
