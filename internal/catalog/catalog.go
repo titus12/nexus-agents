@@ -1661,9 +1661,9 @@ func btdAgentTemplates() []TemplateItem {
 			UpdatedAt:       spec.updatedAt,
 			Status:          "ready",
 			ModelTier:       spec.model,
-			RulesCount:      4,
+			RulesCount:      5,
 			SkillsCount:     len(spec.skills),
-			RelatedRules:    []string{"00-routing", "01-communication", "02-safety", "03-project-model"},
+			RelatedRules:    []string{"00-routing", "01-communication", "02-safety", "03-project-model", "04-task-decomposition"},
 			RelatedSkills:   append([]string(nil), spec.skills...),
 			Tools:           append([]string(nil), spec.tools...),
 			MCP:             append([]string(nil), spec.mcp...),
@@ -1715,6 +1715,12 @@ func btdRuleTemplates() []TemplateItem {
 			summary:   "定义 btd-game-server 的 Actor 模型、xbean 事务、配置层和 Manager 模式约束。",
 			content:   "玩家状态只能在自己的 actor 内修改；数据变更必须走 DoTransaction；配置使用 WithContext；go 命令带 actor_id_uint64 tag。",
 			updatedAt: "2026-06-20 10:27",
+		},
+		{
+			id:        "04-task-decomposition",
+			summary:   "Go 任务拆分与 subagent 派发规则：按目标、范围、验证和风险约束任务规模。",
+			content:   "方案阶段必须评估业务目标、模块/package、非机械性生产文件、验证路径、高风险项和未确认假设；超出规则时必须拆分或先设计。subagent 仅在用户明确授权且 Task Capsule 边界独立、验收与验证明确时使用。",
+			updatedAt: "2026-07-15 00:00",
 		},
 		{
 			id:        "unity-00-routing",
@@ -2073,6 +2079,8 @@ func btdRuleTemplatePath(id string) string {
 		return "templates/rules/go-02-safety.md"
 	case "03-project-model":
 		return "templates/rules/go-03-project-model.md"
+	case "04-task-decomposition":
+		return "templates/rules/go-04-task-decomposition.md"
 	case "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety":
 		return "templates/rules/" + id + ".md"
 	default:
@@ -2119,7 +2127,11 @@ func workflowTemplateSourcePaths(id string) []string {
 	if isUnityWorkflowID(id) {
 		routing = "templates/rules/unity-00-routing.md"
 	}
-	return []string{btdWorkflowTemplatePath(id), btdWorkflowGraphTemplatePath(id), routing}
+	paths := []string{btdWorkflowTemplatePath(id), btdWorkflowGraphTemplatePath(id), routing}
+	if id == "feature-development" {
+		paths = append(paths, "templates/rules/go-04-task-decomposition.md")
+	}
+	return paths
 }
 
 func isUnityWorkflowID(id string) bool {

@@ -557,7 +557,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		Content     string   `json:"content"`
 	}
 	getJSON(t, server, "/api/templates/rules", &rules)
-	assertTemplateIDs(t, "rules", rules, []string{"00-routing", "01-communication", "02-safety", "03-project-model", "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety"})
+	assertTemplateIDs(t, "rules", rules, []string{"00-routing", "01-communication", "02-safety", "03-project-model", "04-task-decomposition", "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety"})
 	for _, rule := range rules {
 		displayName := strings.TrimSuffix(strings.TrimPrefix(rule.SourcePaths[0], "templates/rules/"), ".md")
 		if rule.Name != displayName || rule.Slug != displayName {

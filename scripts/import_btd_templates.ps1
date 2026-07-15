@@ -42,6 +42,18 @@ foreach ($entry in $ruleCopies.GetEnumerator()) {
   Copy-Item -LiteralPath (Join-Path $source ".claude\rules\$($entry.Key)") -Destination (Join-Path $templates "rules\$($entry.Value)") -Force
 }
 
+Set-Content -LiteralPath (Join-Path $templates "rules\go-04-task-decomposition.md") -Encoding utf8 -Value @'
+# Go 任务拆分与派发规则
+
+进入实施前，每个任务必须定义主要业务目标、依赖、允许修改范围、必须完成项、验证方式、风险和未确认假设。
+
+方案阶段必须评估业务目标数、模块/package、非机械性生产文件、独立验证路径、高风险项和未确认假设。出现多个独立目标、多个模块或验证路径、公共契约/迁移改动、未确认业务假设或高风险项时，必须拆分 Task Capsule，或先进入设计/等待用户确认。
+
+Task Capsule 必须独立可验收，并在计划中写明执行顺序、并行条件、集成点和父任务负责的总体目标门、质量门及最终验证。
+
+任务拆分默认由主线程串行执行。仅当用户明确要求并行、分工或 delegation 时，才可将边界不重叠、完成标准和验证方式明确的单一目标 Capsule 派发给 subagent。
+'@
+
 $skillCopies = @{
   "dev-workflow.md" = "go-dev-workflow.md"
   "skill-standard.md" = "skill-standard.md"

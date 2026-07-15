@@ -28,6 +28,7 @@ RULE_FILES = [
     "01-communication.md",
     "go-02-safety.md",
     "go-03-project-model.md",
+    "go-04-task-decomposition.md",
 ]
 
 SKILL_FILES = [
@@ -61,6 +62,8 @@ GO_FEATURE_WORKFLOW_TOKENS = [
     "质量门",
     "父工作流最多 3 个完整 Loop",
     "每个子任务最多 2 次",
+    "## 任务拆分决策",
+    "## 角色与阶段",
     "success | partial_success | blocked | failed | cancelled",
 ]
 
