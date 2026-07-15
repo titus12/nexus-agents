@@ -1,241 +1,341 @@
-# Go Feature Workflow Unification Design
+# Go 功能工作流统一设计
 
-**Date:** 2026-07-15  
-**Status:** Approved for implementation planning  
-**Scope:** Unify Go feature development and existing-behavior modification under `$wf-go-feat`; remove the `go-modify-existing` / `$wf-go-mod` workflow family.
+**日期：**2026-07-15
+**状态：**已确认，等待实施计划
+**范围：**将 Go 新功能开发和既有行为修改统一到 `$wf-go-feat`，完全移除 `go-modify-existing` / `$wf-go-mod` 工作流族。
 
-## Context
+## 背景
 
-The template library currently exposes two nearly identical Go change workflows:
+当前模板库对 Go 业务变更提供了两套高度重复的工作流：
 
-- `$wf-go-feat` backed by `go-feature-development`;
-- `$wf-go-mod` backed by `go-modify-existing`.
+- `$wf-go-feat`，对应 `go-feature-development`；
+- `$wf-go-mod`，对应 `go-modify-existing`。
 
-Both workflows need the same operational lifecycle: inspect project knowledge and real code, define a goal, plan and implement changes, verify results, and provide evidence. Keeping separate workflow, graph, skill, command, catalog, and test surfaces creates duplicated maintenance and forces users to classify a request as "new" versus "existing" before work starts.
+两者都需要相同的执行生命周期：探索项目知识和真实代码、明确目标、规划并实施改动、验证结果并提交证据。继续分别维护 workflow、graph、skill、command、catalog 和测试，会造成重复维护，并迫使用户在开始前判断请求属于“新功能”还是“修改已有功能”。
 
-The unified workflow must work reliably for real project work. In particular, it must:
+统一后的工作流必须更贴近实战，且稳定可维护：
 
-- use project rules, profile rules, project overlays, and knowledge-base routing before implementation;
-- make a concrete, auditable plan even when the request is initially vague;
-- decompose complex work into bounded tasks without treating every task split as subagent delegation;
-- make each task and the parent workflow pass explicit goal and quality gates;
-- stop retrying when new evidence is unavailable or a bounded retry budget is exhausted;
-- leave human approval for significant assumptions and final acceptance.
+- 实施前必须使用项目规则、技术 Profile 规则、项目 Overlay 规则和知识库路由；
+- 用户需求模糊时，AI 必须主动补齐可审核的目标、方案和质检要求；
+- 复杂任务可拆为有边界的任务，但任务拆分不等于必须使用 subagent；
+- 每个任务和整个工作流都有清晰的目标门与质量门；
+- 没有新证据或达到重试上限时，必须停止循环；
+- 重大假设由用户审核，最终交付也由用户审核。
 
-## Decision
+## 核心决策
 
-Keep `$wf-go-feat` as the sole Go business-change workflow and broaden its meaning:
+保留 `$wf-go-feat` 作为唯一的 Go 业务变更工作流，并扩大其含义：
 
-> `$wf-go-feat` handles new Go features, existing Go behavior changes, cross-file business adjustments, and medium-sized Go development tasks.
+> `$wf-go-feat` 用于 Go 新功能、既有行为修改、跨文件业务调整和中等规模的 Go 开发任务。
 
-Remove the `go-modify-existing` / `$wf-go-mod` family completely. Do not retain a compatibility alias.
+完全删除 `go-modify-existing` / `$wf-go-mod`，**不保留兼容别名**。
 
-The workflow internally records:
+工作流内部仍记录：
 
 ```text
 changeKind: feature | modification
 ```
 
-This classification influences exploration and verification emphasis only. It does not select a separate workflow, skill, command, graph, or catalog item.
+该分类只影响探索重点和质检重点；不再对应独立 workflow、skill、command、graph 或 catalog 项。
 
-## Routing Boundaries
+## 路由边界
 
 ```text
-New Go feature                         -> $wf-go-feat
-Existing Go behavior modification      -> $wf-go-feat
-Cross-file Go business adjustment      -> $wf-go-feat
-Runtime failure/root-cause repair      -> $wf-go-bugfix
-Behavior-preserving structural change  -> $wf-go-refactor
-Read-only understanding/research       -> $wf-research
-Diff review                            -> $wf-go-review
+Go 新功能                         -> $wf-go-feat
+Go 既有行为修改                   -> $wf-go-feat
+Go 跨文件业务调整                 -> $wf-go-feat
+运行时失败 / 根因修复             -> $wf-go-bugfix
+外部行为不变的结构性调整          -> $wf-go-refactor
+只读理解 / 调研                   -> $wf-research
+审查当前 diff                     -> $wf-go-review
 ```
 
-## Workflow Lifecycle
+## 工作流总览
 
 ```mermaid
 flowchart TD
-    A["Receive task"] --> B["Load context"]
-    B --> C["Explore KB and real code"]
-    C --> D["Draft auditable goal contract"]
-    D --> E{"Major assumption or high risk?"}
-    E -->|Yes| F["Wait for user confirmation"]
-    E -->|No| G["Plan work"]
+    A["接收任务"] --> B["加载上下文"]
+    B --> C["探索知识库和真实代码"]
+    C --> D["生成待审核目标契约"]
+    D --> E{"存在重大假设或高风险？"}
+    E -->|是| F["等待用户确认"]
+    E -->|否| G["制定执行计划"]
     F --> G
-    G --> H{"Complex and safely decomposable?"}
-    H -->|No| I["Execute bounded change task"]
-    H -->|Yes| J["Create task capsules"]
-    J --> K["Run task loops"]
-    K --> L["Integrate"]
-    I --> M["Goal gate"]
+    G --> H{"任务复杂且可安全拆分？"}
+    H -->|否| I["执行有边界的变更任务"]
+    H -->|是| J["创建 Task Capsule"]
+    J --> K["执行子任务 Loop"]
+    K --> L["集成"]
+    I --> M["目标门"]
     L --> M
-    M --> N["Quality gate"]
-    N -->|Pass| O["Submit evidence and user review"]
-    N -->|Repairable with new evidence and budget| P["Update plan or task"]
+    M --> N["质量门"]
+    N -->|通过| O["提交证据，交由用户审核"]
+    N -->|有新证据且未超上限| P["更新计划或任务"]
     P --> H
-    N -->|No evidence, budget exhausted, or blocked| Q["partial_success or blocked"]
+    N -->|无新证据、达到上限或阻塞| Q["partial_success 或 blocked"]
 ```
 
-### 0. Receive and classify
+## 工作流步骤
 
-Capture the user request, known constraints, prohibited files, and whether the user explicitly requested parallel or delegated work. Infer `changeKind` after initial exploration.
+### Step 0：接收与初步分类
 
-Task decomposition does not imply subagent use. The main thread executes sequentially by default. Subagents are only considered when explicitly requested or when independently bounded work has a clear benefit and is permitted by the execution environment.
+记录：
 
-### 1. Load minimum necessary context
+- 用户原始需求；
+- 已知约束与禁止修改文件；
+- 用户是否明确要求并行或 subagent；
+- 初步的 `changeKind`，最终分类在探索后确认。
 
-Load in this order:
+任务拆分不等于 subagent。默认由主线程串行推进。仅当用户明确要求，或者任务边界独立、收益明确且当前执行环境允许时，才考虑 subagent。
 
-1. `AGENTS.md` and project instructions;
-2. Go profile rules;
-3. project overlay rules;
-4. `design/KnowledgeBase/project/routing.md`;
-5. only the domain documents selected by routing;
-6. precise code, tests, configuration, call sites, and existing analogous implementations.
+### Step 1：加载最少必要上下文
 
-Prefer precise search and code graph exploration before reading large files. Report the loaded rule and knowledge paths.
-
-### 2. Explore knowledge and real code
-
-Before planning, establish:
-
-- current behavior;
-- requested behavior;
-- relevant entry points, call sites, data flow, configuration, and tests;
-- existing analogous implementations;
-- known risks;
-- practical verification methods.
-
-When the user request conflicts with evidence from code or the knowledge base, surface the conflict in the goal contract rather than silently choosing one interpretation.
-
-### 3. Draft an auditable goal contract
-
-The AI must draft a contract even when the request or quality requirements are vague:
+固定加载顺序：
 
 ```text
-Task type:
-User request:
-AI-understood objective:
-Required completion criteria:
-Optional enhancements:
-Explicit non-goals:
-Expected change scope and affected callers:
-Verification and quality criteria:
-Key assumptions and supporting evidence:
-Risks:
-User confirmation required: yes/no, with reason
+1. AGENTS.md 与项目指令
+2. Go Profile Rules
+3. 项目 Overlay Rules
+4. design/KnowledgeBase/project/routing.md
+5. routing 指向的最少量领域文档
+6. 精确的代码、测试、配置、调用方和相似实现
 ```
 
-Quality criteria may be quantitative (tests, build, performance baseline) or evidence-based (before/after behavior paths, code and call-chain review, manual acceptance steps, logs, screenshots, or review findings). The AI must not invent a numerical metric when no reliable measurement exists.
+规则：
 
-### 4. Ambiguity and risk gate
+- 优先精确搜索和 codegraph，再读取大文件；
+- 不把完整知识库一次性塞进上下文；
+- 简要报告实际加载了哪些规则和知识文件。
 
-Pause for user confirmation when any of these apply:
+### Step 2：探索知识库和真实代码
 
-- more than one reasonable business interpretation exists;
-- product rules, defaults, state transitions, rewards, or economics are undefined;
-- public APIs, protocols, database schemas, configuration formats, or migrations change;
-- existing behavior must be removed or intentionally replaced;
-- a broad refactor is required;
-- only a business owner can define acceptable quality.
+进入计划前必须回答：
 
-For low-risk, well-supported assumptions, present the contract and continue with the recommended approach. The user always retains final delivery review.
+- 当前行为是什么；
+- 用户期望行为是什么；
+- 涉及哪些入口、调用方、数据流、配置和测试；
+- 项目是否已有可复用的相似实现；
+- 主要风险是什么；
+- 如何验证。
 
-### 5. Plan and decompose
+如果用户描述与代码或知识库证据冲突，必须在目标契约中明确说明，不能静默选择一种解释。
 
-Every planned task must declare:
+### Step 3：AI 自动生成待审核目标契约
 
-- objective;
-- inputs and dependencies;
-- allowed edit scope;
-- completion criteria;
-- verification;
-- risks.
-
-Split work only when there are two or more independently verifiable deliverables, the write scopes do not overlap (or their dependency order is explicit), and decomposition reduces complexity.
-
-### 6. Task loop
-
-Each child task carries a compact task capsule:
+即使用户目标或质检要求不清晰，AI 也必须补齐：
 
 ```text
-Task objective:
-Dependencies:
-Allowed edit scope:
-Completion criteria:
-Verification:
-Current attempt:
-Evidence:
-Known risks:
+任务类型：
+用户原始需求：
+AI 理解后的目标：
+必须完成的验收标准：
+可选增强：
+明确非目标：
+预计改动范围和受影响调用方：
+验证与质检标准：
+关键假设及其证据：
+风险：
+是否需要用户确认：是/否，以及原因
 ```
 
-The task loop is:
+质检要求可以是：
+
+- **可量化的：**测试结果、构建结果、性能基线或调用次数；
+- **可证据化的：**前后行为路径、代码与调用链审查、人工验收步骤、日志、截图或 review 结论。
+
+没有可靠度量时，AI 不得虚构数值指标。
+
+### Step 4：歧义与风险门
+
+以下情况必须暂停，等待用户确认：
+
+- 存在多个合理的业务解释；
+- 产品规则、默认值、状态流转、奖励或经济规则未定义；
+- 改动公共 API、协议、数据库 schema、配置格式或迁移；
+- 需要删除或有意替换既有行为；
+- 需要大范围重构；
+- 只有业务负责人才能定义可接受的质量标准。
+
+对于低风险且有充分代码/知识库依据的假设，AI 展示目标契约后可按推荐方案继续；用户始终保留最终交付审核权。
+
+### Step 5：制定计划与决定是否拆任务
+
+每个计划任务必须声明：
 
 ```text
-minimal exploration -> minimal implementation -> task goal check -> task quality check
+目标
+输入与依赖
+允许修改范围
+完成标准
+验证方式
+风险
 ```
 
-A task returns its completion status, changed files, implementation rationale, verification results, and residual risks. Parent integration is required; a task completion report is not proof of whole-workflow success.
+只有同时满足以下条件才拆任务：
 
-### 7. Integrate
+- 至少有两个可独立验证的交付物；
+- 每个任务有清晰目标和验收标准；
+- 写入范围不重叠，或依赖顺序明确；
+- 拆分确实降低复杂度。
 
-The parent workflow checks task boundaries, interfaces, data flow, error handling, conflicts, and total verification scope. It updates the goal contract when integration changes a previously stated assumption.
+不应拆分的情况：
 
-### 8. Goal gate
+- 同一个核心数据流或状态机；
+- 需求尚未稳定；
+- 子任务必须反复读取彼此未完成的实现；
+- 只是为了表面并行。
 
-Verify that every required completion criterion in the contract is satisfied, every required task is complete, non-goals were not unintentionally changed, and relevant call sites, configuration, and behavior paths are covered.
+### Step 6：子任务 Loop
 
-If the goal gate fails, create the smallest necessary follow-up task. Return to exploration if the overall understanding is incorrect. Pause for user confirmation if a business decision is required.
-
-### 9. Quality gate
-
-All changes must satisfy:
-
-- project instructions, rules, and overlays;
-- minimal and relevant diff scope;
-- appropriate error handling, boundary handling, and logging;
-- no debug residue, secrets, or forbidden-file edits;
-- executed and accurately reported tests, builds, and checks;
-- explicit classification of failed or unavailable validation.
-
-The Go profile quality gate additionally checks affected package tests, necessary builds, API/protocol/configuration compatibility, concurrency/null/timeout/retry/idempotency risks, configuration loading, error propagation, and affected callers.
-
-### 10. Retry budget and exit
-
-Default limits:
+每个子任务携带一个紧凑的 Task Capsule：
 
 ```text
-Parent workflow: at most 3 complete loops
-Each task: at most 2 implementation-quality attempts
-Same failure: never repeat twice without new evidence
+子任务目标：
+依赖：
+允许修改范围：
+完成标准：
+验证方式：
+当前尝试次数：
+已有证据：
+已知风险：
 ```
 
-Exit with `partial_success` or `blocked` when the retry budget is exhausted, no new evidence exists, the environment or permissions block validation, or the next action exceeds the approved contract.
-
-Final output contains completed and unfinished objectives, changed files, commands and results, user review items, risks, and one of:
+子任务循环：
 
 ```text
-success | partial_success | blocked | failed | cancelled
+最小探索 -> 最小实现 -> 子目标检查 -> 子任务质量检查
 ```
 
-## Other Workflow Optimization
+子任务必须返回：
 
-| Workflow | Target role | Optimization |
+```text
+是否完成目标
+改动文件
+关键实现理由
+验证命令与结果
+剩余风险或阻塞项
+```
+
+子任务完成报告不是整体成功证明，必须由父任务集成。
+
+### Step 7：集成
+
+主线程统一检查：
+
+- 子任务是否越界；
+- 接口、数据流和错误处理是否一致；
+- 是否存在集成冲突；
+- 是否需要更新总目标契约；
+- 最终验证范围是否完整。
+
+### Step 8：目标门
+
+目标门只验证：
+
+> 目标契约中的全部“必须完成项”是否真的完成。
+
+检查：
+
+- 每个必须完成项是否有证据；
+- 每个必需子任务是否完成；
+- 非目标是否被意外触及；
+- 调用方、配置和行为路径是否有遗漏。
+
+处理方式：
+
+- 缺少明确点：创建最小补充任务；
+- 整体理解有误：返回探索和计划；
+- 需要业务选择：等待用户确认。
+
+### Step 9：质量门
+
+所有改动必须满足：
+
+```text
+- 遵守项目指令、Rules 与 Overlay
+- diff 最小且与目标相关
+- 错误处理、边界处理与日志合理
+- 无调试残留、秘密信息或禁止文件改动
+- 实际执行并如实报告测试、构建和检查
+- 明确记录失败或无法执行的验证
+```
+
+Go Profile 额外检查：
+
+```text
+- 受影响 package 的测试
+- 必要时的 go build
+- API / 协议 / 配置兼容性
+- 并发、空值、超时、重试、幂等性风险
+- 配置加载、错误传播和受影响调用方
+```
+
+当需求无法量化时，质量证据可以是：
+
+```text
+- 前后行为路径对比
+- 调用链与 diff 证据
+- 人工验收步骤
+- 日志或截图
+- Review 结论
+- 已知风险与未覆盖范围
+```
+
+### Step 10：循环上限与退出
+
+默认上限：
+
+```text
+父工作流：最多 3 个完整 Loop
+每个子任务：最多 2 次“实现-质检”尝试
+同一失败：没有新证据时禁止连续重复两次
+```
+
+一个完整 Loop 定义为：
+
+```text
+计划/拆解 -> 实施/集成 -> 目标门 -> 质量门
+```
+
+以下情况必须以 `partial_success` 或 `blocked` 退出：
+
+- 达到重试上限；
+- 同一失败重复且没有新证据；
+- 环境、权限、外部服务阻塞验证；
+- 下一步超出已审核目标契约，例如公共 API、迁移或大范围改造；
+- 关键业务决策尚未得到用户确认。
+
+最终输出必须包含：
+
+```text
+已完成目标
+未完成目标
+改动文件
+验证命令与结果
+需要用户审核的关键点
+已知风险
+状态：success / partial_success / blocked / failed / cancelled
+```
+
+## 其它工作流的优化定位
+
+| 工作流 | 目标角色 | 优化方案 |
 |---|---|---|
-| `wf-go-feat` | Primary Go change workflow | Unified lifecycle described above. |
-| `wf-go-mod` | Removed | No alias, skill, command, workflow, graph, catalog item, or tests remain. |
-| `wf-go-bugfix` | Diagnose and repair | Keep independent; require reproduction and root-cause evidence, then reuse goal/quality gates and bounded loops. |
-| `wf-go-refactor` | Behavior-preserving structural work | Keep independent; contract fixes external behavior as unchanged and each stage remains buildable. |
-| `wf-go-review` | Standalone or embedded quality gate | Use independently for a diff or as a high-risk quality-gate expansion with logic/performance/security review. |
-| `wf-research` | Read-only discovery | Produce a change brief with relevant paths, evidence, assumptions, risks, and recommended task decomposition; do not implement. |
-| `wf-design` | Decision and design workflow | Resolve unclear product or technical decisions before work enters the change lifecycle. |
-| `wf-subagents` | Execution strategy | Invoke only for independently scoped tasks; not a default business workflow. |
-| `wf-commit` | Terminal delivery gate | Run only after goal and quality gates pass. |
-| `wf-lark` | Integration profile | Load as needed for external system operations rather than competing with software-development workflows. |
-| `wf-kb-maintenance` | Knowledge-base maintenance | Validate routing, stale information, and duplicated hard rules without implementing business changes. |
+| `wf-go-feat` | Go 变更主工作流 | 使用本文定义的统一生命周期。 |
+| `wf-go-mod` | 删除 | 不保留 alias、skill、command、workflow、graph、catalog 或测试。 |
+| `wf-go-bugfix` | 诊断与修复 | 保持独立；强调复现和根因证据，复用目标门、质量门与循环上限。 |
+| `wf-go-refactor` | 行为不变的结构调整 | 保持独立；目标契约固定“外部行为不变”，每阶段都必须可构建。 |
+| `wf-go-review` | 独立或嵌入式质量门 | 可以独立审查 diff，也可作为高风险任务的逻辑/性能/安全质量门扩展。 |
+| `wf-research` | 只读探索 | 输出 Change Brief：路径、证据、假设、风险和建议拆分；不直接实现。 |
+| `wf-design` | 需求与方案决策 | 当业务规则或技术边界不清楚时，先产出可审核设计。 |
+| `wf-subagents` | 执行策略 | 只用于边界独立的任务；不是默认业务入口。 |
+| `wf-commit` | 终态交付门 | 仅在目标门和质量门都通过后使用。 |
+| `wf-lark` | 集成 Profile | 按需加载外部系统能力，不与软件开发工作流竞争。 |
+| `wf-kb-maintenance` | 知识库维护 | 检查路由、陈旧信息和重复硬规则，不直接实现业务改动。 |
 
-## Required Template and Catalog Changes
+## 需要修改的模板与 Catalog
 
-Modify:
+修改：
 
 ```text
 templates/workflows/go-feature-development.md
@@ -244,10 +344,10 @@ templates/skills/codex/wf-go-feat/SKILL.md
 templates/rules/go-00-routing.md
 templates/commands/claude/wf-go-feat.md
 internal/catalog/...
-internal/httpapi/... tests and catalog tests
+internal/httpapi/... 的测试和 catalog 测试
 ```
 
-Remove:
+删除：
 
 ```text
 templates/workflows/go-modify-existing.md
@@ -256,11 +356,18 @@ templates/skills/codex/wf-go-mod/
 templates/commands/claude/wf-go-mod.md
 ```
 
-Also remove all `go-modify-existing`, `modify-existing`, and `wf-go-mod` catalog mappings, skill references, command projections, UI/API expectations, synchronization expectations, and tests.
+同时删除所有 `go-modify-existing`、`modify-existing` 和 `wf-go-mod` 的：
 
-## Non-Goals
+- catalog 映射；
+- skill 引用；
+- command projection；
+- UI/API 预期；
+- 项目同步预期；
+- 测试。
 
-- Do not merge bugfix or refactor into `$wf-go-feat`.
-- Do not make subagent execution the default.
-- Do not copy BTD-specific PMT/SSH operational rules into the global Go profile.
-- Do not replace Go and Unity profile-specific rules or verification with a generic checklist.
+## 非目标
+
+- 不将 bugfix 或 refactor 合并进 `$wf-go-feat`；
+- 不让 subagent 成为默认执行方式；
+- 不将 BTD 特有的 PMT/SSH 运维规则复制到全局 Go Profile；
+- 不用通用 checklist 替换 Go 和 Unity 各自的 Profile 规则和验证方式。
