@@ -108,7 +108,7 @@ try {
   if ($createdRule.kind -ne "rule") {
     throw "Template create did not return a rule."
   }
-  Invoke-WebRequest -UseBasicParsing -Method Delete -TimeoutSec 5 "$base/api/templates/rules/$($createdRule.id)" | Out-Null
+  Invoke-WebRequest -UseBasicParsing -Method Delete -TimeoutSec 5 "$base/api/templates/.claude/rules/$($createdRule.id)" | Out-Null
 
   $agents = Invoke-Json "$base/api/templates/agents"
   if ($agents[0].modelTier -eq $null -or $agents[0].relatedRules.Count -eq 0 -or $agents[0].content -eq $null) {

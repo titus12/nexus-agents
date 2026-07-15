@@ -20,7 +20,7 @@ const (
 	maxFileTokens            = 1500
 )
 
-var knowledgePathPattern = regexp.MustCompile(`(?:design/KnowledgeBase/[^\s\])'"` + "`" + `]+|(?:\./|\.\./)[^\s\])'"` + "`" + `]+\.md)`)
+var knowledgePathPattern = regexp.MustCompile(`(?:KnowledgeBase/[^\s\])'"` + "`" + `]+|(?:\./|\.\./)[^\s\])'"` + "`" + `]+\.md)`)
 
 func Retrieve(projectRoot string, query string, options RetrieveOptions) (RetrievalResult, error) {
 	options = normalizeRetrieveOptions(options)
@@ -405,7 +405,7 @@ func packKnowledgeBudget(required, optional, related []KnowledgeContextItem, max
 
 func buildLoadedKnowledgeMarkdown(required []KnowledgeContextItem) string {
 	if len(required) == 0 {
-		return "## Loaded Knowledge\n\nNo specific KnowledgeBase files matched this task. Read `design/KnowledgeBase/project/routing.md` first when present and select the relevant domain manually."
+		return "## Loaded Knowledge\n\nNo specific KnowledgeBase files matched this task. Read `KnowledgeBase/project/routing.md` first when present and select the relevant domain manually."
 	}
 	lines := []string{"## Loaded Knowledge", ""}
 	for _, item := range required {

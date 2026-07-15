@@ -353,7 +353,7 @@ def main() -> None:
     expect("promote" not in (common_js + pages_js).lower(), "V1 must not expose project-to-template promotion")
 
     mock_js = read(DESIGN / "js/mock-data.js")
-    for token in ["project: \"all\"", "project: \"btd-game-server\"", "content:", "templateId:", "baseVersion:", "baseHash:", "localVersion:", "syncMode: \"manual\"", "templates/skills/go-testing.md", "projectConfigSets", "status: \"diverged\"", "status: \"detached\""]:
+    for token in ["project: \"all\"", "project: \"btd-game-server\"", "content:", "templateId:", "baseVersion:", "baseHash:", "localVersion:", "syncMode: \"manual\"", "templates/.claude/skills/go-testing/SKILL.md", "projectConfigSets", "status: \"diverged\"", "status: \"detached\""]:
         expect(token in mock_js, f"mock data missing project/content token {token}")
 
     plan_docs = {

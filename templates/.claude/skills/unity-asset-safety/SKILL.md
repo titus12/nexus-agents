@@ -1,0 +1,1 @@
+# unity-asset-safety`n`nBefore changing assets, inspect existing Prefab/Scene/.meta/generated/imported file ownership. Do not regenerate or rewrite broad asset trees without explicit need. Review serialized references and .meta identity after changes.

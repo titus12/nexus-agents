@@ -1,1 +1,0 @@
-﻿# unity-testing`n`nRun or request Unity EditMode/PlayMode tests when applicable. For manual checks, document scene/page path, reproduction steps, Console state, expected result, actual result, and remaining risk.

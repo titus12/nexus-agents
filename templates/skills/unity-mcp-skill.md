@@ -1,1 +1,0 @@
-﻿# unity-mcp-skill`n`nUse Unity MCP for compile checks, Console reads, tests, Scene/GameObject/component inspection, screenshots, assets, Prefabs, and safe editor automation. Prefer read-only inspection before mutations and record skipped checks with reasons.

@@ -1,3 +1,0 @@
-﻿name = "unity-workflow-evaluator"
-model = "deepseek-v4-flash"
-model_reasoning_effort = "high"

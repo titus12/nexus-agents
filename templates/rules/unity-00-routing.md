@@ -1,1 +1,0 @@
-# unity-00-routing`n`nRoute Unity work through explicit workflow entries: `$wf-unity-bugfix`, `$wf-unity-logic-mod`, `$wf-unity-ui-feature`.`n`nUse bug investigation for failures, logic modification for non-UI behavior changes, and UI feature development for UGUI, TMP, UIArchitect, Prefab, Scene, Resolver, or presentation work.

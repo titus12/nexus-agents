@@ -29,6 +29,11 @@ RULE_FILES = [
     "go-02-safety.md",
     "go-03-project-model.md",
     "go-04-task-decomposition.md",
+    "knowledge-retrieval.md",
+    "uiarchitect/uiarchitect-asset-safety.md",
+    "uiarchitect/uiarchitect-editor-runtime-boundary.md",
+    "uiarchitect/uiarchitect-generated-safety.md",
+    "uiarchitect/uiarchitect-portability.md",
 ]
 
 SKILL_FILES = [
@@ -133,7 +138,7 @@ def require_tokens(rel: str, tokens: list[str]) -> str:
 
 
 def require_workflow_graph(markdown_filename: str) -> None:
-    graph_rel = f"templates/workflows/{Path(markdown_filename).stem}.graph.json"
+    graph_rel = f"templates/.claude/workflows/{Path(markdown_filename).stem}.graph.json"
     graph_text = read(graph_rel)
     try:
         graph = json.loads(graph_text)
@@ -147,12 +152,15 @@ def require_workflow_graph(markdown_filename: str) -> None:
 def main() -> None:
     expect(TEMPLATES.is_dir(), "templates directory must exist")
     expect(not (TEMPLATES / "profiles").exists(), "templates/profiles must not exist")
-    expect(not (TEMPLATES / "agents" / "profiles").exists(), "agent profiles must not exist")
-    expect(not (TEMPLATES / "workflows" / "profiles").exists(), "workflow profiles must not exist")
-    expect((TEMPLATES / "agents" / "claude").is_dir(), "templates/agents/claude must exist")
-    expect((TEMPLATES / "agents" / "codex").is_dir(), "templates/agents/codex must exist")
-    direct_agent_files = [path for path in (TEMPLATES / "agents").iterdir() if path.is_file()]
-    expect(not direct_agent_files, "agent templates must be separated into claude/ and codex/")
+    expect(not (TEMPLATES / "agents").exists(), "legacy templates/agents must not exist")
+    expect(not (TEMPLATES / "rules").exists(), "legacy templates/rules must not exist")
+    expect(not (TEMPLATES / "skills").exists(), "legacy templates/skills must not exist")
+    expect(not (TEMPLATES / "workflows").exists(), "legacy templates/workflows must not exist")
+    expect(not (TEMPLATES / "README.md").exists(), "templates/README.md must not exist")
+    expect((TEMPLATES / ".claude" / "agents").is_dir(), "templates/.claude/agents must exist")
+    expect((TEMPLATES / ".codex" / "agents").is_dir(), "templates/.codex/agents must exist")
+    expect((TEMPLATES / ".agents" / "skills").is_dir(), "templates/.agents/skills must exist")
+    expect((TEMPLATES / "KnowledgeBase" / "framework").is_dir(), "templates/KnowledgeBase/framework must exist")
 
     yaml_files = [
         path
@@ -161,69 +169,83 @@ def main() -> None:
         and not (
             path.name == "openai.yaml"
             and path.parent.name == "agents"
-            and TEMPLATES / "skills" / "codex" in path.parents
+            and TEMPLATES / ".agents" / "skills" in path.parents
         )
     ]
     expect(not yaml_files, "templates must use copied md/toml files, not yaml manifests")
 
-    require_tokens(
-        "templates/README.md",
-        ["Template Library", "copied from btd-game-server", "go-", "No YAML manifests"],
-    )
-
     for agent in AGENTS:
         require_tokens(
-            f"templates/agents/claude/go-{agent}.md",
+            f"templates/.claude/agents/go-{agent}.md",
             ["---", "name:", "description:"],
         )
         require_tokens(
-            f"templates/agents/codex/go-{agent}.toml",
+            f"templates/.codex/agents/go-{agent}.toml",
             [f'name = "{agent}"', "model =", "developer_instructions"],
         )
 
     for filename in RULE_FILES:
-        require_tokens(f"templates/rules/{filename}", ["# "])
+        require_tokens(f"templates/.claude/rules/{filename}", ["# "])
 
     for filename in SKILL_FILES:
-        require_tokens(f"templates/skills/{filename}", ["# "])
+        skill_id = Path(filename).stem
+        require_tokens(f"templates/.claude/skills/{skill_id}/SKILL.md", ["# "])
 
     for filename in GO_WORKFLOW_FILES:
-        read(f"templates/workflows/{filename}")
+        read(f"templates/.claude/workflows/{filename}")
         require_workflow_graph(filename)
 
     require_tokens(
-        "templates/workflows/go-feature-development.md",
+        "templates/.claude/workflows/go-feature-development.md",
         GO_FEATURE_WORKFLOW_TOKENS,
     )
     require_tokens(
-        "templates/workflows/go-bugfix.md",
+        "templates/.claude/workflows/go-bugfix.md",
         GO_BUGFIX_WORKFLOW_TOKENS,
     )
     require_tokens(
-        "templates/workflows/go-code-review.md",
+        "templates/.claude/workflows/go-code-review.md",
         GO_REVIEW_WORKFLOW_TOKENS,
     )
 
     for rel in [
-        "templates/workflows/go-modify-existing.md",
-        "templates/workflows/go-modify-existing.graph.json",
-        "templates/commands/claude/wf-go-mod.md",
-        "templates/skills/codex/wf-go-mod/SKILL.md",
-        "templates/workflows/go-refactor.md",
-        "templates/workflows/go-refactor.graph.json",
-        "templates/commands/claude/wf-go-refactor.md",
-        "templates/skills/codex/wf-go-refactor/SKILL.md",
+        "templates/.claude/workflows/go-modify-existing.md",
+        "templates/.claude/workflows/go-modify-existing.graph.json",
+        "templates/.claude/commands/wf-go-mod.md",
+        "templates/.agents/skills/wf-go-mod/SKILL.md",
+        "templates/.claude/workflows/go-refactor.md",
+        "templates/.claude/workflows/go-refactor.graph.json",
+        "templates/.claude/commands/wf-go-refactor.md",
+        "templates/.agents/skills/wf-go-refactor/SKILL.md",
     ]:
         expect(not (ROOT / rel).exists(), f"obsolete Go workflow template remains: {rel}")
 
     for filename in CORE_WORKFLOW_FILES:
-        read(f"templates/workflows/{filename}")
+        read(f"templates/.claude/workflows/{filename}")
         require_workflow_graph(filename)
 
-    require_tokens(
-        "templates/go-btd-game-server.md",
-        ["# go-btd-game-server", "go build -tags actor_id_uint64 ./cmd/server/"],
-    )
+    for skill_dir, required_files in {
+        "kb-maintenance": ["SKILL.md", "agents/openai.yaml"],
+        "kb-system-curator": [
+            "SKILL.md",
+            "agents/openai.yaml",
+            "references/decomposition-rules.md",
+            "references/entry-plan-template.md",
+            "references/exploration-and-validation.md",
+            "references/kb-gates.md",
+            "references/okf-checklist.md",
+        ],
+        "nexus-evaluation-review": ["SKILL.md"],
+        "nexus-taskrun-submit": [
+            "SKILL.md",
+            "task-run-template.json",
+            "start-workflow-run.ps1",
+            "submit-workflow-result.ps1",
+            "taskrun.mjs",
+        ],
+    }.items():
+        for filename in required_files:
+            read(f"templates/.agents/skills/{skill_dir}/{filename}")
 
     print("OK: template catalog verified")
 

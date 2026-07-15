@@ -1,0 +1,108 @@
+{
+  "id": "bug-investigation",
+  "name": "wf-unity-bugfix",
+  "nodes": [
+    {
+      "id": "trigger",
+      "y": 210,
+      "agent": "-",
+      "category": "event",
+      "type": "input",
+      "x": 48,
+      "label": "$wf-unity-bugfix",
+      "detail": "Unity workflow entry receives the request."
+    },
+    {
+      "id": "route",
+      "y": 210,
+      "agent": "skill resolver",
+      "category": "condition",
+      "type": "condition",
+      "x": 300,
+      "label": "unity workflow skill",
+      "detail": "Load Unity workflow rules and skills."
+    },
+    {
+      "id": "owner",
+      "y": 210,
+      "agent": "unity-debugger",
+      "category": "action",
+      "type": "agent",
+      "x": 560,
+      "label": "unity-debugger",
+      "detail": "Reproduce Unity failure, identify root cause, fix, test, and review."
+    },
+    {
+      "id": "developer",
+      "y": 140,
+      "agent": "unity-bugfix-developer",
+      "category": "action",
+      "type": "agent",
+      "x": 820,
+      "label": "unity-bugfix-developer",
+      "detail": "Implement smallest root-cause fix."
+    },
+    {
+      "id": "tester",
+      "y": 320,
+      "agent": "unity-regression-evaluator",
+      "category": "action",
+      "type": "agent",
+      "x": 820,
+      "label": "unity-regression-evaluator",
+      "detail": "Verify reproduction, tests, compile, and Console evidence."
+    },
+    {
+      "id": "review",
+      "y": 210,
+      "agent": "unity-bugfix-reviewer",
+      "category": "action",
+      "type": "agent",
+      "x": 1080,
+      "label": "unity-bugfix-reviewer",
+      "detail": "Review root-cause alignment, scope, and Unity safety."
+    },
+    {
+      "id": "output",
+      "y": 210,
+      "agent": "unity-debugger",
+      "category": "data",
+      "type": "output",
+      "x": 1600,
+      "label": "deliver",
+      "detail": "Return result, evidence, skipped checks, and remaining risks."
+    }
+  ],
+  "edges": [
+    {
+      "label": "command",
+      "from": "trigger",
+      "to": "route"
+    },
+    {
+      "label": "matched",
+      "from": "route",
+      "to": "owner"
+    },
+    {
+      "label": "root cause",
+      "from": "owner",
+      "to": "developer"
+    },
+    {
+      "label": "diff",
+      "from": "developer",
+      "to": "tester"
+    },
+    {
+      "label": "verification",
+      "from": "tester",
+      "to": "review"
+    },
+    {
+      "label": "reviewed evidence",
+      "from": "review",
+      "to": "output"
+    }
+  ]
+}

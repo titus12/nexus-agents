@@ -39,8 +39,9 @@ func scanProjectConfigSetForProject(projectToken string, projectRoot string, lib
 
 	var copies []ProjectCopy
 	copies = append(copies, scanAgentCopies(projectToken, projectRoot, library.Agents)...)
+	copies = append(copies, scanProjectRootRuleCopies(projectToken, projectRoot, library.Rules)...)
 	copies = append(copies, scanMarkdownCopies(projectToken, projectRoot, "rule", ".claude/rules", library.Rules)...)
-	copies = append(copies, scanMarkdownCopies(projectToken, projectRoot, "skill", ".claude/skills", publicSkillTemplates(library.Skills))...)
+	copies = append(copies, scanClaudeSkillCopies(projectToken, projectRoot, publicSkillTemplates(library.Skills))...)
 	copies = append(copies, scanCodexSkillCopies(projectToken, projectRoot, publicSkillTemplates(library.Skills))...)
 	copies = append(copies, scanWorkflowCopies(projectToken, projectRoot, library.Workflows)...)
 
@@ -53,6 +54,30 @@ func scanProjectConfigSetForProject(projectToken string, projectRoot string, lib
 	return copies, nil
 }
 
+func scanProjectRootRuleCopies(projectToken string, projectRoot string, templates []TemplateItem) []ProjectCopy {
+	projectPath := filepath.Join(projectRoot, "AGENTS.md")
+	if stat, err := os.Stat(projectPath); err != nil || stat.IsDir() {
+		return nil
+	}
+
+	copies := []ProjectCopy{}
+	for _, template := range templates {
+		if !isProjectRootTemplate(template) {
+			continue
+		}
+		copies = append(copies, projectCopyFromScan(
+			projectToken,
+			"rule",
+			template.ID,
+			displayProjectPath(projectRoot, projectPath),
+			[]string{projectPath},
+			template,
+			true,
+		))
+	}
+	return copies
+}
+
 func scanCodexSkillCopies(projectToken string, projectRoot string, templates []TemplateItem) []ProjectCopy {
 	skillFiles := codexSkillFilesByID(filepath.Join(projectRoot, ".agents", "skills"))
 	templateByID := templateItemsByID(templates)
@@ -61,6 +86,24 @@ func scanCodexSkillCopies(projectToken string, projectRoot string, templates []T
 		if strings.HasPrefix(id, "wf-") {
 			continue
 		}
+		projectPath := skillFiles[id]
+		template, ok := templateByID[id]
+		copy := projectCopyFromScan(projectToken, "skill", id, displayProjectPath(projectRoot, projectPath), codexSkillProjectFiles(projectPath), template, ok)
+		addProjectCopyCandidate(candidates, id, template, ok, copy)
+	}
+	return projectCopiesFromCandidates(candidates)
+}
+
+func scanClaudeSkillCopies(projectToken string, projectRoot string, templates []TemplateItem) []ProjectCopy {
+	skillFiles := codexSkillFilesByID(filepath.Join(projectRoot, ".claude", "skills"))
+	for id, path := range markdownFilesByID(filepath.Join(projectRoot, ".claude", "skills")) {
+		if skillFiles[id] == "" {
+			skillFiles[id] = path
+		}
+	}
+	templateByID := templateItemsByID(templates)
+	candidates := make(map[string]projectCopyCandidate, len(skillFiles))
+	for _, id := range sortedKeys(skillFiles) {
 		projectPath := skillFiles[id]
 		template, ok := templateByID[id]
 		copy := projectCopyFromScan(projectToken, "skill", id, displayProjectPath(projectRoot, projectPath), codexSkillProjectFiles(projectPath), template, ok)
@@ -89,11 +132,14 @@ func codexSkillFilesByID(root string) map[string]string {
 }
 
 func codexSkillProjectFiles(skillPath string) []string {
-	files := []string{skillPath}
-	openaiPath := filepath.Join(filepath.Dir(skillPath), "agents", "openai.yaml")
-	if stat, err := os.Stat(openaiPath); err == nil && !stat.IsDir() {
-		files = append(files, openaiPath)
-	}
+	root := filepath.Dir(skillPath)
+	files := []string{}
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && !info.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
 	return files
 }
 
@@ -321,10 +367,10 @@ func hydrateTemplateItemsFromFiles(items []TemplateItem) []TemplateItem {
 func hydrateTemplateItemFromFiles(item TemplateItem) TemplateItem {
 	item = applyTemplateFilenameDisplay(item)
 	if item.Kind == "agent" {
-		if content := readFirstExistingText(pathsMatching(item, "templates/agents/claude/")); content != "" {
+		if content := readFirstExistingText(pathsMatching(item, "templates/.claude/agents/")); content != "" {
 			item.Content = content
 		}
-		if projection := readFirstExistingText(pathsMatching(item, "templates/agents/codex/")); projection != "" {
+		if projection := readFirstExistingText(pathsMatching(item, "templates/.codex/agents/")); projection != "" {
 			item.CodexProjection = projection
 			if model := parseCodexAgentModel(projection); model != "" {
 				item.ModelTier = model
@@ -350,7 +396,7 @@ func applyTemplateFilenameDisplay(item TemplateItem) TemplateItem {
 }
 
 func templateFilenameStem(item TemplateItem) string {
-	if item.Kind == "skill" && isCodexSkillTemplate(item) {
+	if item.Kind == "skill" {
 		return item.ID
 	}
 	for _, path := range templateFileCandidates(item) {
@@ -594,7 +640,16 @@ func displayProjectPath(projectRoot string, absolutePath string) string {
 
 func latestProjectConfigStamp(projectRoot string) string {
 	var latest int64
-	for _, relativeDir := range []string{".claude/agents", ".codex/agents", ".claude/rules", ".claude/skills"} {
+	for _, relativeDir := range []string{".claude/agents", ".codex/agents", ".claude/rules", ".claude/skills", ".agents/skills"} {
+		if relativeDir == ".agents/skills" {
+			_ = filepath.Walk(filepath.Join(projectRoot, filepath.FromSlash(relativeDir)), func(path string, info os.FileInfo, err error) error {
+				if err == nil && info != nil && !info.IsDir() && info.ModTime().Unix() > latest {
+					latest = info.ModTime().Unix()
+				}
+				return nil
+			})
+			continue
+		}
 		files := filesByID(filepath.Join(projectRoot, filepath.FromSlash(relativeDir)), "")
 		for _, path := range files {
 			stat, err := os.Stat(path)

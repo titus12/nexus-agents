@@ -1,0 +1,134 @@
+{
+  "id": "ui-feature-development",
+  "name": "wf-unity-ui-feature",
+  "nodes": [
+    {
+      "id": "trigger",
+      "y": 210,
+      "agent": "-",
+      "category": "event",
+      "type": "input",
+      "x": 48,
+      "label": "$wf-unity-ui-feature",
+      "detail": "Unity workflow entry receives the request."
+    },
+    {
+      "id": "route",
+      "y": 210,
+      "agent": "skill resolver",
+      "category": "condition",
+      "type": "condition",
+      "x": 300,
+      "label": "unity workflow skill",
+      "detail": "Load Unity workflow rules and skills."
+    },
+    {
+      "id": "requirement",
+      "y": 210,
+      "agent": "requirement-collector",
+      "model": "gpt-5.4",
+      "category": "action",
+      "type": "agent",
+      "x": 430,
+      "label": "requirement-collector",
+      "detail": "Collect Feishu/user requirements, screenshots/tables, protocol/config paths, Feature Card, UI AIConfig, and KnowledgeBase into a minimal task context package."
+    },
+    {
+      "id": "owner",
+      "y": 210,
+      "agent": "unity-ui-developer",
+      "category": "action",
+      "type": "agent",
+      "x": 690,
+      "label": "unity-ui-developer",
+      "detail": "Develop Unity UI feature with UIArchitect, UGUI, TMP, and asset safety.",
+      "model": "gpt-5.4"
+    },
+    {
+      "id": "asset",
+      "y": 80,
+      "agent": "unity-asset-safety-evaluator",
+      "category": "action",
+      "type": "agent",
+      "x": 950,
+      "label": "unity-asset-safety-evaluator",
+      "detail": "Check Prefab, Scene, .meta, generated, and asset risks.",
+      "model": "deepseek-v4-pro"
+    },
+    {
+      "id": "tester",
+      "y": 340,
+      "agent": "unity-regression-evaluator",
+      "category": "action",
+      "type": "agent",
+      "x": 950,
+      "label": "unity-regression-evaluator",
+      "detail": "Verify compile, Console, interactions, input locks, and UI states.",
+      "model": "deepseek-v4-flash"
+    },
+    {
+      "id": "review",
+      "y": 210,
+      "agent": "ui-reviewer",
+      "category": "action",
+      "type": "agent",
+      "x": 1210,
+      "label": "ui-reviewer",
+      "detail": "Merge UI quality, behavior verification, data-flow boundary, and asset safety findings.",
+      "model": "deepseek-v4-pro"
+    },
+    {
+      "id": "output",
+      "y": 210,
+      "agent": "unity-ui-developer",
+      "category": "data",
+      "type": "output",
+      "x": 1730,
+      "label": "deliver",
+      "detail": "Return result, evidence, skipped checks, and remaining risks.",
+      "model": "gpt-5.4"
+    }
+  ],
+  "edges": [
+    {
+      "label": "command",
+      "from": "trigger",
+      "to": "route"
+    },
+    {
+      "label": "requirements",
+      "from": "route",
+      "to": "requirement"
+    },
+    {
+      "label": "task context",
+      "from": "requirement",
+      "to": "owner"
+    },
+    {
+      "label": "assets",
+      "from": "owner",
+      "to": "asset"
+    },
+    {
+      "label": "behavior",
+      "from": "owner",
+      "to": "tester"
+    },
+    {
+      "label": "asset findings",
+      "from": "asset",
+      "to": "review"
+    },
+    {
+      "label": "verification",
+      "from": "tester",
+      "to": "review"
+    },
+    {
+      "label": "reviewed evidence",
+      "from": "review",
+      "to": "output"
+    }
+  ]
+}

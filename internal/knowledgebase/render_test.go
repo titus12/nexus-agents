@@ -9,8 +9,8 @@ import (
 func TestRenderTreeUsesFrontmatterTitles(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root KB", "design/KnowledgeBase/index.md", "# Root"))
-	writeTestFile(t, filepath.Join(kb, "domains", "ui", "routing.md"), okfDoc("Routing", "UI Routing", "design/KnowledgeBase/domains/ui/routing.md", "# UI"))
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root KB", "KnowledgeBase/index.md", "# Root"))
+	writeTestFile(t, filepath.Join(kb, "domains", "ui", "routing.md"), okfDoc("Routing", "UI Routing", "KnowledgeBase/domains/ui/routing.md", "# UI"))
 	tree, err := BuildRenderTree(root)
 	if err != nil {
 		t.Fatal(err)
@@ -19,7 +19,7 @@ func TestRenderTreeUsesFrontmatterTitles(t *testing.T) {
 		t.Fatalf("unexpected tree: %#v", tree)
 	}
 	domains := tree.Nodes[0]
-	if domains.Kind != "directory" || domains.Path != "design/KnowledgeBase/domains" || len(domains.Children) != 1 {
+	if domains.Kind != "directory" || domains.Path != "KnowledgeBase/domains" || len(domains.Children) != 1 {
 		t.Fatalf("expected hierarchical domains tree, got %#v", tree)
 	}
 }
@@ -27,8 +27,8 @@ func TestRenderTreeUsesFrontmatterTitles(t *testing.T) {
 func TestRenderDocumentEscapesHTMLAndRendersHeadings(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Heading\n\n<script>alert(1)</script>"))
-	doc, err := RenderDocument(root, "design/KnowledgeBase/index.md")
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "KnowledgeBase/index.md", "# Heading\n\n<script>alert(1)</script>"))
+	doc, err := RenderDocument(root, "KnowledgeBase/index.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +44,8 @@ func TestRenderDocumentRendersTablesLinksAndLists(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
 	body := "# Routing\n\n[UI](./domains/ui/README.md)\n\n1. Open routing\n2. Read rules\n\n| Task | File |\n|---|---|\n| UI | `routing.md` |\n"
-	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "design/KnowledgeBase/index.md", body))
-	doc, err := RenderDocument(root, "design/KnowledgeBase/index.md")
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "KnowledgeBase/index.md", body))
+	doc, err := RenderDocument(root, "KnowledgeBase/index.md")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,8 +10,8 @@ import (
 func TestExportProjectKnowledgeWritesManifestAndDocs(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root"))
-	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log"))
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "KnowledgeBase/index.md", "# Root"))
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "KnowledgeBase/log.md", "# Log"))
 	exportRoot := filepath.Join(t.TempDir(), "export")
 	manifest, err := ExportProjectKnowledge("btd-client", root, exportRoot)
 	if err != nil {
@@ -23,7 +23,7 @@ func TestExportProjectKnowledgeWritesManifestAndDocs(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(exportRoot, "manifest.json")); err != nil {
 		t.Fatalf("manifest not written: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(exportRoot, "docs", "design_KnowledgeBase_index.md.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(exportRoot, "docs", "KnowledgeBase_index.md.json")); err != nil {
 		t.Fatalf("rendered doc not written: %v", err)
 	}
 }
@@ -31,14 +31,14 @@ func TestExportProjectKnowledgeWritesManifestAndDocs(t *testing.T) {
 func TestReadFreshExportRebuildsWhenSourceChanges(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root"))
-	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log"))
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "KnowledgeBase/index.md", "# Root"))
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "KnowledgeBase/log.md", "# Log"))
 	exportRoot := filepath.Join(t.TempDir(), "export")
 	first, err := ExportProjectKnowledge("sample", root, exportRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(kb, "domains", "ui", "routing.md"), okfDoc("Routing", "UI", "design/KnowledgeBase/domains/ui/routing.md", "# UI"))
+	writeTestFile(t, filepath.Join(kb, "domains", "ui", "routing.md"), okfDoc("Routing", "UI", "KnowledgeBase/domains/ui/routing.md", "# UI"))
 
 	data, err := ReadFreshExport("sample", root, exportRoot)
 	if err != nil {

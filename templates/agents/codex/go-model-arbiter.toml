@@ -1,3 +1,0 @@
-name = "model-arbiter"
-model = "deepseek-v4-pro"
-model_reasoning_effort = "high"

@@ -1,0 +1,1 @@
+# unity-ui-safety`n`nUI safety: reuse existing UIArchitect/UGUI/TMP patterns, keep View/ViewModel/Presenter boundaries, validate open/close/reopen and input-lock release paths, and check anchors, pivots, safe area, text overflow, list bounds, and loading/error states.

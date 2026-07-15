@@ -1604,8 +1604,8 @@ function findDefaultKnowledgePath(tree?: KnowledgeRenderTree | null): string {
   const nodes = tree?.nodes ?? [];
   const flattened = flattenKnowledgeNodes(nodes);
   return (
-    flattened.find((node) => node.path === "design/KnowledgeBase/index.md")?.path ||
-    flattened.find((node) => node.path === "design/KnowledgeBase/README.md")?.path ||
+    flattened.find((node) => node.path === "KnowledgeBase/index.md")?.path ||
+    flattened.find((node) => node.path === "KnowledgeBase/README.md")?.path ||
     flattened.find((node) => node.kind === "document")?.path ||
     ""
   );
@@ -1878,8 +1878,8 @@ async function createTemplateForCurrentPage() {
   const item = await createTemplate(kind, {
     name: `new-${label.toLowerCase()}-${currentTemplateItems.value.length + 1}`,
     summary: `New ${label} template created from Nexus Agents.`,
-    entry: kind === "skills" ? "templates/skills/new-skill.md" : kind === "workflows" ? "templates/workflows/new-workflow.md" : `templates/${kind}/new.md`,
-    files: kind === "skills" ? ["templates/skills/new-skill.md"] : kind === "workflows" ? ["templates/workflows/new-workflow.md"] : [],
+    entry: kind === "skills" ? "templates/.claude/skills/new-skill/SKILL.md" : kind === "workflows" ? "templates/.claude/workflows/new-workflow.md" : `templates/.claude/${kind}/new.md`,
+    files: kind === "skills" ? ["templates/.claude/skills/new-skill/SKILL.md"] : kind === "workflows" ? ["templates/.claude/workflows/new-workflow.md"] : [],
   });
   templateLibrary.value = {
     ...templateLibrary.value,

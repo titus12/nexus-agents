@@ -1,0 +1,4 @@
+interface:
+  display_name: "KB System Curator"
+  short_description: "Curate stable system knowledge into the project KnowledgeBase."
+  default_prompt: "Use $kb-system-curator to explore a system or feature and prepare a user-approved KnowledgeBase update."

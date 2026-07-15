@@ -428,7 +428,27 @@ func (s *Store) AddProjectCopyFromTemplate(projectID string, kind string, templa
 	if copy.Name == "" {
 		copy.Name = template.ID
 	}
-	if err := s.writeTemplateToProjectCopyLocked(project, copy); err != nil {
+	if isProjectRootTemplate(template) {
+		conflict, err := projectRootTemplateConflict(projectLocalPath(project), template)
+		if err != nil {
+			return ProjectCopy{}, true, err
+		}
+		if conflict {
+			copies, err := scanProjectConfigSetForProject(projectTokenFromID(project.ID), projectLocalPath(project), s.data.TemplateLibrary)
+			if err != nil {
+				return ProjectCopy{}, true, err
+			}
+			s.data.ProjectConfigSets[projectID] = copies
+			s.updateProjectSummaryLocked(projectID)
+			for _, scanned := range copies {
+				if scanned.Kind == itemKind && scanned.Origin != nil && scanned.Origin.TemplateID == template.ID {
+					return cloneProjectCopy(scanned), true, nil
+				}
+			}
+			return ProjectCopy{}, true, fmt.Errorf("project root guide conflict was not found during project scan")
+		}
+	}
+	if err := s.writeTemplateToProjectCopyLocked(project, copy, false); err != nil {
 		return ProjectCopy{}, true, err
 	}
 
@@ -457,7 +477,7 @@ func (s *Store) SyncProjectCopy(projectID string, copyID string) (ProjectCopy, b
 	copies := s.data.ProjectConfigSets[projectID]
 	for index := range copies {
 		if copies[index].ID == copyID {
-			if err := s.writeTemplateToProjectCopyLocked(project, copies[index]); err != nil {
+			if err := s.writeTemplateToProjectCopyLocked(project, copies[index], true); err != nil {
 				return ProjectCopy{}, true, err
 			}
 			copies[index].Status = "synced"
@@ -507,22 +527,12 @@ func projectLocalPath(project Project) string {
 }
 
 func defaultProjectCopyPath(kind string, template TemplateItem) string {
-	stem := projectTemplateStem(ProjectCopy{}, template)
-	switch kind {
-	case "agent":
-		return filepath.ToSlash(filepath.Join(".claude", "agents", stem+".md"))
-	case "rule":
-		return filepath.ToSlash(filepath.Join(".claude", "rules", stem+".md"))
-	case "skill":
-		if isCodexSkillTemplate(template) {
-			return filepath.ToSlash(filepath.Join(".agents", "skills", template.ID, "SKILL.md"))
+	for _, path := range templateFileCandidates(template) {
+		if relative, ok := templateProjectRelativePath(path); ok {
+			return relative
 		}
-		return filepath.ToSlash(filepath.Join(".claude", "skills", stem+".md"))
-	case "workflow":
-		return filepath.ToSlash(filepath.Join(".claude", "workflows", stem+".md"))
-	default:
-		return stem
 	}
+	return projectTemplateStem(ProjectCopy{}, template)
 }
 
 func (s *Store) templateForProjectCopyLocked(copy ProjectCopy) (TemplateItem, bool) {
@@ -563,6 +573,19 @@ func (s *Store) workflowSkillTemplateForWorkflowLocked(workflowID string) (Templ
 	return TemplateItem{}, false
 }
 
+func (s *Store) workflowSupportSkillTemplatesLocked(workflow TemplateItem) []TemplateItem {
+	text := readFirstExistingText(templateFileCandidates(workflow))
+	if !strings.Contains(text, ".agents/skills/nexus-taskrun-submit/") {
+		return nil
+	}
+	for _, item := range s.data.TemplateLibrary.Skills {
+		if item.ID == "nexus-taskrun-submit" {
+			return []TemplateItem{item}
+		}
+	}
+	return nil
+}
+
 func workflowSkillTemplateID(workflowID string) (string, bool) {
 	switch workflowID {
 	case "feature-development":
@@ -587,6 +610,8 @@ func workflowSkillTemplateID(workflowID string) (string, bool) {
 		return "wf-unity-logic-mod", true
 	case "ui-feature-development":
 		return "wf-unity-ui-feature", true
+	case "ui-quick":
+		return "wf-unity-ui-quick", true
 	default:
 		return "", false
 	}
@@ -597,7 +622,7 @@ func workflowCommandTemplatePath(workflowID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return "templates/commands/claude/" + skillID + ".md", true
+	return "templates/.claude/commands/" + skillID + ".md", true
 }
 
 func workflowCommandTemplateWrites(workflowID string) ([]projectTemplateWrite, error) {
@@ -613,7 +638,7 @@ func workflowCommandTemplateWrites(workflowID string) ([]projectTemplateWrite, e
 		return nil, fmt.Errorf("read workflow command template %s: %w", path, err)
 	}
 	return []projectTemplateWrite{{
-		relativePath: filepath.ToSlash(filepath.Join(".claude", "commands", filepath.Base(path))),
+		relativePath: mustTemplateProjectRelativePath(path),
 		data:         data,
 	}}, nil
 }
@@ -625,7 +650,7 @@ func isWorkflowSkillTemplate(item TemplateItem) bool {
 	return strings.HasPrefix(item.ID, "wf-") && isCodexSkillTemplate(item)
 }
 
-func (s *Store) writeTemplateToProjectCopyLocked(project Project, copy ProjectCopy) error {
+func (s *Store) writeTemplateToProjectCopyLocked(project Project, copy ProjectCopy, allowOverwrite bool) error {
 	template, ok := s.templateForProjectCopyLocked(copy)
 	if !ok {
 		return fmt.Errorf("copy %s has no template origin", copy.ID)
@@ -649,6 +674,13 @@ func (s *Store) writeTemplateToProjectCopyLocked(project Project, copy ProjectCo
 			}
 			writes = append(writes, skillWrites...)
 		}
+		for _, skill := range s.workflowSupportSkillTemplatesLocked(template) {
+			skillWrites, err := projectTemplateWrites(ProjectCopy{Kind: "skill"}, skill)
+			if err != nil {
+				return err
+			}
+			writes = append(writes, skillWrites...)
+		}
 		commandWrites, err := workflowCommandTemplateWrites(template.ID)
 		if err != nil {
 			return err
@@ -657,6 +689,16 @@ func (s *Store) writeTemplateToProjectCopyLocked(project Project, copy ProjectCo
 	}
 	for _, write := range writes {
 		target := filepath.Join(projectRoot, filepath.FromSlash(write.relativePath))
+		if isProjectRootTemplate(template) && !allowOverwrite {
+			if existing, err := os.ReadFile(target); err == nil {
+				if string(existing) == string(write.data) {
+					continue
+				}
+				return fmt.Errorf("refusing to overwrite existing %s; review the template diff and use an explicit sync after approval", write.relativePath)
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("read existing project guide %s: %w", write.relativePath, err)
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return fmt.Errorf("create sync target directory: %w", err)
 		}
@@ -673,28 +715,133 @@ type projectTemplateWrite struct {
 }
 
 func projectTemplateWrites(copy ProjectCopy, template TemplateItem) ([]projectTemplateWrite, error) {
-	stem := projectTemplateStem(copy, template)
-	switch copy.Kind {
-	case "agent":
-		return agentTemplateWrites(stem, template)
-	case "rule":
-		return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "rules", stem+".md")), template)
-	case "skill":
-		if isCodexSkillTemplate(template) {
-			return codexSkillTemplateWrites(template)
+	writes := []projectTemplateWrite{}
+	seen := map[string]bool{}
+	for _, path := range templateFileCandidates(template) {
+		relative, ok := templateProjectRelativePath(path)
+		if !ok || seen[relative] {
+			continue
 		}
-		return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "skills", stem+".md")), template)
-	case "workflow":
-		return workflowTemplateWrites(stem, template)
-	default:
-		return nil, fmt.Errorf("unsupported project copy kind %q", copy.Kind)
+		data, err := os.ReadFile(resolveDataPath(path))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("read template file %s: %w", path, err)
+		}
+		seen[relative] = true
+		writes = append(writes, projectTemplateWrite{relativePath: relative, data: data})
 	}
+	if len(writes) == 0 && template.Content != "" {
+		stem := projectTemplateStem(copy, template)
+		switch copy.Kind {
+		case "agent":
+			return agentTemplateWrites(stem, template)
+		case "rule":
+			return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "rules", stem+".md")), template)
+		case "skill":
+			if isCodexSkillTemplate(template) {
+				return codexSkillTemplateWrites(template)
+			}
+			return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "skills", stem+".md")), template)
+		case "workflow":
+			return workflowTemplateWrites(stem, template)
+		default:
+			return nil, fmt.Errorf("unsupported project copy kind %q", copy.Kind)
+		}
+	}
+	if len(writes) == 0 {
+		stem := projectTemplateStem(copy, template)
+		switch copy.Kind {
+		case "agent":
+			return agentTemplateWrites(stem, template)
+		case "rule":
+			if isProjectRootTemplate(template) {
+				return markdownTemplateWrites("AGENTS.md", template)
+			}
+			return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "rules", stem+".md")), template)
+		case "skill":
+			if isCodexSkillTemplate(template) {
+				return codexSkillTemplateWrites(template)
+			}
+			return markdownTemplateWrites(filepath.ToSlash(filepath.Join(".claude", "skills", stem+".md")), template)
+		case "workflow":
+			return workflowTemplateWrites(stem, template)
+		default:
+			return nil, fmt.Errorf("template %s has no files to sync", template.ID)
+		}
+	}
+	return writes, nil
+}
+
+func templateProjectRelativePath(templatePath string) (string, bool) {
+	const prefix = "templates/"
+	slashed := filepath.ToSlash(strings.TrimSpace(templatePath))
+	if !strings.HasPrefix(slashed, prefix) {
+		return "", false
+	}
+	relative := strings.TrimPrefix(slashed, prefix)
+	switch {
+	case relative == "project-files/AGENTS.md":
+		return "AGENTS.md", true
+	case strings.HasPrefix(relative, "agents/claude/"):
+		return ".claude/" + strings.TrimPrefix(relative, "agents/claude/"), true
+	case strings.HasPrefix(relative, "agents/codex/"):
+		return ".codex/" + strings.TrimPrefix(relative, "agents/codex/"), true
+	case strings.HasPrefix(relative, "commands/claude/"):
+		return ".claude/commands/" + strings.TrimPrefix(relative, "commands/claude/"), true
+	case strings.HasPrefix(relative, "rules/"):
+		return ".claude/rules/" + strings.TrimPrefix(relative, "rules/"), true
+	case strings.HasPrefix(relative, "workflows/"):
+		return ".claude/workflows/" + strings.TrimPrefix(relative, "workflows/"), true
+	case strings.HasPrefix(relative, "skills/codex/"):
+		return ".agents/skills/" + strings.TrimPrefix(relative, "skills/codex/"), true
+	case strings.HasPrefix(relative, "skills/") && strings.HasSuffix(relative, ".md"):
+		name := strings.TrimSuffix(filepath.Base(relative), ".md")
+		return ".claude/skills/" + name + "/SKILL.md", true
+	case strings.HasPrefix(relative, "knowledgebase/"):
+		return "KnowledgeBase/" + strings.TrimPrefix(relative, "knowledgebase/"), true
+	}
+	if relative == "" || relative == "README.md" {
+		return "", false
+	}
+	return relative, true
+}
+
+func mustTemplateProjectRelativePath(templatePath string) string {
+	relative, ok := templateProjectRelativePath(templatePath)
+	if !ok {
+		panic("template path is not project-relative: " + templatePath)
+	}
+	return relative
+}
+
+func isProjectRootTemplate(template TemplateItem) bool {
+	return template.Kind == "rule" && template.ID == "project-agents"
+}
+
+func projectRootTemplateConflict(projectRoot string, template TemplateItem) (bool, error) {
+	if !isProjectRootTemplate(template) {
+		return false, nil
+	}
+	templateData, err := templatePrimaryContent(template)
+	if err != nil {
+		return false, err
+	}
+	existing, err := os.ReadFile(filepath.Join(projectRoot, "AGENTS.md"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read existing AGENTS.md: %w", err)
+	}
+	return string(existing) != string(templateData), nil
 }
 
 func isCodexSkillTemplate(template TemplateItem) bool {
 	for _, path := range templateFileCandidates(template) {
 		slashed := filepath.ToSlash(path)
-		if strings.HasPrefix(slashed, "templates/skills/codex/") {
+		if strings.HasPrefix(slashed, "templates/.agents/skills/") {
 			return true
 		}
 		if strings.EqualFold(filepath.Base(filepath.FromSlash(slashed)), "SKILL.md") &&
@@ -711,7 +858,7 @@ func codexSkillTemplateWrites(template TemplateItem) ([]projectTemplateWrite, er
 	if root == "" {
 		return nil, fmt.Errorf("template %s has no codex skill root", template.ID)
 	}
-	for _, path := range templateFileCandidates(template) {
+	for _, path := range codexSkillTemplateFiles(root) {
 		slashed := filepath.ToSlash(path)
 		data, err := os.ReadFile(resolveDataPath(path))
 		if err != nil {
@@ -787,14 +934,14 @@ func stemFromProjectPath(path string) string {
 
 func agentTemplateWrites(stem string, template TemplateItem) ([]projectTemplateWrite, error) {
 	writes := []projectTemplateWrite{}
-	for _, path := range pathsMatching(template, "templates/agents/claude/") {
+	for _, path := range pathsMatching(template, "templates/.claude/agents/") {
 		data, err := os.ReadFile(resolveDataPath(path))
 		if err == nil {
 			writes = append(writes, projectTemplateWrite{relativePath: filepath.ToSlash(filepath.Join(".claude", "agents", stem+".md")), data: data})
 			break
 		}
 	}
-	for _, path := range pathsMatching(template, "templates/agents/codex/") {
+	for _, path := range pathsMatching(template, "templates/.codex/agents/") {
 		data, err := os.ReadFile(resolveDataPath(path))
 		if err == nil {
 			writes = append(writes, projectTemplateWrite{relativePath: filepath.ToSlash(filepath.Join(".codex", "agents", stem+".toml")), data: data})
@@ -1044,14 +1191,14 @@ func (s *Store) CreateWorkflow(input WorkflowInput) WorkflowSummary {
 		Name:      name,
 		Version:   1,
 		Summary:   summary,
-		Entry:     "templates/workflows/" + id + ".md",
-		Files:     []string{"templates/workflows/" + id + ".md", "templates/workflows/" + id + ".graph.json"},
+		Entry:     "templates/.claude/workflows/" + id + ".md",
+		Files:     []string{"templates/.claude/workflows/" + id + ".md", "templates/.claude/workflows/" + id + ".graph.json"},
 		UpdatedAt: workflow.UpdatedAt,
 		Status:    status,
 		Source:    "Template Library markdown",
 		SourcePaths: []string{
-			"templates/workflows/" + id + ".md",
-			"templates/workflows/" + id + ".graph.json",
+			"templates/.claude/workflows/" + id + ".md",
+			"templates/.claude/workflows/" + id + ".graph.json",
 		},
 		Content: "New workflow template represented as markdown plus graph JSON.",
 	})
@@ -1102,14 +1249,14 @@ func (s *Store) DuplicateWorkflow(workflowID string) (WorkflowSummary, bool) {
 		Name:      workflow.Name,
 		Version:   1,
 		Summary:   workflow.Summary,
-		Entry:     "templates/workflows/" + id + ".md",
-		Files:     []string{"templates/workflows/" + id + ".md", "templates/workflows/" + id + ".graph.json"},
+		Entry:     "templates/.claude/workflows/" + id + ".md",
+		Files:     []string{"templates/.claude/workflows/" + id + ".md", "templates/.claude/workflows/" + id + ".graph.json"},
 		UpdatedAt: workflow.UpdatedAt,
 		Status:    workflow.Status,
 		Source:    "Template Library markdown",
 		SourcePaths: []string{
-			"templates/workflows/" + id + ".md",
-			"templates/workflows/" + id + ".graph.json",
+			"templates/.claude/workflows/" + id + ".md",
+			"templates/.claude/workflows/" + id + ".graph.json",
 		},
 		Content: "Duplicated workflow template represented as markdown plus graph JSON.",
 	})
@@ -1384,7 +1531,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "sisyphus",
 			summary:   "主编排者，负责复杂任务分析、拆解、多 agent 协调与最终综合。",
-			model:     "gpt-5.4",
+			model:     "gpt-5.6-terra",
 			effort:    "high",
 			skills:    []string{"dev-workflow", "skill-standard", "review-feedback"},
 			tools:     []string{"shell", "rg", "git", "task-dispatch"},
@@ -1395,7 +1542,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "prometheus",
 			summary:   "战略规划角色，负责方案设计、架构决策、选型评估，开始实现前使用。",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.6-terra",
 			effort:    "high",
 			skills:    []string{"dev-workflow", "skill-standard", "pmconf-pattern"},
 			tools:     []string{"rg", "codegraph", "read-only-shell"},
@@ -1417,7 +1564,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "quick",
 			summary:   "快速修改角色，处理单文件修改、小 bug 修复和编译错误修复。",
-			model:     "deepseek-v4-flash",
+			model:     "gpt-5.6-luna",
 			effort:    "low",
 			skills:    []string{"coding-rules", "testing"},
 			tools:     []string{"shell", "apply_patch", "rg"},
@@ -1428,7 +1575,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "oracle",
 			summary:   "架构分析与复杂调试角色，负责深度代码追踪、复杂 bug 诊断和影响评估。",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.6-terra",
 			effort:    "high",
 			skills:    []string{"coding-rules", "testing", "review-feedback"},
 			tools:     []string{"rg", "git", "codegraph"},
@@ -1439,7 +1586,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "debugger",
 			summary:   "日志优先 Bug 排查角色，低成本快速定位简单或中等 bug。",
-			model:     "gpt-5.4-mini",
+			model:     "gpt-5.6-luna",
 			effort:    "medium",
 			skills:    []string{"coding-rules", "testing", "cross-social", "cross-gate", "cross-client"},
 			tools:     []string{"rg", "git"},
@@ -1450,7 +1597,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "librarian",
 			summary:   "文档查询角色，负责查 API 用法、框架文档和第三方库使用方式。",
-			model:     "deepseek-v4-flash",
+			model:     "gpt-5.6-luna",
 			effort:    "medium",
 			skills:    []string{"skill-standard", "cross-config", "cross-client"},
 			tools:     []string{"rg", "web", "context7"},
@@ -1461,7 +1608,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "worker",
 			summary:   "任务执行工人，接收明确子任务并完成函数、样板代码或重复性修改。",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.4",
 			effort:    "high",
 			skills:    []string{"coding-rules", "testing", "quest-system", "pmconf-pattern"},
 			tools:     []string{"shell", "apply_patch", "rg"},
@@ -1472,7 +1619,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "reviewer-logic",
 			summary:   "逻辑正确性审核角色，聚焦空指针、边界条件、并发安全、事务完整性和错误处理。",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.6-terra",
 			effort:    "high",
 			skills:    []string{"coding-rules", "testing", "review-feedback"},
 			tools:     []string{"rg", "git", "codegraph"},
@@ -1483,7 +1630,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "reviewer-perf",
 			summary:   "性能审核角色，聚焦 N+1、goroutine 泄漏、内存分配、锁粒度和缓存缺失。",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.4",
 			effort:    "medium",
 			skills:    []string{"coding-rules", "testing", "pmconf-pattern"},
 			tools:     []string{"rg", "git", "codegraph"},
@@ -1494,7 +1641,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "reviewer-security",
 			summary:   "安全审核角色，从攻击者视角检查越权、输入验证、耗尽、泄露、注入和重放风险。",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.6-terra",
 			effort:    "high",
 			skills:    []string{"high-risk-api", "coding-rules", "review-feedback"},
 			tools:     []string{"rg", "git", "codegraph"},
@@ -1505,7 +1652,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "gatekeeper",
 			summary:   "提交门禁角色，提交前扫描 diff 并生成高风险清单，必要时要求用户确认。",
-			model:     "deepseek-v4-flash",
+			model:     "gpt-5.6-luna",
 			effort:    "medium",
 			skills:    []string{"coding-rules", "high-risk-api", "review-feedback"},
 			tools:     []string{"git", "rg"},
@@ -1516,18 +1663,18 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "workflow-evaluator",
 			summary:   "工作流评估入口角色，负责读取 Task Run Evidence，按 rubric 生成归因矩阵和质量评分。",
-			model:     "gpt-5.4",
+			model:     "gpt-5.6-luna",
 			effort:    "high",
 			skills:    []string{"review-feedback", "skill-standard"},
 			tools:     []string{"evaluation-store", "chromem-go", "model-policy"},
 			mcp:       []string{"codegraph"},
-			content:   "Balance accuracy and cost: run deterministic scoring first, use gpt-5.4 for high-risk analysis, and escalate to gpt-5.5 only for failed or low-confidence cases.",
+			content:   "Balance accuracy and cost: run deterministic scoring first, use gpt-5.4 for high-risk analysis, and escalate to gpt-5.6-terra only for failed or low-confidence cases.",
 			updatedAt: "2026-06-23 15:40",
 		},
 		{
 			id:        "learning-curator",
 			summary:   "学习案例整理角色，负责把高分成功和代表性失败任务压缩为可检索 learning case。",
-			model:     "gpt-5.4-mini",
+			model:     "gpt-5.6-luna",
 			effort:    "medium",
 			skills:    []string{"skill-standard", "review-feedback"},
 			tools:     []string{"chromem-go", "evaluation-store"},
@@ -1538,18 +1685,18 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "model-arbiter",
 			summary:   "模型评估仲裁角色，在多模型评估分歧或低置信度时判断准确性与成本取舍。",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.6-terra",
 			effort:    "high",
 			skills:    []string{"review-feedback", "high-risk-api"},
 			tools:     []string{"model-policy", "evaluation-store"},
 			mcp:       []string{},
-			content:   "Use deepseek-v4-pro as the default arbiter, then escalate to gpt-5.5 only for failed, low-confidence, high-risk, or recurring cross-project cases.",
+			content:   "Use gpt-5.6-terra as the default arbiter for failed, low-confidence, high-risk, or recurring cross-project cases.",
 			updatedAt: "2026-06-23 15:42",
 		},
 		{
 			id:        "unity-debugger",
 			summary:   "Unity failure reproduction and root-cause analysis role for Console, tests, scenes, objects, and asset evidence.",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.4",
 			effort:    "high",
 			skills:    []string{"unity-mcp-skill", "unity-debugger", "unity-testing", "unity-asset-safety"},
 			tools:     []string{"rg", "git", "unity-mcp"},
@@ -1571,7 +1718,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "unity-bugfix-reviewer",
 			summary:   "Unity bugfix reviewer for root-cause alignment, diff scope, asset safety, and verification evidence.",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.4",
 			effort:    "high",
 			skills:    []string{"unity-bugfix-review", "unity-asset-safety", "review-feedback"},
 			tools:     []string{"rg", "git", "unity-mcp"},
@@ -1593,7 +1740,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "unity-logic-reviewer",
 			summary:   "Unity logic reviewer for compatibility, boundary, lifecycle, exception, and performance risks.",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.4",
 			effort:    "high",
 			skills:    []string{"unity-logic-review", "unity-testing", "review-feedback"},
 			tools:     []string{"rg", "git", "unity-mcp"},
@@ -1615,7 +1762,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "unity-asset-safety-evaluator",
 			summary:   "Unity asset safety evaluator for Prefab, Scene, .meta, generated file, imported asset, and serialized-reference risks.",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.6-terra",
 			effort:    "high",
 			skills:    []string{"unity-asset-safety", "review-feedback"},
 			tools:     []string{"git", "rg", "unity-mcp"},
@@ -1626,7 +1773,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "unity-regression-evaluator",
 			summary:   "Unity regression evaluator for compile, Console, EditMode/PlayMode, reproduction, and manual verification evidence.",
-			model:     "deepseek-v4-pro",
+			model:     "gpt-5.4",
 			effort:    "high",
 			skills:    []string{"unity-testing", "unity-mcp-skill", "review-feedback"},
 			tools:     []string{"unity-mcp", "rg", "git"},
@@ -1637,7 +1784,7 @@ func btdAgentTemplates() []TemplateItem {
 		{
 			id:        "unity-workflow-evaluator",
 			summary:   "Unity workflow evaluation entry role for Task Run Evidence scoring, attribution, and escalation recommendations.",
-			model:     "deepseek-v4-flash",
+			model:     "gpt-5.6-luna",
 			effort:    "high",
 			skills:    []string{"unity-testing", "unity-asset-safety", "review-feedback"},
 			tools:     []string{"evaluation-store", "model-policy", "unity-mcp"},
@@ -1675,12 +1822,12 @@ func btdAgentTemplates() []TemplateItem {
 }
 
 func agentTemplateSourcePaths(id string) []string {
-	claudePath := "templates/agents/claude/" + id + ".md"
-	codexPath := "templates/agents/codex/" + id + ".toml"
+	claudePath := "templates/.claude/agents/" + id + ".md"
+	codexPath := "templates/.codex/agents/" + id + ".toml"
 	if _, err := os.Stat(resolveDataPath(claudePath)); err == nil {
 		return []string{claudePath, codexPath, ".claude/agents/" + id + ".md", ".codex/agents/" + id + ".toml"}
 	}
-	return []string{"templates/agents/claude/go-" + id + ".md", "templates/agents/codex/go-" + id + ".toml", ".claude/agents/" + id + ".md", ".codex/agents/" + id + ".toml"}
+	return []string{"templates/.claude/agents/go-" + id + ".md", "templates/.codex/agents/go-" + id + ".toml", ".claude/agents/" + id + ".md", ".codex/agents/" + id + ".toml"}
 }
 
 func btdRuleTemplates() []TemplateItem {
@@ -1703,6 +1850,12 @@ func btdRuleTemplates() []TemplateItem {
 			updatedAt: "2026-06-20 10:25",
 		},
 		{
+			id:        "project-agents",
+			summary:   "项目根目录 AGENTS.md 的通用工具入口、来源声明、Codex workflow/role 约定与执行底线。",
+			content:   "作为可选根文件模板安装到 AGENTS.md；默认不覆盖现有项目文件，需显式同步后才可替换。",
+			updatedAt: "2026-07-15 18:10",
+		},
+		{
 			id:        "02-safety",
 			summary:   "定义 Git、文件、验证和不可逆操作的安全边界。",
 			content:   "不 force push、不 reset --hard、不覆盖未知修改；修改代码后必须 go build；删除数据等不可逆操作要先确认。",
@@ -1721,9 +1874,39 @@ func btdRuleTemplates() []TemplateItem {
 			updatedAt: "2026-07-15 00:00",
 		},
 		{
+			id:        "knowledge-retrieval",
+			summary:   "在浏览本地 KnowledgeBase 前强制使用 Nexus Knowledge Retrieval，并规定失败回退和工作流证据记录。",
+			content:   "实现工作流必须先检索知识库；不可用时记录 fallbackUsed 与 error 后才能按本地路由回退。",
+			updatedAt: "2026-07-15 00:00",
+		},
+		{
+			id:        "uiarchitect-asset-safety",
+			summary:   "UIArchitect 资产安全规则，覆盖 .meta、Prefab、Scene、GUID 与序列化引用风险。",
+			content:   "禁止删除 .meta；高风险资产变更后必须验证 GUID 敏感文件和序列化引用。",
+			updatedAt: "2026-07-15 00:00",
+		},
+		{
+			id:        "uiarchitect-editor-runtime-boundary",
+			summary:   "UIArchitect Editor 与 Runtime 边界规则，防止运行时代码依赖 UnityEditor。",
+			content:   "Editor 管线必须位于 Editor 边界；可复用插件代码不能强依赖宿主业务代码。",
+			updatedAt: "2026-07-15 00:00",
+		},
+		{
+			id:        "uiarchitect-generated-safety",
+			summary:   "UIArchitect 生成代码安全规则，要求修复生成源而不是手改生成结果。",
+			content:   "生成输出必须可复现；公开生成契约变化需要说明兼容性。",
+			updatedAt: "2026-07-15 00:00",
+		},
+		{
+			id:        "uiarchitect-portability",
+			summary:   "UIArchitect 可移植性规则，避免 AIConfig 与宿主项目路径、模块或业务依赖耦合。",
+			content:   "宿主差异必须配置化或隔离；可复用 UIArchitect 配置只依赖可携带的自身路径。",
+			updatedAt: "2026-07-15 00:00",
+		},
+		{
 			id:        "unity-00-routing",
-			summary:   "Unity workflow routing rule for bugfix, logic modification, and UI feature entries.",
-			content:   "Unity work enters through $wf-unity-bugfix, $wf-unity-logic-mod, and $wf-unity-ui-feature.",
+			summary:   "Unity workflow routing rule for bugfix, logic modification, full UI feature, and narrow UI quick entries.",
+			content:   "Unity work enters through $wf-unity-bugfix, $wf-unity-logic-mod, $wf-unity-ui-feature, and $wf-unity-ui-quick.",
 			updatedAt: "2026-06-23 19:40",
 		},
 		{
@@ -1876,58 +2059,86 @@ func btdSkillTemplates() []TemplateItem {
 			updatedAt:        "2026-06-20 10:41",
 		},
 		{
+			id:               "kb-system-curator",
+			summary:          "将经过代码与知识检索验证的稳定系统知识，整理为需用户确认后才写入的 KnowledgeBase 更新。",
+			content:          "先检索、再窄范围探索和拆解；先给知识库入库计划，获得用户确认后才编辑 KnowledgeBase。",
+			applicableAgents: []string{"librarian", "oracle", "sisyphus"},
+			updatedAt:        "2026-07-15 00:00",
+		},
+		{
+			id:               "kb-maintenance",
+			summary:          "以报告模式维护项目 KnowledgeBase：检查 OKF 元数据、链接、路由、陈旧内容、体积和重复硬规则。",
+			content:          "默认只读审计并提出维护建议；未获得用户批准时不重写硬规则或业务知识。",
+			applicableAgents: []string{"librarian", "oracle", "sisyphus"},
+			updatedAt:        "2026-07-15 18:40",
+		},
+		{
+			id:               "nexus-evaluation-review",
+			summary:          "基于 Nexus 评估证据、统计和历史记录，客观审查工作流、规则、Skill、Agent 或模型是否需要调整。",
+			content:          "先拉取证据和历史对比，再归类问题；不得依据单次评分直接改变工作流、角色或模型。",
+			applicableAgents: []string{"reviewer-logic", "reviewer-perf", "reviewer-security", "gatekeeper"},
+			updatedAt:        "2026-07-15 00:00",
+		},
+		{
+			id:               "nexus-taskrun-submit",
+			summary:          "在工作流开始创建本地 TaskRun payload，并在结束时以紧凑证据向 Nexus 提交一次。",
+			content:          "开始阶段仅落地本地 JSON；结束阶段更新同一 payload 后只 POST 一次，并保留 .nexus 证据文件。",
+			applicableAgents: []string{"sisyphus", "gatekeeper"},
+			updatedAt:        "2026-07-15 00:00",
+		},
+		{
 			id:               "wf-design",
 			summary:          "Codex skill entry for the design workflow.",
-			content:          "Invoke with $wf-design to load templates/workflows/design.md and follow the design workflow.",
+			content:          "Invoke with $wf-design to load templates/.claude/workflows/design.md and follow the design workflow.",
 			applicableAgents: []string{"prometheus", "sisyphus"},
 			updatedAt:        "2026-06-22 16:45",
 		},
 		{
 			id:               "wf-research",
 			summary:          "Codex skill entry for the research workflow.",
-			content:          "Invoke with $wf-research to load templates/workflows/research.md and follow the research workflow.",
+			content:          "Invoke with $wf-research to load templates/.claude/workflows/research.md and follow the research workflow.",
 			applicableAgents: []string{"oracle", "librarian"},
 			updatedAt:        "2026-06-22 16:45",
 		},
 		{
 			id:               "wf-commit",
 			summary:          "Codex skill entry for the commit-gate workflow.",
-			content:          "Invoke with $wf-commit to load templates/workflows/commit-gate.md and follow the commit-gate workflow.",
+			content:          "Invoke with $wf-commit to load templates/.claude/workflows/commit-gate.md and follow the commit-gate workflow.",
 			applicableAgents: []string{"gatekeeper", "reviewer-security"},
 			updatedAt:        "2026-06-22 16:45",
 		},
 		{
 			id:               "wf-lark",
 			summary:          "Codex skill entry for the Lark integration workflow.",
-			content:          "Invoke with $wf-lark to load templates/workflows/lark-integration.md and follow the Lark integration workflow.",
+			content:          "Invoke with $wf-lark to load templates/.claude/workflows/lark-integration.md and follow the Lark integration workflow.",
 			applicableAgents: []string{"librarian"},
 			updatedAt:        "2026-06-22 16:45",
 		},
 		{
 			id:               "wf-subagents",
 			summary:          "Codex skill entry for the subagent-driven development workflow.",
-			content:          "Invoke with $wf-subagents to load templates/workflows/subagent-driven-development.md and follow the subagent workflow.",
+			content:          "Invoke with $wf-subagents to load templates/.claude/workflows/subagent-driven-development.md and follow the subagent workflow.",
 			applicableAgents: []string{"sisyphus"},
 			updatedAt:        "2026-06-22 16:45",
 		},
 		{
 			id:               "wf-go-feat",
 			summary:          "Codex skill entry for the unified Go business-change workflow.",
-			content:          "Invoke with $wf-go-feat to load templates/workflows/go-feature-development.md and follow the bounded Go business-change workflow for new features or existing behavior modifications.",
+			content:          "Invoke with $wf-go-feat to load templates/.claude/workflows/go-feature-development.md and follow the bounded Go business-change workflow for new features or existing behavior modifications.",
 			applicableAgents: []string{"sisyphus", "prometheus", "hephaestus", "quick", "worker"},
 			updatedAt:        "2026-07-15 00:00",
 		},
 		{
 			id:               "wf-go-bugfix",
 			summary:          "Codex skill entry for the Go bugfix workflow.",
-			content:          "Invoke with $wf-go-bugfix to load templates/workflows/go-bugfix.md and follow the Go root-cause bugfix workflow.",
+			content:          "Invoke with $wf-go-bugfix to load templates/.claude/workflows/go-bugfix.md and follow the Go root-cause bugfix workflow.",
 			applicableAgents: []string{"debugger", "oracle", "hephaestus"},
 			updatedAt:        "2026-06-22 16:30",
 		},
 		{
 			id:               "wf-go-review",
 			summary:          "Codex skill entry for the Go code-review workflow.",
-			content:          "Invoke with $wf-go-review to load templates/workflows/go-code-review.md and follow the Go review workflow.",
+			content:          "Invoke with $wf-go-review to load templates/.claude/workflows/go-code-review.md and follow the Go review workflow.",
 			applicableAgents: []string{"sisyphus", "reviewer-logic", "reviewer-perf", "reviewer-security"},
 			updatedAt:        "2026-06-22 16:30",
 		},
@@ -2011,23 +2222,30 @@ func btdSkillTemplates() []TemplateItem {
 		{
 			id:               "wf-unity-bugfix",
 			summary:          "Codex skill entry for the Unity bug investigation workflow.",
-			content:          "Invoke with $wf-unity-bugfix to load templates/workflows/unity-bug-investigation.md and follow the Unity bug investigation workflow.",
+			content:          "Invoke with $wf-unity-bugfix to load templates/.claude/workflows/wf-unity-bugfix.md and follow the Unity bug investigation workflow.",
 			applicableAgents: []string{"unity-debugger", "unity-bugfix-developer", "unity-bugfix-reviewer"},
 			updatedAt:        "2026-06-23 19:56",
 		},
 		{
 			id:               "wf-unity-logic-mod",
 			summary:          "Codex skill entry for the Unity logic modification workflow.",
-			content:          "Invoke with $wf-unity-logic-mod to load templates/workflows/unity-logic-modification.md and follow the Unity logic modification workflow.",
+			content:          "Invoke with $wf-unity-logic-mod to load templates/.claude/workflows/wf-unity-logic-mod.md and follow the Unity logic modification workflow.",
 			applicableAgents: []string{"unity-logic-developer", "unity-logic-reviewer"},
 			updatedAt:        "2026-06-23 19:57",
 		},
 		{
 			id:               "wf-unity-ui-feature",
 			summary:          "Codex skill entry for the Unity UI feature development workflow.",
-			content:          "Invoke with $wf-unity-ui-feature to load templates/workflows/unity-ui-feature-development.md and follow the Unity UI feature workflow.",
+			content:          "Invoke with $wf-unity-ui-feature to load templates/.claude/workflows/wf-unity-ui-feature.md and follow the Unity UI feature workflow.",
 			applicableAgents: []string{"unity-ui-developer", "unity-asset-safety-evaluator", "unity-regression-evaluator"},
 			updatedAt:        "2026-06-23 19:58",
+		},
+		{
+			id:               "wf-unity-ui-quick",
+			summary:          "Codex skill entry for narrow Unity UI fixes.",
+			content:          "Invoke with $wf-unity-ui-quick to load templates/.claude/workflows/unity-ui-quick.md for a bounded View or ViewModel fix, escalating to the full UI workflow when necessary.",
+			applicableAgents: []string{"quick-planner", "quick-developer", "quick-verifier"},
+			updatedAt:        "2026-07-15 17:30",
 		},
 	}
 
@@ -2047,7 +2265,7 @@ func btdSkillTemplates() []TemplateItem {
 			Status:           "ready",
 			Source:           "Copied skill markdown",
 			ApplicableAgents: append([]string(nil), spec.applicableAgents...),
-			SourcePaths:      []string{path, ".claude/skills/" + spec.id + ".md"},
+			SourcePaths:      []string{path},
 			Content:          spec.content,
 			ClaudeSource:     path,
 		})
@@ -2056,37 +2274,58 @@ func btdSkillTemplates() []TemplateItem {
 }
 
 func skillTemplateFiles(id string, path string) []string {
-	if strings.HasPrefix(filepath.ToSlash(path), "templates/skills/codex/") {
-		return []string{path, "templates/skills/codex/" + id + "/agents/openai.yaml"}
+	if strings.HasPrefix(filepath.ToSlash(path), "templates/.agents/skills/") {
+		return codexSkillTemplateFiles(filepath.ToSlash(filepath.Join("templates", ".agents", "skills", id)))
 	}
 	return []string{path}
 }
 
+func codexSkillTemplateFiles(root string) []string {
+	resolvedRoot := resolveDataPath(root)
+	files := []string{}
+	_ = filepath.Walk(resolvedRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(resolvedRoot, path)
+		if err != nil || strings.HasPrefix(relative, "..") {
+			return nil
+		}
+		files = append(files, filepath.ToSlash(filepath.Join(root, relative)))
+		return nil
+	})
+	return files
+}
+
 func btdRuleTemplatePath(id string) string {
 	switch id {
+	case "project-agents":
+		return "templates/AGENTS.md"
 	case "00-routing":
-		return "templates/rules/go-00-routing.md"
+		return "templates/.claude/rules/go-00-routing.md"
 	case "02-safety":
-		return "templates/rules/go-02-safety.md"
+		return "templates/.claude/rules/go-02-safety.md"
 	case "03-project-model":
-		return "templates/rules/go-03-project-model.md"
+		return "templates/.claude/rules/go-03-project-model.md"
 	case "04-task-decomposition":
-		return "templates/rules/go-04-task-decomposition.md"
+		return "templates/.claude/rules/go-04-task-decomposition.md"
 	case "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety":
-		return "templates/rules/" + id + ".md"
+		return "templates/.claude/rules/" + id + ".md"
+	case "uiarchitect-asset-safety", "uiarchitect-editor-runtime-boundary", "uiarchitect-generated-safety", "uiarchitect-portability":
+		return "templates/.claude/rules/uiarchitect/" + id + ".md"
 	default:
-		return "templates/rules/" + id + ".md"
+		return "templates/.claude/rules/" + id + ".md"
 	}
 }
 
 func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "dev-workflow", "coding-rules", "testing", "pmconf-pattern", "quest-system", "cross-config":
-		return "templates/skills/go-" + id + ".md"
-	case "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature":
-		return "templates/skills/codex/" + id + "/SKILL.md"
+		return "templates/.claude/skills/go-" + id + "/SKILL.md"
+	case "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit", "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-ui-quick":
+		return "templates/.agents/skills/" + id + "/SKILL.md"
 	default:
-		return "templates/skills/" + id + ".md"
+		return "templates/.claude/skills/" + id + "/SKILL.md"
 	}
 }
 
@@ -2114,20 +2353,20 @@ func btdWorkflowTemplates() []TemplateItem {
 }
 
 func workflowTemplateSourcePaths(id string) []string {
-	routing := "templates/rules/go-00-routing.md"
+	routing := "templates/.claude/rules/go-00-routing.md"
 	if isUnityWorkflowID(id) {
-		routing = "templates/rules/unity-00-routing.md"
+		routing = "templates/.claude/rules/unity-00-routing.md"
 	}
 	paths := []string{btdWorkflowTemplatePath(id), btdWorkflowGraphTemplatePath(id), routing}
 	if id == "feature-development" || id == "bugfix" || id == "code-review" {
-		paths = append(paths, "templates/rules/go-04-task-decomposition.md")
+		paths = append(paths, "templates/.claude/rules/go-04-task-decomposition.md")
 	}
 	return paths
 }
 
 func isUnityWorkflowID(id string) bool {
 	switch id {
-	case "bug-investigation", "logic-modification", "ui-feature-development":
+	case "bug-investigation", "logic-modification", "ui-feature-development", "ui-quick":
 		return true
 	default:
 		return false
@@ -2137,15 +2376,17 @@ func isUnityWorkflowID(id string) bool {
 func btdWorkflowTemplatePath(id string) string {
 	switch id {
 	case "feature-development", "bugfix", "code-review":
-		return "templates/workflows/go-" + id + ".md"
+		return "templates/.claude/workflows/go-" + id + ".md"
 	case "bug-investigation":
-		return "templates/workflows/unity-bug-investigation.md"
+		return "templates/.claude/workflows/wf-unity-bugfix.md"
 	case "logic-modification":
-		return "templates/workflows/unity-logic-modification.md"
+		return "templates/.claude/workflows/wf-unity-logic-mod.md"
 	case "ui-feature-development":
-		return "templates/workflows/unity-ui-feature-development.md"
+		return "templates/.claude/workflows/wf-unity-ui-feature.md"
+	case "ui-quick":
+		return "templates/.claude/workflows/unity-ui-quick.md"
 	default:
-		return "templates/workflows/" + id + ".md"
+		return "templates/.claude/workflows/" + id + ".md"
 	}
 }
 
@@ -2287,6 +2528,17 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 			tags:      []string{"unity", "ui", "asset-safety", "evaluation"},
 			status:    "ready",
 			updatedAt: "2026-06-23 20:02",
+		},
+		{
+			id:        "ui-quick",
+			name:      "$wf-unity-ui-quick Unity UI Quick Fix",
+			trigger:   "$wf-unity-ui-quick",
+			owner:     "quick-developer",
+			summary:   "Make a narrow Unity UI View or ViewModel fix without changing protocol, cache, service, prefab, scene, generated files, or cross-feature data flow.",
+			content:   "quick planner confirms the bounded scope; quick developer makes the smallest handwritten change or diagnostic; quick verifier checks compile risk, generated-file safety, and available Unity evidence.",
+			tags:      []string{"unity", "ui", "quick", "bounded-change"},
+			status:    "ready",
+			updatedAt: "2026-07-15 17:30",
 		},
 	}
 }

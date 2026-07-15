@@ -1,1 +1,0 @@
-﻿# unity-bugfix-safety`n`nBugfix safety: reproduce first, identify root cause before editing, avoid speculative fixes, add regression tests when practical, verify Unity compile and Console state, and keep the diff focused.

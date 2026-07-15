@@ -10,7 +10,7 @@ import (
 func TestValidateBundleReportsMissingMetadataAndBrokenLinks(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: design/KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n[Missing](./missing.md)")
+	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n[Missing](./missing.md)")
 	writeTestFile(t, filepath.Join(kb, "domains", "actor", "routing.md"), "# Routing\nNo metadata")
 
 	report, err := Validate(root)
@@ -31,13 +31,13 @@ func TestValidateBundleReportsMissingMetadataAndBrokenLinks(t *testing.T) {
 func TestValidateReportsOKFQualityGateIssues(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)\n[Guide](./domains/ui/guide.md)"))
-	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
-	writeTestFile(t, filepath.Join(kb, "project", "routing.md"), okfDoc("Routing", "Project Routing", "design/KnowledgeBase/project/routing.md", "# Routing\n\nUI tasks load `design/KnowledgeBase/domains/ui/routing.md`."))
-	writeTestFile(t, filepath.Join(kb, "domains", "ui", "README.md"), okfDoc("Domain", "UI", "design/KnowledgeBase/domains/ui/README.md", "# UI\n\nUI domain overview links to [routing](./routing.md)."))
-	writeTestFile(t, filepath.Join(kb, "domains", "ui", "routing.md"), okfDoc("Routing", "UI Routing", "design/KnowledgeBase/domains/ui/routing.md", "# UI Routing\n\nLoad `design/KnowledgeBase/domains/ui/guide.md`."))
-	writeTestFile(t, filepath.Join(kb, "domains", "ui", "guide.md"), "---\ntype: Strange\ntitle: UI\nresource: design/KnowledgeBase/domains/ui/not-guide.md\ntags: []\ntimestamp: not-a-time\ndepends_on: [design/KnowledgeBase/domains/ui/missing.md]\n---\n\nTODO")
-	writeTestFile(t, filepath.Join(kb, "domains", "ui", "orphan.md"), okfDoc("Guide", "Orphan", "design/KnowledgeBase/domains/ui/orphan.md", "# Orphan\n\nThis document is not linked by routing."))
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)\n[Guide](./domains/ui/guide.md)"))
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
+	writeTestFile(t, filepath.Join(kb, "project", "routing.md"), okfDoc("Routing", "Project Routing", "KnowledgeBase/project/routing.md", "# Routing\n\nUI tasks load `KnowledgeBase/domains/ui/routing.md`."))
+	writeTestFile(t, filepath.Join(kb, "domains", "ui", "README.md"), okfDoc("Domain", "UI", "KnowledgeBase/domains/ui/README.md", "# UI\n\nUI domain overview links to [routing](./routing.md)."))
+	writeTestFile(t, filepath.Join(kb, "domains", "ui", "routing.md"), okfDoc("Routing", "UI Routing", "KnowledgeBase/domains/ui/routing.md", "# UI Routing\n\nLoad `KnowledgeBase/domains/ui/guide.md`."))
+	writeTestFile(t, filepath.Join(kb, "domains", "ui", "guide.md"), "---\ntype: Strange\ntitle: UI\nresource: KnowledgeBase/domains/ui/not-guide.md\ntags: []\ntimestamp: not-a-time\ndepends_on: [KnowledgeBase/domains/ui/missing.md]\n---\n\nTODO")
+	writeTestFile(t, filepath.Join(kb, "domains", "ui", "orphan.md"), okfDoc("Guide", "Orphan", "KnowledgeBase/domains/ui/orphan.md", "# Orphan\n\nThis document is not linked by routing."))
 
 	report, err := Validate(root)
 	if err != nil {
@@ -53,19 +53,19 @@ func TestValidateReportsOKFQualityGateIssues(t *testing.T) {
 func TestValidateDomainRoutingAliases(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)"))
-	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
-	writeTestFile(t, filepath.Join(kb, "project", "routing.md"), okfDoc("Routing", "Project Routing", "design/KnowledgeBase/project/routing.md", "# Routing\n\nUse domain routing."))
-	writeTestFile(t, filepath.Join(kb, "domains", "behaviour_tree", "routing.md"), "---\ntype: Routing\ntitle: Behaviour Tree Routing\ndescription: Routes behaviour tree work.\nresource: design/KnowledgeBase/domains/behaviour_tree/routing.md\ntags: [routing, behaviour-tree]\nrouting:\n  aliases:\n    zh: [行为树]\n    en: [behaviour tree, BonsaiBT]\n  keywords:\n    zh: [黑板]\n    en: [blackboard]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Routing\n\nLoad `design/KnowledgeBase/domains/behaviour_tree/README.md`.")
-	writeTestFile(t, filepath.Join(kb, "domains", "behaviour_tree", "README.md"), okfDoc("Domain", "Behaviour Tree", "design/KnowledgeBase/domains/behaviour_tree/README.md", "# Behaviour Tree"))
-	writeTestFile(t, filepath.Join(kb, "domains", "network", "routing.md"), "---\ntype: Routing\ntitle: Network Routing\ndescription: Routes network work.\nresource: design/KnowledgeBase/domains/network/routing.md\ntags: [routing, network]\nrouting:\n  aliases:\n    zh: [网络]\n  keywords:\n    en: [protocol]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Routing")
-	writeTestFile(t, filepath.Join(kb, "domains", "gameplay", "routing.md"), "---\ntype: Routing\ntitle: Gameplay Routing\ndescription: Routes gameplay work.\nresource: design/KnowledgeBase/domains/gameplay/routing.md\ntags: [routing, gameplay]\nrouting:\n  aliases:\n    zh: [系统]\n    en: [behaviour tree]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Routing")
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)"))
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
+	writeTestFile(t, filepath.Join(kb, "project", "routing.md"), okfDoc("Routing", "Project Routing", "KnowledgeBase/project/routing.md", "# Routing\n\nUse domain routing."))
+	writeTestFile(t, filepath.Join(kb, "domains", "behaviour_tree", "routing.md"), "---\ntype: Routing\ntitle: Behaviour Tree Routing\ndescription: Routes behaviour tree work.\nresource: KnowledgeBase/domains/behaviour_tree/routing.md\ntags: [routing, behaviour-tree]\nrouting:\n  aliases:\n    zh: [行为树]\n    en: [behaviour tree, BonsaiBT]\n  keywords:\n    zh: [黑板]\n    en: [blackboard]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Routing\n\nLoad `KnowledgeBase/domains/behaviour_tree/README.md`.")
+	writeTestFile(t, filepath.Join(kb, "domains", "behaviour_tree", "README.md"), okfDoc("Domain", "Behaviour Tree", "KnowledgeBase/domains/behaviour_tree/README.md", "# Behaviour Tree"))
+	writeTestFile(t, filepath.Join(kb, "domains", "network", "routing.md"), "---\ntype: Routing\ntitle: Network Routing\ndescription: Routes network work.\nresource: KnowledgeBase/domains/network/routing.md\ntags: [routing, network]\nrouting:\n  aliases:\n    zh: [网络]\n  keywords:\n    en: [protocol]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Routing")
+	writeTestFile(t, filepath.Join(kb, "domains", "gameplay", "routing.md"), "---\ntype: Routing\ntitle: Gameplay Routing\ndescription: Routes gameplay work.\nresource: KnowledgeBase/domains/gameplay/routing.md\ntags: [routing, gameplay]\nrouting:\n  aliases:\n    zh: [系统]\n    en: [behaviour tree]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Routing")
 
 	report, err := Validate(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hasIssueForPath(report.Issues, "missing_domain_aliases", "design/KnowledgeBase/domains/behaviour_tree/routing.md") {
+	if hasIssueForPath(report.Issues, "missing_domain_aliases", "KnowledgeBase/domains/behaviour_tree/routing.md") {
 		t.Fatalf("behaviour_tree has aliases and should not report missing_domain_aliases: %#v", report.Issues)
 	}
 	for _, code := range []string{"missing_bilingual_aliases", "duplicate_domain_alias", "broad_domain_alias"} {
@@ -78,8 +78,8 @@ func TestValidateDomainRoutingAliases(t *testing.T) {
 func TestValidateReportsMojibakeContent(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: design/KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Root\n\nThis text contains garbled Chinese like 鐞涘奔璐熼弽 and 閹存ɑ鏋 AI.")
-	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
+	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Root\n\nThis text contains garbled Chinese like 鐞涘奔璐熼弽 and 閹存ɑ鏋 AI.")
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
 
 	report, err := Validate(root)
 	if err != nil {
@@ -93,8 +93,8 @@ func TestValidateReportsMojibakeContent(t *testing.T) {
 func TestValidateAllowsMojibakeExamplesInsideCode(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: design/KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Root\n\nUse examples like `鈥?` only inside code spans when documenting encoding checks.\n\n```text\n鐞涘奔璐熼弽\n閹存ɑ鏋\n```")
-	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
+	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Root\n\nUse examples like `鈥?` only inside code spans when documenting encoding checks.\n\n```text\n鐞涘奔璐熼弽\n閹存ɑ鏋\n```")
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
 
 	report, err := Validate(root)
 	if err != nil {
@@ -109,11 +109,11 @@ func TestMaintenanceDetectsDuplicateChineseHardRules(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
 	rule := "- 必须通过 ViewModel 传递界面状态，禁止在 View 中直接访问网络和业务服务。"
-	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root\n\n[Rules](./domains/ui/rules.md)\n[More](./domains/ui/more-rules.md)"))
-	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "design/KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
-	writeTestFile(t, filepath.Join(kb, "project", "routing.md"), okfDoc("Routing", "Project Routing", "design/KnowledgeBase/project/routing.md", "# Routing\n\nLoad `design/KnowledgeBase/domains/ui/routing.md`."))
-	writeTestFile(t, filepath.Join(kb, "domains", "ui", "rules.md"), okfDoc("CodingRules", "Rules", "design/KnowledgeBase/domains/ui/rules.md", rule))
-	writeTestFile(t, filepath.Join(kb, "domains", "ui", "more-rules.md"), okfDoc("CodingRules", "More Rules", "design/KnowledgeBase/domains/ui/more-rules.md", rule))
+	writeTestFile(t, filepath.Join(kb, "index.md"), okfDoc("Index", "Root", "KnowledgeBase/index.md", "# Root\n\n[Rules](./domains/ui/rules.md)\n[More](./domains/ui/more-rules.md)"))
+	writeTestFile(t, filepath.Join(kb, "log.md"), okfDoc("Log", "Log", "KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry."))
+	writeTestFile(t, filepath.Join(kb, "project", "routing.md"), okfDoc("Routing", "Project Routing", "KnowledgeBase/project/routing.md", "# Routing\n\nLoad `KnowledgeBase/domains/ui/routing.md`."))
+	writeTestFile(t, filepath.Join(kb, "domains", "ui", "rules.md"), okfDoc("CodingRules", "Rules", "KnowledgeBase/domains/ui/rules.md", rule))
+	writeTestFile(t, filepath.Join(kb, "domains", "ui", "more-rules.md"), okfDoc("CodingRules", "More Rules", "KnowledgeBase/domains/ui/more-rules.md", rule))
 
 	report, err := Maintenance(root)
 	if err != nil {
@@ -131,8 +131,8 @@ func TestMaintenanceReportFlagsLargeDocs(t *testing.T) {
 	for i := range largeBody {
 		largeBody[i] = 'x'
 	}
-	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: design/KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n"+string(largeBody))
-	writeTestFile(t, filepath.Join(kb, "log.md"), "---\ntype: Log\ntitle: Log\ndescription: Changes.\nresource: design/KnowledgeBase/log.md\ntags: [log]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n")
+	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Root\ndescription: Root.\nresource: KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n"+string(largeBody))
+	writeTestFile(t, filepath.Join(kb, "log.md"), "---\ntype: Log\ntitle: Log\ndescription: Changes.\nresource: KnowledgeBase/log.md\ntags: [log]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n")
 
 	report, err := Maintenance(root)
 	if err != nil {

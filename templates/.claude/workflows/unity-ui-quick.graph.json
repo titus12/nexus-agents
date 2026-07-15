@@ -1,0 +1,78 @@
+{
+  "id": "ui-quick",
+  "name": "unity-ui-quick",
+  "nodes": [
+    {
+      "id": "trigger",
+      "y": 210,
+      "agent": "-",
+      "category": "event",
+      "type": "input",
+      "x": 48,
+      "label": "$wf-unity-ui-quick",
+      "detail": "Receive a narrow Unity UI View or ViewModel change."
+    },
+    {
+      "id": "scope",
+      "y": 210,
+      "agent": "quick-planner",
+      "category": "condition",
+      "type": "condition",
+      "x": 320,
+      "label": "quick scope gate",
+      "detail": "Confirm a maximum of two handwritten files and no protocol, cache, service, prefab, scene, generated-file, or cross-feature data-flow change."
+    },
+    {
+      "id": "developer",
+      "y": 140,
+      "agent": "quick-developer",
+      "category": "action",
+      "type": "agent",
+      "x": 620,
+      "label": "quick-developer",
+      "detail": "Read the smallest relevant UI context and make the minimal safe handwritten change or diagnostic."
+    },
+    {
+      "id": "verifier",
+      "y": 320,
+      "agent": "quick-verifier",
+      "category": "action",
+      "type": "agent",
+      "x": 920,
+      "label": "quick-verifier",
+      "detail": "Check behavior, compile risk, generated-file safety, and the available Unity Console or compile evidence."
+    },
+    {
+      "id": "output",
+      "y": 210,
+      "agent": "quick-developer",
+      "category": "data",
+      "type": "output",
+      "x": 1220,
+      "label": "deliver",
+      "detail": "Return evidence, changed files, validation results, skipped checks, risks, or an escalation to the full UI workflow."
+    }
+  ],
+  "edges": [
+    {
+      "label": "request",
+      "from": "trigger",
+      "to": "scope"
+    },
+    {
+      "label": "within scope",
+      "from": "scope",
+      "to": "developer"
+    },
+    {
+      "label": "implementation or diagnostic",
+      "from": "developer",
+      "to": "verifier"
+    },
+    {
+      "label": "verification",
+      "from": "verifier",
+      "to": "output"
+    }
+  ]
+}

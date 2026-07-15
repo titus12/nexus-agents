@@ -1,0 +1,1 @@
+# unity-logic-mod-safety`n`nLogic modification safety: summarize current and target behavior before editing, avoid UI/asset/generated changes, verify old and new behavior, and check null, lifecycle, async, cancellation, timeout, and destroyed-object boundaries.

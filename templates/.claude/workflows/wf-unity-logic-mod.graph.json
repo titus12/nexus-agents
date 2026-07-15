@@ -1,0 +1,93 @@
+{
+  "id": "logic-modification",
+  "name": "wf-unity-logic-mod",
+  "nodes": [
+    {
+      "id": "trigger",
+      "y": 210,
+      "agent": "-",
+      "category": "event",
+      "type": "input",
+      "x": 48,
+      "label": "$wf-unity-logic-mod",
+      "detail": "Unity workflow entry receives the request."
+    },
+    {
+      "id": "route",
+      "y": 210,
+      "agent": "skill resolver",
+      "category": "condition",
+      "type": "condition",
+      "x": 300,
+      "label": "unity workflow skill",
+      "detail": "Load Unity workflow rules and skills."
+    },
+    {
+      "id": "owner",
+      "y": 210,
+      "agent": "unity-logic-developer",
+      "category": "action",
+      "type": "agent",
+      "x": 560,
+      "label": "unity-logic-developer",
+      "detail": "Modify scoped existing Unity C# logic and verify behavior."
+    },
+    {
+      "id": "tester",
+      "y": 320,
+      "agent": "unity-regression-evaluator",
+      "category": "action",
+      "type": "agent",
+      "x": 820,
+      "label": "unity-regression-evaluator",
+      "detail": "Verify compile, tests, new behavior, and key old behavior."
+    },
+    {
+      "id": "review",
+      "y": 210,
+      "agent": "unity-logic-reviewer",
+      "category": "action",
+      "type": "agent",
+      "x": 1080,
+      "label": "unity-logic-reviewer",
+      "detail": "Review compatibility, boundaries, lifecycle, and performance risks."
+    },
+    {
+      "id": "output",
+      "y": 210,
+      "agent": "unity-logic-developer",
+      "category": "data",
+      "type": "output",
+      "x": 1600,
+      "label": "deliver",
+      "detail": "Return result, evidence, skipped checks, and remaining risks."
+    }
+  ],
+  "edges": [
+    {
+      "label": "command",
+      "from": "trigger",
+      "to": "route"
+    },
+    {
+      "label": "matched",
+      "from": "route",
+      "to": "owner"
+    },
+    {
+      "label": "implementation",
+      "from": "owner",
+      "to": "tester"
+    },
+    {
+      "label": "verification",
+      "from": "tester",
+      "to": "review"
+    },
+    {
+      "label": "reviewed evidence",
+      "from": "review",
+      "to": "output"
+    }
+  ]
+}

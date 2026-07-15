@@ -1,4 +1,0 @@
-﻿name: wf-kb-maintenance
-summary: Validate and maintain OKF-compatible project knowledge bases.
-model: gpt-5.5
-reasoning_effort: medium

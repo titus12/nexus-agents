@@ -77,7 +77,7 @@ $workflowFiles = @{
   "go-feature-development.md" = @'
 # go-feature-development
 
-Source: `templates/rules/go-00-routing.md`
+Source: `templates/.claude/rules/go-00-routing.md`
 Stack: `go`
 
 Entry skill: `$wf-go-feat`
@@ -143,7 +143,7 @@ Entry skill: `$wf-go-feat`
   "go-bugfix.md" = @"
 # go-bugfix
 
-Source: ``templates/rules/go-00-routing.md``
+Source: ``templates/.claude/rules/go-00-routing.md``
 Stack: ``go``
 
 Entry skill: ``$wf-go-bugfix``
@@ -163,7 +163,7 @@ Workflow:
   "go-code-review.md" = @"
 # go-code-review
 
-Source: ``templates/rules/go-00-routing.md``
+Source: ``templates/.claude/rules/go-00-routing.md``
 Stack: ``go``
 
 Entry skill: ``$wf-go-review``
@@ -181,7 +181,7 @@ Workflow:
   "design.md" = @"
 # design
 
-Source: ``templates/rules/go-00-routing.md``
+Source: ``templates/.claude/rules/go-00-routing.md``
 
 Entry skill: ``$wf-design``
 
@@ -197,7 +197,7 @@ Workflow:
   "research.md" = @"
 # research
 
-Source: ``templates/rules/go-00-routing.md``
+Source: ``templates/.claude/rules/go-00-routing.md``
 
 Entry skill: ``$wf-research``
 
@@ -212,7 +212,7 @@ Workflow:
   "commit-gate.md" = @"
 # commit-gate
 
-Source: ``templates/rules/go-00-routing.md``
+Source: ``templates/.claude/rules/go-00-routing.md``
 
 Entry skill: ``$wf-commit``
 
@@ -228,7 +228,7 @@ Workflow:
   "lark-integration.md" = @"
 # lark-integration
 
-Source: ``templates/rules/go-00-routing.md``
+Source: ``templates/.claude/rules/go-00-routing.md``
 
 Entry skill: ``$wf-lark``
 

@@ -9,8 +9,8 @@ import (
 func TestScanBundleReadsMarkdownAndLinks(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
-	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Knowledge Index\ndescription: Root.\nresource: design/KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n[Actor](./domains/actor/index.md)")
-	writeTestFile(t, filepath.Join(kb, "domains", "actor", "index.md"), "---\ntype: Domain\ntitle: Actor\ndescription: Actor.\nresource: design/KnowledgeBase/domains/actor/index.md\ntags: [actor]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Actor")
+	writeTestFile(t, filepath.Join(kb, "index.md"), "---\ntype: Index\ntitle: Knowledge Index\ndescription: Root.\nresource: KnowledgeBase/index.md\ntags: [index]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n[Actor](./domains/actor/index.md)")
+	writeTestFile(t, filepath.Join(kb, "domains", "actor", "index.md"), "---\ntype: Domain\ntitle: Actor\ndescription: Actor.\nresource: KnowledgeBase/domains/actor/index.md\ntags: [actor]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Actor")
 
 	bundle, err := ScanBundle(root)
 	if err != nil {

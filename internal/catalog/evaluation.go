@@ -1034,10 +1034,10 @@ func detectLoadedKnowledgeEvidence(run TaskRun) []string {
 	var files []string
 	for _, text := range texts {
 		for _, line := range strings.Split(text, "\n") {
-			if !strings.Contains(line, "design/KnowledgeBase/") {
+			if !strings.Contains(line, "KnowledgeBase/") {
 				continue
 			}
-			start := strings.Index(line, "design/KnowledgeBase/")
+			start := strings.Index(line, "KnowledgeBase/")
 			item := strings.Trim(line[start:], "` -*\t\r\n")
 			item = strings.TrimRight(item, "，。,.;；")
 			if item != "" && !seen[item] {
@@ -1051,7 +1051,7 @@ func detectLoadedKnowledgeEvidence(run TaskRun) []string {
 
 func knowledgeIssues(files []string) []string {
 	if len(files) == 0 {
-		return []string{"missing Loaded Knowledge section or design/KnowledgeBase references"}
+		return []string{"missing Loaded Knowledge section or KnowledgeBase references"}
 	}
 	return nil
 }

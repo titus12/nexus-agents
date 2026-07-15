@@ -29,7 +29,7 @@ func TestSQLiteFTS5SupportsBM25AndSnippet(t *testing.T) {
 	}{
 		{
 			id:      "ui-routing",
-			path:    "design/KnowledgeBase/domains/ui/routing.md",
+			path:    "KnowledgeBase/domains/ui/routing.md",
 			title:   "UI Routing",
 			heading: "Popup and ViewModel tasks",
 			tags:    "ui popup viewmodel 界面 弹窗",
@@ -37,7 +37,7 @@ func TestSQLiteFTS5SupportsBM25AndSnippet(t *testing.T) {
 		},
 		{
 			id:      "network",
-			path:    "design/KnowledgeBase/domains/network/README.md",
+			path:    "KnowledgeBase/domains/network/README.md",
 			title:   "Network",
 			heading: "Protocol",
 			tags:    "network protocol socket 网络 协议",

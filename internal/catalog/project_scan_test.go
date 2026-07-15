@@ -9,8 +9,8 @@ import (
 
 func TestHydrateTemplateItemFromFilesPrefersCodexTomlModel(t *testing.T) {
 	root := t.TempDir()
-	claudeRel := "templates/agents/claude/go-worker.md"
-	codexRel := "templates/agents/codex/go-worker.toml"
+	claudeRel := "templates/.claude/agents/go-worker.md"
+	codexRel := "templates/.codex/agents/go-worker.toml"
 	writeTestFile(t, root, claudeRel, "worker markdown")
 	writeTestFile(t, root, codexRel, "name = \"worker\"\nmodel = \"deepseek-v4-pro\"\nmodel_reasoning_effort = \"high\"\n")
 	claudePath := filepath.Join(root, filepath.FromSlash(claudeRel))
@@ -640,12 +640,18 @@ func TestAddProjectCopyFromWorkflowTemplateWritesCodexWorkflowSkillFolder(t *tes
 
 	templateSkill := filepath.Join(templateRoot, "skills", "codex", "wf-go-feat", "SKILL.md")
 	templateMetadata := filepath.Join(templateRoot, "skills", "codex", "wf-go-feat", "agents", "openai.yaml")
+	templateHelper := filepath.Join(templateRoot, "skills", "codex", "wf-go-feat", "scripts", "taskrun.mjs")
+	taskrunSkill := filepath.Join(templateRoot, "skills", "codex", "nexus-taskrun-submit", "SKILL.md")
+	taskrunHelper := filepath.Join(templateRoot, "skills", "codex", "nexus-taskrun-submit", "taskrun.mjs")
 	templateWorkflow := filepath.Join(templateRoot, "workflows", "go-feature-development.md")
 	templateGraph := filepath.Join(templateRoot, "workflows", "go-feature-development.graph.json")
 	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/SKILL.md", "---\nname: wf-go-feat\ndescription: Go feature workflow.\n---\n\n# wf-go-feat\n")
 	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/agents/openai.yaml", "interface:\n  display_name: \"WF Go Feature\"\n")
+	writeTestFile(t, templateRoot, "skills/codex/wf-go-feat/scripts/taskrun.mjs", "console.log('taskrun');\n")
+	writeTestFile(t, templateRoot, "skills/codex/nexus-taskrun-submit/SKILL.md", "---\nname: nexus-taskrun-submit\ndescription: Submit workflow evidence.\n---\n")
+	writeTestFile(t, templateRoot, "skills/codex/nexus-taskrun-submit/taskrun.mjs", "console.log('submit');\n")
 	writeTestFile(t, templateRoot, "commands/claude/wf-go-feat.md", "---\ndescription: Run the Go feature-development workflow\n---\n\n# /wf-go-feat\n")
-	writeTestFile(t, templateRoot, "workflows/go-feature-development.md", "# go-feature-development\n")
+	writeTestFile(t, templateRoot, "workflows/go-feature-development.md", "# go-feature-development\n\nnode .agents/skills/nexus-taskrun-submit/taskrun.mjs start\n")
 	writeTestFile(t, templateRoot, "workflows/go-feature-development.graph.json", `{"id":"feature-development","name":"feature","nodes":[],"edges":[]}`+"\n")
 
 	store := NewStoreFromData(BootstrapData{
@@ -664,7 +670,14 @@ func TestAddProjectCopyFromWorkflowTemplateWritesCodexWorkflowSkillFolder(t *tes
 				Name:    "wf-go-feat",
 				Version: 1,
 				Entry:   templateSkill,
-				Files:   []string{templateSkill, templateMetadata},
+				Files:   []string{templateSkill, templateMetadata, templateHelper},
+			}, {
+				ID:      "nexus-taskrun-submit",
+				Kind:    "skill",
+				Name:    "nexus-taskrun-submit",
+				Version: 1,
+				Entry:   taskrunSkill,
+				Files:   []string{taskrunSkill, taskrunHelper},
 			}},
 		},
 		ProjectConfigSets: map[string][]ProjectCopy{},
@@ -696,6 +709,12 @@ func TestAddProjectCopyFromWorkflowTemplateWritesCodexWorkflowSkillFolder(t *tes
 	if data, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "wf-go-feat", "agents", "openai.yaml")); err != nil || string(data) != "interface:\n  display_name: \"WF Go Feature\"\n" {
 		t.Fatalf("expected codex skill metadata from template, data=%q err=%v", string(data), err)
 	}
+	if data, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "wf-go-feat", "scripts", "taskrun.mjs")); err != nil || string(data) != "console.log('taskrun');\n" {
+		t.Fatalf("expected codex skill helper from template, data=%q err=%v", string(data), err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, ".agents", "skills", "nexus-taskrun-submit", "taskrun.mjs")); err != nil || string(data) != "console.log('submit');\n" {
+		t.Fatalf("expected workflow support skill helper from template, data=%q err=%v", string(data), err)
+	}
 	if data, err := os.ReadFile(filepath.Join(root, ".claude", "commands", "wf-go-feat.md")); err != nil || !strings.Contains(string(data), ".claude/workflows/go-feature-development.md") {
 		t.Fatalf("expected claude workflow command from template, data=%q err=%v", string(data), err)
 	}
@@ -705,8 +724,8 @@ func TestBootstrapFiltersWorkflowSkillTemplates(t *testing.T) {
 	store := NewStoreFromData(BootstrapData{
 		TemplateLibrary: TemplateLibrary{
 			Skills: []TemplateItem{
-				{ID: "go-testing", Kind: "skill", Name: "go-testing", Version: 1, Entry: "templates/skills/go-testing.md", Files: []string{"templates/skills/go-testing.md"}},
-				{ID: "wf-go-feat", Kind: "skill", Name: "wf-go-feat", Version: 1, Entry: "templates/skills/codex/wf-go-feat/SKILL.md", Files: []string{"templates/skills/codex/wf-go-feat/SKILL.md"}},
+				{ID: "go-testing", Kind: "skill", Name: "go-testing", Version: 1, Entry: "templates/.claude/skills/go-testing/SKILL.md", Files: []string{"templates/.claude/skills/go-testing/SKILL.md"}},
+				{ID: "wf-go-feat", Kind: "skill", Name: "wf-go-feat", Version: 1, Entry: "templates/.agents/skills/wf-go-feat/SKILL.md", Files: []string{"templates/.agents/skills/wf-go-feat/SKILL.md"}},
 			},
 		},
 		ProjectConfigSets: map[string][]ProjectCopy{
@@ -760,6 +779,85 @@ func TestTemplateHashPrefersDeclaredFilesOverSourcePaths(t *testing.T) {
 	if withRoutingSource != withoutRoutingSource {
 		t.Fatalf("expected source-only routing references not to affect hash, got %s and %s", withRoutingSource, withoutRoutingSource)
 	}
+}
+
+func TestProjectAgentsTemplateWritesRootFileAndPreservesExistingContent(t *testing.T) {
+	templateRoot := t.TempDir()
+	templatePath := filepath.Join(templateRoot, "project-files", "AGENTS.md")
+	templateContent := "# Project AI Tooling Guide\n\nTemplate content.\n"
+	writeTestFile(t, templateRoot, "project-files/AGENTS.md", templateContent)
+
+	newStore := func() *Store {
+		return NewStoreFromData(BootstrapData{
+			TemplateLibrary: TemplateLibrary{
+				Rules: []TemplateItem{{
+					ID:      "project-agents",
+					Kind:    "rule",
+					Name:    "Project AI Tooling Guide",
+					Version: 1,
+					Entry:   templatePath,
+					Files:   []string{templatePath},
+				}},
+			},
+			ProjectConfigSets: map[string][]ProjectCopy{},
+		}, nil, nil)
+	}
+
+	t.Run("writes when the project has no AGENTS.md", func(t *testing.T) {
+		root := t.TempDir()
+		store := newStore()
+		project, err := store.ImportProject(ProjectInput{Name: "empty-project", Path: root})
+		if err != nil {
+			t.Fatalf("import project: %v", err)
+		}
+
+		copy, ok, err := store.AddProjectCopyFromTemplate(project.ID, "rule", "project-agents")
+		if err != nil {
+			t.Fatalf("add project AGENTS template: %v", err)
+		}
+		if !ok || copy.Path != "AGENTS.md" || copy.Status != "synced" {
+			t.Fatalf("unexpected AGENTS project copy: %#v", copy)
+		}
+		data, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+		if err != nil || string(data) != templateContent {
+			t.Fatalf("expected root AGENTS template content, data=%q err=%v", string(data), err)
+		}
+	})
+
+	t.Run("adopts an existing AGENTS.md without overwriting it", func(t *testing.T) {
+		root := t.TempDir()
+		existingContent := "# Existing project instructions\n"
+		writeTestFile(t, root, "AGENTS.md", existingContent)
+		store := newStore()
+		project, err := store.ImportProject(ProjectInput{Name: "existing-project", Path: root})
+		if err != nil {
+			t.Fatalf("import project: %v", err)
+		}
+
+		copy, ok, err := store.AddProjectCopyFromTemplate(project.ID, "rule", "project-agents")
+		if err != nil {
+			t.Fatalf("adopt existing AGENTS project copy: %v", err)
+		}
+		if !ok || copy.Path != "AGENTS.md" || copy.Status != "project_modified" {
+			t.Fatalf("expected protected existing AGENTS project copy: %#v", copy)
+		}
+		data, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+		if err != nil || string(data) != existingContent {
+			t.Fatalf("existing AGENTS.md was overwritten, data=%q err=%v", string(data), err)
+		}
+
+		synced, ok, err := store.SyncProjectCopy(project.ID, copy.ID)
+		if err != nil {
+			t.Fatalf("explicitly sync AGENTS template: %v", err)
+		}
+		if !ok || synced.Status != "synced" {
+			t.Fatalf("unexpected explicitly synced AGENTS copy: %#v", synced)
+		}
+		data, err = os.ReadFile(filepath.Join(root, "AGENTS.md"))
+		if err != nil || string(data) != templateContent {
+			t.Fatalf("expected explicit sync to replace AGENTS content, data=%q err=%v", string(data), err)
+		}
+	})
 }
 
 func TestNewStoreRestoresProjectsFromUserHomeNexusIndex(t *testing.T) {

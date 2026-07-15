@@ -1,4 +1,0 @@
-name = "learning-curator"
-model = "gpt-5.4-mini"
-model_reasoning_effort = "medium"
-

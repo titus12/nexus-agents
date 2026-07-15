@@ -541,10 +541,10 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		if agent.ModelTier == "" || agent.CodexProjection == "" || agent.ClaudeSource == "" {
 			t.Fatalf("expected btd agent model and source metadata, got %#v", agent)
 		}
-		if !containsString(agent.SourcePaths, "templates/agents/claude/"+displayName+".md") {
+		if !containsString(agent.SourcePaths, "templates/.claude/agents/"+displayName+".md") {
 			t.Fatalf("expected copied agent markdown template for %s, got %#v", agent.ID, agent.SourcePaths)
 		}
-		if !containsString(agent.SourcePaths, "templates/agents/codex/"+displayName+".toml") {
+		if !containsString(agent.SourcePaths, "templates/.codex/agents/"+displayName+".toml") {
 			t.Fatalf("expected copied agent toml template for %s, got %#v", agent.ID, agent.SourcePaths)
 		}
 	}
@@ -557,13 +557,21 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		Content     string   `json:"content"`
 	}
 	getJSON(t, server, "/api/templates/rules", &rules)
-	assertTemplateIDs(t, "rules", rules, []string{"00-routing", "01-communication", "02-safety", "03-project-model", "04-task-decomposition", "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety"})
+	assertTemplateIDs(t, "rules", rules, []string{
+		"00-routing", "01-communication", "02-safety", "03-project-model", "04-task-decomposition", "knowledge-retrieval", "project-agents",
+		"uiarchitect-asset-safety", "uiarchitect-editor-runtime-boundary", "uiarchitect-generated-safety", "uiarchitect-portability",
+		"unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety",
+	})
 	for _, rule := range rules {
-		displayName := strings.TrimSuffix(strings.TrimPrefix(rule.SourcePaths[0], "templates/rules/"), ".md")
+		displayName := strings.TrimSuffix(filepath.Base(rule.SourcePaths[0]), ".md")
 		if rule.Name != displayName || rule.Slug != displayName {
 			t.Fatalf("expected rule template identity to preserve go- filename prefix, got %#v", rule)
 		}
-		if rule.Content == "" || !hasTemplateMarkdownPath(rule.SourcePaths, "templates/rules/") {
+		expectedPathPrefix := "templates/.claude/rules/"
+		if rule.ID == "project-agents" {
+			expectedPathPrefix = "templates/"
+		}
+		if rule.Content == "" || !hasTemplateMarkdownPath(rule.SourcePaths, expectedPathPrefix) {
 			t.Fatalf("expected copied btd rule content and template path, got %#v", rule)
 		}
 	}
@@ -579,16 +587,17 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "skills", skills, []string{
 		"coding-rules", "cross-client", "cross-config", "cross-gate", "cross-social", "dev-workflow",
 		"high-risk-api", "pmconf-pattern", "quest-system", "review-feedback", "skill-standard", "test-first-and-worktree", "testing",
+		"kb-system-curator", "nexus-evaluation-review", "nexus-taskrun-submit",
 		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver", "csharp-behaviour-tree",
 	})
 	for _, skill := range skills {
-		if strings.HasPrefix(skill.SourcePaths[0], "templates/skills/go-") {
+		if strings.HasPrefix(skill.SourcePaths[0], "templates/.claude/skills/go-") {
 			displayName := "go-" + skill.ID
 			if skill.Name != displayName || skill.Slug != displayName {
 				t.Fatalf("expected skill template identity to preserve go- filename prefix, got %#v", skill)
 			}
 		}
-		if skill.Content == "" || !hasTemplateMarkdownPath(skill.SourcePaths, "templates/skills/") {
+		if skill.Content == "" || !hasTemplateMarkdownPath(skill.SourcePaths, "templates/.claude/skills/") {
 			t.Fatalf("expected copied btd skill content and template path, got %#v", skill)
 		}
 	}
@@ -606,21 +615,27 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "workflows", workflows, []string{
 		"feature-development", "bugfix", "code-review", "design",
 		"research", "commit-gate", "lark-integration", "subagent-driven-development",
-		"bug-investigation", "logic-modification", "ui-feature-development",
+		"bug-investigation", "logic-modification", "ui-feature-development", "ui-quick",
 	})
+	unityWorkflowIDs := map[string]bool{
+		"bug-investigation":      true,
+		"logic-modification":     true,
+		"ui-feature-development": true,
+		"ui-quick":               true,
+	}
 	for _, workflow := range workflows {
-		if strings.HasPrefix(workflow.Entry, "templates/workflows/go-") {
+		if strings.HasPrefix(workflow.Entry, "templates/.claude/workflows/go-") {
 			displayName := "go-" + workflow.ID
 			if workflow.Name != displayName || workflow.Slug != displayName {
 				t.Fatalf("expected workflow template identity to preserve go- filename prefix, got %#v", workflow)
 			}
 		}
-		if workflow.Entry == "" || !strings.HasPrefix(workflow.Entry, "templates/workflows/") || !strings.HasSuffix(workflow.Entry, ".md") {
+		if workflow.Entry == "" || !strings.HasPrefix(workflow.Entry, "templates/.claude/workflows/") || !strings.HasSuffix(workflow.Entry, ".md") {
 			t.Fatalf("expected workflow entry to be copied markdown under templates/workflows, got %#v", workflow)
 		}
-		routingPath := "templates/rules/go-00-routing.md"
-		if strings.HasPrefix(workflow.Entry, "templates/workflows/unity-") {
-			routingPath = "templates/rules/unity-00-routing.md"
+		routingPath := "templates/.claude/rules/go-00-routing.md"
+		if unityWorkflowIDs[workflow.ID] {
+			routingPath = "templates/.claude/rules/unity-00-routing.md"
 		}
 		if workflow.Source != "Expanded workflow markdown" || workflow.Content == "" || !containsString(workflow.SourcePaths, routingPath) {
 			t.Fatalf("expected btd workflow content and routing lineage, got %#v", workflow)
@@ -650,7 +665,7 @@ func TestTemplateCrudEndpoints(t *testing.T) {
 		t.Fatalf("unexpected created template: %#v", created)
 	}
 
-	updateResponse := requestJSON(t, server, http.MethodPut, "/api/templates/rules/"+created.ID, `{"summary":"Updated review checklist."}`)
+	updateResponse := requestJSON(t, server, http.MethodPut, "/api/templates/.claude/rules/"+created.ID, `{"summary":"Updated review checklist."}`)
 	if updateResponse.Code != http.StatusOK {
 		t.Fatalf("expected update status 200, got %d", updateResponse.Code)
 	}
@@ -665,7 +680,7 @@ func TestTemplateCrudEndpoints(t *testing.T) {
 		t.Fatalf("unexpected updated template: %#v", updated)
 	}
 
-	deleteResponse := requestJSON(t, server, http.MethodDelete, "/api/templates/rules/"+created.ID, "")
+	deleteResponse := requestJSON(t, server, http.MethodDelete, "/api/templates/.claude/rules/"+created.ID, "")
 	if deleteResponse.Code != http.StatusNoContent {
 		t.Fatalf("expected delete status 204, got %d", deleteResponse.Code)
 	}
@@ -1147,10 +1162,10 @@ func writeHTTPTestFile(t *testing.T, root string, relative string, content strin
 
 func TestProjectKnowledgeRetrieveEndpoint(t *testing.T) {
 	root := t.TempDir()
-	writeHTTPTestFile(t, root, "design/KnowledgeBase/index.md", httpOKFDoc("Index", "Root", "design/KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)"))
-	writeHTTPTestFile(t, root, "design/KnowledgeBase/project/routing.md", httpOKFDoc("Routing", "Project Routing", "design/KnowledgeBase/project/routing.md", "# Routing\n\nUI tasks read `design/KnowledgeBase/domains/ui/routing.md`."))
-	writeHTTPTestFile(t, root, "design/KnowledgeBase/domains/ui/routing.md", httpOKFDoc("Routing", "UI Routing", "design/KnowledgeBase/domains/ui/routing.md", "# UI Routing\n\nRequired:\n- design/KnowledgeBase/domains/ui/coding_rules.md"))
-	writeHTTPTestFile(t, root, "design/KnowledgeBase/domains/ui/coding_rules.md", httpOKFDoc("CodingRules", "UI Coding Rules", "design/KnowledgeBase/domains/ui/coding_rules.md", "# Coding\n\n## ViewModel\n\n弹窗 UI 使用 ViewModel 管理状态。"))
+	writeHTTPTestFile(t, root, "KnowledgeBase/index.md", httpOKFDoc("Index", "Root", "KnowledgeBase/index.md", "# Root\n\n[Project routing](./project/routing.md)"))
+	writeHTTPTestFile(t, root, "KnowledgeBase/project/routing.md", httpOKFDoc("Routing", "Project Routing", "KnowledgeBase/project/routing.md", "# Routing\n\nUI tasks read `KnowledgeBase/domains/ui/routing.md`."))
+	writeHTTPTestFile(t, root, "KnowledgeBase/domains/ui/routing.md", httpOKFDoc("Routing", "UI Routing", "KnowledgeBase/domains/ui/routing.md", "# UI Routing\n\nRequired:\n- KnowledgeBase/domains/ui/coding_rules.md"))
+	writeHTTPTestFile(t, root, "KnowledgeBase/domains/ui/coding_rules.md", httpOKFDoc("CodingRules", "UI Coding Rules", "KnowledgeBase/domains/ui/coding_rules.md", "# Coding\n\n## ViewModel\n\n弹窗 UI 使用 ViewModel 管理状态。"))
 	store := catalog.NewStoreFromData(catalog.BootstrapData{Projects: []catalog.Project{{ID: "sample", Name: "sample", Path: root}}}, nil, nil)
 	server := NewServerWithStore(store)
 

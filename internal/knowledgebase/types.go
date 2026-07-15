@@ -2,7 +2,7 @@ package knowledgebase
 
 import "time"
 
-const DefaultRoot = "design/KnowledgeBase"
+const DefaultRoot = "KnowledgeBase"
 
 type Summary struct {
 	Exists       bool   `json:"exists"`

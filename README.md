@@ -25,7 +25,7 @@ templates/
   workflows/   # 工作流 Markdown + .graph.json
 ```
 
-Go 相关模板使用 `go-` 文件名前缀，例如 `templates/agents/claude/go-worker.md`、`templates/agents/codex/go-worker.toml`、`templates/workflows/go-bugfix.md`。
+Go 相关模板使用 `go-` 文件名前缀，例如 `templates/.claude/agents/go-worker.md`、`templates/.codex/agents/go-worker.toml`、`templates/.claude/workflows/go-bugfix.md`。
 
 ## 构建前端资源
 Go 服务嵌入了 `web/dist`，前端代码修改后需重新构建：

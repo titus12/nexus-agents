@@ -3,12 +3,12 @@ package knowledgebase
 import "testing"
 
 func TestParseFrontmatterWithTags(t *testing.T) {
-	input := "---\ntype: Domain\ntitle: Go Actor System\ndescription: Actor rules.\nresource: design/KnowledgeBase/domains/actor\ntags: [go, actor, server]\ndepends_on: [design/KnowledgeBase/project/routing.md]\nsee_also: [./routing.md]\nstatus: stable\nowner: gameplay-team\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Body\nText"
+	input := "---\ntype: Domain\ntitle: Go Actor System\ndescription: Actor rules.\nresource: KnowledgeBase/domains/actor\ntags: [go, actor, server]\ndepends_on: [KnowledgeBase/project/routing.md]\nsee_also: [./routing.md]\nstatus: stable\nowner: gameplay-team\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Body\nText"
 	fm, body, ok := ParseFrontmatter(input)
 	if !ok {
 		t.Fatal("expected frontmatter")
 	}
-	if fm.Type != "Domain" || fm.Title != "Go Actor System" || fm.Resource != "design/KnowledgeBase/domains/actor" {
+	if fm.Type != "Domain" || fm.Title != "Go Actor System" || fm.Resource != "KnowledgeBase/domains/actor" {
 		t.Fatalf("unexpected frontmatter: %#v", fm)
 	}
 	if len(fm.Tags) != 3 || fm.Tags[0] != "go" || fm.Tags[2] != "server" {
@@ -36,7 +36,7 @@ func TestParseFrontmatterMissingBlock(t *testing.T) {
 }
 
 func TestParseFrontmatterRoutingAliasesAndKeywords(t *testing.T) {
-	input := "---\ntype: Routing\ntitle: Behaviour Tree Routing\ndescription: Routes behaviour tree work.\nresource: design/KnowledgeBase/domains/behaviour_tree/routing.md\ntags: [btd-client, routing]\nrouting:\n  aliases:\n    zh: [行为树, 战斗 AI]\n    en: [behaviour tree, BonsaiBT]\n    pairs:\n      - zh: 行为树\n        en: behaviour tree\n      - zh: BonsaiBT\n        en: BonsaiBT\n  keywords:\n    zh: [黑板, 选择器]\n    en: [blackboard, selector]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Body"
+	input := "---\ntype: Routing\ntitle: Behaviour Tree Routing\ndescription: Routes behaviour tree work.\nresource: KnowledgeBase/domains/behaviour_tree/routing.md\ntags: [btd-client, routing]\nrouting:\n  aliases:\n    zh: [行为树, 战斗 AI]\n    en: [behaviour tree, BonsaiBT]\n    pairs:\n      - zh: 行为树\n        en: behaviour tree\n      - zh: BonsaiBT\n        en: BonsaiBT\n  keywords:\n    zh: [黑板, 选择器]\n    en: [blackboard, selector]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n# Body"
 	fm, _, ok := ParseFrontmatter(input)
 	if !ok {
 		t.Fatal("expected frontmatter")
