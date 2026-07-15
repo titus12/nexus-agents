@@ -243,8 +243,7 @@ function Get-WorkflowSpec {
   param([string]$Stem)
 
   $specs = @{
-    "go-feature-development" = @{ Trigger = "$wf-go-feat"; Owner = "sisyphus"; Summary = "New Go feature development with clarification, implementation, testing, and verification." }
-    "go-modify-existing" = @{ Trigger = "$wf-go-mod"; Owner = "hephaestus"; Summary = "Modify an existing Go feature after impact analysis and scoped verification." }
+    "go-feature-development" = @{ Trigger = "$wf-go-feat"; Owner = "sisyphus"; Summary = "Unified Go business-change workflow with evidence-driven planning, bounded task loops, goal gates, and quality gates." }
     "go-bugfix" = @{ Trigger = "$wf-go-bugfix"; Owner = "debugger"; Summary = "Investigate and fix a Go bug with root cause evidence and reproduction." }
     "go-code-review" = @{ Trigger = "$wf-go-review"; Owner = "sisyphus"; Summary = "Run parallel logic, performance, and security reviewers, then merge findings." }
     "design" = @{ Trigger = "$wf-design"; Owner = "prometheus"; Summary = "Produce architecture or implementation design without changing code." }

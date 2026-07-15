@@ -62,43 +62,60 @@ foreach ($entry in $skillCopies.GetEnumerator()) {
 }
 
 $workflowFiles = @{
-  "go-feature-development.md" = @"
+  "go-feature-development.md" = @'
 # go-feature-development
 
-Source: ``templates/rules/go-00-routing.md``
-Stack: ``go``
+Source: `templates/rules/go-00-routing.md`
+Stack: `go`
 
-Entry skill: ``$wf-go-feat``
+Entry skill: `$wf-go-feat`
 
-Use for new features or substantial modules. Load ``go-dev-workflow.md``, move through the nine-step development flow, and report after each step for user review before continuing.
+适用于 Go 新功能、既有行为修改和跨文件业务调整。
 
-Workflow:
+## 强约束
 
-1. Before step 1, ask 2-3 clarification questions to confirm scope.
-2. Load ``go-dev-workflow.md``.
-3. During implementation, load ``go-coding-rules.md``.
-4. When writing tests, write the failing test first, watch it fail, implement, then watch it pass.
-5. Verify with the Go project commands from ``templates/go-btd-game-server.md``.
-"@
-  "go-modify-existing.md" = @"
-# go-modify-existing
+1. 先探索，后实施：加载适用 Rules、知识库 routing 和真实代码证据后，才生成方案和修改代码。
+2. 目标和质检必须可审核：需求不清晰时补齐目标、完成标准、假设和证据。
+3. 重大假设必须确认：业务语义、公共契约、迁移和高风险改动必须等待用户确认。
+4. 任务必须有边界：每项任务定义目标、允许修改范围、完成标准、验证和风险。
+5. 目标门和质量门不得省略：代码写完或子任务完成不等于工作流完成。
+6. Loop 受证据和上限约束：父工作流最多 3 个完整 Loop；每个子任务最多 2 次实施-质检尝试。
 
-Source: ``templates/rules/go-00-routing.md``
-Stack: ``go``
+## 工作流
 
-Entry skill: ``$wf-go-mod``
+1. 加载上下文并探索真实代码、调用方、测试、配置和知识库。
+2. 生成待审核目标契约：目标、必须完成项、非目标、范围、验证、假设/证据和风险。
+3. 重大假设确认后，制定计划；复杂任务仅在边界清晰时拆成 Task Capsule。
+4. 执行 Task Capsule Loop：最小探索 -> 最小实现 -> 子目标检查 -> 子任务质检 -> 集成。
+5. 通过目标门确认必须完成项与影响范围。
+6. 通过质量门确认 Rules、最小 diff、测试、构建、兼容性和真实验证证据；无新证据、超限或阻塞时退出为 partial_success 或 blocked。
 
-Use for changes to existing Go features.
+## 待审核目标契约
 
-Workflow:
+```text
+任务类型：feature | modification
+目标：
+必须完成：
+非目标：
+范围：
+验证与质检：
+关键假设及证据：
+风险：
+是否需要用户确认：
+```
 
-1. Locate the impact area with search or code graph.
-2. Read the matching module skill when one exists.
-3. Load ``go-coding-rules.md``.
-4. Use ``go-hephaestus`` for multi-file work and ``go-quick`` for narrow single-file work.
-5. Check high-risk changes with ``high-risk-api.md``.
-6. Verify with build and relevant tests.
-"@
+## Task Capsule
+
+```text
+目标：
+依赖：
+允许修改范围：
+完成标准：
+验证方式：
+当前尝试次数：
+已有证据与风险：
+```
+'@
   "go-bugfix.md" = @"
 # go-bugfix
 
