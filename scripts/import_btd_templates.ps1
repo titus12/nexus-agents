@@ -51,7 +51,7 @@ Set-Content -LiteralPath (Join-Path $templates "rules\go-04-task-decomposition.m
 
 Task Capsule 必须独立可验收，并在计划中写明执行顺序、并行条件、集成点和父任务负责的总体目标门、质量门及最终验证。
 
-任务拆分默认由主线程串行执行。仅当用户明确要求并行、分工或 delegation 时，才可将边界不重叠、完成标准和验证方式明确的单一目标 Capsule 派发给 subagent。
+选择 ``$wf-go-feat`` 或 ``$wf-go-bugfix`` 即授权 Owner 按角色编排 subagent。Owner 必须先拆分任务；只能派发边界不重叠、完成标准和验证方式明确的单一目标 Capsule，不能把整个需求交给单个 subagent。
 '@
 
 $skillCopies = @{
@@ -152,11 +152,13 @@ Use for Go runtime errors, crashes, and behavioral bugs.
 
 Workflow:
 
-1. Start with ``go-debugger`` and identify the root cause before editing.
-2. Escalate to ``go-oracle`` for cross-module or ambiguous failures.
-3. Add or describe a reproduction path.
-4. Load ``go-coding-rules.md`` before changing code.
-5. Verify the reproduction path plus build or targeted tests.
+1. Load Rules, KB routing, authoritative requirement sources, logs, failing tests, code and callers; do not replace an unreadable authoritative source with local guesses.
+2. Reproduce the failure and record exact command, input, environment and error evidence.
+3. Report conflicts among requirements, logs, code, config, protocol and tests before choosing a fix.
+4. When root cause is uncertain, use a diagnosis-first plan with minimal diagnostic logs or probes; do not apply speculative behavior changes.
+5. After root cause evidence is sufficient, load ``go-04-task-decomposition.md`` and record whether the repair must be split.
+6. Implement the smallest confirmed root-cause repair, then verify reproduction, regression, affected package tests or build, and diff safety.
+7. Keep the loop bounded by new evidence and retry limits; report partial or blocked status when evidence is insufficient.
 "@
   "go-code-review.md" = @"
 # go-code-review

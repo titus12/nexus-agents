@@ -64,9 +64,11 @@ Task 名称：
 
 如果不拆分，计划必须说明为什么该任务仍然只有一个目标、一个边界和一组可验证结果。
 
-## subagent 约束
+## subagent 编排约束
 
-任务拆分默认由主线程串行执行。只有用户明确要求并行、分工或 delegation 时，才能使用 subagent。
+`$wf-go-feat` 和 `$wf-go-bugfix` 是 subagent 编排工作流。选择这些 workflow 即授权 Owner 按角色拆分探索、诊断、实现、验证和复核任务；不需要用户为每一个 Capsule 重复授权。
+
+Owner 不应把大任务直接交给一个 subagent。先按本规则拆分，再派发边界清晰的 Capsule。默认由 Owner 负责任务拆分、上下文压缩、集成、目标门、质量门和最终交付。
 
 可派发给 subagent 的 Task Capsule 必须同时满足：
 
@@ -77,3 +79,17 @@ Task 名称：
 - 不承担最终目标门、质量门或最终交付。
 
 禁止派发“完成整个功能”“处理所有相关代码”或没有明确范围与验证方式的大任务。
+
+默认角色编排：
+
+```text
+探索/跨模块分析：Oracle
+根因诊断：Debugger
+方案和拆分：Sisyphus；高复杂度时 Prometheus
+单文件实现：Quick
+多文件、已确认的窄 Capsule：Hephaestus
+独立验证或辅助任务：Worker
+逻辑复核：Reviewer Logic
+性能/安全复核：Reviewer Perf / Reviewer Security（按风险启用）
+集成与最终交付：Sisyphus
+```

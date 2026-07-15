@@ -70,6 +70,15 @@ GO_FEATURE_WORKFLOW_TOKENS = [
     "success | partial_success | blocked | failed | cancelled",
 ]
 
+GO_BUGFIX_WORKFLOW_TOKENS = [
+    "## 需求来源与事实冲突",
+    "## Diagnosis-First 方案",
+    "## 修复范围与拆分决策",
+    "go-04-task-decomposition.md",
+    "## 知识库建议门",
+    "KB Recommendation:",
+]
+
 CORE_WORKFLOW_FILES = [
     "design.md",
     "research.md",
@@ -167,6 +176,10 @@ def main() -> None:
     require_tokens(
         "templates/workflows/go-feature-development.md",
         GO_FEATURE_WORKFLOW_TOKENS,
+    )
+    require_tokens(
+        "templates/workflows/go-bugfix.md",
+        GO_BUGFIX_WORKFLOW_TOKENS,
     )
 
     for rel in [

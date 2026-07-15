@@ -12,7 +12,7 @@ Entry skill: `$wf-go-feat`
 2. **目标和质检必须可审核。** 用户描述不完整时，AI 必须补齐完成标准、质检项、假设和证据；权威需求来源不可读取时必须如实阻塞或取得用户同意后降级；不得伪造量化结论。
 3. **重大假设必须确认。** 涉及多个业务解释、公共 API/协议、数据或配置迁移、删除旧行为、大范围重构或只能由业务方定义的验收标准时，必须等待用户确认。
 4. **任务拆分必须遵守 `go-04-task-decomposition.md`。** 方案阶段必须记录任务规模信号，并明确“是否拆分、为何拆分或为何不拆分”；未输出该决策不得实施。
-5. **Subagent 必须由用户授权。** 仅当用户明确要求并行、分工或 delegation，且写入范围不重叠时，才使用 subagent。
+5. **Workflow 默认按角色使用 subagent。** 选择 `$wf-go-feat` 即授权 Owner 派发探索、实现、验证和复核 Capsule；派发前必须通过 `go-04-task-decomposition.md` 的边界和规模检查，禁止把大任务直接交给单个 subagent。
 6. **目标门和质量门不得省略。** 子任务完成或代码写完不等于工作流完成。
 7. **循环必须受证据和上限约束。** 父工作流最多 3 个完整 Loop；每个子任务最多 2 次实施-质检尝试；没有新证据时禁止重复同一失败路径。
 8. **最终结果必须可复核。** 如实报告改动、验证命令和结果、未验证项、风险及最终状态：`success | partial_success | blocked | failed | cancelled`。
@@ -123,18 +123,18 @@ Task 2：目标 / 范围 / 验收 / 验证 / 风险
 
 ## 角色与阶段
 
-默认由 **Sisyphus** 作为工作流 Owner 串行推进。角色是职责分工，不自动等于启动 subagent；只有用户明确要求并行、分工或 delegation 时，才按 `go-04-task-decomposition.md` 派发边界清晰的 Task Capsule。
+默认由 **Sisyphus** 作为工作流 Owner 编排 subagent。选择 `$wf-go-feat` 即授权按角色派发 Capsule；Owner 始终负责拆分、上下文压缩、集成和最终两道门，不能把整个需求交给单个 subagent。
 
 | 阶段 | 主角色 | 触发条件与职责 |
 |---|---|---|
-| 加载上下文与探索 | Sisyphus | 默认负责规则、KB routing、代码和调用方探索。 |
-| 跨模块或不确定性探索 | Oracle | 仅在代码关系复杂、根因或影响范围不清时提供只读分析。 |
+| 加载上下文与探索 | Sisyphus + Oracle | Owner 提供最小上下文；Oracle 默认负责独立的代码、KB routing 和调用方探索。 |
+| 跨模块或不确定性探索 | Oracle | 扩展只读分析，确认调用链、影响范围和未确认事实。 |
 | 外部 API/文档核对 | Librarian | 仅在需要外部文档、协议或第三方库证据时使用。 |
-| 目标契约与拆分方案 | Sisyphus | 默认产出目标契约、拆分决策和 Task Capsule。 |
+| 目标契约与拆分方案 | Sisyphus | 汇总探索包，产出目标契约、拆分决策和 Task Capsule。 |
 | 高复杂度设计 | Prometheus | 仅在高风险、多个可选方案或先设计后实施时提供只读方案。 |
-| 单文件、小范围实施 | Quick | 单一 Capsule、范围小且无接口变化时执行最小改动。 |
-| 多文件实施 | Hephaestus | 已确认的多文件 Capsule；不负责替用户决定未确认业务语义。 |
-| 用户授权的独立子任务 | Worker | 仅接收边界不重叠、验收和验证明确的 Capsule。 |
+| 单文件、小范围实施 | Quick | 作为实现 subagent 执行单一 Capsule、范围小且无接口变化的最小改动。 |
+| 多文件实施 | Hephaestus | 作为实现 subagent 执行已确认的多文件窄 Capsule；不负责替用户决定未确认业务语义。 |
+| 独立验证或辅助子任务 | Worker | 只接收边界不重叠、验收和验证明确的 Capsule。 |
 | 质量门 | Reviewer Logic | 检查逻辑、边界、并发、事务和错误处理；高风险时再按需加入 Reviewer Perf 与 Reviewer Security。 |
 | 集成与最终交付 | Sisyphus | 合并结果，执行总体目标门、质量门和最终验证。 |
 
