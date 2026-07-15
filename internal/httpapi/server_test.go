@@ -605,7 +605,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	getJSON(t, server, "/api/templates/workflows", &workflows)
 	assertTemplateIDs(t, "workflows", workflows, []string{
 		"feature-development", "bugfix", "code-review", "design",
-		"research", "commit-gate", "refactor", "lark-integration", "subagent-driven-development",
+		"research", "commit-gate", "lark-integration", "subagent-driven-development",
 		"bug-investigation", "logic-modification", "ui-feature-development",
 	})
 	for _, workflow := range workflows {

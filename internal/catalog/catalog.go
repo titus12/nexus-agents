@@ -571,8 +571,6 @@ func workflowSkillTemplateID(workflowID string) (string, bool) {
 		return "wf-go-bugfix", true
 	case "code-review":
 		return "wf-go-review", true
-	case "refactor":
-		return "wf-go-refactor", true
 	case "design":
 		return "wf-design", true
 	case "research":
@@ -1934,13 +1932,6 @@ func btdSkillTemplates() []TemplateItem {
 			updatedAt:        "2026-06-22 16:30",
 		},
 		{
-			id:               "wf-go-refactor",
-			summary:          "Codex skill entry for the Go refactor workflow.",
-			content:          "Invoke with $wf-go-refactor to load templates/workflows/go-refactor.md and follow the staged Go refactor workflow.",
-			applicableAgents: []string{"prometheus", "hephaestus", "reviewer-logic", "reviewer-perf", "reviewer-security"},
-			updatedAt:        "2026-06-22 16:30",
-		},
-		{
 			id:               "unity-mcp-skill",
 			summary:          "Unity MCP tool guide for Console, compile, tests, scenes, objects, assets, Prefabs, and screenshots.",
 			content:          "Prefer read-only inspection before mutations and record Console, tests, evidence, and skipped checks.",
@@ -2092,7 +2083,7 @@ func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "dev-workflow", "coding-rules", "testing", "pmconf-pattern", "quest-system", "cross-config":
 		return "templates/skills/go-" + id + ".md"
-	case "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-go-refactor", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature":
+	case "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature":
 		return "templates/skills/codex/" + id + "/SKILL.md"
 	default:
 		return "templates/skills/" + id + ".md"
@@ -2145,7 +2136,7 @@ func isUnityWorkflowID(id string) bool {
 
 func btdWorkflowTemplatePath(id string) string {
 	switch id {
-	case "feature-development", "bugfix", "code-review", "refactor":
+	case "feature-development", "bugfix", "code-review":
 		return "templates/workflows/go-" + id + ".md"
 	case "bug-investigation":
 		return "templates/workflows/unity-bug-investigation.md"
@@ -2241,17 +2232,6 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 			tags:      []string{"routing", "commit", "gate"},
 			status:    "ready",
 			updatedAt: "2026-06-20 11:06",
-		},
-		{
-			id:        "refactor",
-			name:      "$wf-go-refactor 重构",
-			trigger:   "$wf-go-refactor",
-			owner:     "prometheus",
-			summary:   "大范围结构调整但外部行为不变，按影响面分析、分步方案和分阶段验证推进。",
-			content:   "codegraph_impact 分析影响面；prometheus 设计可编译分步方案；hephaestus 分阶段实现；3 reviewer 并行审核。",
-			tags:      []string{"routing", "refactor", "staged"},
-			status:    "ready",
-			updatedAt: "2026-06-20 11:07",
 		},
 		{
 			id:        "lark-integration",
@@ -2359,7 +2339,7 @@ func btdCopyStatus(templateID string) string {
 		return "template_updated"
 	case "quick", "03-project-model", "quest-system", "bugfix":
 		return "project_modified"
-	case "high-risk-api", "refactor":
+	case "high-risk-api":
 		return "diverged"
 	case "lark-integration":
 		return "detached"
@@ -2388,8 +2368,6 @@ func btdCopyDiff(templateID string) string {
 		return "- template: generic high-risk checklist\n+ project: payment rollback and GM currency checklist"
 	case "bugfix":
 		return "+ project: local log capture path added for btd runtime crashes."
-	case "refactor":
-		return "- template: generic staged refactor\n+ project: extra actor impact review and reviewer fan-out"
 	case "lark-integration":
 		return "Detached because this project currently handles Feishu operations outside the repo workflow."
 	default:
@@ -2479,7 +2457,7 @@ func workflowGraphFromRoutingSpec(spec btdWorkflowSpec) WorkflowGraph {
 		{From: "skills", To: "verify", Label: "steps"},
 		{From: "verify", To: "output", Label: "approved"},
 	}
-	if spec.id == "code-review" || spec.id == "refactor" {
+	if spec.id == "code-review" {
 		nodes = append(nodes,
 			WorkflowNode{ID: "logic", Type: "agent", Category: "action", Label: "reviewer-logic", Agent: "reviewer-logic", Detail: "Check control flow, state, transaction, nil, and boundary risks.", X: 820, Y: 70},
 			WorkflowNode{ID: "perf", Type: "agent", Category: "action", Label: "reviewer-perf", Agent: "reviewer-perf", Detail: "Check hot paths, allocations, loops, locks, and goroutine risks.", X: 820, Y: 350},

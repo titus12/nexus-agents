@@ -214,24 +214,6 @@ Workflow:
 3. Ask for confirmation on high-risk items.
 4. Commit only after verification and explicit approval.
 "@
-  "go-refactor.md" = @"
-# go-refactor
-
-Source: ``templates/rules/go-00-routing.md``
-Stack: ``go``
-
-Entry skill: ``$wf-go-refactor``
-
-Use for broad Go structural changes where external behavior should remain unchanged.
-
-Workflow:
-
-1. Analyze impact before editing.
-2. Have ``go-prometheus`` design staged steps that remain buildable.
-3. Implement with ``go-hephaestus``.
-4. Run logic, performance, and security review in parallel.
-5. Verify existing behavior still passes.
-"@
   "lark-integration.md" = @"
 # lark-integration
 

@@ -10,7 +10,7 @@
 ```text
 新功能 / 修改既有行为 / 跨文件业务调整 -> $wf-go-feat
 运行时故障和根因修复                 -> $wf-go-bugfix
-外部行为不变的结构调整                -> $wf-go-refactor
+外部行为不变的结构调整                -> $wf-go-feat（在目标契约中明确接口不变）
 只读理解和调研                        -> $wf-research
 审查当前改动                          -> $wf-go-review
 ```
@@ -158,7 +158,7 @@ success | partial_success | blocked | failed | cancelled
 | `wf-go-feat` | 唯一的 Go 业务变更工作流。 |
 | `wf-go-mod` | 完全删除。 |
 | `wf-go-bugfix` | 独立的复现、根因与最小修复流程；复用目标门、质量门和循环上限。 |
-| `wf-go-refactor` | 独立的行为不变结构调整流程；每阶段必须可构建和回归。 |
+| `wf-go-refactor` | 删除；结构调整通过 `$wf-go-feat` 执行，并在目标契约中明确外部接口不变与验证要求。 |
 | `wf-go-review` | 可独立运行，也可作为高风险质量门扩展。 |
 | `wf-research` | 只读；输出 Change Brief，供变更工作流使用。 |
 | `wf-design` | 处理业务规则或技术边界不明确的设计决策。 |
@@ -193,7 +193,7 @@ templates/commands/claude/wf-go-mod.md
 
 ## 非目标
 
-- 不将 bugfix 或 refactor 合并进 `$wf-go-feat`；
+- 不将 bugfix 合并进 `$wf-go-feat`；
 - 不让 subagent 成为默认执行方式；
 - 不将 BTD 特有的 PMT/SSH 运维规则复制到全局 Go Profile；
 - 不用通用 checklist 替换 Go 和 Unity 各自的 Profile 规则和验证方式。

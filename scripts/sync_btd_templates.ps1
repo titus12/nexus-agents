@@ -249,7 +249,6 @@ function Get-WorkflowSpec {
     "design" = @{ Trigger = "$wf-design"; Owner = "prometheus"; Summary = "Produce architecture or implementation design without changing code." }
     "research" = @{ Trigger = "$wf-research"; Owner = "oracle"; Summary = "Read-only code understanding, investigation, or documentation research." }
     "commit-gate" = @{ Trigger = "$wf-commit"; Owner = "gatekeeper"; Summary = "Inspect diff and risks before committing." }
-    "go-refactor" = @{ Trigger = "$wf-go-refactor"; Owner = "prometheus"; Summary = "Stage a Go refactor while keeping external behavior unchanged." }
     "lark-integration" = @{ Trigger = "$wf-lark"; Owner = "librarian"; Summary = "Route Feishu or Lark operations to the matching skill." }
   }
 
@@ -282,7 +281,7 @@ function New-WorkflowGraphJson {
     (New-Edge -From "verify" -To "output" -Label "approved")
   )
 
-  if ($Stem -eq "go-code-review" -or $Stem -eq "go-refactor") {
+  if ($Stem -eq "go-code-review") {
     $nodes += @(
       (New-Node -Id "logic" -Type "agent" -Category "action" -Label "reviewer-logic" -Agent "reviewer-logic" -Detail "Check control flow, state, transactions, nil handling, and boundaries." -X 820 -Y 70),
       (New-Node -Id "perf" -Type "agent" -Category "action" -Label "reviewer-perf" -Agent "reviewer-perf" -Detail "Check hot paths, allocations, locks, and goroutines." -X 820 -Y 350),

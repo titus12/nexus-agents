@@ -50,7 +50,6 @@ GO_WORKFLOW_FILES = [
     "go-feature-development.md",
     "go-bugfix.md",
     "go-code-review.md",
-    "go-refactor.md",
 ]
 
 GO_FEATURE_WORKFLOW_TOKENS = [
@@ -171,8 +170,12 @@ def main() -> None:
         "templates/workflows/go-modify-existing.graph.json",
         "templates/commands/claude/wf-go-mod.md",
         "templates/skills/codex/wf-go-mod/SKILL.md",
+        "templates/workflows/go-refactor.md",
+        "templates/workflows/go-refactor.graph.json",
+        "templates/commands/claude/wf-go-refactor.md",
+        "templates/skills/codex/wf-go-refactor/SKILL.md",
     ]:
-        expect(not (ROOT / rel).exists(), f"obsolete Go modification template remains: {rel}")
+        expect(not (ROOT / rel).exists(), f"obsolete Go workflow template remains: {rel}")
 
     for filename in CORE_WORKFLOW_FILES:
         read(f"templates/workflows/{filename}")

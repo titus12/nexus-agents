@@ -1,6 +1,6 @@
 ---
 name: coding-rules
-description: "Go 编码规范合集：质量原则/命名/错误处理/日志/并发/性能/复用。写代码的工作流（$wf-go-feat/$wf-go-bugfix/$wf-go-refactor）激活时加载。"
+description: "Go 编码规范合集：质量原则/命名/错误处理/日志/并发/性能/复用。写代码的工作流（$wf-go-feat/$wf-go-bugfix）激活时加载。"
 ---
 
 # Go 编码规范
