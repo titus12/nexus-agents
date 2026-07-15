@@ -1,93 +1,163 @@
 {
-    "id":  "go-feature-development",
-    "name":  "go-feature-development",
-    "nodes":  [
-                  {
-                      "id":  "trigger",
-                      "type":  "input",
-                      "category":  "event",
-                      "label":  "$wf-go-feat",
-                      "agent":  "-",
-                      "detail":  "User input starts this workflow.",
-                      "x":  48,
-                      "y":  210
-                  },
-                  {
-                      "id":  "route",
-                      "type":  "condition",
-                      "category":  "condition",
-                      "label":  "workflow skill",
-                      "agent":  "sisyphus",
-                      "detail":  "The wf-* skill points to this workflow file as the source of truth.",
-                      "x":  300,
-                      "y":  210
-                  },
-                  {
-                      "id":  "owner",
-                      "type":  "agent",
-                      "category":  "action",
-                      "label":  "sisyphus",
-                      "agent":  "sisyphus",
-                      "detail":  "New Go feature development with clarification, implementation, testing, and verification.",
-                      "x":  560,
-                      "y":  210
-                  },
-                  {
-                      "id":  "skills",
-                      "type":  "transform",
-                      "category":  "data",
-                      "label":  "load skills",
-                      "agent":  "skill resolver",
-                      "detail":  "Load required rules and skills for this workflow.",
-                      "x":  820,
-                      "y":  210
-                  },
-                  {
-                      "id":  "verify",
-                      "type":  "human_approval",
-                      "category":  "human",
-                      "label":  "checkpoint",
-                      "agent":  "owner",
-                      "detail":  "Report progress and wait when scope or risk is unclear.",
-                      "x":  1080,
-                      "y":  210
-                  },
-                  {
-                      "id":  "output",
-                      "type":  "output",
-                      "category":  "data",
-                      "label":  "deliver",
-                      "agent":  "sisyphus",
-                      "detail":  "Return result, evidence, and next action.",
-                      "x":  1340,
-                      "y":  210
-                  }
-              ],
-    "edges":  [
-                  {
-                      "from":  "trigger",
-                      "to":  "route",
-                      "label":  "command"
-                  },
-                  {
-                      "from":  "route",
-                      "to":  "owner",
-                      "label":  "matched"
-                  },
-                  {
-                      "from":  "owner",
-                      "to":  "skills",
-                      "label":  "context"
-                  },
-                  {
-                      "from":  "skills",
-                      "to":  "verify",
-                      "label":  "steps"
-                  },
-                  {
-                      "from":  "verify",
-                      "to":  "output",
-                      "label":  "approved"
-                  }
-              ]
+  "id": "go-feature-development",
+  "name": "go-feature-development",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "input",
+      "category": "event",
+      "label": "接收任务",
+      "agent": "sisyphus",
+      "detail": "用户提交 Go 新功能、既有行为修改或跨文件业务调整。",
+      "x": 40,
+      "y": 260
+    },
+    {
+      "id": "explore",
+      "type": "transform",
+      "category": "action",
+      "label": "加载上下文并探索",
+      "agent": "sisyphus",
+      "detail": "加载 Rules、知识库 routing 和真实代码、调用方、测试及配置证据。",
+      "x": 270,
+      "y": 260
+    },
+    {
+      "id": "contract",
+      "type": "transform",
+      "category": "data",
+      "label": "生成待审核目标契约",
+      "agent": "sisyphus",
+      "detail": "补齐完成标准、范围、验证、假设、风险和确认要求。",
+      "x": 520,
+      "y": 260
+    },
+    {
+      "id": "confirmation",
+      "type": "condition",
+      "category": "condition",
+      "label": "重大假设或高风险？",
+      "agent": "user",
+      "detail": "有重大假设或高风险时等待用户确认；否则按推荐方案继续。",
+      "x": 780,
+      "y": 260
+    },
+    {
+      "id": "plan",
+      "type": "transform",
+      "category": "action",
+      "label": "计划并决定是否拆任务",
+      "agent": "sisyphus",
+      "detail": "仅在任务边界、范围和验证清晰时创建 Task Capsule。",
+      "x": 1040,
+      "y": 260
+    },
+    {
+      "id": "task_loop",
+      "type": "agent",
+      "category": "action",
+      "label": "执行任务 Loop 并集成",
+      "agent": "sisyphus",
+      "detail": "最小探索、实施、子目标检查、子任务质检和主线程集成；受重试上限约束。",
+      "x": 1300,
+      "y": 260
+    },
+    {
+      "id": "goal_gate",
+      "type": "condition",
+      "category": "condition",
+      "label": "目标门",
+      "agent": "sisyphus",
+      "detail": "检查目标契约中的必须完成项、调用方和非目标边界。",
+      "x": 1560,
+      "y": 260
+    },
+    {
+      "id": "quality_gate",
+      "type": "condition",
+      "category": "condition",
+      "label": "质量门",
+      "agent": "reviewer",
+      "detail": "检查 Rules、兼容性、最小 diff、测试、构建和真实验证证据。",
+      "x": 1800,
+      "y": 260
+    },
+    {
+      "id": "complete",
+      "type": "output",
+      "category": "data",
+      "label": "提交证据，用户审核",
+      "agent": "sisyphus",
+      "detail": "交付可复核结果、验证证据、风险和最终状态。",
+      "x": 2050,
+      "y": 150
+    },
+    {
+      "id": "blocked",
+      "type": "output",
+      "category": "data",
+      "label": "partial_success / blocked",
+      "agent": "sisyphus",
+      "detail": "无新证据、超过重试上限或环境阻塞时如实退出。",
+      "x": 2050,
+      "y": 420
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "explore",
+      "label": "开始"
+    },
+    {
+      "from": "explore",
+      "to": "contract",
+      "label": "证据"
+    },
+    {
+      "from": "contract",
+      "to": "confirmation",
+      "label": "待审核"
+    },
+    {
+      "from": "confirmation",
+      "to": "plan",
+      "label": "是：用户确认"
+    },
+    {
+      "from": "confirmation",
+      "to": "plan",
+      "label": "否：继续"
+    },
+    {
+      "from": "plan",
+      "to": "task_loop",
+      "label": "执行"
+    },
+    {
+      "from": "task_loop",
+      "to": "goal_gate",
+      "label": "集成"
+    },
+    {
+      "from": "goal_gate",
+      "to": "quality_gate",
+      "label": "目标完成"
+    },
+    {
+      "from": "quality_gate",
+      "to": "complete",
+      "label": "通过"
+    },
+    {
+      "from": "quality_gate",
+      "to": "plan",
+      "label": "可重试"
+    },
+    {
+      "from": "quality_gate",
+      "to": "blocked",
+      "label": "停止"
+    }
+  ]
 }

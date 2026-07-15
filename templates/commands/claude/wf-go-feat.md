@@ -1,5 +1,5 @@
 ---
-description: Run the Go feature-development workflow
+description: Run the unified Go business-change workflow
 argument-hint: [workflow input]
 ---
 

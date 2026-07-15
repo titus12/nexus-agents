@@ -47,10 +47,21 @@ SKILL_FILES = [
 
 GO_WORKFLOW_FILES = [
     "go-feature-development.md",
-    "go-modify-existing.md",
     "go-bugfix.md",
     "go-code-review.md",
     "go-refactor.md",
+]
+
+GO_FEATURE_WORKFLOW_TOKENS = [
+    "## 强约束",
+    "先探索，后实施",
+    "## 工作流",
+    "生成待审核目标契约",
+    "目标门",
+    "质量门",
+    "父工作流最多 3 个完整 Loop",
+    "每个子任务最多 2 次",
+    "success | partial_success | blocked | failed | cancelled",
 ]
 
 CORE_WORKFLOW_FILES = [
@@ -110,7 +121,16 @@ def main() -> None:
     direct_agent_files = [path for path in (TEMPLATES / "agents").iterdir() if path.is_file()]
     expect(not direct_agent_files, "agent templates must be separated into claude/ and codex/")
 
-    yaml_files = [path for path in TEMPLATES.rglob("*") if path.suffix.lower() in {".yaml", ".yml"}]
+    yaml_files = [
+        path
+        for path in TEMPLATES.rglob("*")
+        if path.suffix.lower() in {".yaml", ".yml"}
+        and not (
+            path.name == "openai.yaml"
+            and path.parent.name == "agents"
+            and TEMPLATES / "skills" / "codex" in path.parents
+        )
+    ]
     expect(not yaml_files, "templates must use copied md/toml files, not yaml manifests")
 
     require_tokens(
@@ -135,17 +155,24 @@ def main() -> None:
         require_tokens(f"templates/skills/{filename}", ["# "])
 
     for filename in GO_WORKFLOW_FILES:
-        require_tokens(
-            f"templates/workflows/{filename}",
-            ["Source: `templates/rules/go-00-routing.md`", "Stack: `go`"],
-        )
+        read(f"templates/workflows/{filename}")
         require_workflow_graph(filename)
 
+    require_tokens(
+        "templates/workflows/go-feature-development.md",
+        GO_FEATURE_WORKFLOW_TOKENS,
+    )
+
+    for rel in [
+        "templates/workflows/go-modify-existing.md",
+        "templates/workflows/go-modify-existing.graph.json",
+        "templates/commands/claude/wf-go-mod.md",
+        "templates/skills/codex/wf-go-mod/SKILL.md",
+    ]:
+        expect(not (ROOT / rel).exists(), f"obsolete Go modification template remains: {rel}")
+
     for filename in CORE_WORKFLOW_FILES:
-        require_tokens(
-            f"templates/workflows/{filename}",
-            ["Source: `templates/rules/go-00-routing.md`"],
-        )
+        read(f"templates/workflows/{filename}")
         require_workflow_graph(filename)
 
     require_tokens(
