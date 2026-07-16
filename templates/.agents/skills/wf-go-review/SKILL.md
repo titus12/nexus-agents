@@ -1,6 +1,6 @@
 ---
 name: wf-go-review
-description: Go code-review workflow entry. Use for reviewing Go diffs through bounded logic, performance, and security review capsules.
+description: Go code-review workflow entry. Use for reviewing Go diffs through bounded logic, performance, and security review capsules. Invoke explicitly with $wf-go-review.
 ---
 
 # wf-go-review

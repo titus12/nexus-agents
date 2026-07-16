@@ -1,6 +1,6 @@
-# UIArchitect Portability
+# UIArchitect 可移植性规范
 
-- UIArchitect AIConfig must not depend on a host project's business paths or modules.
-- Host-specific paths must be configurable or isolated in wrappers or manifests.
-- Do not require host-specific design documents, services, events, caches, or feature cards.
-- Keep reusable plugin AIConfig source under a portable UIArchitect-owned path so it can move with the plugin.
+- UIArchitect 的 AIConfig 不得依赖宿主项目的业务路径或模块。
+- 宿主项目专属路径必须可配置，或隔离在包装层或清单中。
+- 不得要求宿主项目专属的设计文档、服务、事件、缓存或功能卡片。
+- 可复用插件的 AIConfig 源码必须位于 UIArchitect 所有的可移植路径下，以便随插件迁移。

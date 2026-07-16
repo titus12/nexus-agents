@@ -1,67 +1,25 @@
 ---
 name: testing
-description: "测试编写规范：运行命令、mock 策略、gomonkey 踩坑、断言规范。写测试或补测试时加载。"
+description: "公共 Go 测试规范：确定测试范围、隔离依赖、覆盖关键路径，并基于实际结果报告验证状态。"
 ---
 
-# 测试编写规范
+# Go 测试规范
 
-> 触发：写测试/gomonkey/mock/断言
->
-> §1 何时写 §2 运行命令 §3 mock 策略 §4 gomonkey 踩坑 §5 断言规范 §6 检查清单
+## 何时补充测试
 
-## §1 何时必须写测试
+- 新增或修改核心业务逻辑、状态流转、计算规则、边界条件或错误处理时，应补充或更新测试。
+- 修复 Bug 时，优先添加能复现问题的回归测试。
+- 纯文案、注释或不改变行为的简单修改，可根据风险决定是否补测。
 
-| 场景 | 是否必须 |
-|------|----------|
-| 数值计算/状态机/边界逻辑（升级、扣减、返还、奖励） | 必须 |
-| 公共函数被多处调用 | 必须 |
-| 纯 CRUD / 透传 / 仅组装 proto | 可选 |
-| typo、单行修复 | 不强制 |
+## 测试设计
 
-## §2 运行命令（固定）
+- 覆盖成功路径、边界条件和失败路径。
+- 测试应独立、可重复运行；避免依赖真实数据库、网络、时间或外部服务。
+- 需要替换依赖时，使用项目已有的 mock、fake 或测试辅助工具；替换必须在测试结束时恢复。
+- 多分支逻辑优先使用表驱动测试或子测试，并为失败输出足够的上下文。
 
-```bash
-go test -tags actor_id_uint64 -gcflags=all=-l -vet=off -run '<TestName>' ./app/manager/
-```
+## 运行与报告
 
-| 标志 | 原因 |
-|------|------|
-| `-tags actor_id_uint64` | 项目构建标签 |
-| `-gcflags=all=-l` | 禁内联，gomonkey patch 才能生效 |
-| `-vet=off` | 跳过遗留 vet 告警 |
-
-## §3 mock 策略
-
-**原则：不依赖真实 DB、xbean 工厂、配置加载。**
-
-1. **手写 xbean 接口 mock**：用 Go map 支撑，实现全部接口方法（含 IBean + Serializer）
-2. **构造真实 entity 包装 mock**：`&entities.Talents{Talents: mockXbeanTalents}`
-3. **gomonkey patch 外部依赖**：
-   - 配置：`pmconf.GetXxx` → 返回测试构造的配置
-   - 道具：`DoDecreaseItemByMap` → 捕获参数做断言
-   - entity getter：`(*CacheEntity).GetXxx` → 返回 mock
-4. **patch 掉会触发工厂的写方法**：避免 `xbean.NewXxx(id)` 在测试中 panic
-
-## §4 gomonkey 踩坑
-
-- **必须 `-gcflags=all=-l`**：否则小函数内联导致 patch 静默失效
-- **方法 patch**：`ApplyMethod(reflect.TypeOf(&T{}), "Method", func(_ *T, args...) ret {...})`，第一个参数是 receiver
-- **变参方法**：replacement 也要变参
-- **全局生效**：按类型 patch，影响所有实例
-- **隔离**：每个测试 `p := gomonkey.NewPatches()` + `defer p.Reset()`
-- **捕获参数**：用闭包记录被 patch 函数收到的入参
-
-## §5 断言规范
-
-- **错误码**：`logger.ExtractErrorCode(err, msg.ErrorCode(-1))` 提取后比对
-- **map/slice**：`reflect.DeepEqual`，期望值显式写全
-- **失败信息**：`t.Errorf("期望 X，实际 %v", got)`
-- **表驱动**：多分支用子测试，命名 `Test_func_Scenario`
-
-## §6 检查清单
-
-1. [ ] 覆盖正常 + 边界（满级、0级、空集）+ 失败路径
-2. [ ] mock 不触达真实 DB/工厂/网络
-3. [ ] patch 全部 defer Reset()
-4. [ ] 用 §2 完整命令跑过，每个用例 PASS
-5. [ ] 不声称"测试通过"而未实际运行
+- 使用项目现有的测试命令、构建标签和静态检查约定；不得把某个项目的专用命令当作通用默认值。
+- 先运行与改动最相关的测试，再按风险扩大验证范围。
+- 未实际运行测试时，必须明确说明未验证的原因和风险；不得声称测试已通过。

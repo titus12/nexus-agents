@@ -3,6 +3,7 @@ import { computed, defineComponent, h, onMounted, ref, type PropType, type VNode
 import { NDataTable, NTooltip, type DataTableColumns } from "naive-ui";
 import {
   addProjectCopyFromTemplate,
+  applyTemplateInitialization,
   createTemplate,
   createTaskRun,
   createProjectWorkflow,
@@ -32,6 +33,7 @@ import {
   fetchProjectKnowledgeExportDocument,
   fetchProjectWorkflowGraph,
   previewProjectKnowledgeRoute,
+  previewTemplateInitialization,
   retrieveProjectKnowledge,
   refreshProjectKnowledgeExport,
   fetchSyncPreview,
@@ -89,6 +91,9 @@ import type {
   ProjectInput,
   SyncStatus,
   TemplateInput,
+  TemplateInitializationPreview,
+  TemplateInitializationResult,
+  TemplateProjectType,
   TemplateItem,
   TemplateKind,
   StatisticsTaskItem,
@@ -243,6 +248,9 @@ const error = ref("");
 const toast = ref("");
 const drawerMode = ref<DrawerMode>(null);
 const showImportModal = ref(false);
+const showTemplateInitializerModal = ref(false);
+const templateInitializerBusy = ref(false);
+const templateInitializerError = ref("");
 const showDirectoryBrowser = ref(false);
 const directoryBrowser = ref<LocalDirectoriesResponse | null>(null);
 const directoryBrowserLoading = ref(false);
@@ -323,6 +331,14 @@ const importForm = ref<ProjectInput>({
   name: "",
   path: "",
 });
+
+const templateInitializerForm = ref<{ targetPath: string; projectType: TemplateProjectType }>({
+  targetPath: "",
+  projectType: "general",
+});
+const templateInitializerPreview = ref<TemplateInitializationPreview | null>(null);
+const templateInitializerResult = ref<TemplateInitializationResult | null>(null);
+const directorySelectionTarget = ref<"import" | "template-initializer">("import");
 
 const syncOrder: SyncStatus[] = ["synced", "template_updated", "project_modified", "diverged", "detached"];
 
@@ -1927,13 +1943,20 @@ async function openDirectoryBrowser() {
 }
 
 function applyProjectDirectory(path: string) {
+  if (directorySelectionTarget.value === "template-initializer") {
+    templateInitializerForm.value.targetPath = path;
+    templateInitializerPreview.value = null;
+    templateInitializerResult.value = null;
+    return;
+  }
   importForm.value.path = path;
   if (!importForm.value.name) {
     importForm.value.name = baseNameFromPath(path);
   }
 }
 
-async function chooseProjectDirectory() {
+async function chooseProjectDirectory(target: "import" | "template-initializer" = "import") {
+  directorySelectionTarget.value = target;
   directoryBrowserError.value = "";
   showToast("正在打开系统目录选择器...");
   const controller = new AbortController();
@@ -1949,6 +1972,44 @@ async function chooseProjectDirectory() {
     await openDirectoryBrowser();
   } finally {
     window.clearTimeout(timeout);
+  }
+}
+
+function openTemplateInitializer() {
+  templateInitializerError.value = "";
+  templateInitializerPreview.value = null;
+  templateInitializerResult.value = null;
+  showTemplateInitializerModal.value = true;
+}
+
+async function previewTemplateInitializer() {
+  templateInitializerBusy.value = true;
+  templateInitializerError.value = "";
+  templateInitializerResult.value = null;
+  try {
+    templateInitializerPreview.value = await previewTemplateInitialization(templateInitializerForm.value);
+  } catch (err) {
+    templateInitializerPreview.value = null;
+    templateInitializerError.value = errorMessage(err);
+  } finally {
+    templateInitializerBusy.value = false;
+  }
+}
+
+async function applyTemplateInitializer() {
+  const planId = templateInitializerPreview.value?.planId;
+  if (!planId) return;
+  templateInitializerBusy.value = true;
+  templateInitializerError.value = "";
+  try {
+    templateInitializerResult.value = await applyTemplateInitialization(planId);
+    templateInitializerPreview.value = null;
+    showToast(`已创建 ${templateInitializerResult.value.summary.create} 个 AI 配置文件。`);
+    showTemplateInitializerModal.value = false;
+  } catch (err) {
+    templateInitializerError.value = errorMessage(err);
+  } finally {
+    templateInitializerBusy.value = false;
   }
 }
 
@@ -2634,7 +2695,10 @@ onMounted(loadData);
           <section v-if="activePage === 'projects'" class="page active">
             <div class="page-header">
               <div class="page-description">统一导入和管理项目自己的 Agents、Rules、Skills、Workflows 配置副本，模板同步保持手动触发。</div>
-              <button class="btn-primary" type="button" @click="showImportModal = true">导入项目</button>
+              <div class="page-actions">
+                <button class="btn-secondary" type="button" @click="openTemplateInitializer">快速配置新项目</button>
+                <button class="btn-primary" type="button" @click="showImportModal = true">导入项目</button>
+              </div>
             </div>
             <div class="stats-row">
               <div class="stat-card"><div class="stat-icon purple">P</div><div><div class="stat-num">{{ projects.length }}</div><div class="stat-label">Managed projects</div></div></div>
@@ -3387,6 +3451,54 @@ requires_openai_auth = true</pre>
         </template>
       </section>
     </main>
+
+    <div v-if="showTemplateInitializerModal" class="modal-backdrop" @click.self="showTemplateInitializerModal = false">
+      <section class="modal">
+        <div class="modal-header">
+          <div>
+            <div class="panel-title">快速配置新项目</div>
+            <div class="drawer-subtitle">先预览，再只创建缺失的 AI 配置文件；不会覆盖冲突文件或 KnowledgeBase/project。</div>
+          </div>
+          <button class="icon-btn" type="button" @click="showTemplateInitializerModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <label class="field-label">项目目录
+            <div class="path-picker-row">
+              <input v-model="templateInitializerForm.targetPath" class="field-input mono" />
+              <button class="btn-secondary" type="button" @click="chooseProjectDirectory('template-initializer')">选择目录</button>
+            </div>
+          </label>
+          <label class="field-label">项目类型
+            <select v-model="templateInitializerForm.projectType" class="field-input">
+              <option value="general">通用</option>
+              <option value="go">Go</option>
+              <option value="unity">Unity</option>
+            </select>
+          </label>
+          <div v-if="templateInitializerError" class="notice danger">{{ templateInitializerError }}</div>
+          <div v-if="templateInitializerPreview" class="scan-preview">
+            <span class="chip chip-green">创建 {{ templateInitializerPreview.summary.create }}</span>
+            <span class="chip chip-gray">相同 {{ templateInitializerPreview.summary.unchanged }}</span>
+            <span class="chip chip-orange">冲突 {{ templateInitializerPreview.summary.conflict }}</span>
+            <span class="chip chip-purple">受保护 {{ templateInitializerPreview.summary.protected }}</span>
+          </div>
+          <div v-if="templateInitializerPreview" class="template-initializer-list">
+            <div v-for="write in templateInitializerPreview.writes" :key="write.relativePath" class="template-initializer-row">
+              <span class="chip" :class="write.action === 'create' ? 'chip-green' : write.action === 'conflict' ? 'chip-orange' : write.action === 'protected' ? 'chip-purple' : 'chip-gray'">{{ write.action }}</span>
+              <span class="mono">{{ write.relativePath }}</span>
+            </div>
+          </div>
+          <div v-if="templateInitializerResult" class="notice success">
+            已创建 {{ templateInitializerResult.summary.create }} 个文件。冲突文件保持不变；如需纳入 Projects，请前往 Projects 手动导入该目录。
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" type="button" @click="showTemplateInitializerModal = false">关闭</button>
+          <button class="btn-secondary" type="button" :disabled="templateInitializerBusy" @click="previewTemplateInitializer">{{ templateInitializerBusy ? '处理中...' : '预览' }}</button>
+          <button class="btn-primary" type="button" :disabled="templateInitializerBusy || !templateInitializerPreview" @click="applyTemplateInitializer">应用创建项</button>
+        </div>
+      </section>
+    </div>
 
     <div v-if="showImportModal" class="modal-backdrop" @click.self="showImportModal = false">
       <section class="modal">

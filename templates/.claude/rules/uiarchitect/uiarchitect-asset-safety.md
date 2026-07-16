@@ -1,6 +1,6 @@
-# UIArchitect Asset Safety
+# UIArchitect 资产安全规范
 
-- Never delete `.meta` files.
-- Treat Prefab, Scene, generated asset, imported sprite, atlas, and serialized reference changes as high risk.
-- Avoid broad asset regeneration unless explicitly required.
-- Verify serialized references and GUID-sensitive files after importer behavior changes.
+- 永远不得删除 `.meta` 文件。
+- 将 Prefab、Scene、生成资产、导入的 Sprite、图集和序列化引用变更视为高风险操作。
+- 除非用户明确要求，避免大范围重新生成资产。
+- 导入器行为变更后，验证序列化引用和依赖 GUID 的文件。

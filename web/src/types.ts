@@ -244,6 +244,42 @@ export type ProjectInput = {
   path: string;
 };
 
+export type TemplateProjectType = "general" | "go" | "unity";
+
+export type TemplateInitializationInput = {
+  targetPath: string;
+  projectType: TemplateProjectType;
+};
+
+export type TemplateInitializationWrite = {
+  relativePath: string;
+  sourcePath?: string;
+  action: "create" | "unchanged" | "conflict" | "protected";
+  reason?: string;
+};
+
+export type TemplateInitializationSummary = {
+  create: number;
+  unchanged: number;
+  conflict: number;
+  protected: number;
+};
+
+export type TemplateInitializationPreview = {
+  planId: string;
+  targetPath: string;
+  projectType: TemplateProjectType;
+  summary: TemplateInitializationSummary;
+  writes: TemplateInitializationWrite[];
+};
+
+export type TemplateInitializationResult = {
+  targetPath: string;
+  projectType: TemplateProjectType;
+  summary: TemplateInitializationSummary;
+  writes: TemplateInitializationWrite[];
+};
+
 export type LocalDirectoryEntry = {
   name: string;
   path: string;

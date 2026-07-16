@@ -1,6 +1,6 @@
 ---
 name: wf-unity-ui-feature
-description: Unity UI feature workflow entry. Use for concrete btdgame UI View/ViewModel/Service/DataEvents feature logic. Invoke explicitly with $wf-unity-ui-feature.
+description: Unity UI feature workflow entry. Use for concrete Unity UI View, ViewModel, Service, or data-event feature changes. Invoke explicitly with $wf-unity-ui-feature.
 ---
 
 # wf-unity-ui-feature

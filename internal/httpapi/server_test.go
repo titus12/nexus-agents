@@ -510,6 +510,41 @@ func TestTemplateEndpointsExposePlanMetadata(t *testing.T) {
 	}
 }
 
+func TestTemplateInitializationPreviewAndApplyEndpoints(t *testing.T) {
+	target := t.TempDir()
+	server := NewServerWithStore(catalog.NewStore())
+
+	var preview catalog.TemplateInitializationPreview
+	response := requestJSON(t, server, http.MethodPost, "/api/templates/initialize/preview", `{"targetPath":"`+strings.ReplaceAll(target, `\`, `\\`)+`","projectType":"go"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected initialization preview, got %d: %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode initialization preview: %v", err)
+	}
+	if preview.PlanID == "" || preview.Summary.Create == 0 {
+		t.Fatalf("unexpected initialization preview: %#v", preview)
+	}
+
+	var result catalog.TemplateInitializationResult
+	response = requestJSON(t, server, http.MethodPost, "/api/templates/initialize/apply", `{"planId":"`+preview.PlanID+`"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected initialization apply, got %d: %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode initialization result: %v", err)
+	}
+	if result.Summary.Create == 0 {
+		t.Fatalf("expected created files, got %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(target, "AGENTS.md")); err != nil {
+		t.Fatalf("expected AGENTS.md to be initialized: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "KnowledgeBase", "project", ".gitkeep")); !os.IsNotExist(err) {
+		t.Fatalf("KnowledgeBase/project must not be written, err=%v", err)
+	}
+}
+
 func TestBtdGameServerTemplateInventory(t *testing.T) {
 	server := NewServer()
 
@@ -585,10 +620,10 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	}
 	getJSON(t, server, "/api/templates/skills", &skills)
 	assertTemplateIDs(t, "skills", skills, []string{
-		"coding-rules", "cross-client", "cross-config", "cross-gate", "cross-social", "dev-workflow",
-		"high-risk-api", "pmconf-pattern", "quest-system", "review-feedback", "skill-standard", "test-first-and-worktree", "testing",
+		"coding-rules",
+		"review-feedback", "testing",
 		"kb-system-curator", "nexus-evaluation-review", "nexus-taskrun-submit",
-		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver", "csharp-behaviour-tree",
+		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver",
 	})
 	for _, skill := range skills {
 		if strings.HasPrefix(skill.SourcePaths[0], "templates/.claude/skills/go-") {

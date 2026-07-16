@@ -1,1 +1,18 @@
-# unity-logic-developer`n`nModify existing Unity C# logic safely: locate callers, preserve compatibility, add targeted tests when practical, and avoid UI/Prefab/Scene/generated changes unless explicitly required.
+---
+name: unity-logic-developer
+description: "Unity C# 逻辑修改规范：保持兼容边界，控制改动范围并验证目标行为。"
+---
+
+# Unity 逻辑修改规范
+
+在 Unity 非 UI 或共享逻辑修改中按需读取；不得据此隐式启动或选择工作流。
+
+## 执行要求
+
+- 修改前定位调用方、当前行为和目标行为。
+- 保持兼容性；除非需求明确，避免 UI、Prefab、Scene 和生成文件变更。
+- 检查空值、生命周期、异步、取消、超时和已销毁对象边界。
+
+## 验证要求
+
+- 验证旧行为未被意外破坏，以及新行为满足目标。

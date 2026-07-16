@@ -3,7 +3,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -18,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"nexus-agents/internal/catalog"
@@ -90,6 +93,15 @@ func (f LocalDirectoryPickerFunc) PickDirectory() (string, bool, error) {
 	return f()
 }
 
+type templateInitializationApplyInput struct {
+	PlanID string `json:"planId"`
+}
+
+type templateInitializationPlan struct {
+	Input     catalog.TemplateInitializationInput
+	ExpiresAt time.Time
+}
+
 type Server struct {
 	store                *catalog.Store
 	evaluationStore      *catalog.EvaluationStore
@@ -101,6 +113,8 @@ type Server struct {
 	mux                  *http.ServeMux
 	webFS                fs.FS
 	webFileServer        http.Handler
+	templatePlansMu      sync.Mutex
+	templatePlans        map[string]templateInitializationPlan
 }
 
 func NewServer() http.Handler {
@@ -167,6 +181,7 @@ func newServerWithOptions(store *catalog.Store, infrastructure *catalog.Infrastr
 		mux:                  http.NewServeMux(),
 		webFS:                webFS,
 		webFileServer:        http.FileServer(http.FS(webFS)),
+		templatePlans:        map[string]templateInitializationPlan{},
 	}
 	server.routes()
 	return server
@@ -1324,6 +1339,14 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/templates/"), "/")
+	if path == "initialize/preview" {
+		s.handleTemplateInitializationPreview(w, r)
+		return
+	}
+	if path == "initialize/apply" {
+		s.handleTemplateInitializationApply(w, r)
+		return
+	}
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 || parts[0] == "" {
 		http.NotFound(w, r)
@@ -1384,6 +1407,83 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.NotFound(w, r)
+}
+
+func (s *Server) handleTemplateInitializationPreview(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodPost) {
+		return
+	}
+	var input catalog.TemplateInitializationInput
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	preview, err := catalog.PreviewTemplateInitialization(input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	planID, err := newTemplateInitializationPlanID()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	preview.PlanID = planID
+	s.templatePlansMu.Lock()
+	s.cleanupTemplateInitializationPlansLocked(time.Now())
+	s.templatePlans[planID] = templateInitializationPlan{
+		Input:     catalog.TemplateInitializationInput{TargetPath: preview.TargetPath, ProjectType: preview.ProjectType},
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	s.templatePlansMu.Unlock()
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (s *Server) handleTemplateInitializationApply(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodPost) {
+		return
+	}
+	var input templateInitializationApplyInput
+	if !decodeRequest(w, r, &input) {
+		return
+	}
+	planID := strings.TrimSpace(input.PlanID)
+	if planID == "" {
+		http.Error(w, "initialization plan id is empty", http.StatusBadRequest)
+		return
+	}
+	s.templatePlansMu.Lock()
+	s.cleanupTemplateInitializationPlansLocked(time.Now())
+	plan, ok := s.templatePlans[planID]
+	if ok {
+		delete(s.templatePlans, planID)
+	}
+	s.templatePlansMu.Unlock()
+	if !ok {
+		http.Error(w, "initialization plan is missing or expired; generate a new preview", http.StatusBadRequest)
+		return
+	}
+	result, err := catalog.ApplyTemplateInitialization(plan.Input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) cleanupTemplateInitializationPlansLocked(now time.Time) {
+	for id, plan := range s.templatePlans {
+		if !plan.ExpiresAt.After(now) {
+			delete(s.templatePlans, id)
+		}
+	}
+}
+
+func newTemplateInitializationPlanID() (string, error) {
+	data := make([]byte, 16)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate initialization plan id: %w", err)
+	}
+	return "init-" + hex.EncodeToString(data), nil
 }
 
 func (s *Server) handleWorkflows(w http.ResponseWriter, r *http.Request) {

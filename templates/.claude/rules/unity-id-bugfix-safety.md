@@ -1,1 +1,6 @@
-# unity-bugfix-safety`n`nBugfix safety: reproduce first, identify root cause before editing, avoid speculative fixes, add regression tests when practical, verify Unity compile and Console state, and keep the diff focused.
+# Unity Bug 修复安全规范
+
+- 修改前先复现问题并定位根因，禁止猜测性修复。
+- 条件允许时补充回归测试。
+- 验证 Unity 编译状态和 Console 状态。
+- 保持 diff 聚焦于问题本身。

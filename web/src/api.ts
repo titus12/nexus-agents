@@ -31,6 +31,9 @@ import type {
   ProjectRescanResult,
   ProjectWorkflowCreateResult,
   TemplateInput,
+  TemplateInitializationInput,
+  TemplateInitializationPreview,
+  TemplateInitializationResult,
   TemplateItem,
   TemplateKind,
   TaskRun,
@@ -283,6 +286,20 @@ export function addProjectCopyFromTemplate(projectId: string, kind: ProjectCopyK
 
 export function fetchTemplates(kind: TemplateKind): Promise<TemplateItem[]> {
   return fetchJSON<TemplateItem[]>(`/api/templates/${kind}`);
+}
+
+export function previewTemplateInitialization(input: TemplateInitializationInput): Promise<TemplateInitializationPreview> {
+  return fetchJSON<TemplateInitializationPreview>("/api/templates/initialize/preview", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function applyTemplateInitialization(planId: string): Promise<TemplateInitializationResult> {
+  return fetchJSON<TemplateInitializationResult>("/api/templates/initialize/apply", {
+    method: "POST",
+    body: JSON.stringify({ planId }),
+  });
 }
 
 export function createTemplate(kind: TemplateKind, input: TemplateInput): Promise<TemplateItem> {

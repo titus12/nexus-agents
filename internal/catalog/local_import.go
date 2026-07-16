@@ -39,9 +39,6 @@ func prepareImportedProject(name string, projectPath string) (string, string, er
 	if !stat.IsDir() {
 		return "", "", fmt.Errorf("project path %s is not a directory", localPath)
 	}
-	if err := migrateLegacyNexusDirectory(localPath); err != nil {
-		return "", "", err
-	}
 	return localPath, detectRepoKey(localPath, name), nil
 }
 
@@ -187,67 +184,6 @@ func projectTokenFromID(projectID string) string {
 
 func stripUTF8BOM(data []byte) []byte {
 	return bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
-}
-
-func migrateLegacyNexusDirectory(projectRoot string) error {
-	nexusPath := filepath.Join(projectRoot, ".nexus")
-	stat, err := os.Stat(nexusPath)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("stat .nexus: %w", err)
-	}
-	if !stat.IsDir() {
-		return nil
-	}
-
-	entries, err := os.ReadDir(nexusPath)
-	if err != nil {
-		return fmt.Errorf("read legacy .nexus directory: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.Name() != "workflows" || !entry.IsDir() {
-			return fmt.Errorf("legacy .nexus directory contains unknown entry %s; move it before importing", entry.Name())
-		}
-	}
-
-	legacyWorkflowDir := filepath.Join(nexusPath, "workflows")
-	if _, err := os.Stat(legacyWorkflowDir); err == nil {
-		files, err := os.ReadDir(legacyWorkflowDir)
-		if err != nil {
-			return fmt.Errorf("read legacy workflow graphs: %w", err)
-		}
-		targetDir := filepath.Join(projectRoot, ".claude", "workflows")
-		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			return fmt.Errorf("create workflow directory: %w", err)
-		}
-		for _, file := range files {
-			if file.IsDir() || !strings.HasSuffix(strings.ToLower(file.Name()), ".json") {
-				return fmt.Errorf("legacy .nexus/workflows contains unknown entry %s; move it before importing", file.Name())
-			}
-			stem := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
-			source := filepath.Join(legacyWorkflowDir, file.Name())
-			target := filepath.Join(targetDir, stem+".graph.json")
-			data, err := os.ReadFile(source)
-			if err != nil {
-				return fmt.Errorf("read legacy workflow graph %s: %w", file.Name(), err)
-			}
-			if err := os.WriteFile(target, data, 0o644); err != nil {
-				return fmt.Errorf("write migrated workflow graph %s: %w", target, err)
-			}
-			if err := os.Remove(source); err != nil {
-				return fmt.Errorf("remove legacy workflow graph %s: %w", source, err)
-			}
-		}
-		if err := os.Remove(legacyWorkflowDir); err != nil {
-			return fmt.Errorf("remove legacy workflow directory: %w", err)
-		}
-	}
-	if err := os.Remove(nexusPath); err != nil {
-		return fmt.Errorf("remove legacy .nexus directory: %w", err)
-	}
-	return nil
 }
 
 func detectRepoKey(projectRoot string, fallbackName string) string {

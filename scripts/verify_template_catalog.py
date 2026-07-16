@@ -27,7 +27,6 @@ RULE_FILES = [
     "go-00-routing.md",
     "01-communication.md",
     "go-02-safety.md",
-    "go-03-project-model.md",
     "go-04-task-decomposition.md",
     "knowledge-retrieval.md",
     "uiarchitect/uiarchitect-asset-safety.md",
@@ -37,18 +36,9 @@ RULE_FILES = [
 ]
 
 SKILL_FILES = [
-    "go-dev-workflow.md",
-    "skill-standard.md",
     "review-feedback.md",
     "go-coding-rules.md",
     "go-testing.md",
-    "go-pmconf-pattern.md",
-    "high-risk-api.md",
-    "go-quest-system.md",
-    "go-cross-config.md",
-    "cross-client.md",
-    "cross-gate.md",
-    "cross-social.md",
 ]
 
 GO_WORKFLOW_FILES = [

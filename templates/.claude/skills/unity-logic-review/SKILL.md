@@ -1,1 +1,14 @@
-# unity-logic-review`n`nReview Unity logic changes for behavior compatibility, boundaries, exceptions, nulls, lifecycle, cancellation, timeout, hot-path performance, and verification quality.
+---
+name: unity-logic-review
+description: "Unity 逻辑审查规范：检查行为兼容性、边界处理、性能风险与验证质量。"
+---
+
+# Unity 逻辑审查规范
+
+在审查 Unity 逻辑变更时按需读取；不得据此隐式启动或选择工作流。
+
+## 审查重点
+
+- 行为兼容性、异常处理、空值和生命周期边界。
+- 异步、取消、超时、对象销毁和热路径性能风险。
+- 变更是否超出任务范围，及验证证据是否充分。

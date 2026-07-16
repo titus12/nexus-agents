@@ -1,39 +1,39 @@
-# Nexus Knowledge Retrieval Rule
+# Nexus 知识检索规范
 
-All project KnowledgeBase access must use Nexus Knowledge Retrieval before local `KnowledgeBase` browsing.
+访问项目 `KnowledgeBase` 前，必须先使用 Nexus 知识检索；不得先在本地浏览 `KnowledgeBase`。
 
-## Required Call
+## 必须调用
 
-Use the repository root folder name as `{id}`, mode `context`, maxTokens `6000`, and the task title or lookup question as `q`.
+使用仓库根目录名作为 `{id}`，使用 `context` 模式、`6000` 个最大 Token，并将任务标题或检索问题作为 `q`。
 
 ```text
 GET /api/projects/{id}/knowledge/retrieve?q={query}&mode=context&maxTokens=6000
 ```
 
-Use the repository's supported Nexus retrieval client when one is available.
+仓库提供 Nexus 检索客户端时，必须使用该客户端。
 
-## Gate
+## 前置门禁
 
-- Do not skip retrieval because the agent already knows the project.
-- Do not manually browse `KnowledgeBase` to guess relevant files before retrieval.
-- Do not replace retrieval with grep, CodeGraph, or source search; use those only for code facts after retrieval.
-- For implementation workflows, do not plan or implement until retrieval succeeds or fallback is recorded.
+- 不得因智能体已了解项目而跳过检索。
+- 不得在检索前手动浏览 `KnowledgeBase` 并猜测相关文件。
+- 不得以 grep、CodeGraph 或源码搜索替代检索；检索完成后，才可将它们用于核实代码事实。
+- 对实施类工作流，检索成功或已记录回退前，不得规划或实现。
 
-## Result
+## 检索结果
 
-Use `loadedKnowledgeMarkdown` as the authoritative knowledge context.
+将 `loadedKnowledgeMarkdown` 作为权威知识上下文。
 
-For workflows, record `knowledgeRetrieval` with:
+对于工作流，记录 `knowledgeRetrieval`：
 
 - `query`
 - `matchedDomain`
 - `requiredPaths`
 - `usedTokens`
 - `loadedKnowledgeMarkdown`
-- `fallbackUsed` / `error` when applicable
+- 适用时记录 `fallbackUsed` / `error`
 
-Include the returned `Loaded Knowledge` section in workflow final summaries.
+工作流最终摘要必须包含返回的 `Loaded Knowledge` 区块。
 
-## Fallback
+## 回退
 
-If retrieval is unavailable, record `knowledgeRetrieval.error`, set `fallbackUsed=true`, then use local KB routing as fallback and report it.
+检索不可用时，记录 `knowledgeRetrieval.error`、设置 `fallbackUsed=true`，然后以本地知识库路由作为回退，并向用户报告。

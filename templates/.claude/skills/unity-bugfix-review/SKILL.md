@@ -1,1 +1,18 @@
-# unity-bugfix-review`n`nReview Unity bugfixes for root-cause match, diff scope, asset safety, lifecycle/null/destroyed-object risks, temporary residue, and verification evidence.
+---
+name: unity-bugfix-review
+description: "Unity Bug 修复审查规范：检查根因匹配、改动范围、生命周期风险与验证证据。"
+---
+
+# Unity Bug 修复审查规范
+
+在审查 Unity Bug 修复时按需读取；不得据此隐式启动或选择工作流。
+
+## 审查重点
+
+- 修复是否针对已确认根因，且改动范围是否聚焦。
+- 是否引入空值、生命周期、已销毁对象、临时资源或资产安全风险。
+- 是否留下调试代码、临时开关或无关变更。
+
+## 验证要求
+
+- 检查编译、Console、复现与回归证据是否足以支持结论。

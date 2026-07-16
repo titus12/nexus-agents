@@ -1533,7 +1533,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "主编排者，负责复杂任务分析、拆解、多 agent 协调与最终综合。",
 			model:     "gpt-5.6-terra",
 			effort:    "high",
-			skills:    []string{"dev-workflow", "skill-standard", "review-feedback"},
+			skills:    []string{"review-feedback"},
 			tools:     []string{"shell", "rg", "git", "task-dispatch"},
 			mcp:       []string{"codegraph"},
 			content:   "Phase 0-5 orchestration: 接收需求、分析模块、拆解角色任务、协调执行、综合结果并交付。",
@@ -1544,7 +1544,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "战略规划角色，负责方案设计、架构决策、选型评估，开始实现前使用。",
 			model:     "gpt-5.6-terra",
 			effort:    "high",
-			skills:    []string{"dev-workflow", "skill-standard", "pmconf-pattern"},
+			skills:    []string{},
 			tools:     []string{"rg", "codegraph", "read-only-shell"},
 			mcp:       []string{"codegraph"},
 			content:   "Clarify -> read skills -> inspect project context -> compare 2-3 approaches -> hand off implementation plan.",
@@ -1555,7 +1555,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "深度工匠，负责端到端 feature 实现、多文件重构和完整功能开发。",
 			model:     "gpt-5.4",
 			effort:    "high",
-			skills:    []string{"coding-rules", "testing", "high-risk-api", "pmconf-pattern", "cross-config", "cross-client"},
+			skills:    []string{"coding-rules", "testing"},
 			tools:     []string{"shell", "apply_patch", "rg", "git"},
 			mcp:       []string{"codegraph"},
 			content:   "Read required skills, explore references with codegraph/rg, implement scoped changes, then run build and tests.",
@@ -1588,7 +1588,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "日志优先 Bug 排查角色，低成本快速定位简单或中等 bug。",
 			model:     "gpt-5.6-luna",
 			effort:    "medium",
-			skills:    []string{"coding-rules", "testing", "cross-social", "cross-gate", "cross-client"},
+			skills:    []string{"coding-rules", "testing"},
 			tools:     []string{"rg", "git"},
 			mcp:       []string{"codegraph"},
 			content:   "Use logs and stack traces first, keep grep/read budget small, then conclude or escalate to oracle.",
@@ -1599,7 +1599,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "文档查询角色，负责查 API 用法、框架文档和第三方库使用方式。",
 			model:     "gpt-5.6-luna",
 			effort:    "medium",
-			skills:    []string{"skill-standard", "cross-config", "cross-client"},
+			skills:    []string{},
 			tools:     []string{"rg", "web", "context7"},
 			mcp:       []string{"codegraph"},
 			content:   "Check project-local docs first, then external docs when needed; return code examples, parameters, and caveats.",
@@ -1610,7 +1610,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "任务执行工人，接收明确子任务并完成函数、样板代码或重复性修改。",
 			model:     "gpt-5.4",
 			effort:    "high",
-			skills:    []string{"coding-rules", "testing", "quest-system", "pmconf-pattern"},
+			skills:    []string{"coding-rules", "testing"},
 			tools:     []string{"shell", "apply_patch", "rg"},
 			mcp:       []string{"codegraph"},
 			content:   "Execute bounded instructions, follow local patterns, verify the assigned slice, and ask when context is insufficient.",
@@ -1632,7 +1632,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "性能审核角色，聚焦 N+1、goroutine 泄漏、内存分配、锁粒度和缓存缺失。",
 			model:     "gpt-5.4",
 			effort:    "medium",
-			skills:    []string{"coding-rules", "testing", "pmconf-pattern"},
+			skills:    []string{"coding-rules", "testing"},
 			tools:     []string{"rg", "git", "codegraph"},
 			mcp:       []string{"codegraph"},
 			content:   "Review hot paths, loops, allocations, actor calls, locks, and config lookup patterns.",
@@ -1643,7 +1643,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "安全审核角色，从攻击者视角检查越权、输入验证、耗尽、泄露、注入和重放风险。",
 			model:     "gpt-5.6-terra",
 			effort:    "high",
-			skills:    []string{"high-risk-api", "coding-rules", "review-feedback"},
+			skills:    []string{"coding-rules", "review-feedback"},
 			tools:     []string{"rg", "git", "codegraph"},
 			mcp:       []string{"codegraph"},
 			content:   "Trace data flow from inputs through auth, economy, persistence, and side effects; report exploitable risks only.",
@@ -1654,7 +1654,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "提交门禁角色，提交前扫描 diff 并生成高风险清单，必要时要求用户确认。",
 			model:     "gpt-5.6-luna",
 			effort:    "medium",
-			skills:    []string{"coding-rules", "high-risk-api", "review-feedback"},
+			skills:    []string{"coding-rules", "review-feedback"},
 			tools:     []string{"git", "rg"},
 			mcp:       []string{"codegraph"},
 			content:   "Scan staged or working-tree diff for destructive, auth, currency, goroutine, lock, and ignored-error risks.",
@@ -1665,7 +1665,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "工作流评估入口角色，负责读取 Task Run Evidence，按 rubric 生成归因矩阵和质量评分。",
 			model:     "gpt-5.6-luna",
 			effort:    "high",
-			skills:    []string{"review-feedback", "skill-standard"},
+			skills:    []string{"review-feedback"},
 			tools:     []string{"evaluation-store", "chromem-go", "model-policy"},
 			mcp:       []string{"codegraph"},
 			content:   "Balance accuracy and cost: run deterministic scoring first, use gpt-5.4 for high-risk analysis, and escalate to gpt-5.6-terra only for failed or low-confidence cases.",
@@ -1676,7 +1676,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "学习案例整理角色，负责把高分成功和代表性失败任务压缩为可检索 learning case。",
 			model:     "gpt-5.6-luna",
 			effort:    "medium",
-			skills:    []string{"skill-standard", "review-feedback"},
+			skills:    []string{"review-feedback"},
 			tools:     []string{"chromem-go", "evaluation-store"},
 			mcp:       []string{},
 			content:   "Extract concise case summaries, successful paths, component combinations, tags, and retention class for future retrieval.",
@@ -1687,7 +1687,7 @@ func btdAgentTemplates() []TemplateItem {
 			summary:   "模型评估仲裁角色，在多模型评估分歧或低置信度时判断准确性与成本取舍。",
 			model:     "gpt-5.6-terra",
 			effort:    "high",
-			skills:    []string{"review-feedback", "high-risk-api"},
+			skills:    []string{"review-feedback"},
 			tools:     []string{"model-policy", "evaluation-store"},
 			mcp:       []string{},
 			content:   "Use gpt-5.6-terra as the default arbiter for failed, low-confidence, high-risk, or recurring cross-project cases.",
@@ -1840,7 +1840,7 @@ func btdRuleTemplates() []TemplateItem {
 		{
 			id:        "00-routing",
 			summary:   "定义 $wf-* 工作流 skill 入口、通用路由原则与角色激活底线。",
-			content:   "工作流入口由 .agents/skills/wf-* 维护；具体流程以 .claude/workflows/*.md 为准；高风险改动走 high-risk-api。",
+			content:   "工作流入口由 .agents/skills/wf-* 维护；具体流程以 .claude/workflows/*.md 为准；高风险改动必须遵守共享安全规则。",
 			updatedAt: "2026-06-20 10:24",
 		},
 		{
@@ -1975,81 +1975,11 @@ func btdSkillTemplates() []TemplateItem {
 			updatedAt:        "2026-06-20 10:30",
 		},
 		{
-			id:               "cross-client",
-			summary:          "客户端跨端协作手册，说明协议对接、联调和常见跨端问题排查。",
-			content:          "新增服务端接口后检查 Req/Resp/Notify/ErrorCode 对齐，排查客户端收不到响应或数据不一致。",
-			applicableAgents: []string{"hephaestus", "debugger", "librarian"},
-			updatedAt:        "2026-06-20 10:31",
-		},
-		{
-			id:               "cross-config",
-			summary:          "btd-config 跨仓配置协作手册，说明 proto、rawdata、gen 文件和配置注册边界。",
-			content:          "proto/config 变更时停下等待用户生成；gen 文件不可手改；新增配置表需在 setting.yaml 注册。",
-			applicableAgents: []string{"hephaestus", "librarian"},
-			updatedAt:        "2026-06-20 10:32",
-		},
-		{
-			id:               "cross-gate",
-			summary:          "Gate 服务跨服务协作手册，覆盖仓库结构、通信协议、关键调试文件和常见问题。",
-			content:          "涉及 gate 通信时检查协议边界、关键文件和跨服务调用链，优先按调试指引定位。",
-			applicableAgents: []string{"debugger", "oracle", "worker"},
-			updatedAt:        "2026-06-20 10:33",
-		},
-		{
-			id:               "cross-social",
-			summary:          "Social 服务跨服务协作手册，覆盖职责边界、通信方式、调试指引和常见跨服务 Bug。",
-			content:          "涉及 social 通信时先确认职责边界和通信方式，再按调试指引定位跨服务问题。",
-			applicableAgents: []string{"debugger", "oracle", "worker"},
-			updatedAt:        "2026-06-20 10:34",
-		},
-		{
-			id:               "dev-workflow",
-			summary:          "新功能开发流程，定义九步流程、铁律、Agent 分工和方案文件要求。",
-			content:          "需求澄清、阅读上下文、设计方案、实现、测试、审核、文档和完成状态必须形成可追踪流程。",
-			applicableAgents: []string{"sisyphus", "prometheus", "hephaestus"},
-			updatedAt:        "2026-06-20 10:35",
-		},
-		{
-			id:               "high-risk-api",
-			summary:          "高风险 API 管控，分为报备级、确认级和自动审核级。",
-			content:          "货币、GM、cron、删除数据、鉴权等高风险行为按级别报备或暂停确认，完成后触发 reviewer。",
-			applicableAgents: []string{"hephaestus", "reviewer-security", "gatekeeper"},
-			updatedAt:        "2026-06-20 10:36",
-		},
-		{
-			id:               "pmconf-pattern",
-			summary:          "pmconf 配置预处理模式，说明何时预处理、标准四步写法和参考实现。",
-			content:          "配置加载/热更时预处理一次，业务侧 O(1) 查询；不要发明新模式，优先参考已有 postLoad 实现。",
-			applicableAgents: []string{"hephaestus", "worker", "reviewer-perf", "prometheus"},
-			updatedAt:        "2026-06-20 10:37",
-		},
-		{
-			id:               "quest-system",
-			summary:          "任务系统手册，覆盖架构、核心接口、数据结构、扩展点、配置依赖和测试方法。",
-			content:          "新增任务目标、触发点或任务类型时，检查 counter/handler 注册、配置同步、通知客户端和 QuestPool 容量。",
-			applicableAgents: []string{"worker", "hephaestus", "reviewer-logic"},
-			updatedAt:        "2026-06-20 10:38",
-		},
-		{
 			id:               "review-feedback",
 			summary:          "审核反馈动态纳入规范，用于把重复或高风险审核发现沉淀为规则。",
 			content:          "只纳入重复出现或高风险模式；规则需具体可执行，并标注负责检查的 reviewer 角色。",
 			applicableAgents: []string{"sisyphus", "reviewer-logic", "reviewer-security", "gatekeeper"},
 			updatedAt:        "2026-06-20 10:39",
-		},
-		{
-			id:               "skill-standard",
-			summary:          "Skill 创建规范，定义定位、标准结构、编写原则、创建时机和触发规则。",
-			content:          "Skill 应按模块沉淀稳定知识，结构包含架构、接口、数据、扩展、配置、踩坑、测试和检查清单。",
-			applicableAgents: []string{"sisyphus", "prometheus", "librarian"},
-			updatedAt:        "2026-06-20 10:40",
-		},
-		{
-			id:               "test-first-and-worktree",
-			summary:          "测试优先与隔离工作区规范，用于核心逻辑、bugfix、重构和中大型改动前置检查。",
-			content:          "核心逻辑优先 test-first；bugfix 优先补回归测试；中大型改动前检查隔离分支或 worktree。",
-			applicableAgents: []string{"hephaestus", "quick", "worker", "debugger", "gatekeeper"},
-			updatedAt:        "2026-06-22 15:10",
 		},
 		{
 			id:               "testing",
@@ -2213,13 +2143,6 @@ func btdSkillTemplates() []TemplateItem {
 			updatedAt:        "2026-06-23 19:54",
 		},
 		{
-			id:               "csharp-behaviour-tree",
-			summary:          "Behavior tree skill for Battle AI, BonsaiBT, monster, boss, or behavior-tree Unity logic.",
-			content:          "Read existing behavior tree nodes and monster references before making minimal logic changes.",
-			applicableAgents: []string{"unity-debugger", "unity-logic-developer"},
-			updatedAt:        "2026-06-23 19:55",
-		},
-		{
 			id:               "wf-unity-bugfix",
 			summary:          "Codex skill entry for the Unity bug investigation workflow.",
 			content:          "Invoke with $wf-unity-bugfix to load templates/.claude/workflows/wf-unity-bugfix.md and follow the Unity bug investigation workflow.",
@@ -2305,8 +2228,6 @@ func btdRuleTemplatePath(id string) string {
 		return "templates/.claude/rules/go-00-routing.md"
 	case "02-safety":
 		return "templates/.claude/rules/go-02-safety.md"
-	case "03-project-model":
-		return "templates/.claude/rules/go-03-project-model.md"
 	case "04-task-decomposition":
 		return "templates/.claude/rules/go-04-task-decomposition.md"
 	case "unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety":
@@ -2320,7 +2241,7 @@ func btdRuleTemplatePath(id string) string {
 
 func btdSkillTemplatePath(id string) string {
 	switch id {
-	case "dev-workflow", "coding-rules", "testing", "pmconf-pattern", "quest-system", "cross-config":
+	case "coding-rules", "testing":
 		return "templates/.claude/skills/go-" + id + "/SKILL.md"
 	case "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit", "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-ui-quick":
 		return "templates/.agents/skills/" + id + "/SKILL.md"
@@ -2589,10 +2510,8 @@ func btdCopyStatus(templateID string) string {
 	switch templateID {
 	case "worker", "00-routing", "feature-development", "code-review":
 		return "template_updated"
-	case "quick", "03-project-model", "quest-system", "bugfix":
+	case "quick", "03-project-model", "bugfix":
 		return "project_modified"
-	case "high-risk-api":
-		return "diverged"
 	case "lark-integration":
 		return "detached"
 	default:
@@ -2607,17 +2526,13 @@ func btdCopyDiff(templateID string) string {
 	case "00-routing":
 		return "+ template: expanded $wf-go-review reviewer routing and workflow phase checkpoints."
 	case "feature-development":
-		return "+ template: align $wf-go-feat workflow with latest dev-workflow and testing rules."
+		return "+ template: align $wf-go-feat workflow with the latest shared rules and testing guidance."
 	case "code-review":
 		return "+ template: route review through logic / perf / security reviewer fan-out."
 	case "quick":
 		return "+ project: tightened quick role to single-file fixes only."
 	case "03-project-model":
 		return "+ project: actor index rebuild note added for local btd-game-server development."
-	case "quest-system":
-		return "+ project: added local quest pool capacity checklist."
-	case "high-risk-api":
-		return "- template: generic high-risk checklist\n+ project: payment rollback and GM currency checklist"
 	case "bugfix":
 		return "+ project: local log capture path added for btd runtime crashes."
 	case "lark-integration":

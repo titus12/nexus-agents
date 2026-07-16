@@ -1,6 +1,6 @@
-# UIArchitect Generated Output Safety
+# UIArchitect 生成产物安全规范
 
-- Do not hand-edit generated output to fix generator bugs.
-- Fix the generator, templates, resolver metadata, or source PSD interpretation instead.
-- Generated field names and binding paths must be deterministic.
-- Existing generated public-contract changes require compatibility notes.
+- 不得通过手工修改生成产物来修复生成器问题。
+- 应修复生成器、模板、Resolver 元数据或源 PSD 的解析逻辑。
+- 生成字段名和绑定路径必须保持确定性。
+- 既有生成代码的公共契约发生变更时，必须提供兼容性说明。

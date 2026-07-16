@@ -1,1 +1,19 @@
-# unity-asset-safety`n`nBefore changing assets, inspect existing Prefab/Scene/.meta/generated/imported file ownership. Do not regenerate or rewrite broad asset trees without explicit need. Review serialized references and .meta identity after changes.
+---
+name: unity-asset-safety
+description: "Unity 资产安全规范：保护 Prefab、Scene、.meta、生成资产和序列化引用。"
+---
+
+# Unity 资产安全规范
+
+在 Unity 资产相关任务中按需读取；不得据此隐式启动或选择工作流。
+
+## 执行要求
+
+- 修改前确认 Prefab、Scene、`.meta`、导入资产和生成资产的归属与影响范围。
+- 将序列化引用、GUID、图集、Sprite 和生成资产变更视为高风险操作。
+- 除非需求明确，避免大范围重新导入、重新生成或重写资产树。
+
+## 验证要求
+
+- 修改导入器或资产后，检查序列化引用、`.meta` 标识和受影响场景。
+- 记录无法验证的资产风险。

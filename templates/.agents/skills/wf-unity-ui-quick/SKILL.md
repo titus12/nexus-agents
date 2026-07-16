@@ -1,6 +1,6 @@
 ---
 name: wf-unity-ui-quick
-description: Lightweight Unity UI workflow for simple btdgame UI fixes. Use for narrow View/ViewModel binding or display changes that do not need the full UI feature workflow.
+description: Lightweight Unity UI workflow for simple UI fixes. Use for narrow View/ViewModel binding or display changes that do not need the full UI feature workflow. Invoke explicitly with $wf-unity-ui-quick.
 ---
 
 # wf-unity-ui-quick

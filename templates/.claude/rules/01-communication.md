@@ -1,38 +1,39 @@
-# Communication and File Encoding Rules
+# 沟通与文件编码规范
 
-## Language
+## 语言
 
-- Always reply in Chinese unless the user explicitly asks otherwise.
-- Code comments should follow the existing project style; prefer English comments for source code unless surrounding code uses Chinese.
-- Commit messages should be in English when commits are requested.
+- 除非用户明确要求其他语言，否则始终使用中文回复。
+- 代码注释应遵循项目既有风格；除非周边代码使用中文，否则源代码注释优先使用英文。
+- 用户明确要求提交时，提交信息使用英文。
 
-## When to Ask
+## 需要先询问的情况
 
-- Ask first when the requirement has multiple reasonable interpretations and a wrong assumption would be costly.
-- Ask first before high-risk or irreversible operations, including deletion, reset, permission changes, or broad asset rewrites.
-- **Never autonomously operate Git beyond read-only inspection.** `git status`, `git diff`, `git log`, and `git show` are allowed; every state-changing or remote action requires explicit user approval for that exact action. This includes `git add`, `commit`, `push`, `pull`, `fetch`, `merge`, `rebase`, `reset`, `restore`, `checkout` / `switch`, `stash`, tag or branch creation/deletion, and force options. Do not infer approval for staging, committing, or pushing from a request to edit code, run tests, or review changes.
-- **Workflows may only be invoked when explicitly requested by the user.** Do not infer, select, or run any `wf-*` workflow from task content, keywords, or default routing; when a workflow may help, suggest it rather than invoking it.
-- Ask first for architecture decisions or technology choices that cannot be inferred from local context.
+- 需求存在多种合理解释，且错误假设可能造成较高成本时，先询问用户。
+- 删除、重置、权限变更或大范围资产重写等高风险、不可逆操作前，先询问用户。
+- **除只读检查外，禁止自主执行 Git 操作。** 允许 `git status`、`git diff`、`git log`、`git show`。所有改变状态或涉及远程的操作，均须获得用户对该具体操作的明确授权，包括 `git add`、`commit`、`push`、`pull`、`fetch`、`merge`、`rebase`、`reset`、`restore`、`checkout` / `switch`、`stash`、创建或删除标签/分支，以及任何强制选项。不得从编辑代码、运行测试或审查变更的请求中推断出暂存、提交或推送的授权。
+- **工作流只能由用户显式调用。** 不得根据任务内容、关键词或默认路由推断、选择或运行任何 `wf-*` 工作流；工作流可能有帮助时，只能建议用户调用，不能自行调用。
+- 无法从本地上下文推断的架构决策或技术选型，先询问用户。
 
-## When to Act
+## 可以直接执行的情况
 
-- Act directly when the requirement is clear, the change is small, and the result can be verified.
-- Prefer reading the relevant rule, workflow, or skill source before editing.
-- Use read-only CodeGraph directly when available; no user permission is needed for read-only code lookups.
+- 需求明确、改动较小且结果可验证时，可直接执行。
+- 编辑前优先阅读相关规则、工作流或技能的权威来源。
+- 可用时直接使用只读 CodeGraph，无须向用户申请只读查询权限。
+- 修改 AI 配置文件前，先检查 Nexus `templates/` 中是否存在相同相对路径和文件名的文件。只有该匹配模板文件存在时，才将已修改的项目副本同步回模板；否则视为项目私有文件，加入公共模板前必须询问用户。Nexus 路径不可访问、映射不明确或出现冲突时，必须报告，不得静默跳过。模板同步不授权 Git 写入或远程操作。
 
-## Output Style
+## 输出风格
 
-- Keep progress and final reports concise.
-- Prefer bullets or tables over long prose when summarizing findings.
-- Use absolute file paths when referencing workspace files in user-facing messages.
-- Do not claim fixed, verified, submitted, or uploaded without evidence from the current turn.
+- 进度与最终报告保持简洁。
+- 汇总发现时优先使用列表或表格，避免冗长叙述。
+- 面向用户引用工作区文件时使用绝对路径。
+- 没有本轮任务的新鲜证据时，不得声称已修复、已验证、已提交或已上传。
 
-## File Encoding Rules
+## 文件编码
 
-- Preserve the existing file encoding when editing files whenever possible.
-- For new or rewritten text files, use UTF-8 without BOM by default.
-- This applies to all project text assets, including `.cs`, `.go`, `.md`, `.json`, `.xml`, `.yaml`, `.ps1`, `.txt`, config files, workflow files, and skill files.
-- Do not rely on Windows PowerShell defaults that may write UTF-8 with BOM or otherwise change encoding unexpectedly.
-- When writing files from PowerShell, prefer explicit UTF-8 without BOM APIs, for example: ``[System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($false))``.
-- When writing JSON or request bodies from PowerShell, prefer explicit UTF-8 without BOM bytes, for example: ``[System.Text.UTF8Encoding]::new($false).GetBytes($json)``.
-- If a file unexpectedly causes `invalid json body`, parser failures, Unity import issues, or unreadable mojibake, check BOM and encoding before changing business logic.
+- 编辑文件时尽可能保持原有编码。
+- 新建或重写文本文件默认使用无 BOM 的 UTF-8。
+- 该规则适用于所有项目文本资产，包括 `.cs`、`.go`、`.md`、`.json`、`.xml`、`.yaml`、`.ps1`、`.txt`、配置文件、工作流文件和技能文件。
+- 不得依赖 Windows PowerShell 的默认编码，以免意外写入 UTF-8 BOM 或改变原有编码。
+- 通过 PowerShell 写入文件时，优先使用显式的无 BOM UTF-8 API，例如：``[System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($false))``。
+- 通过 PowerShell 写入 JSON 或请求体时，优先使用显式的无 BOM UTF-8 字节，例如：``[System.Text.UTF8Encoding]::new($false).GetBytes($json)``。
+- 如果文件意外出现 `invalid json body`、解析失败、Unity 导入问题或乱码，在改业务逻辑前先检查 BOM 和编码。

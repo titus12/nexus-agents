@@ -208,6 +208,8 @@ Vite 开发服务器会将 `/api` 代理到 `http://127.0.0.1:8766`。
 GET  /api/health
 GET  /api/bootstrap
 POST /api/projects/import
+POST /api/templates/initialize/preview
+POST /api/templates/initialize/apply
 GET  /api/model-routes/resolve?client=codex&model=deepseek-v4-pro
 GET  /proxy/codex/health
 GET  /proxy/codex/model-catalog.json

@@ -1,0 +1,99 @@
+package catalog
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestPreviewTemplateInitializationProtectsKnowledgeProject(t *testing.T) {
+	target := t.TempDir()
+
+	preview, err := PreviewTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeGo,
+	})
+	if err != nil {
+		t.Fatalf("preview template initialization: %v", err)
+	}
+	if preview.Summary.Create == 0 {
+		t.Fatalf("expected create entries, got %#v", preview.Summary)
+	}
+	if preview.Summary.Protected != 1 {
+		t.Fatalf("expected one protected KnowledgeBase/project entry, got %#v", preview.Summary)
+	}
+	assertInitializationAction(t, preview, "AGENTS.md", "create")
+	assertInitializationAction(t, preview, "KnowledgeBase/project/", "protected")
+	for _, write := range preview.Writes {
+		if write.RelativePath == "KnowledgeBase/project/.gitkeep" {
+			t.Fatalf("protected project content must not be included: %#v", write)
+		}
+	}
+}
+
+func TestApplyTemplateInitializationCreatesOnlyMissingFiles(t *testing.T) {
+	target := t.TempDir()
+	protectedFile := filepath.Join(target, "KnowledgeBase", "project", "local.md")
+	if err := os.MkdirAll(filepath.Dir(protectedFile), 0o755); err != nil {
+		t.Fatalf("create protected directory: %v", err)
+	}
+	if err := os.WriteFile(protectedFile, []byte("project knowledge"), 0o644); err != nil {
+		t.Fatalf("write protected file: %v", err)
+	}
+	existingAgents := filepath.Join(target, "AGENTS.md")
+	if err := os.WriteFile(existingAgents, []byte("project-specific guide"), 0o644); err != nil {
+		t.Fatalf("write existing AGENTS.md: %v", err)
+	}
+
+	result, err := ApplyTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeUnity,
+	})
+	if err != nil {
+		t.Fatalf("apply template initialization: %v", err)
+	}
+	assertInitializationAction(t, TemplateInitializationPreview{Writes: result.Writes}, "AGENTS.md", "conflict")
+	assertInitializationAction(t, TemplateInitializationPreview{Writes: result.Writes}, "KnowledgeBase/project/", "protected")
+	if data, err := os.ReadFile(existingAgents); err != nil || string(data) != "project-specific guide" {
+		t.Fatalf("AGENTS.md should remain untouched, data=%q err=%v", data, err)
+	}
+	if data, err := os.ReadFile(protectedFile); err != nil || string(data) != "project knowledge" {
+		t.Fatalf("KnowledgeBase/project must remain untouched, data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".claude", "agents", "unity-debugger.md")); err != nil {
+		t.Fatalf("expected Unity template output: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".claude", "agents", "go-debugger.md")); !os.IsNotExist(err) {
+		t.Fatalf("Go output must not be included for Unity profile, err=%v", err)
+	}
+}
+
+func TestApplyTemplateInitializationCreatesMissingTargetDirectory(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "new-project")
+	result, err := ApplyTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeGeneral,
+	})
+	if err != nil {
+		t.Fatalf("apply template initialization to new directory: %v", err)
+	}
+	if result.Summary.Create == 0 {
+		t.Fatalf("expected files to be created, got %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(target, "AGENTS.md")); err != nil {
+		t.Fatalf("expected initialized AGENTS.md: %v", err)
+	}
+}
+
+func assertInitializationAction(t *testing.T, preview TemplateInitializationPreview, relativePath string, action string) {
+	t.Helper()
+	for _, write := range preview.Writes {
+		if write.RelativePath == relativePath {
+			if write.Action != action {
+				t.Fatalf("expected %s action %s, got %#v", relativePath, action, write)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing initialization entry %s", relativePath)
+}

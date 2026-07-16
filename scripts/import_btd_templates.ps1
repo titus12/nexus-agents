@@ -35,7 +35,6 @@ $ruleCopies = @{
   "00-routing.md" = "go-00-routing.md"
   "01-communication.md" = "01-communication.md"
   "02-safety.md" = "go-02-safety.md"
-  "03-project-model.md" = "go-03-project-model.md"
 }
 
 foreach ($entry in $ruleCopies.GetEnumerator()) {
@@ -55,18 +54,9 @@ Task Capsule 必须独立可验收，并在计划中写明执行顺序、并行�
 '@
 
 $skillCopies = @{
-  "dev-workflow.md" = "go-dev-workflow.md"
-  "skill-standard.md" = "skill-standard.md"
   "review-feedback.md" = "review-feedback.md"
   "coding-rules.md" = "go-coding-rules.md"
   "testing.md" = "go-testing.md"
-  "pmconf-pattern.md" = "go-pmconf-pattern.md"
-  "high-risk-api.md" = "high-risk-api.md"
-  "quest-system.md" = "go-quest-system.md"
-  "cross-config.md" = "go-cross-config.md"
-  "cross-client.md" = "cross-client.md"
-  "cross-gate.md" = "cross-gate.md"
-  "cross-social.md" = "cross-social.md"
 }
 
 foreach ($entry in $skillCopies.GetEnumerator()) {

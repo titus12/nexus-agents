@@ -393,7 +393,7 @@ func TestImportProjectWritesUserHomeNexusIndex(t *testing.T) {
 	}
 }
 
-func TestImportProjectMigratesLegacyNexusWorkflowDirectory(t *testing.T) {
+func TestImportProjectLeavesLegacyNexusDirectoryUntouched(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, ".claude/workflows/go-feature-development.md", "workflow markdown")
 	writeTestFile(t, root, ".nexus/workflows/go-feature-development.json", `{"id":"go-feature-development","name":"feature graph","nodes":[],"edges":[]}`)
@@ -404,14 +404,11 @@ func TestImportProjectMigratesLegacyNexusWorkflowDirectory(t *testing.T) {
 		t.Fatalf("import project: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(root, ".nexus")); !os.IsNotExist(err) {
-		t.Fatalf("expected legacy .nexus path to be removed after migration, err=%v", err)
+	if _, err := os.Stat(filepath.Join(root, ".nexus", "workflows", "go-feature-development.json")); err != nil {
+		t.Fatalf("expected legacy .nexus workflow file to remain untouched, err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "go-feature-development.graph.json")); err != nil {
-		t.Fatalf("expected migrated workflow graph: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, ".nexus", "workflows", "go-feature-development.json")); !os.IsNotExist(err) {
-		t.Fatalf("expected legacy workflow graph to be removed, err=%v", err)
+	if _, err := os.Stat(filepath.Join(root, ".claude", "workflows", "go-feature-development.graph.json")); !os.IsNotExist(err) {
+		t.Fatalf("legacy workflow must not be migrated, err=%v", err)
 	}
 }
 

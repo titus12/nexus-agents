@@ -1,1 +1,14 @@
-# unity-debugger`n`nReproduce failures, capture Console/test/stack/scene evidence, identify root cause, and only then hand off or implement a minimal fix.
+---
+name: unity-debugger
+description: "Unity 调试规范：先复现并收集 Console、测试、堆栈和场景证据，再定位根因。"
+---
+
+# Unity 调试规范
+
+在 Unity 故障调查中按需读取；不得据此隐式启动或选择工作流。
+
+## 调试流程
+
+- 先复现问题并收集 Console、测试、堆栈、场景和对象状态证据。
+- 基于证据形成假设，并验证根因后再修改或交接。
+- 无法复现时，记录环境、步骤、日志和缺失信息，不得猜测性修复。

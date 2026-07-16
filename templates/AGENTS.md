@@ -41,6 +41,14 @@ Read the authoritative source instead of copying its content into this file.
 - Use subagents, parallel execution, or delegation only when the user explicitly requests it.
 - Keep model-routing and provider configuration outside project-local role documentation unless the project explicitly owns that configuration.
 
+## Template synchronization
+
+- When changing an AI configuration file in a project, first check whether Nexus `templates/` contains a file with the same relative path and name.
+- Only when that matching template file exists and its copied project counterpart has changed must the equivalent change be synchronized back to the corresponding Nexus template file and verified for consistency.
+- If no matching template file exists, treat the file as project-specific. Do not add it to public templates without first proposing it to the user and receiving approval.
+- If Nexus cannot be accessed, the path mapping is unclear, or the files conflict, report the blocker explicitly; do not silently skip synchronization.
+- Template synchronization does not authorize Git write or remote operations.
+
 ## Execution baseline
 
 - Clarify ambiguous requirements and high-risk actions before changing files or external state.
