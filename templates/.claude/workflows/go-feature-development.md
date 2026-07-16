@@ -27,6 +27,27 @@ node .agents/skills/nexus-taskrun-submit/taskrun.mjs start --projectId <projectI
 7. **循环必须受证据和上限约束。** 父工作流最多 3 个完整 Loop；每个子任务最多 2 次实施-质检尝试；没有新证据时禁止重复同一失败路径。
 8. **最终结果必须可复核。** 如实报告改动、验证命令和结果、未验证项、风险及最终状态：`success | partial_success | blocked | failed | cancelled`。
 
+## 子代理派发模式
+
+除非满足 full-history fork 例外条件，所有角色都使用最小 Capsule 的非 fork 派发：
+
+```text
+context_mode: capsule_non_fork
+fork_context: false
+requestedModel: <optional model override>
+requestedReasoningEffort: <optional reasoning override>
+runtimeModelConfirmed: false
+```
+
+- Capsule 只包含目标、允许范围、已确认事实与证据、必要路径、验收、验证和风险。
+- 需要指定模型或 reasoning effort 的角色必须保持 `fork_context: false`。
+- `requestedModel` 和 `requestedReasoningEffort` 仅表示请求；除非运行时返回独立证据，`runtimeModelConfirmed` 必须保持 `false`。
+- full-history fork 仅可用于无法由 Capsule 表达的只读分析，且不需要模型或 effort override；不得用于实现、验证、独立审查或证据整理。
+
+## Plan Compliance
+
+为待审核目标契约的必须项和非目标分配 `planItemIds`。Task Capsule 写明其负责项；Worker 和 Reviewer 对每项返回 `met | deviated | unverified | not_started` 与简短证据。Sisyphus 只有在所有必须项为 `met`、非目标未被触及或偏离已获批准时才可报告 `success`。
+
 ## 工作流
 
 1. **加载上下文并探索**：读取 AGENTS、适用 Rules、知识库 routing 及其最少必要文档；先读取用户提供的权威需求来源，再搜索真实代码、调用方、测试、配置和相似实现，形成当前行为、冲突和风险证据。

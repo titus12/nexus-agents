@@ -38,6 +38,23 @@ Do not use for:
 2. `unity-logic-tester` - verifies new behavior, key old behavior, Unity compile, Console, and targeted tests/manual path.
 3. `unity-logic-reviewer` - reviews scope, compatibility, temporary residue, boundary conditions, performance risk, and verification evidence.
 
+## 子代理派发模式
+
+如果将逻辑开发、测试或复核角色派发为子代理，默认使用最小上下文包的非 fork 模式：
+
+```text
+context_mode: capsule_non_fork
+fork_context: false
+requestedModel: <optional model override>
+requestedReasoningEffort: <optional reasoning override>
+runtimeModelConfirmed: false
+```
+
+- 上下文包只包含当前/目标行为、已确认事实、相关路径、允许范围、验收、验证和风险。
+- 指定模型或 reasoning effort 时必须保持 `fork_context: false`。
+- `requestedModel` 与 `requestedReasoningEffort` 只记录请求；没有独立运行时证据时 `runtimeModelConfirmed` 保持 `false`。
+- full-history fork 只允许用于无法压缩为上下文包的只读分析，且不需要 override；不得用于实现、测试、复核或证据整理。
+
 ## 必需规则
 
 - `.claude/rules/01-communication.md`
@@ -126,6 +143,10 @@ Do not use for:
    - Hot-path performance and allocation risks.
    - Verification evidence is sufficient for the requested behavior change.
 10. Final report includes current behavior, target behavior, changed files, verification evidence, skipped checks with reasons, and remaining risks.
+
+## Plan Compliance
+
+批准的逻辑修改计划为行为、验证和非目标分配 `planItemIds`。Tester 和 Reviewer 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；所有必需项为 `met` 且偏离已获批准后，工作流才可报告成功。
 
 ## Progress Output Discipline
 

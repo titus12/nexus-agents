@@ -51,11 +51,11 @@ real role separation.
    minimal task context package.
 2. `ui-developer` - default **main agent role**, use the current main model unless the user explicitly requests another model. Implement UI and business logic from the task context package. Read generated
    bindings, Service/DataEvents/Cache, protocol, config, one example, or one template only when needed.
-3. `ui-tester` - default **subagent**, spawn with model `deepseek-v4-flash` to validate compile, Console, tests, interactions, state transitions,
+3. `ui-tester` - default **subagent**, spawn with model `gpt-5.4` to validate compile, Console, tests, interactions, state transitions,
    and input-lock release paths.
-4. `ui-reviewer` - default **subagent**, spawn with model `deepseek-v4-pro` to review diff, assets, layout adaptation, View/ViewModel/Service/DataEvents/
+4. `ui-reviewer` - default **subagent**, spawn with model `gpt-5.5` to review diff, assets, layout adaptation, View/ViewModel/Service/DataEvents/
    Cache boundaries, generated-file safety, and remaining risks.
-5. `workflow-evaluator` - default **subagent**, spawn with model `deepseek-v4-flash` to prepare verification evidence, role/model usage records,
+5. `workflow-evaluator` - default **subagent**, spawn with model `gpt-5.4` to prepare verification evidence, role/model usage records,
    Nexus TaskRun payload, metrics, and final report.
 
 ## 计划门禁
@@ -140,6 +140,23 @@ source directories.
 
 ## 子代理策略
 
+## Subagent Dispatch Mode
+
+All default support subagents use a minimal, evidence-focused non-fork context package:
+
+```text
+context_mode: capsule_non_fork
+fork_context: false
+requestedModel: <optional model override>
+requestedReasoningEffort: <optional reasoning override>
+runtimeModelConfirmed: false
+```
+
+- The package contains only the feature goal, authoritative sources, confirmed facts, relevant files/assets, allowed scope, acceptance criteria, verification, and risks.
+- A role with a model or reasoning-effort override must use `fork_context: false`.
+- Record `requestedModel` and `requestedReasoningEffort` as requested settings only. Keep `runtimeModelConfirmed: false` unless the runtime independently confirms the selected model and effort.
+- A full-history fork is allowed only for explicitly justified read-only analysis that cannot be expressed in a context package and has no model or reasoning override. Do not use it for implementation, review, testing, asset safety, or evidence preparation.
+
 Explicit invocation of `$wf-unity-ui-feature` is an explicit request to run this workflow, including the
 default support subagents below. Do not reinterpret generic agent-tool restrictions as a reason to suppress
 `requirement-collector`, `ui-reviewer`, `ui-tester`, or `workflow-evaluator` after this workflow has been selected.
@@ -158,9 +175,9 @@ For the normal tasks that still use this workflow:
 
 - `requirement-collector` runs first as an independent read-only subagent with `model: gpt-5.4` and produces the Requirement Context Package;
 - `ui-developer` stays in the main session and owns the implementation;
-- `ui-reviewer` reviews the implementation diff independently with `model: deepseek-v4-pro`;
-- `ui-tester` validates compile / console / interaction / edge paths independently with `model: deepseek-v4-flash`;
-- `workflow-evaluator` independently prepares the Nexus Evidence Package and metrics with `model: deepseek-v4-flash`.
+- `ui-reviewer` reviews the implementation diff independently with `model: gpt-5.5`;
+- `ui-tester` validates compile / console / interaction / edge paths independently with `model: gpt-5.4`;
+- `workflow-evaluator` independently prepares the Nexus Evidence Package and metrics with `model: gpt-5.4`.
 
 When spawning these default subagents, pass the model override explicitly in the subagent call. Do not merely print a
 role/model label while continuing to execute every role on the main model.
@@ -218,6 +235,10 @@ Each split role receives only the smallest context package required for its job:
 - `workflow-evaluator`: final changed files, verification evidence, skipped checks, remaining risks, and model/role usage.
 
 Do not pass the entire chat history by default.
+
+## Plan Compliance
+
+批准的 UI 计划为资源、行为、验证和非目标分配 `planItemIds`。`ui-reviewer`、`ui-tester` 和 `workflow-evaluator` 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；Owner 只有在所有必需项为 `met`、偏离已获批准时才可完成。
 
 ## 必需规则
 

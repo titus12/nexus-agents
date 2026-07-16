@@ -43,7 +43,7 @@ function start(args) {
     projectId, workflowType, taskTitle, submittedStatus: 'partial_success',
     sessionId: sessionId.trim(), startedAt,
     metrics: { filesChangedCount: 0, testRunCount: 0 },
-    evidence: { changedFiles: [], skippedChecks: [], remainingRisks: [] },
+    evidence: { changedFiles: [], planCompliance: { items: [], unexpectedChanges: [] }, skippedChecks: [], remainingRisks: [] },
   });
   if (contextFile) {
     writeJson(contextFile, {

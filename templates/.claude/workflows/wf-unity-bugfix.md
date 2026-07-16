@@ -35,6 +35,23 @@ Default roles:
 
 The main agent must not be the only reviewer/tester for its own implementation unless subagents are unavailable. If degraded, state why and mark review/verification as degraded in the final report.
 
+## Subagent Dispatch Mode
+
+Use a minimal non-fork context package for every support subagent:
+
+```text
+context_mode: capsule_non_fork
+fork_context: false
+requestedModel: <optional model override>
+requestedReasoningEffort: <optional reasoning override>
+runtimeModelConfirmed: false
+```
+
+- Include only the failing path, confirmed evidence, allowed scope, verification, and risks needed by the assigned role.
+- A requested model or reasoning override requires `fork_context: false`.
+- Record requested settings without claiming the runtime selection: leave `runtimeModelConfirmed: false` unless independently confirmed.
+- A full-history fork is an explicitly justified, read-only exception with no override; never use it for implementation, regression testing, review, or final evidence.
+
 ## Required Rules and Skills
 
 - `.claude/rules/01-communication.md`
@@ -202,6 +219,10 @@ Tester verifies what is available:
 - related regression risks.
 
 If the original bug cannot be automatically accepted, tester must return `needs_user_acceptance` with concrete user steps and expected evidence.
+
+## Plan Compliance
+
+批准的 diagnosis/fix plan 为诊断、修复、验证和非目标分配 `planItemIds`。Reviewer 和 tester 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；Owner 只有在所有必需项为 `met`、偏离已获批准时才可报告 `success`。
 
 ## Workflow Steps
 

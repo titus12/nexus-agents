@@ -25,6 +25,27 @@ node .agents/skills/nexus-taskrun-submit/taskrun.mjs start --projectId <projectI
 5. **Owner 必须汇总。** reviewer 的“无问题”或“完成”不能替代 Sisyphus 的去重、严重度排序和质量门。
 6. **最终结果可复核。** 区分已修复、必须修复、可延期、信息不足和错误 finding；如实记录未审查范围与原因。
 
+## 子代理派发模式
+
+Reviewer Logic、Reviewer Perf、Reviewer Security、Oracle 和 Librarian 都默认使用最小审查 Capsule 的非 fork 派发：
+
+```text
+context_mode: capsule_non_fork
+fork_context: false
+requestedModel: <optional model override>
+requestedReasoningEffort: <optional reasoning override>
+runtimeModelConfirmed: false
+```
+
+- Capsule 只包含审查目标、base/head、变更范围、必要 diff/hunk、已执行验证、检查重点、未覆盖项和风险。
+- 指定模型或 reasoning effort 时必须使用 `fork_context: false`。
+- `requestedModel` 与 `requestedReasoningEffort` 仅记录请求；没有运行时独立证据时 `runtimeModelConfirmed` 保持 `false`。
+- full-history fork 仅限无法由 Capsule 表达的只读事实补充，且不需要 override；独立审查、复核和验证不得使用。
+
+## Plan Compliance
+
+审查上下文包为目标契约和非目标分配 `planItemIds`。每个 reviewer 对其负责项返回 `met | deviated | unverified | not_started` 与 finding 或验证证据；Sisyphus 汇总后，只有必需契约项为 `met`、偏离已获批准时才可得出通过结论。
+
 ## 审查上下文包
 
 ```text

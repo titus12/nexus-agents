@@ -3,6 +3,7 @@ package catalog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +84,50 @@ func TestApplyTemplateInitializationCreatesMissingTargetDirectory(t *testing.T) 
 	if _, err := os.Stat(filepath.Join(target, "AGENTS.md")); err != nil {
 		t.Fatalf("expected initialized AGENTS.md: %v", err)
 	}
+}
+
+func TestApplyTemplateInitializationMergesGitignoreAndKeepsProjectKnowledgeTracked(t *testing.T) {
+	target := t.TempDir()
+	gitignorePath := filepath.Join(target, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte("bin/\n"), 0o644); err != nil {
+		t.Fatalf("write existing .gitignore: %v", err)
+	}
+
+	result, err := ApplyTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeGeneral,
+	})
+	if err != nil {
+		t.Fatalf("apply template initialization: %v", err)
+	}
+	if result.Summary.Update != 1 {
+		t.Fatalf("expected one .gitignore update, got %#v", result.Summary)
+	}
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("read merged .gitignore: %v", err)
+	}
+	text := string(data)
+	for _, expected := range []string{
+		"bin/",
+		"AGENTS.md",
+		"KnowledgeBase/*",
+		"!KnowledgeBase/project/",
+		"!KnowledgeBase/project/**",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected .gitignore to contain %q, got %s", expected, text)
+		}
+	}
+
+	preview, err := PreviewTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeGeneral,
+	})
+	if err != nil {
+		t.Fatalf("preview after .gitignore update: %v", err)
+	}
+	assertInitializationAction(t, preview, ".gitignore", "unchanged")
 }
 
 func assertInitializationAction(t *testing.T, preview TemplateInitializationPreview, relativePath string, action string) {

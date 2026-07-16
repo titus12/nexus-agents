@@ -26,6 +26,27 @@ node .agents/skills/nexus-taskrun-submit/taskrun.mjs start --projectId <projectI
 - 优先用精确搜索或 codegraph 定位，再读取大文件。
 - 结束时必须给出具体证据：根因、改动文件、执行命令、验证结果和剩余风险。
 
+## 子代理派发模式
+
+Bugfix Owner 派发 Debugger、Reproducer、Implementer、Verifier、Reviewer 或 Learning Curator 时，默认使用：
+
+```text
+context_mode: capsule_non_fork
+fork_context: false
+requestedModel: <optional model override>
+requestedReasoningEffort: <optional reasoning override>
+runtimeModelConfirmed: false
+```
+
+- 输入只包含当前 Bugfix Loop Capsule：症状、已确认事实、失败路径、候选假设、允许范围、验证和风险。
+- 需要模型或 reasoning override 时不得改用 full-history fork。
+- `requestedModel` 和 `requestedReasoningEffort` 是请求而非运行时证明；没有独立回执时 `runtimeModelConfirmed` 保持 `false`。
+- full-history fork 仅可用于无法压缩为 Capsule 的只读分析，且不需要 override；不得用于修复、复现、验证、审查或证据整理。
+
+## Plan Compliance
+
+为修复、复现/回归验证和非目标项分配 `planItemIds`。Verifier 和 Reviewer 对每项返回 `met | deviated | unverified | not_started` 与简短证据。Bugfix Owner 只有在所有必需项为 `met`、偏离已获批准时才可报告 `success`。
+
 ## 角色
 
 - **Bugfix Owner**：负责 loop、Bugfix Loop Capsule、重试预算和退出决策。

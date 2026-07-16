@@ -53,7 +53,7 @@
       "x": 950,
       "label": "unity-asset-safety-evaluator",
       "detail": "Check Prefab, Scene, .meta, generated, and asset risks.",
-      "model": "deepseek-v4-pro"
+      "model": "gpt-5.5"
     },
     {
       "id": "tester",
@@ -64,7 +64,7 @@
       "x": 950,
       "label": "unity-regression-evaluator",
       "detail": "Verify compile, Console, interactions, input locks, and UI states.",
-      "model": "deepseek-v4-flash"
+      "model": "gpt-5.4"
     },
     {
       "id": "review",
@@ -75,7 +75,7 @@
       "x": 1210,
       "label": "ui-reviewer",
       "detail": "Merge UI quality, behavior verification, data-flow boundary, and asset safety findings.",
-      "model": "deepseek-v4-pro"
+      "model": "gpt-5.5"
     },
     {
       "id": "output",

@@ -38,6 +38,23 @@ Follow `.claude/rules/knowledge-retrieval.md`. Record `knowledgeRetrieval` and i
 2. `quick-developer` - 实现最小且安全的手写修改。
 3. `quick-verifier` - 检查编译风险、生成文件安全和目标行为。
 
+## 子代理派发模式
+
+本工作流的角色默认留在主会话；只有用户明确要求独立委派且任务边界仍然安全时，才派发非 fork 子代理：
+
+```text
+context_mode: capsule_non_fork
+fork_context: false
+requestedModel: <optional model override>
+requestedReasoningEffort: <optional reasoning override>
+runtimeModelConfirmed: false
+```
+
+- 子代理仅接收当前目标、相关 View/ViewModel 路径、允许范围、验证和风险。
+- 请求模型或 reasoning override 时必须使用 `fork_context: false`。
+- `requestedModel` 和 `requestedReasoningEffort` 是请求；没有独立运行时证据时 `runtimeModelConfirmed` 保持 `false`。
+- full-history fork 只可用于无法由最小上下文包表达的只读分析，且不需要 override；快速修复、验证和复核不得使用。
+
 ## 必需行为
 
 ### 计划门禁
@@ -107,6 +124,10 @@ quick 日志只打边界点：ViewModel 最终数据/关键状态、View `OnBind
    - 做了哪些验证；
    - 跳过了哪些检查以及原因；
    - Nexus TaskRun 提交结果。
+
+## Plan Compliance
+
+`quick-planner` 为必须项和非目标分配 `planItemIds`，`quick-verifier` 对每项返回 `met | deviated | unverified | not_started` 与简短证据。所有必需项为 `met` 且偏离已获批准后，工作流才可报告成功。
 
 ## Progress Output Discipline
 

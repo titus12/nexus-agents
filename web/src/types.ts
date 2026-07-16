@@ -254,12 +254,13 @@ export type TemplateInitializationInput = {
 export type TemplateInitializationWrite = {
   relativePath: string;
   sourcePath?: string;
-  action: "create" | "unchanged" | "conflict" | "protected";
+  action: "create" | "update" | "unchanged" | "conflict" | "protected";
   reason?: string;
 };
 
 export type TemplateInitializationSummary = {
   create: number;
+  update: number;
   unchanged: number;
   conflict: number;
   protected: number;

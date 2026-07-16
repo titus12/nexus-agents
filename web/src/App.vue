@@ -2004,7 +2004,7 @@ async function applyTemplateInitializer() {
   try {
     templateInitializerResult.value = await applyTemplateInitialization(planId);
     templateInitializerPreview.value = null;
-    showToast(`已创建 ${templateInitializerResult.value.summary.create} 个 AI 配置文件。`);
+    showToast(`已创建 ${templateInitializerResult.value.summary.create} 个文件，并更新 ${templateInitializerResult.value.summary.update} 个忽略规则。`);
     showTemplateInitializerModal.value = false;
   } catch (err) {
     templateInitializerError.value = errorMessage(err);
@@ -3478,18 +3478,19 @@ requires_openai_auth = true</pre>
           <div v-if="templateInitializerError" class="notice danger">{{ templateInitializerError }}</div>
           <div v-if="templateInitializerPreview" class="scan-preview">
             <span class="chip chip-green">创建 {{ templateInitializerPreview.summary.create }}</span>
+            <span class="chip chip-blue">更新 {{ templateInitializerPreview.summary.update }}</span>
             <span class="chip chip-gray">相同 {{ templateInitializerPreview.summary.unchanged }}</span>
             <span class="chip chip-orange">冲突 {{ templateInitializerPreview.summary.conflict }}</span>
             <span class="chip chip-purple">受保护 {{ templateInitializerPreview.summary.protected }}</span>
           </div>
           <div v-if="templateInitializerPreview" class="template-initializer-list">
             <div v-for="write in templateInitializerPreview.writes" :key="write.relativePath" class="template-initializer-row">
-              <span class="chip" :class="write.action === 'create' ? 'chip-green' : write.action === 'conflict' ? 'chip-orange' : write.action === 'protected' ? 'chip-purple' : 'chip-gray'">{{ write.action }}</span>
+              <span class="chip" :class="write.action === 'create' ? 'chip-green' : write.action === 'update' ? 'chip-blue' : write.action === 'conflict' ? 'chip-orange' : write.action === 'protected' ? 'chip-purple' : 'chip-gray'">{{ write.action }}</span>
               <span class="mono">{{ write.relativePath }}</span>
             </div>
           </div>
           <div v-if="templateInitializerResult" class="notice success">
-            已创建 {{ templateInitializerResult.summary.create }} 个文件。冲突文件保持不变；如需纳入 Projects，请前往 Projects 手动导入该目录。
+            已创建 {{ templateInitializerResult.summary.create }} 个文件，并更新 {{ templateInitializerResult.summary.update }} 个忽略规则。冲突文件保持不变；如需纳入 Projects，请前往 Projects 手动导入该目录。
           </div>
         </div>
         <div class="modal-footer">

@@ -9,7 +9,7 @@ Use for architecture or implementation design without code changes.
 
 Codex execution notes:
 
-- Do not spawn subagents unless the user explicitly asks for subagent / parallel / delegation; otherwise execute the named role strategy in the main thread.
+- Do not spawn subagents unless the user explicitly asks for subagent / parallel / delegation; otherwise execute the named role strategy in the main thread. When delegated, use `context_mode: capsule_non_fork` with `fork_context: false`; record `requestedModel`, `requestedReasoningEffort`, and `runtimeModelConfirmed: false`. A full-history fork is read-only-only, requires an explicit reason, and cannot use a model or reasoning override.
 - Before acting, load the referenced current rule/skill files by exact path and report which ones were loaded.
 - Prefer precise search/codegraph before reading large files.
 - End with concrete evidence: changed files, commands run, and verification result.

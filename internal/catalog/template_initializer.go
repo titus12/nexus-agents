@@ -29,6 +29,7 @@ type TemplateInitializationWrite struct {
 
 type TemplateInitializationSummary struct {
 	Create    int `json:"create"`
+	Update    int `json:"update"`
 	Unchanged int `json:"unchanged"`
 	Conflict  int `json:"conflict"`
 	Protected int `json:"protected"`
@@ -111,6 +112,19 @@ func PreviewTemplateInitialization(input TemplateInitializationInput) (TemplateI
 		Reason:       "KnowledgeBase/project is never initialized or overwritten.",
 	})
 	preview.Summary.Protected++
+	gitignoreWrite, err := templateInitializationGitignoreWrite(targetPath)
+	if err != nil {
+		return TemplateInitializationPreview{}, err
+	}
+	preview.Writes = append(preview.Writes, gitignoreWrite)
+	switch gitignoreWrite.Action {
+	case "create":
+		preview.Summary.Create++
+	case "update":
+		preview.Summary.Update++
+	case "unchanged":
+		preview.Summary.Unchanged++
+	}
 	sort.Slice(preview.Writes, func(i, j int) bool {
 		return preview.Writes[i].RelativePath < preview.Writes[j].RelativePath
 	})
@@ -134,7 +148,30 @@ func ApplyTemplateInitialization(input TemplateInitializationInput) (TemplateIni
 		switch write.Action {
 		case "protected", "unchanged", "conflict":
 			result.Writes = append(result.Writes, write)
+		case "update":
+			if write.RelativePath != ".gitignore" {
+				return TemplateInitializationResult{}, fmt.Errorf("unsupported initialization update %s", write.RelativePath)
+			}
+			data, err := mergedTemplateInitializationGitignore(preview.TargetPath)
+			if err != nil {
+				return TemplateInitializationResult{}, err
+			}
+			if err := os.WriteFile(filepath.Join(preview.TargetPath, ".gitignore"), data, 0o644); err != nil {
+				return TemplateInitializationResult{}, fmt.Errorf("write .gitignore: %w", err)
+			}
+			result.Writes = append(result.Writes, write)
 		case "create":
+			if write.RelativePath == ".gitignore" {
+				data, err := mergedTemplateInitializationGitignore(preview.TargetPath)
+				if err != nil {
+					return TemplateInitializationResult{}, err
+				}
+				if err := os.WriteFile(filepath.Join(preview.TargetPath, ".gitignore"), data, 0o644); err != nil {
+					return TemplateInitializationResult{}, fmt.Errorf("write .gitignore: %w", err)
+				}
+				result.Writes = append(result.Writes, write)
+				continue
+			}
 			target, err := safeTemplateInitializationTarget(preview.TargetPath, write.RelativePath)
 			if err != nil {
 				return TemplateInitializationResult{}, err
@@ -168,6 +205,8 @@ func ApplyTemplateInitialization(input TemplateInitializationInput) (TemplateIni
 		switch write.Action {
 		case "create":
 			result.Summary.Create++
+		case "update":
+			result.Summary.Update++
 		case "unchanged":
 			result.Summary.Unchanged++
 		case "conflict":
@@ -177,6 +216,76 @@ func ApplyTemplateInitialization(input TemplateInitializationInput) (TemplateIni
 		}
 	}
 	return result, nil
+}
+
+const nexusGitignoreBlock = `# >>> Nexus Agents AI configuration >>>
+AGENTS.md
+.claude/
+.codex/
+.agents/
+
+# Generated/shared KnowledgeBase configuration
+KnowledgeBase/*
+!KnowledgeBase/project/
+!KnowledgeBase/project/**
+# <<< Nexus Agents AI configuration <<<
+`
+
+func templateInitializationGitignoreWrite(targetRoot string) (TemplateInitializationWrite, error) {
+	target := filepath.Join(targetRoot, ".gitignore")
+	data, err := os.ReadFile(target)
+	if os.IsNotExist(err) {
+		return TemplateInitializationWrite{
+			RelativePath: ".gitignore",
+			Action:       "create",
+			Reason:       "Creates the Nexus AI configuration ignore block.",
+		}, nil
+	}
+	if err != nil {
+		return TemplateInitializationWrite{}, fmt.Errorf("read .gitignore: %w", err)
+	}
+	merged := mergeTemplateInitializationGitignore(string(data))
+	if string(data) == string(merged) {
+		return TemplateInitializationWrite{
+			RelativePath: ".gitignore",
+			Action:       "unchanged",
+			Reason:       "The Nexus AI configuration ignore block is already current.",
+		}, nil
+	}
+	return TemplateInitializationWrite{
+		RelativePath: ".gitignore",
+		Action:       "update",
+		Reason:       "Appends or refreshes the Nexus AI configuration ignore block without replacing existing rules.",
+	}, nil
+}
+
+func mergedTemplateInitializationGitignore(targetRoot string) ([]byte, error) {
+	target := filepath.Join(targetRoot, ".gitignore")
+	data, err := os.ReadFile(target)
+	if os.IsNotExist(err) {
+		return []byte(nexusGitignoreBlock), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read .gitignore: %w", err)
+	}
+	return mergeTemplateInitializationGitignore(string(data)), nil
+}
+
+func mergeTemplateInitializationGitignore(existing string) []byte {
+	const begin = "# >>> Nexus Agents AI configuration >>>"
+	const end = "# <<< Nexus Agents AI configuration <<<"
+	text := strings.ReplaceAll(existing, "\r\n", "\n")
+	if start := strings.Index(text, begin); start >= 0 {
+		if finish := strings.Index(text[start:], end); finish >= 0 {
+			finish += start + len(end)
+			text = strings.TrimRight(text[:start]+text[finish:], "\n")
+		}
+	}
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return []byte(nexusGitignoreBlock)
+	}
+	return []byte(text + "\n\n" + nexusGitignoreBlock)
 }
 
 func validateTemplateInitializationInput(input TemplateInitializationInput) (string, string, error) {

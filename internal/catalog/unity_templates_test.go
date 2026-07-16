@@ -71,6 +71,141 @@ func TestUnityWorkflowTemplatesIncludeTaskRunProtocol(t *testing.T) {
 	}
 }
 
+func TestSubagentWorkflowTemplatesUseCapsuleNonForkDispatch(t *testing.T) {
+	root := filepath.Join("..", "..")
+	files := []string{
+		filepath.Join(root, "templates", ".claude", "workflows", "commit-gate.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "design.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "research.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "lark-integration.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "subagent-driven-development.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "go-feature-development.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "go-bugfix.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "go-code-review.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-ui-feature.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-bugfix.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-logic-mod.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "unity-ui-quick.md"),
+	}
+	required := []string{
+		"context_mode: capsule_non_fork",
+		"fork_context: false",
+		"requestedModel",
+		"requestedReasoningEffort",
+		"runtimeModelConfirmed: false",
+	}
+
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		text := string(data)
+		for _, needle := range required {
+			if !strings.Contains(text, needle) {
+				t.Fatalf("expected %s to contain %q", file, needle)
+			}
+		}
+	}
+}
+
+func TestUnityUIFeatureTemplateUsesOnlySupportedGPTSubagentModels(t *testing.T) {
+	root := filepath.Join("..", "..")
+	paths := []string{
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-ui-feature.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-ui-feature.graph.json"),
+	}
+
+	for _, file := range paths {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		text := string(data)
+		if strings.Contains(text, "deepseek-v4-pro") || strings.Contains(text, "deepseek-v4-flash") {
+			t.Fatalf("expected %s to avoid unsupported DeepSeek subagent models", file)
+		}
+		if !strings.Contains(text, "gpt-5.4") || !strings.Contains(text, "gpt-5.5") {
+			t.Fatalf("expected %s to use the approved GPT subagent model tiers", file)
+		}
+	}
+}
+
+func TestTemplatesContainNoDeepSeekV4RoleReferences(t *testing.T) {
+	root := filepath.Join("..", "..", "templates")
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(data)
+		if strings.Contains(text, "deepseek-v4-pro") || strings.Contains(text, "deepseek-v4-flash") {
+			t.Fatalf("template %s still references a retired DeepSeek v4 role model", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk templates: %v", err)
+	}
+}
+
+func TestImplementationWorkflowsRequirePlanComplianceEvidence(t *testing.T) {
+	root := filepath.Join("..", "..")
+	workflows := []string{
+		filepath.Join(root, "templates", ".claude", "workflows", "subagent-driven-development.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "go-feature-development.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "go-bugfix.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "go-code-review.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-ui-feature.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-bugfix.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-logic-mod.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "unity-ui-quick.md"),
+	}
+	required := []string{
+		"Plan Compliance",
+		"planItemIds",
+		"met | deviated | unverified | not_started",
+	}
+
+	for _, file := range workflows {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		text := string(data)
+		for _, needle := range required {
+			if !strings.Contains(text, needle) {
+				t.Fatalf("expected %s to contain %q", file, needle)
+			}
+		}
+	}
+}
+
+func TestTaskRunTemplatesInitializePlanComplianceEvidence(t *testing.T) {
+	root := filepath.Join("..", "..", "templates", ".agents", "skills", "nexus-taskrun-submit")
+	files := []string{
+		filepath.Join(root, "task-run-template.json"),
+		filepath.Join(root, "taskrun.mjs"),
+		filepath.Join(root, "start-workflow-run.ps1"),
+	}
+
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		if !strings.Contains(string(data), "planCompliance") {
+			t.Fatalf("expected %s to initialize plan compliance evidence", file)
+		}
+	}
+}
+
 func TestUnityUIQuickWorkflowIsPublishedWithSkillAndGraph(t *testing.T) {
 	library := TemplateBootstrapData().TemplateLibrary
 

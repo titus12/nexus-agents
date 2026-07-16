@@ -12,6 +12,29 @@ Codex execution notes:
 - Main session owns integration, final diff review, and final verification.
 - End with concrete evidence: changed files, commands run, and verification result.
 
+## Dispatch Mode
+
+Use capsule-based non-fork dispatch by default:
+
+```text
+context_mode: capsule_non_fork
+fork_context: false
+requestedModel: <optional model override>
+requestedReasoningEffort: <optional reasoning override>
+runtimeModelConfirmed: false
+```
+
+- Build the capsule from only the task goal, ownership, confirmed facts, relevant paths, constraints, acceptance criteria, verification, and risks.
+- A task that requests a model or reasoning-effort override must use `fork_context: false`.
+- Treat `requestedModel` and `requestedReasoningEffort` as requests, not as proof of the runtime selection. Keep `runtimeModelConfirmed: false` unless the runtime returns independent confirmation.
+- A full-history fork is an exception only for a read-only task whose material constraints cannot be captured in a capsule, does not need a model or reasoning override, and has an explicitly recorded reason. Do not use it for implementation, independent review, verification, or evidence preparation.
+
+## Plan Compliance
+
+Before implementation, assign stable IDs (`P1`, `P2`, ...) to approved required items and non-goals. Every worker, tester, reviewer, or evaluator capsule includes `planItemIds` for the items it owns.
+
+Quality output uses `met | deviated | unverified | not_started` for each assigned item, with short implementation or verification evidence. The main session may report `success` only when every required item is `met`; a `deviated` item requires explicit approval, and `unverified` or `not_started` requires `partial_success` or `blocked`.
+
 Workflow:
 
 1. Read the plan or requirements and extract independent tasks.
@@ -52,10 +75,15 @@ Workflow:
 Task: [specific task]
 Ownership: [files/modules this agent may edit]
 Context: [requirements, relevant files, constraints]
+Context mode: capsule_non_fork
+Fork context: false
+Requested model: [optional model override]
+Requested reasoning effort: [optional reasoning override]
+Plan item IDs: [P1, P2]
 Do not edit: [out-of-scope files/modules]
 Coordination: You are not alone in the codebase. Do not revert edits made by others. Adapt to existing changes.
 Verification: [commands/tests to run if possible]
-Report: changed files, tests run, status, blockers, concerns.
+Report: changed files, tests run, plan compliance status per plan item, blockers, concerns.
 ```
 
 ## Result Status
