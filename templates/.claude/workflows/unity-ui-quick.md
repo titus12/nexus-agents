@@ -127,7 +127,17 @@ quick 日志只打边界点：ViewModel 最终数据/关键状态、View `OnBind
 
 ## Plan Compliance
 
-`quick-planner` 为必须项和非目标分配 `planItemIds`，`quick-verifier` 对每项返回 `met | deviated | unverified | not_started` 与简短证据。所有必需项为 `met` 且偏离已获批准后，工作流才可报告成功。
+使用本地 `.nexus/plan-compliance-unity-ui-quick.json` 及通用 Plan Compliance loop；不得写入 TaskRun payload。`quick-planner` 为必须项和非目标分配 `planItemIds`，`quick-verifier` 对每项返回 `met | deviated | unverified | not_started` 与简短证据。所有必需项为 `met` 且偏离已获批准后，工作流才可报告成功。
+
+## Unity Quality Gate
+
+`quick-verifier` 必须读取 `.agents/skills/wf-subagents/unity-quality-rubric.md` 并在主会话返回 `QualityResult`。Owner 将汇总写入本地 ledger 的 `quality.blockingFindings`、`quality.majorFindings`、`quality.skippedRequiredChecks`、`quality.requiredChecks`、`quality.passedChecks`、`quality.manualAcceptancePending` 和 `quality.unexpectedChanges`，再运行：
+
+```text
+node .agents/skills/wf-subagents/plan-loop.mjs gate --file .nexus/plan-compliance-unity-ui-quick.json --stage quality
+```
+
+关键 Prefab 引用为 `null` / `{fileID: 0}`、编译失败或触及禁止范围均为 blocker；仅人工路径未验证时进入 `awaiting_user_acceptance`。
 
 ## Progress Output Discipline
 

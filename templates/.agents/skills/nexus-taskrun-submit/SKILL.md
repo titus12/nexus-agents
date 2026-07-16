@@ -45,7 +45,6 @@ metrics.filesChangedCount
 metrics.testRunCount
 evidence.summary
 evidence.changedFiles
-evidence.planCompliance
 evidence.verification
 evidence.skippedChecks
 evidence.remainingRisks
@@ -83,7 +82,6 @@ Keep the `.nexus/task-run-*.json` payload and any context/snapshot JSON after ei
 
 - Keep `summary` to one short sentence.
 - Use project-relative `changedFiles`.
-- For implementation workflows, record `planCompliance.items` with plan item ID, status, and short implementation or verification evidence; record unapproved scope additions in `planCompliance.unexpectedChanges`.
 - Omit empty and unknown fields.
 - Use concise command labels; do not embed long logs or full diffs.
 - Record skipped checks and remaining risks with short reasons.

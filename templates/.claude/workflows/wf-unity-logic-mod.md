@@ -146,7 +146,17 @@ runtimeModelConfirmed: false
 
 ## Plan Compliance
 
-批准的逻辑修改计划为行为、验证和非目标分配 `planItemIds`。Tester 和 Reviewer 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；所有必需项为 `met` 且偏离已获批准后，工作流才可报告成功。
+使用本地 `.nexus/plan-compliance-logic-modification.json` 及通用 Plan Compliance loop；不得写入 TaskRun payload。批准的逻辑修改计划为行为、验证和非目标分配 `planItemIds`。Tester 和 Reviewer 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；所有必需项为 `met` 且偏离已获批准后，工作流才可报告成功。
+
+## Unity Quality Gate
+
+`unity-logic-tester` 和 `unity-logic-reviewer` 必须读取 `.agents/skills/wf-subagents/unity-quality-rubric.md` 并返回 `QualityResult`。Owner 将汇总写入本地 ledger 的 `quality.blockingFindings`、`quality.majorFindings`、`quality.skippedRequiredChecks`、`quality.requiredChecks`、`quality.passedChecks`、`quality.manualAcceptancePending` 和 `quality.unexpectedChanges`，再运行：
+
+```text
+node .agents/skills/wf-subagents/plan-loop.mjs gate --file .nexus/plan-compliance-logic-modification.json --stage quality
+```
+
+blocker/major 必须回到修复；required check 被跳过不能成功；只有待用户手工验收时才进入 `awaiting_user_acceptance`。
 
 ## Progress Output Discipline
 

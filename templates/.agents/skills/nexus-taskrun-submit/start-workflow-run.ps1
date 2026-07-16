@@ -41,10 +41,6 @@ $payload = [ordered]@{
     }
     evidence = [ordered]@{
         changedFiles = @()
-        planCompliance = [ordered]@{
-            items = @()
-            unexpectedChanges = @()
-        }
         skippedChecks = @()
         remainingRisks = @()
     }

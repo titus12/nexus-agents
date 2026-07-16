@@ -33,7 +33,38 @@ runtimeModelConfirmed: false
 
 Before implementation, assign stable IDs (`P1`, `P2`, ...) to approved required items and non-goals. Every worker, tester, reviewer, or evaluator capsule includes `planItemIds` for the items it owns.
 
-Quality output uses `met | deviated | unverified | not_started` for each assigned item, with short implementation or verification evidence. The main session may report `success` only when every required item is `met`; a `deviated` item requires explicit approval, and `unverified` or `not_started` requires `partial_success` or `blocked`.
+Each item records:
+
+```text
+id: P1
+required: true | false
+expected: <observable behavior, command result, or manual acceptance>
+allowedFiles: [<project-relative paths>] | []
+actual: <observed result>
+evidence: [<file:line>, <command>, <exitCode>, or <manual acceptance>]
+status: met | deviated | unverified | not_started
+```
+
+- Command or test items record the expected result and actual `exitCode`.
+- File-scope items compare actual changed files with `allowedFiles`; unexpected files are recorded instead of silently accepted.
+- Manual items remain `unverified` until the stated acceptance evidence is received.
+
+Owner summary records `requiredItems`, `metCount`, `deviatedApprovedCount`, `unverifiedCount`, `notStartedCount`, `blockingFindings`, and `unexpectedChanges`. The main session may report `success` only when `metCount == requiredItems`, `unverifiedCount == 0`, `notStartedCount == 0`, and `blockingFindings == 0`; a `deviated` item requires explicit approval.
+
+Keep this state in a local `.nexus/plan-compliance-<workflowType>.json` ledger, never in the TaskRun payload submitted to Nexus.
+
+```text
+node .agents/skills/wf-subagents/plan-loop.mjs init --file .nexus/plan-compliance-<workflowType>.json --workflowType <workflowType> --maxLoops 3
+node .agents/skills/wf-subagents/plan-loop.mjs gate --file .nexus/plan-compliance-<workflowType>.json --stage plan
+```
+
+After each implementation/review/verification pass, update item `actual`, `evidence`, `status`, `quality.blockingFindings`, `quality.unexpectedChanges`, and `loop.newEvidence`. Then run:
+
+```text
+node .agents/skills/wf-subagents/plan-loop.mjs gate --file .nexus/plan-compliance-<workflowType>.json --stage quality
+```
+
+The returned decision is the loop gate: `success` exits; `repair` requires `node .agents/skills/wf-subagents/plan-loop.mjs advance --file <ledger>` before returning to diagnosis; `awaiting_user_acceptance` pauses for the stated evidence; and `blocked` exits without another blind retry.
 
 Workflow:
 

@@ -12,10 +12,6 @@
   },
   "evidence": {
     "changedFiles": [],
-    "planCompliance": {
-      "items": [],
-      "unexpectedChanges": []
-    },
     "skippedChecks": [],
     "remainingRisks": []
   }

@@ -45,7 +45,7 @@ runtimeModelConfirmed: false
 
 ## Plan Compliance
 
-为修复、复现/回归验证和非目标项分配 `planItemIds`。Verifier 和 Reviewer 对每项返回 `met | deviated | unverified | not_started` 与简短证据。Bugfix Owner 只有在所有必需项为 `met`、偏离已获批准时才可报告 `success`。
+使用本地 `.nexus/plan-compliance-bugfix.json` 及通用 Plan Compliance loop；不得写入 TaskRun payload。为修复、复现/回归验证和非目标项分配 `planItemIds`。Verifier 和 Reviewer 对每项返回 `met | deviated | unverified | not_started` 与简短证据。Bugfix Owner 只有在所有必需项为 `met`、偏离已获批准时才可报告 `success`。
 
 ## 角色
 

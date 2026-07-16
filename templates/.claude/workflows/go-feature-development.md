@@ -46,7 +46,7 @@ runtimeModelConfirmed: false
 
 ## Plan Compliance
 
-为待审核目标契约的必须项和非目标分配 `planItemIds`。Task Capsule 写明其负责项；Worker 和 Reviewer 对每项返回 `met | deviated | unverified | not_started` 与简短证据。Sisyphus 只有在所有必须项为 `met`、非目标未被触及或偏离已获批准时才可报告 `success`。
+使用本地 `.nexus/plan-compliance-feature-development.json` 及通用 Plan Compliance loop；不得写入 TaskRun payload。为待审核目标契约的必须项和非目标分配 `planItemIds`。Task Capsule 写明其负责项；Worker 和 Reviewer 对每项返回 `met | deviated | unverified | not_started` 与简短证据。Sisyphus 只有在所有必须项为 `met`、非目标未被触及或偏离已获批准时才可报告 `success`。
 
 ## 工作流
 

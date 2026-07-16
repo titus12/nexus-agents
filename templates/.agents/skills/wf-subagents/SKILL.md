@@ -15,6 +15,10 @@ Read `.claude/workflows/subagent-driven-development.md` from the repository root
 
 Treat the user's remaining prompt as the workflow input.
 
+## Local Plan Loop
+
+Use `plan-loop.mjs` through the workflow's Plan Compliance instructions to keep the auditable phase/loop ledger in `.nexus/plan-compliance-<workflowType>.json`. This local ledger controls plan, quality, repair, blocked, and user-acceptance transitions; do not include it in the Task Run payload submitted to Nexus.
+
 ## Workflow Run Header Protocol
 
 When invoked inside a Nexus project workflow:

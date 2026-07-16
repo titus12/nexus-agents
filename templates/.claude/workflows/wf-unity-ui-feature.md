@@ -238,7 +238,17 @@ Do not pass the entire chat history by default.
 
 ## Plan Compliance
 
-批准的 UI 计划为资源、行为、验证和非目标分配 `planItemIds`。`ui-reviewer`、`ui-tester` 和 `workflow-evaluator` 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；Owner 只有在所有必需项为 `met`、偏离已获批准时才可完成。
+使用本地 `.nexus/plan-compliance-ui-feature-development.json` 及通用 Plan Compliance loop；不得写入 TaskRun payload。批准的 UI 计划为资源、行为、验证和非目标分配 `planItemIds`。`ui-reviewer`、`ui-tester` 和 `workflow-evaluator` 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；Owner 只有在所有必需项为 `met`、偏离已获批准时才可完成。
+
+## Unity Quality Gate
+
+`ui-reviewer`、`ui-tester` 和 `workflow-evaluator` 必须读取 `.agents/skills/wf-subagents/unity-quality-rubric.md` 并返回 `QualityResult`。Owner 将汇总写入本地 ledger 的 `quality.blockingFindings`、`quality.majorFindings`、`quality.skippedRequiredChecks`、`quality.requiredChecks`、`quality.passedChecks`、`quality.manualAcceptancePending` 和 `quality.unexpectedChanges`，再运行：
+
+```text
+node .agents/skills/wf-subagents/plan-loop.mjs gate --file .nexus/plan-compliance-ui-feature-development.json --stage quality
+```
+
+不得依据口头“测试通过”继续；结果为 `repair` 时修复后重跑，`awaiting_user_acceptance` 时等待用户验收，`blocked` 时停止。
 
 ## 必需规则
 

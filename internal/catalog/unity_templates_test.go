@@ -187,7 +187,7 @@ func TestImplementationWorkflowsRequirePlanComplianceEvidence(t *testing.T) {
 	}
 }
 
-func TestTaskRunTemplatesInitializePlanComplianceEvidence(t *testing.T) {
+func TestTaskRunTemplatesDoNotContainPlanComplianceState(t *testing.T) {
 	root := filepath.Join("..", "..", "templates", ".agents", "skills", "nexus-taskrun-submit")
 	files := []string{
 		filepath.Join(root, "task-run-template.json"),
@@ -200,8 +200,89 @@ func TestTaskRunTemplatesInitializePlanComplianceEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", file, err)
 		}
-		if !strings.Contains(string(data), "planCompliance") {
-			t.Fatalf("expected %s to initialize plan compliance evidence", file)
+		if strings.Contains(string(data), "planCompliance") {
+			t.Fatalf("expected %s to keep plan compliance state outside TaskRun evidence", file)
+		}
+	}
+}
+
+func TestPlanComplianceWorkflowHelperDefinesQuantitativeGates(t *testing.T) {
+	root := filepath.Join("..", "..")
+	file := filepath.Join(root, "templates", ".agents", "skills", "wf-subagents", "plan-loop.mjs")
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read %s: %v", file, err)
+	}
+	text := string(data)
+	for _, needle := range []string{
+		"expected",
+		"actual",
+		"evidence",
+		"allowedFiles",
+		"actualExitCode",
+		"maxLoops",
+		"quality",
+		"requiredItems",
+		"blockingFindings",
+		"majorFindings",
+		"skippedRequiredChecks",
+		"qualityScore",
+		"metCount == requiredItems",
+		"passedChecks === summary.requiredChecks",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("expected %s to define quantitative plan compliance field %q", file, needle)
+		}
+	}
+}
+
+func TestUnityQualityAgentsUseSharedRubric(t *testing.T) {
+	root := filepath.Join("..", "..")
+	files := []string{
+		filepath.Join(root, "templates", ".claude", "agents", "unity-bugfix-reviewer.md"),
+		filepath.Join(root, "templates", ".claude", "agents", "unity-logic-reviewer.md"),
+		filepath.Join(root, "templates", ".claude", "agents", "unity-regression-evaluator.md"),
+		filepath.Join(root, "templates", ".claude", "agents", "unity-asset-safety-evaluator.md"),
+		filepath.Join(root, "templates", ".claude", "agents", "unity-workflow-evaluator.md"),
+	}
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		text := string(data)
+		for _, needle := range []string{"unity-quality-rubric.md", "QualityResult", "blocker"} {
+			if !strings.Contains(text, needle) {
+				t.Fatalf("expected %s to use Unity quality rubric field %q", file, needle)
+			}
+		}
+	}
+}
+
+func TestUnityWorkflowsRequireStructuredQualityGate(t *testing.T) {
+	root := filepath.Join("..", "..")
+	files := []string{
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-ui-feature.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-bugfix.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "wf-unity-logic-mod.md"),
+		filepath.Join(root, "templates", ".claude", "workflows", "unity-ui-quick.md"),
+	}
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		text := string(data)
+		for _, needle := range []string{
+			"unity-quality-rubric.md",
+			"quality.blockingFindings",
+			"quality.majorFindings",
+			"quality.skippedRequiredChecks",
+			"plan-loop.mjs gate",
+		} {
+			if !strings.Contains(text, needle) {
+				t.Fatalf("expected %s to require structured Unity quality gate %q", file, needle)
+			}
 		}
 	}
 }

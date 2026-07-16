@@ -44,7 +44,7 @@ runtimeModelConfirmed: false
 
 ## Plan Compliance
 
-审查上下文包为目标契约和非目标分配 `planItemIds`。每个 reviewer 对其负责项返回 `met | deviated | unverified | not_started` 与 finding 或验证证据；Sisyphus 汇总后，只有必需契约项为 `met`、偏离已获批准时才可得出通过结论。
+使用本地 `.nexus/plan-compliance-code-review.json` 及通用 Plan Compliance loop；不得写入 TaskRun payload。审查上下文包为目标契约和非目标分配 `planItemIds`。每个 reviewer 对其负责项返回 `met | deviated | unverified | not_started` 与 finding 或验证证据；Sisyphus 汇总后，只有必需契约项为 `met`、偏离已获批准时才可得出通过结论。
 
 ## 审查上下文包
 

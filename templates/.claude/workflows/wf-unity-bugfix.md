@@ -222,7 +222,17 @@ If the original bug cannot be automatically accepted, tester must return `needs_
 
 ## Plan Compliance
 
-批准的 diagnosis/fix plan 为诊断、修复、验证和非目标分配 `planItemIds`。Reviewer 和 tester 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；Owner 只有在所有必需项为 `met`、偏离已获批准时才可报告 `success`。
+使用本地 `.nexus/plan-compliance-bug-investigation.json` 及通用 Plan Compliance loop；不得写入 TaskRun payload。批准的 diagnosis/fix plan 为诊断、修复、验证和非目标分配 `planItemIds`。Reviewer 和 tester 对其负责项返回 `met | deviated | unverified | not_started` 与简短证据；Owner 只有在所有必需项为 `met`、偏离已获批准时才可报告 `success`。
+
+## Unity Quality Gate
+
+`unity-bugfix-reviewer`、`unity-regression-tester` 和可用的 `workflow-evaluator` 必须读取 `.agents/skills/wf-subagents/unity-quality-rubric.md` 并返回 `QualityResult`。Owner 将汇总写入本地 ledger 的 `quality.blockingFindings`、`quality.majorFindings`、`quality.skippedRequiredChecks`、`quality.requiredChecks`、`quality.passedChecks`、`quality.manualAcceptancePending` 和 `quality.unexpectedChanges`，再运行：
+
+```text
+node .agents/skills/wf-subagents/plan-loop.mjs gate --file .nexus/plan-compliance-bug-investigation.json --stage quality
+```
+
+任何 blocker 或 major 进入 `repair`；自动验证不足但人工验收可完成时进入 `awaiting_user_acceptance`；无新诊断证据或预算耗尽时为 `blocked`。
 
 ## Workflow Steps
 
