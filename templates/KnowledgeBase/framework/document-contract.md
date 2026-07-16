@@ -2,6 +2,7 @@
 type: Rules
 title: KnowledgeBase Document Contract
 description: Defines the OKF v0.1 baseline and repository profile for KnowledgeBase directories, index files, routing documents, and concept documents.
+resource: KnowledgeBase/framework/document-contract.md
 tags: [knowledge-base, framework, okf, document-contract]
 timestamp: 2026-07-10T00:00:00+08:00
 ---
@@ -12,7 +13,7 @@ timestamp: 2026-07-10T00:00:00+08:00
 
 - `index.md` and `log.md` are reserved OKF navigation/history files and do not use YAML frontmatter.
 - Every other KnowledgeBase Markdown file is a concept document. It must use parseable YAML frontmatter with a non-empty `type`.
-- Concept documents should also provide `title`, `description`, `tags`, and `timestamp`.
+- Concept documents should also provide `title`, `description`, `resource`, `tags`, and `timestamp`.
 - Use UTF-8 without BOM for new or rewritten Markdown.
 
 ## Repository profile

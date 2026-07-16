@@ -14,7 +14,7 @@ const minUsefulBodyChars = 20
 var validFrontmatterTypes = map[string]bool{
 	"Index": true, "Log": true, "Project": true, "Routing": true,
 	"Domain": true, "Guide": true, "Workflow": true, "Schema": true,
-	"Template": true, "Decision": true, "Reference": true, "CodingRules": true,
+	"Template": true, "Decision": true, "Reference": true, "CodingRules": true, "Rules": true, "Checklist": true,
 }
 
 var placeholderPattern = regexp.MustCompile(`(?i)\b(TBD|TODO|FIXME|placeholder|coming soon)\b|待补充|占位|稍后补充`)
@@ -73,9 +73,6 @@ func validateBundle(bundle Bundle) []ValidationIssue {
 	if !docByPath[path.Join(DefaultRoot, "log.md")] {
 		issues = append(issues, ValidationIssue{Severity: "warning", Code: "missing_log", Path: path.Join(DefaultRoot, "log.md"), Message: "OKF bundle should include log.md for knowledge changes."})
 	}
-	if !docByPath[path.Join(DefaultRoot, "project/routing.md")] {
-		issues = append(issues, ValidationIssue{Severity: "warning", Code: "missing_project_routing", Path: path.Join(DefaultRoot, "project/routing.md"), Message: "OKF knowledge is most useful when project/routing.md deterministically routes tasks to domain documents."})
-	}
 	for _, doc := range bundle.Documents {
 		issues = append(issues, validateDocument(doc, docByPath)...)
 		for _, link := range doc.Links {
@@ -96,6 +93,12 @@ func validateBundle(bundle Bundle) []ValidationIssue {
 }
 
 func validateDocument(doc Document, docByPath map[string]bool) []ValidationIssue {
+	if doc.Reserved {
+		if likelyMojibake(doc.Body) {
+			return []ValidationIssue{{Severity: "warning", Code: "mojibake_content", Path: doc.Path, Message: "Document appears to contain mojibake/garbled Chinese text; rewrite the affected frontmatter or body as UTF-8."}}
+		}
+		return nil
+	}
 	var issues []ValidationIssue
 	fm := doc.Frontmatter
 	if fm.Raw == "" {

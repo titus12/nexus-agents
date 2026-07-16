@@ -28,6 +28,34 @@ func TestValidateBundleReportsMissingMetadataAndBrokenLinks(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsReservedDocumentsWithoutFrontmatterAndOptionalProjectRouting(t *testing.T) {
+	root := t.TempDir()
+	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
+	writeTestFile(t, filepath.Join(kb, "index.md"), "# Root\n\n[Framework](./framework/index.md)")
+	writeTestFile(t, filepath.Join(kb, "log.md"), "# Log\n\nInitial knowledge log entry.")
+	writeTestFile(t, filepath.Join(kb, "framework", "index.md"), "# Framework\n\nReserved navigation document.")
+	writeTestFile(t, filepath.Join(kb, "framework", "rules.md"), okfDoc("Rules", "Rules", "KnowledgeBase/framework/rules.md", "# Rules\n\nReusable guidance."))
+	writeTestFile(t, filepath.Join(kb, "framework", "checklist.md"), okfDoc("Checklist", "Checklist", "KnowledgeBase/framework/checklist.md", "# Checklist\n\nReusable checks."))
+
+	report, err := Validate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, docPath := range []string{
+		"KnowledgeBase/index.md",
+		"KnowledgeBase/log.md",
+		"KnowledgeBase/framework/index.md",
+	} {
+		if hasIssueForPath(report.Issues, "missing_frontmatter", docPath) {
+			t.Fatalf("reserved document %s should not require frontmatter: %#v", docPath, report.Issues)
+		}
+	}
+	for _, code := range []string{"missing_project_routing", "unknown_type"} {
+		if hasIssue(report.Issues, code) {
+			t.Fatalf("did not expect %s issue: %#v", code, report.Issues)
+		}
+	}
+}
 func TestValidateReportsOKFQualityGateIssues(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))

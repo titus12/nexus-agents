@@ -2,6 +2,7 @@
 type: Checklist
 title: KnowledgeBase Sync Checklist
 description: Provides a reusable post-task checklist for deciding whether stable knowledge should be added or adjusted.
+resource: KnowledgeBase/framework/sync-checklist.md
 tags: [knowledge-base, framework, checklist, maintenance]
 timestamp: 2026-07-10T00:00:00+08:00
 ---

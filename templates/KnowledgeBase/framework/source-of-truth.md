@@ -2,6 +2,7 @@
 type: Rules
 title: KnowledgeBase Source of Truth
 description: Defines how KnowledgeBase, CodeGraph, source code, generated artifacts, configuration, assets, and task evidence divide ownership.
+resource: KnowledgeBase/framework/source-of-truth.md
 tags: [knowledge-base, framework, source-of-truth, codegraph]
 timestamp: 2026-07-10T00:00:00+08:00
 ---

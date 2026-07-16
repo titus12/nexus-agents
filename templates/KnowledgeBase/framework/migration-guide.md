@@ -2,6 +2,7 @@
 type: Guide
 title: KnowledgeBase Migration Guide
 description: Explains how to migrate the portable KnowledgeBase framework to another project without carrying project-specific facts.
+resource: KnowledgeBase/framework/migration-guide.md
 tags: [knowledge-base, migration, framework]
 timestamp: 2026-07-10T00:00:00+08:00
 ---

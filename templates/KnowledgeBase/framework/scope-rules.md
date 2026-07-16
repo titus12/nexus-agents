@@ -2,6 +2,7 @@
 type: Rules
 title: KnowledgeBase Scope Rules
 description: Defines which stable findings belong in KnowledgeBase and which findings must remain in source, configuration, issues, or task evidence.
+resource: KnowledgeBase/framework/scope-rules.md
 tags: [knowledge-base, framework, scope, governance]
 timestamp: 2026-07-10T00:00:00+08:00
 ---

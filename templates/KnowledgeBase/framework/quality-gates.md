@@ -2,6 +2,7 @@
 type: Rules
 title: KnowledgeBase Quality Gates
 description: Defines mandatory quality checks for encoding, OKF structure, navigation, links, duplication, and final review.
+resource: KnowledgeBase/framework/quality-gates.md
 tags: [knowledge-base, framework, quality, okf]
 timestamp: 2026-07-10T00:00:00+08:00
 ---

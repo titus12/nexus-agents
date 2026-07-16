@@ -1,3 +1,12 @@
+---
+type: Template
+title: KnowledgeBase Template Overview
+description: Describes the reusable KnowledgeBase template layout and the boundary between portable framework content and project-specific knowledge.
+resource: KnowledgeBase/README.md
+tags: [knowledge-base, template, framework, okf]
+timestamp: 2026-07-16T00:00:00+08:00
+---
+
 # KnowledgeBase Templates
 
 This directory stores portable KnowledgeBase templates.
