@@ -29,6 +29,7 @@ import type {
   ProjectCopyKind,
   ProjectInput,
   ProjectRescanResult,
+  ProjectTemplateSyncResult,
   ProjectWorkflowCreateResult,
   TemplateInput,
   TemplateInitializationInput,
@@ -257,6 +258,12 @@ export function fetchProjectConfig(projectId: string, kind?: string): Promise<Pr
 
 export function rescanProject(projectId: string): Promise<ProjectRescanResult> {
   return fetchJSON<ProjectRescanResult>(`/api/projects/${encodeURIComponent(projectId)}/rescan`, {
+    method: "POST",
+  });
+}
+
+export function syncProjectTemplates(projectId: string): Promise<ProjectTemplateSyncResult> {
+  return fetchJSON<ProjectTemplateSyncResult>(`/api/projects/${encodeURIComponent(projectId)}/template-sync`, {
     method: "POST",
   });
 }

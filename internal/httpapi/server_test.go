@@ -892,6 +892,67 @@ func TestProjectRescanEndpoint(t *testing.T) {
 	}
 }
 
+func TestProjectTemplateSyncEndpoint(t *testing.T) {
+	nexusRoot := t.TempDir()
+	projectRoot := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	writeHTTPTestFile(t, nexusRoot, "templates/.claude/rules/01-communication.md", "template communication")
+	writeHTTPTestFile(t, nexusRoot, "templates/.agents/skills/testing/SKILL.md", "template testing skill")
+	writeHTTPTestFile(t, nexusRoot, "templates/KnowledgeBase/project/keep.md", "template knowledge")
+	writeHTTPTestFile(t, projectRoot, ".claude/rules/01-communication.md", "project communication")
+	writeHTTPTestFile(t, projectRoot, "KnowledgeBase/project/keep.md", "project knowledge")
+	t.Setenv("NEXUS_TEMPLATES_ROOT", filepath.Join(nexusRoot, "templates"))
+
+	store := catalog.NewStoreFromData(catalog.BootstrapData{
+		TemplateLibrary: catalog.TemplateLibrary{
+			Rules: []catalog.TemplateItem{{
+				ID:      "01-communication",
+				Kind:    "rule",
+				Name:    "01-communication",
+				Version: 1,
+				Content: "template communication",
+			}},
+			Skills: []catalog.TemplateItem{{
+				ID:      "testing",
+				Kind:    "skill",
+				Name:    "testing",
+				Version: 1,
+				Entry:   filepath.Join(nexusRoot, "templates", ".agents", "skills", "testing", "SKILL.md"),
+			}},
+		},
+		ProjectConfigSets: map[string][]catalog.ProjectCopy{},
+	}, nil, nil)
+	project, err := store.ImportProject(catalog.ProjectInput{Name: "sample", Path: projectRoot})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+
+	response := requestJSON(t, NewServerWithStore(store), http.MethodPost, "/api/projects/"+project.ID+"/template-sync", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected template sync status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body catalog.ProjectTemplateSyncResult
+	decodeJSON(t, response, &body)
+	if body.Overwritten != 1 || body.Created != 1 || body.Skipped != 1 {
+		t.Fatalf("unexpected template sync counts: %#v", body)
+	}
+	data, err := os.ReadFile(filepath.Join(projectRoot, ".claude", "rules", "01-communication.md"))
+	if err != nil || string(data) != "template communication" {
+		t.Fatalf("expected synchronized rule content, data=%q err=%v", string(data), err)
+	}
+	data, err = os.ReadFile(filepath.Join(projectRoot, "KnowledgeBase", "project", "keep.md"))
+	if err != nil || string(data) != "project knowledge" {
+		t.Fatalf("expected protected knowledge content, data=%q err=%v", string(data), err)
+	}
+
+	missing := requestJSON(t, NewServerWithStore(store), http.MethodPost, "/api/projects/missing/template-sync", "")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("expected missing project 404, got %d", missing.Code)
+	}
+}
+
 func TestWorkflowEndpoints(t *testing.T) {
 	server := NewServer()
 

@@ -326,6 +326,12 @@ export type ProjectRescanResult = {
   copies: ProjectCopy[];
 };
 
+export type ProjectTemplateSyncResult = ProjectRescanResult & {
+  overwritten: number;
+  created: number;
+  skipped: number;
+};
+
 export type BootstrapData = {
   templateLibrary: TemplateLibrary;
   projects: Project[];

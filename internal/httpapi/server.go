@@ -986,6 +986,23 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "template-sync" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		result, ok, err := s.store.SyncProjectTemplates(projectID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
 	if len(parts) == 2 && parts[1] == "rescan" {
 		if !allowMethods(w, r, http.MethodPost) {
 			return

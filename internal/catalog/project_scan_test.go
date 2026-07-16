@@ -465,6 +465,71 @@ func TestStoreRescanProjectRefreshesUserHomeNexusIndex(t *testing.T) {
 	}
 }
 
+func TestStoreSyncProjectTemplatesOverwritesCreatesAndSkipsKnowledge(t *testing.T) {
+	nexusRoot := t.TempDir()
+	projectRoot := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	writeTestFile(t, nexusRoot, "templates/.claude/rules/01-communication.md", "template communication")
+	writeTestFile(t, nexusRoot, "templates/.agents/skills/testing/SKILL.md", "template testing skill")
+	writeTestFile(t, nexusRoot, "templates/KnowledgeBase/project/keep.md", "template knowledge")
+	writeTestFile(t, projectRoot, ".claude/rules/01-communication.md", "project communication")
+	writeTestFile(t, projectRoot, "KnowledgeBase/project/keep.md", "project knowledge")
+	writeTestFile(t, projectRoot, ".claude/rules/project-only.md", "project only")
+	t.Setenv("NEXUS_TEMPLATES_ROOT", filepath.Join(nexusRoot, "templates"))
+
+	store := NewStoreFromData(BootstrapData{
+		TemplateLibrary: TemplateLibrary{
+			Rules: []TemplateItem{{
+				ID:      "01-communication",
+				Kind:    "rule",
+				Name:    "01-communication",
+				Version: 1,
+				Content: "template communication",
+			}},
+			Skills: []TemplateItem{{
+				ID:      "testing",
+				Kind:    "skill",
+				Name:    "testing",
+				Version: 1,
+				Entry:   filepath.Join(nexusRoot, "templates", ".agents", "skills", "testing", "SKILL.md"),
+			}},
+		},
+		ProjectConfigSets: map[string][]ProjectCopy{},
+	}, nil, nil)
+	project, err := store.ImportProject(ProjectInput{Name: "sample", Path: projectRoot})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+
+	result, ok, err := store.SyncProjectTemplates(project.ID)
+	if err != nil {
+		t.Fatalf("sync project templates: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected project template synchronization")
+	}
+	if result.Overwritten != 1 || result.Created != 1 || result.Skipped != 1 {
+		t.Fatalf("expected overwrite/create/skip counts 1/1/1, got %#v", result)
+	}
+	assertTestFileContent(t, projectRoot, ".claude/rules/01-communication.md", "template communication")
+	assertTestFileContent(t, projectRoot, ".agents/skills/testing/SKILL.md", "template testing skill")
+	assertTestFileContent(t, projectRoot, "KnowledgeBase/project/keep.md", "project knowledge")
+	assertTestFileContent(t, projectRoot, ".claude/rules/project-only.md", "project only")
+	if result.Project.ConfigSummary.Rules != 2 || result.Project.ConfigSummary.Skills != 1 {
+		t.Fatalf("expected post-sync project rescan summary, got %#v", result.Project.ConfigSummary)
+	}
+	assertProjectCopy(t, result.Copies, "skill", "testing", "synced", ".agents/skills/testing/SKILL.md")
+}
+
+func TestStoreSyncProjectTemplatesReturnsNotFoundForUnknownProject(t *testing.T) {
+	result, ok, err := NewStoreFromData(BootstrapData{}, nil, nil).SyncProjectTemplates("missing")
+	if err != nil || ok || result.Project.ID != "" || len(result.Copies) != 0 || result.Overwritten != 0 || result.Created != 0 || result.Skipped != 0 {
+		t.Fatalf("expected missing project result, got result=%#v ok=%v err=%v", result, ok, err)
+	}
+}
+
 func TestSyncProjectCopyWritesTemplateContentToProject(t *testing.T) {
 	root := t.TempDir()
 	templateRoot := t.TempDir()
@@ -959,6 +1024,18 @@ func writeTestFile(t *testing.T, root string, relative string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write test file %s: %v", relative, err)
+	}
+}
+
+func assertTestFileContent(t *testing.T, root string, relative string, expected string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", relative, err)
+	}
+	if string(data) != expected {
+		t.Fatalf("expected %s content %q, got %q", relative, expected, string(data))
 	}
 }
 

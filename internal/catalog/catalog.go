@@ -84,6 +84,14 @@ type ProjectRescanResult struct {
 	Copies  []ProjectCopy `json:"copies"`
 }
 
+type ProjectTemplateSyncResult struct {
+	Project     Project       `json:"project"`
+	Copies      []ProjectCopy `json:"copies"`
+	Overwritten int           `json:"overwritten"`
+	Created     int           `json:"created"`
+	Skipped     int           `json:"skipped"`
+}
+
 type ProjectTemplateInput struct {
 	Kind       string `json:"kind"`
 	TemplateID string `json:"templateId"`

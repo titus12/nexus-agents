@@ -47,6 +47,7 @@ import {
   runPendingEvaluations,
   rescanProject,
   syncProjectCopy,
+  syncProjectTemplates,
   updateTemplate,
   updateInfrastructure,
   updateWorkflow,
@@ -262,6 +263,7 @@ const nativePickerTimeout = 2500;
 const templateLibrary = ref<TemplateLibrary>(emptyLibrary);
 const projects = ref<Project[]>([]);
 const projectConfigSets = ref<Record<string, ProjectCopy[]>>({});
+const projectTemplateSyncing = ref(false);
 const workflows = ref<WorkflowSummary[]>([]);
 const workflowGraph = ref<WorkflowGraph | null>(null);
 const workflowStageRef = ref<HTMLElement | null>(null);
@@ -1879,6 +1881,23 @@ async function rescanCurrentProject() {
   showToast(`已重新扫描项目：${result.project.name}`);
 }
 
+async function syncCurrentProjectTemplates() {
+  if (!currentProject.value || projectTemplateSyncing.value) return;
+  projectTemplateSyncing.value = true;
+  try {
+    const result = await syncProjectTemplates(currentProject.value.id);
+    projects.value = upsertProject(projects.value, result.project);
+    projectConfigSets.value = {
+      ...projectConfigSets.value,
+      [result.project.id]: result.copies,
+    };
+    selectedProjectId.value = result.project.id;
+    showToast(`模板同步完成：覆盖 ${result.overwritten} 个，新增 ${result.created} 个，跳过 ${result.skipped} 个。`);
+  } finally {
+    projectTemplateSyncing.value = false;
+  }
+}
+
 function replaceProjectCopy(projectId: string, copy: ProjectCopy) {
   const copies = projectConfigSets.value[projectId] ?? [];
   projectConfigSets.value = {
@@ -2766,6 +2785,7 @@ onMounted(loadData);
             <div class="page-header">
               <div class="page-description">{{ currentProject.name }} 当前展示运行时扫描到的项目配置副本，来源包括 .claude、.codex 和路由规则展开出的工作流。本地导入信息从项目根目录的 .nexus 文件读取。</div>
               <div class="page-actions">
+                <button class="btn-secondary" type="button" :disabled="projectTemplateSyncing" @click="syncCurrentProjectTemplates">{{ projectTemplateSyncing ? "同步中..." : "同步 Nexus 模板" }}</button>
                 <button class="btn-secondary" type="button" @click="rescanCurrentProject">重新扫描</button>
                 <button class="btn-secondary" type="button" @click="openSyncPreviewDrawer">同步预览</button>
                 <button class="btn-secondary danger" type="button" @click="deleteProjectAction(currentProject)">从 Nexus 移除</button>
