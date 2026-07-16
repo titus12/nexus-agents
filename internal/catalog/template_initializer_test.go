@@ -86,6 +86,41 @@ func TestApplyTemplateInitializationCreatesMissingTargetDirectory(t *testing.T) 
 	}
 }
 
+func TestInitializeProjectTemplatesIncludesTestDrivenChangePolicy(t *testing.T) {
+	for _, projectType := range []string{
+		TemplateProjectTypeGeneral,
+		TemplateProjectTypeGo,
+		TemplateProjectTypeUnity,
+	} {
+		t.Run(projectType, func(t *testing.T) {
+			target := t.TempDir()
+
+			if _, err := ApplyTemplateInitialization(TemplateInitializationInput{
+				TargetPath:  target,
+				ProjectType: projectType,
+			}); err != nil {
+				t.Fatalf("apply template initialization: %v", err)
+			}
+
+			rule, err := os.ReadFile(filepath.Join(target, ".claude", "rules", "test-driven-change.md"))
+			if err != nil {
+				t.Fatalf("read test-driven change rule: %v", err)
+			}
+			if !strings.Contains(string(rule), "## Test Design Decision") {
+				t.Fatalf("expected test-design rule, got %q", string(rule))
+			}
+
+			agents, err := os.ReadFile(filepath.Join(target, "AGENTS.md"))
+			if err != nil {
+				t.Fatalf("read AGENTS.md: %v", err)
+			}
+			if !strings.Contains(string(agents), "## Test-Driven Change Baseline") {
+				t.Fatalf("expected TDD baseline in AGENTS.md, got %q", string(agents))
+			}
+		})
+	}
+}
+
 func TestApplyTemplateInitializationMergesGitignoreAndKeepsProjectKnowledgeTracked(t *testing.T) {
 	target := t.TempDir()
 	gitignorePath := filepath.Join(target, ".gitignore")

@@ -94,6 +94,15 @@ runtimeModelConfirmed: false
 
 最终提交状态使用：`success`、`partial_success`、`failed`、`cancelled` 或 `blocked`。当下一步需要用户或运行时带着新日志复现时，加入诊断日志本身可以作为合法的 `partial_success` 交付。
 
+## Regression Test Gate
+
+复现缺陷后必须记录共享规则中的 Test decision。可靠的自动化复现默认成为长期保留
+的回归测试：先对缺陷行为获得 red 证据，再实施最小根因修复并获得 green 证据。
+诊断探针只有保护独特回归风险时才保留，不得因排障时有用而直接成为长期测试。
+
+当前无法自动化时，必须使用完整例外协议：说明原因、记录实际替代复现/验证，并给出
+后续自动化回归测试的触发条件。非契约诊断日志本身不构成回归测试。
+
 ## 验证规则
 
 - 先证明 bug 存在：复现命令、失败测试、手工路径、堆栈，或仅日志证据。
@@ -101,6 +110,11 @@ runtimeModelConfirmed: false
 - 验证影响面：窄改动跑定向测试，package 级改动跑 package 测试；只有触及面足够大时才跑更宽的 `go test ./...`。
 - 每次 patch 后做安全检查：diff 最小、无调试残留、无禁止文件、无未经批准的公共契约变更、修复与根因一致。
 - 如果验证失败，先分类为 `same_failure`、`new_failure`、`environment_blocked`、`regression_introduced` 或 `verification_unreliable`，再决定是否进入下一轮。
+
+## Test Evidence in Bugfix Capsules
+
+Bugfix Loop Capsule 和最终证据必须记录 red/green 命令或完整例外证据，以及测试资产
+的 retain / extend / parameterize / merge / delete 决策。
 
 ## 需求来源与事实冲突
 

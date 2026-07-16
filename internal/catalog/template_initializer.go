@@ -344,6 +344,7 @@ func includeTemplateInitializationPath(relativePath string, projectType string) 
 		strings.HasPrefix(relativePath, ".agents/skills/kb-") ||
 		strings.HasPrefix(relativePath, ".agents/skills/nexus-") ||
 		strings.HasPrefix(relativePath, ".claude/rules/01-communication.md") ||
+		strings.HasPrefix(relativePath, ".claude/rules/test-driven-change.md") ||
 		strings.HasPrefix(relativePath, ".claude/rules/knowledge-retrieval.md") {
 		return true
 	}

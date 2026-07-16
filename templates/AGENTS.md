@@ -52,6 +52,22 @@ Read the authoritative source instead of copying its content into this file.
 ## Execution baseline
 
 - Clarify ambiguous requirements and high-risk actions before changing files or external state.
+
+## Test-Driven Change Baseline
+
+- For every code-changing task, read and follow
+  `.claude/rules/test-driven-change.md` before implementation.
+- For observable behavior changes and defect fixes, decide the minimum
+  behavior-based test before editing production code; run it red first when
+  deterministic automation is practical.
+- Do not add a test merely for coverage. Retain only tests with unique
+  regression or contract value; extend, parameterize, merge, or remove
+  duplicates deliberately.
+- A non-contract logging, comment, formatting, or behavior-preserving rename
+  change normally needs no new test, but must record no behavior change and
+  run proportionate existing validation.
+- Any other exception must record its reason, actual substitute validation, and
+  a future test trigger when applicable.
 - **Git safety constraint: do not autonomously perform Git write or remote operations.** Read-only inspection such as `git status`, `git diff`, `git log`, and `git show` is allowed. `git add`, `commit`, `push`, `pull`, `fetch`, `merge`, `rebase`, `reset`, `restore`, `checkout` / `switch`, `stash`, tag or branch creation/deletion, and any force option require the user's explicit authorization for that specific action. Approval for one action does not authorize subsequent staging, committing, or pushing.
 - Do not claim a task is complete, fixed, or verified without fresh evidence from this task run.
 - For bugs, reproduce and confirm the root cause before changing behavior; do not apply speculative fixes.

@@ -17,6 +17,36 @@ import (
 	"nexus-agents/internal/codexrouter"
 )
 
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "nexus-httpapi-test-home-")
+	if err != nil {
+		panic(err)
+	}
+
+	originalHome, hadHome := os.LookupEnv("HOME")
+	originalUserProfile, hadUserProfile := os.LookupEnv("USERPROFILE")
+	if err := os.Setenv("HOME", home); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("USERPROFILE", home); err != nil {
+		panic(err)
+	}
+
+	exitCode := m.Run()
+	if hadHome {
+		_ = os.Setenv("HOME", originalHome)
+	} else {
+		_ = os.Unsetenv("HOME")
+	}
+	if hadUserProfile {
+		_ = os.Setenv("USERPROFILE", originalUserProfile)
+	} else {
+		_ = os.Unsetenv("USERPROFILE")
+	}
+	_ = os.RemoveAll(home)
+	os.Exit(exitCode)
+}
+
 func getJSON(t *testing.T, server http.Handler, path string, target any) {
 	t.Helper()
 
@@ -49,6 +79,22 @@ func decodeJSON(t *testing.T, response *httptest.ResponseRecorder, target any) {
 	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+}
+
+func newIsolatedServer(t *testing.T) http.Handler {
+	t.Helper()
+
+	evaluationStore, err := catalog.NewEvaluationStore(filepath.Join(t.TempDir(), "evaluation.json"))
+	if err != nil {
+		t.Fatalf("new isolated evaluation store: %v", err)
+	}
+	return newServerWithOptions(
+		catalog.NewStoreFromData(catalog.TemplateBootstrapData(), nil, nil),
+		catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}),
+		codexrouter.NewService(codexrouter.DefaultConfig()),
+		defaultLocalDirectoryPicker{},
+		evaluationStore,
+	)
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -134,7 +180,7 @@ func firstAssetPath(t *testing.T, indexHTML string) string {
 }
 
 func TestBootstrapEndpoint(t *testing.T) {
-	server := NewServer()
+	server := newIsolatedServer(t)
 	var body struct {
 		TemplateLibrary struct {
 			Agents    []struct{ ID string } `json:"agents"`
@@ -159,7 +205,7 @@ func TestBootstrapEndpoint(t *testing.T) {
 }
 
 func TestProjectEndpoints(t *testing.T) {
-	server := NewServer()
+	server := newIsolatedServer(t)
 
 	var projects []struct {
 		ID string `json:"id"`
@@ -622,17 +668,16 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "skills", skills, []string{
 		"coding-rules",
 		"review-feedback", "testing",
-		"kb-system-curator", "nexus-evaluation-review", "nexus-taskrun-submit",
+		"kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit",
 		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver",
 	})
 	for _, skill := range skills {
 		if strings.HasPrefix(skill.SourcePaths[0], "templates/.claude/skills/go-") {
-			displayName := "go-" + skill.ID
-			if skill.Name != displayName || skill.Slug != displayName {
-				t.Fatalf("expected skill template identity to preserve go- filename prefix, got %#v", skill)
+			if skill.Name != skill.ID || skill.Slug != skill.ID {
+				t.Fatalf("expected skill template identity to use its stable skill ID, got %#v", skill)
 			}
 		}
-		if skill.Content == "" || !hasTemplateMarkdownPath(skill.SourcePaths, "templates/.claude/skills/") {
+		if skill.Content == "" || (!hasTemplateMarkdownPath(skill.SourcePaths, "templates/.claude/skills/") && !hasTemplateMarkdownPath(skill.SourcePaths, "templates/.agents/skills/")) {
 			t.Fatalf("expected copied btd skill content and template path, got %#v", skill)
 		}
 	}
@@ -682,7 +727,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 }
 
 func TestTemplateCrudEndpoints(t *testing.T) {
-	server := NewServer()
+	server := newIsolatedServer(t)
 
 	createResponse := requestJSON(t, server, http.MethodPost, "/api/templates/rules", `{"name":"review-risk","summary":"Check high risk changes before merge.","entry":".claude/rules/review-risk.md","files":[".claude/rules/review-risk.md"]}`)
 	if createResponse.Code != http.StatusCreated {
@@ -700,7 +745,7 @@ func TestTemplateCrudEndpoints(t *testing.T) {
 		t.Fatalf("unexpected created template: %#v", created)
 	}
 
-	updateResponse := requestJSON(t, server, http.MethodPut, "/api/templates/.claude/rules/"+created.ID, `{"summary":"Updated review checklist."}`)
+	updateResponse := requestJSON(t, server, http.MethodPut, "/api/templates/rules/"+created.ID, `{"summary":"Updated review checklist."}`)
 	if updateResponse.Code != http.StatusOK {
 		t.Fatalf("expected update status 200, got %d", updateResponse.Code)
 	}
@@ -715,7 +760,7 @@ func TestTemplateCrudEndpoints(t *testing.T) {
 		t.Fatalf("unexpected updated template: %#v", updated)
 	}
 
-	deleteResponse := requestJSON(t, server, http.MethodDelete, "/api/templates/.claude/rules/"+created.ID, "")
+	deleteResponse := requestJSON(t, server, http.MethodDelete, "/api/templates/rules/"+created.ID, "")
 	if deleteResponse.Code != http.StatusNoContent {
 		t.Fatalf("expected delete status 204, got %d", deleteResponse.Code)
 	}
@@ -1310,7 +1355,7 @@ func TestModelRouteEndpoint(t *testing.T) {
 	}
 
 	wantTargets := map[string]string{
-		"gpt-5.6":           "gpt-5.6",
+		"gpt-5.6-sol":       "gpt-5.6-sol",
 		"gpt-5.6-terra":     "gpt-5.6-terra",
 		"gpt-5.6-luna":      "gpt-5.6-luna",
 		"gpt-5.5":           "gpt-5.5",
@@ -1699,10 +1744,10 @@ func TestModelRouteResolveEndpoint(t *testing.T) {
 		wantPassthrough bool
 	}{
 		{
-			name:            "codex gpt-5.6 passthrough",
-			path:            "/api/model-routes/resolve?client=codex&model=gpt-5.6",
+			name:            "codex gpt-5.6 sol passthrough",
+			path:            "/api/model-routes/resolve?client=codex&model=gpt-5.6-sol",
 			wantProvider:    "ChatGPT Subscription",
-			wantTarget:      "gpt-5.6",
+			wantTarget:      "gpt-5.6-sol",
 			wantPassthrough: true,
 		},
 		{
@@ -1808,7 +1853,7 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 	foundGLM := false
 	foundClaude := false
 	for _, model := range catalogBody.Models {
-		if model.Slug == "gpt-5.6" {
+		if model.Slug == "gpt-5.6-sol" {
 			foundGPT = model.DisplayName != "" && model.ApplyPatchToolType == "freeform"
 		}
 		// Hybrid mode: DeepSeek is exposed under a built-in GPT slug so the
@@ -1841,7 +1886,7 @@ func TestCodexRouterCatalogAndModelsEndpoints(t *testing.T) {
 	foundModelGLM := false
 	foundModelClaude := false
 	for _, model := range modelsBody.Data {
-		foundModelGPT = foundModelGPT || model.ID == "gpt-5.6"
+		foundModelGPT = foundModelGPT || model.ID == "gpt-5.6-sol"
 		foundModelDeepSeek = foundModelDeepSeek || model.ID == "deepseek-v4-flash"
 		foundModelGLM = foundModelGLM || model.ID == "glm-5.2"
 		foundModelClaude = foundModelClaude || model.ID == "claude-sonnet-5"

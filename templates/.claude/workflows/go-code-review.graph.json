@@ -68,7 +68,7 @@
                       "category":  "action",
                       "label":  "reviewer-logic",
                       "agent":  "reviewer-logic",
-                      "detail":  "Check control flow, state, transactions, nil handling, and boundaries.",
+                      "detail":  "Check control flow, state, transactions, nil handling, boundaries, and whether test evidence is behavior-based, unique, deterministic, and proportionate.",
                       "x":  820,
                       "y":  70
                   },

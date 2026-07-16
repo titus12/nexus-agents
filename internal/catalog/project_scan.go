@@ -401,10 +401,12 @@ func templateFilenameStem(item TemplateItem) string {
 	}
 	for _, path := range templateFileCandidates(item) {
 		candidate := filepath.ToSlash(path)
-		if !strings.HasPrefix(candidate, "templates/") {
+		templateIndex := strings.Index(candidate, "templates/")
+		if templateIndex < 0 {
 			continue
 		}
-		if item.Kind == "agent" && !strings.Contains(candidate, "/claude/") {
+		candidate = candidate[templateIndex:]
+		if item.Kind == "agent" && !strings.Contains(candidate, "/.claude/") {
 			continue
 		}
 		if strings.HasSuffix(candidate, ".graph.json") {

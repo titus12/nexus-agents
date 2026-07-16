@@ -50,6 +50,9 @@ runtimeModelConfirmed: false
 
 ## 工作流
 
+开始任何生产代码编辑前，必须读取 `.claude/rules/test-driven-change.md`，并在
+目标契约中记录 Test decision 证据。
+
 1. **加载上下文并探索**：读取 AGENTS、适用 Rules、知识库 routing 及其最少必要文档；先读取用户提供的权威需求来源，再搜索真实代码、调用方、测试、配置和相似实现，形成当前行为、冲突和风险证据。
 2. **生成待审核目标契约**：补齐目标、完成标准、非目标、范围、验证、假设/证据和风险。证据不足时改为 diagnosis-first 方案，只实施已批准的诊断步骤；低风险且证据充分时可继续，重大假设或高风险必须等待用户确认。
 3. **计划并决定是否拆分**：加载 `go-04-task-decomposition.md`，评估目标数、模块/package、非机械性生产文件、验证路径、高风险项和未确认假设；在计划中明确是否拆分、拆分顺序、集成点，或说明不拆分原因。仅在边界清晰时拆成 Task Capsule。
@@ -88,6 +91,16 @@ AI 理解后的目标：
 推荐方案及证据：
 是否需要用户决定：
 ```
+
+## Test Design Gate
+
+在创建实施 Capsule 或编辑生产代码前，先按共享规则分类改动，并填写 Test
+decision。行为改动必须选择最低有效测试层，新增或扩展最小的行为测试；当确定性
+自动化可行时，先运行并确认预期的 red 结果。已有测试已覆盖同一风险时，优先扩展
+或参数化，不得为覆盖率或实现细节新增重复测试。
+
+非契约日志可使用紧凑免测记录。其他无法自动化的情况必须完整记录例外原因、实际
+替代验证和补测触发条件，之后才能进入实施。
 
 ## Diagnosis-First 方案
 
@@ -151,6 +164,17 @@ Task 2：目标 / 范围 / 验收 / 验证 / 风险
 ```
 
 每个 Capsule 都执行“最小探索 → 最小实施 → 子目标检查 → 子任务质检”。返回目标是否达成、改动文件、关键理由、验证结果和剩余风险；主线程负责集成和最终两道门。
+
+## Test Evidence in Capsules
+
+每个实施 Capsule 都必须补充：
+
+```text
+Test decision evidence:
+Focused red command and expected failure, or exception/substitute validation:
+Targeted green and expanded validation commands:
+Test asset action: retain / extend / parameterize / merge / delete:
+```
 
 ## 角色与阶段
 

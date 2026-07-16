@@ -48,6 +48,18 @@ runtimeModelConfirmed: false
 
 ## 审查上下文包
 
+审查上下文必须包含以下测试设计证据：
+
+```text
+Test design evidence:
+- Change classification:
+- Behavior/risk and unique regression protection:
+- Existing coverage reused, extended, merged, or deleted:
+- Selected test layer and rationale:
+- Red/green command evidence, or complete exception:
+- Actual validation commands and outcomes:
+```
+
 ```text
 审查目标：
 需求/目标契约与权威来源：
@@ -80,6 +92,10 @@ Capsule 2：范围 / reviewer / 检查重点 / 验收
 
 ## 工作流
 
+汇总质量门必须检查测试设计证据。缺少行为测试或完整例外记录时归类为
+`Insufficient evidence`；实现耦合、重复或不确定性测试即使全部通过也必须作为
+review finding 报告。
+
 1. **加载与定界**：读取 Rules、KB routing、目标契约、diff、调用方、已执行验证和风险；生成审查上下文包。
 2. **拆分审查 Capsule**：按风险和范围决定 reviewer 的最小输入。Logic、Perf、Security 默认独立执行；没有对应风险时仍要明确记录“已检查且无适用面”或“未覆盖及原因”。
 3. **并行审查**：
@@ -94,6 +110,12 @@ Capsule 2：范围 / reviewer / 检查重点 / 验收
    - Insufficient evidence：列出缺口和最小补充检查；
    - Incorrect：用简短技术证据驳回。
 6. **提交证据**：记录审查范围、reviewer 角色、findings、已修复项、未覆盖项和风险，完成本地 TaskRun payload。
+
+## Test Design Review Gate
+
+Reviewer Logic 负责核验改动分类、独特回归保护、测试层级、行为导向断言、确定性和
+例外证据。Owner 在汇总时确认已有测试被有意识地复用、扩展、合并或删除，而不是仅
+检查测试数量。
 
 ## 角色与阶段
 

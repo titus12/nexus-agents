@@ -6,9 +6,9 @@
       "id": "start",
       "type": "input",
       "category": "event",
-      "label": "\u5f00\u59cb",
+      "label": "Start",
       "agent": "-",
-      "detail": "\u7528\u6237 bug \u63cf\u8ff0\u6216\u5931\u8d25\u6d4b\u8bd5\u8fdb\u5165 $wf-go-bugfix\u3002",
+      "detail": "A bug description or failing test starts the Go bug-fix workflow.",
       "x": 430,
       "y": 40
     },
@@ -16,9 +16,9 @@
       "id": "owner",
       "type": "agent",
       "category": "action",
-      "label": "Bugfix \u4e3b\u63a7",
+      "label": "Bugfix owner",
       "agent": "bugfix-owner",
-      "detail": "\u521b\u5efa workflow run\uff0c\u52a0\u8f7d\u89c4\u5219\u4e0e skill\uff0c\u7ef4\u62a4 Loop \u80f6\u56ca\u4e0e\u9000\u51fa\u9884\u7b97\u3002",
+      "detail": "Initialize the workflow, load rules and skills, and manage the bounded loop.",
       "x": 430,
       "y": 190
     },
@@ -26,19 +26,29 @@
       "id": "reproduce",
       "type": "agent",
       "category": "action",
-      "label": "\u590d\u73b0\u5931\u8d25",
+      "label": "Reproduce failure",
       "agent": "reproducer",
-      "detail": "\u8bb0\u5f55\u547d\u4ee4\u3001\u8f93\u5165\u3001\u9519\u8bef\u4e0e\u73af\u5883\uff1b\u4f18\u5148\u6784\u9020\u6700\u5c0f\u5931\u8d25\u56de\u5f52\u6d4b\u8bd5\u3002",
+      "detail": "Record command, input, failure, and environment; prefer a minimal failing regression path.",
       "x": 430,
+      "y": 340
+    },
+    {
+      "id": "regression_test_gate",
+      "type": "condition",
+      "category": "condition",
+      "label": "Regression test or exception",
+      "agent": "reproducer",
+      "detail": "Obtain a red automated regression test when practical; otherwise record the exception, substitute validation, and future test trigger.",
+      "x": 700,
       "y": 340
     },
     {
       "id": "evidence_gate",
       "type": "condition",
       "category": "condition",
-      "label": "\u7ebf\u7d22\u662f\u5426\u53ef\u9760",
+      "label": "Evidence reliable?",
       "agent": "debugger",
-      "detail": "\u5224\u65ad\u6839\u56e0\u7ebf\u7d22\u662f\u5426\u8db3\u591f\u53ef\u9760\uff1b\u4f4e\u7f6e\u4fe1\u5ea6\u4e0d\u80fd\u76f4\u63a5\u6539\u884c\u4e3a\u3002",
+      "detail": "Do not change behavior until root-cause evidence is sufficiently reliable.",
       "x": 430,
       "y": 520
     },
@@ -46,9 +56,9 @@
       "id": "probe",
       "type": "transform",
       "category": "action",
-      "label": "\u52a0\u5173\u952e\u65e5\u5fd7/\u63a2\u9488",
+      "label": "Add diagnostic probe",
       "agent": "debugger",
-      "detail": "\u65e0\u53ef\u9760\u7ebf\u7d22\u65f6\uff0c\u5148\u52a0\u6700\u5c0f\u8bca\u65ad\u65e5\u5fd7\u6216\u63a2\u9488\uff0c\u7b49\u5f85\u65b0\u7684\u8fd0\u884c\u65f6\u8bc1\u636e\u3002",
+      "detail": "Use the smallest temporary diagnostic log or probe when runtime evidence is insufficient.",
       "x": 90,
       "y": 520
     },
@@ -56,9 +66,9 @@
       "id": "diagnose",
       "type": "agent",
       "category": "action",
-      "label": "\u8bca\u65ad\u6839\u56e0",
+      "label": "Diagnose root cause",
       "agent": "debugger",
-      "detail": "\u5f62\u6210\u6839\u56e0\u5047\u8bbe\uff0c\u8bb0\u5f55\u7f6e\u4fe1\u5ea6\u3001\u652f\u6301\u8bc1\u636e\u4e0e\u53cd\u5bf9\u8bc1\u636e\u3002",
+      "detail": "Form one primary root-cause hypothesis with supporting and opposing evidence.",
       "x": 430,
       "y": 700
     },
@@ -66,9 +76,9 @@
       "id": "patch",
       "type": "agent",
       "category": "action",
-      "label": "\u6700\u5c0f\u4fee\u590d",
+      "label": "Apply minimal fix",
       "agent": "implementer",
-      "detail": "\u53ea\u4fee\u6839\u56e0\uff0c\u4e0d\u505a\u987a\u624b\u91cd\u6784\uff1b\u8bb0\u5f55 patch \u610f\u56fe\u4e0e\u6539\u52a8\u6587\u4ef6\u3002",
+      "detail": "Fix only the root cause and record patch intent and changed files.",
       "x": 430,
       "y": 850
     },
@@ -76,9 +86,9 @@
       "id": "verify",
       "type": "agent",
       "category": "action",
-      "label": "\u9a8c\u8bc1\u4fee\u590d",
+      "label": "Verify fix",
       "agent": "verifier",
-      "detail": "\u8fd0\u884c\u590d\u73b0\u3001\u56de\u5f52\u3001\u53d7\u5f71\u54cd package \u6216\u6784\u5efa\u9a8c\u8bc1\u3002",
+      "detail": "Run reproduction, regression, impacted package, and build verification.",
       "x": 430,
       "y": 1000
     },
@@ -86,9 +96,9 @@
       "id": "loop_control",
       "type": "loop",
       "category": "condition",
-      "label": "Loop \u63a7\u5236",
+      "label": "Loop control",
       "agent": "bugfix-owner",
-      "detail": "\u9a8c\u8bc1\u540e\u7edf\u4e00\u51b3\u7b56\uff1a\u901a\u8fc7\u5c31\u9000\u51fa\uff1b\u5931\u8d25\u4e14\u4ecd\u6709\u9884\u7b97\u5c31\u8fdb\u5165\u4e0b\u4e00\u8f6e\u3002",
+      "detail": "Exit on success; otherwise continue only while budget and evidence justify another loop.",
       "x": 430,
       "y": 1180
     },
@@ -96,9 +106,9 @@
       "id": "capsule",
       "type": "transform",
       "category": "data",
-      "label": "\u538b\u7f29\u4e0a\u4e0b\u6587",
+      "label": "Compress context",
       "agent": "bugfix-owner",
-      "detail": "\u538b\u7f29\u672c\u8f6e\u5931\u8d25\u4fe1\u606f\uff0c\u4f5c\u4e3a\u4e0b\u4e00\u8f6e\u8bca\u65ad\u8f93\u5165\u3002",
+      "detail": "Compress the current failure evidence before the next diagnosis loop.",
       "x": 430,
       "y": 1360
     },
@@ -106,9 +116,9 @@
       "id": "exit_gate",
       "type": "condition",
       "category": "condition",
-      "label": "\u9000\u51fa\u68c0\u67e5",
+      "label": "Exit check",
       "agent": "bugfix-owner",
-      "detail": "\u786e\u8ba4\u9000\u51fa\u539f\u56e0\uff1a\u6210\u529f\u3001\u9884\u7b97\u8017\u5c3d\u3001\u540c\u9519\u91cd\u590d\u3001\u4f4e\u7f6e\u4fe1\u5ea6\u6216\u9a8c\u8bc1\u963b\u585e\u3002",
+      "detail": "Classify success, exhausted budget, repeated failure, low confidence, or verification block.",
       "x": 770,
       "y": 1180
     },
@@ -116,78 +126,27 @@
       "id": "submit",
       "type": "output",
       "category": "data",
-      "label": "\u63d0\u4ea4\u8bc1\u636e",
+      "label": "Submit evidence",
       "agent": "learning-curator",
-      "detail": "\u63d0\u4ea4 Task Run Evidence\uff0c\u72b6\u6001\u4e3a success\u3001partial_success\u3001failed\u3001cancelled \u6216 blocked\u3002",
+      "detail": "Submit Task Run Evidence with the final status and verification record.",
       "x": 770,
       "y": 1360
     }
   ],
   "edges": [
-    {
-      "from": "start",
-      "to": "owner",
-      "label": "\u542f\u52a8"
-    },
-    {
-      "from": "owner",
-      "to": "reproduce",
-      "label": "\u521d\u59cb\u5316"
-    },
-    {
-      "from": "reproduce",
-      "to": "evidence_gate",
-      "label": "\u5931\u8d25\u8bc1\u636e"
-    },
-    {
-      "from": "evidence_gate",
-      "to": "probe",
-      "label": "\u65e0\u53ef\u9760\u7ebf\u7d22"
-    },
-    {
-      "from": "evidence_gate",
-      "to": "diagnose",
-      "label": "\u7ebf\u7d22\u53ef\u9760"
-    },
-    {
-      "from": "probe",
-      "to": "exit_gate",
-      "label": "\u7b49\u5f85\u8fd0\u884c\u65f6\u590d\u73b0"
-    },
-    {
-      "from": "diagnose",
-      "to": "patch",
-      "label": "\u6839\u56e0\u6210\u7acb"
-    },
-    {
-      "from": "patch",
-      "to": "verify",
-      "label": "\u5019\u9009\u4fee\u590d"
-    },
-    {
-      "from": "verify",
-      "to": "loop_control",
-      "label": "\u9a8c\u8bc1\u7ed3\u679c"
-    },
-    {
-      "from": "loop_control",
-      "to": "capsule",
-      "label": "\u7ee7\u7eed\u4e0b\u4e00\u8f6e"
-    },
-    {
-      "from": "capsule",
-      "to": "diagnose",
-      "label": "\u56de\u5230\u8bca\u65ad"
-    },
-    {
-      "from": "loop_control",
-      "to": "exit_gate",
-      "label": "\u9000\u51fa"
-    },
-    {
-      "from": "exit_gate",
-      "to": "submit",
-      "label": "\u63d0\u4ea4"
-    }
+    { "from": "start", "to": "owner", "label": "start" },
+    { "from": "owner", "to": "reproduce", "label": "initialize" },
+    { "from": "reproduce", "to": "regression_test_gate", "label": "failure evidence" },
+    { "from": "regression_test_gate", "to": "evidence_gate", "label": "test decision" },
+    { "from": "evidence_gate", "to": "probe", "label": "insufficient evidence" },
+    { "from": "evidence_gate", "to": "diagnose", "label": "evidence reliable" },
+    { "from": "probe", "to": "exit_gate", "label": "await runtime evidence" },
+    { "from": "diagnose", "to": "patch", "label": "root cause established" },
+    { "from": "patch", "to": "verify", "label": "candidate fix" },
+    { "from": "verify", "to": "loop_control", "label": "verification result" },
+    { "from": "loop_control", "to": "capsule", "label": "continue" },
+    { "from": "capsule", "to": "diagnose", "label": "next diagnosis" },
+    { "from": "loop_control", "to": "exit_gate", "label": "exit" },
+    { "from": "exit_gate", "to": "submit", "label": "submit" }
   ]
 }

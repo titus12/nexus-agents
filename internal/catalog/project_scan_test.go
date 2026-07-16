@@ -27,6 +27,9 @@ func TestHydrateTemplateItemFromFilesPrefersCodexTomlModel(t *testing.T) {
 	if hydrated.ModelTier != "deepseek-v4-pro" {
 		t.Fatalf("expected model tier from codex toml, got %q", hydrated.ModelTier)
 	}
+	if hydrated.Name != "go-worker" || hydrated.Slug != "go-worker" {
+		t.Fatalf("expected display identity from Claude filename, got name=%q slug=%q", hydrated.Name, hydrated.Slug)
+	}
 	if !strings.Contains(hydrated.CodexProjection, "model = \"deepseek-v4-pro\"") {
 		t.Fatalf("expected codex projection to load template file, got %q", hydrated.CodexProjection)
 	}

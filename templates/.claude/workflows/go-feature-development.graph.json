@@ -6,9 +6,9 @@
       "id": "start",
       "type": "input",
       "category": "event",
-      "label": "接收任务",
+      "label": "Receive task",
       "agent": "sisyphus",
-      "detail": "用户提交 Go 新功能、既有行为修改或跨文件业务调整。",
+      "detail": "Receive a new Go feature, behavior change, or cross-file business adjustment.",
       "x": 40,
       "y": 260
     },
@@ -16,9 +16,9 @@
       "id": "explore",
       "type": "transform",
       "category": "action",
-      "label": "加载上下文并探索",
+      "label": "Explore context",
       "agent": "sisyphus",
-      "detail": "加载 Rules、知识库 routing 和真实代码、调用方、测试及配置证据。",
+      "detail": "Load rules, knowledge routing, relevant code, callers, tests, and configuration evidence.",
       "x": 270,
       "y": 260
     },
@@ -26,9 +26,9 @@
       "id": "contract",
       "type": "transform",
       "category": "data",
-      "label": "生成待审核目标契约",
+      "label": "Define target contract",
       "agent": "sisyphus",
-      "detail": "补齐完成标准、范围、验证、假设、风险和确认要求。",
+      "detail": "Record scope, acceptance criteria, verification, assumptions, risks, and user decisions.",
       "x": 520,
       "y": 260
     },
@@ -36,19 +36,29 @@
       "id": "confirmation",
       "type": "condition",
       "category": "condition",
-      "label": "重大假设或高风险？",
+      "label": "Need user decision?",
       "agent": "user",
-      "detail": "有重大假设或高风险时等待用户确认；否则按推荐方案继续。",
+      "detail": "Wait only when a material assumption or high-risk decision needs confirmation.",
       "x": 780,
       "y": 260
+    },
+    {
+      "id": "test_design",
+      "type": "transform",
+      "category": "data",
+      "label": "Test design decision",
+      "agent": "sisyphus",
+      "detail": "Classify the change, identify unique regression risk, choose the lowest effective test layer, and obtain red evidence when applicable.",
+      "x": 1040,
+      "y": 100
     },
     {
       "id": "plan",
       "type": "transform",
       "category": "action",
-      "label": "计划并决定是否拆任务",
+      "label": "Plan and split tasks",
       "agent": "sisyphus",
-      "detail": "仅在任务边界、范围和验证清晰时创建 Task Capsule。",
+      "detail": "Create bounded Task Capsules only after scope, test design, and verification are clear.",
       "x": 1040,
       "y": 260
     },
@@ -56,9 +66,9 @@
       "id": "task_loop",
       "type": "agent",
       "category": "action",
-      "label": "执行任务 Loop 并集成",
+      "label": "Execute and integrate",
       "agent": "sisyphus",
-      "detail": "最小探索、实施、子目标检查、子任务质检和主线程集成；受重试上限约束。",
+      "detail": "Perform minimal exploration, implementation, targeted verification, and integration under bounded retries.",
       "x": 1300,
       "y": 260
     },
@@ -66,9 +76,9 @@
       "id": "goal_gate",
       "type": "condition",
       "category": "condition",
-      "label": "目标门",
+      "label": "Goal gate",
       "agent": "sisyphus",
-      "detail": "检查目标契约中的必须完成项、调用方和非目标边界。",
+      "detail": "Check required target-contract items, callers, and non-goal boundaries.",
       "x": 1560,
       "y": 260
     },
@@ -76,9 +86,9 @@
       "id": "quality_gate",
       "type": "condition",
       "category": "condition",
-      "label": "质量门",
+      "label": "Quality gate",
       "agent": "reviewer",
-      "detail": "检查 Rules、兼容性、最小 diff、测试、构建和真实验证证据。",
+      "detail": "Check rules, compatibility, minimal diff, test quality, build results, and actual verification evidence.",
       "x": 1800,
       "y": 260
     },
@@ -86,9 +96,9 @@
       "id": "complete",
       "type": "output",
       "category": "data",
-      "label": "提交证据，用户审核",
+      "label": "Deliver evidence",
       "agent": "sisyphus",
-      "detail": "交付可复核结果、验证证据、风险和最终状态。",
+      "detail": "Deliver an auditable result, validation evidence, risks, and final status.",
       "x": 2050,
       "y": 150
     },
@@ -96,68 +106,25 @@
       "id": "blocked",
       "type": "output",
       "category": "data",
-      "label": "partial_success / blocked",
+      "label": "Partial or blocked",
       "agent": "sisyphus",
-      "detail": "无新证据、超过重试上限或环境阻塞时如实退出。",
+      "detail": "Exit honestly when evidence is unavailable, retries are exhausted, or the environment blocks verification.",
       "x": 2050,
       "y": 420
     }
   ],
   "edges": [
-    {
-      "from": "start",
-      "to": "explore",
-      "label": "开始"
-    },
-    {
-      "from": "explore",
-      "to": "contract",
-      "label": "证据"
-    },
-    {
-      "from": "contract",
-      "to": "confirmation",
-      "label": "待审核"
-    },
-    {
-      "from": "confirmation",
-      "to": "plan",
-      "label": "是：用户确认"
-    },
-    {
-      "from": "confirmation",
-      "to": "plan",
-      "label": "否：继续"
-    },
-    {
-      "from": "plan",
-      "to": "task_loop",
-      "label": "执行"
-    },
-    {
-      "from": "task_loop",
-      "to": "goal_gate",
-      "label": "集成"
-    },
-    {
-      "from": "goal_gate",
-      "to": "quality_gate",
-      "label": "目标完成"
-    },
-    {
-      "from": "quality_gate",
-      "to": "complete",
-      "label": "通过"
-    },
-    {
-      "from": "quality_gate",
-      "to": "plan",
-      "label": "可重试"
-    },
-    {
-      "from": "quality_gate",
-      "to": "blocked",
-      "label": "停止"
-    }
+    { "from": "start", "to": "explore", "label": "start" },
+    { "from": "explore", "to": "contract", "label": "evidence" },
+    { "from": "contract", "to": "confirmation", "label": "proposal" },
+    { "from": "confirmation", "to": "test_design", "label": "confirmed" },
+    { "from": "confirmation", "to": "test_design", "label": "no decision needed" },
+    { "from": "test_design", "to": "plan", "label": "test design complete" },
+    { "from": "plan", "to": "task_loop", "label": "execute" },
+    { "from": "task_loop", "to": "goal_gate", "label": "integrate" },
+    { "from": "goal_gate", "to": "quality_gate", "label": "goal met" },
+    { "from": "quality_gate", "to": "complete", "label": "pass" },
+    { "from": "quality_gate", "to": "plan", "label": "rework" },
+    { "from": "quality_gate", "to": "blocked", "label": "blocked" }
   ]
 }
