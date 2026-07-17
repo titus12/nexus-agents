@@ -1,6 +1,6 @@
 ---
 name: kb-system-curator
-description: Explore a project system or feature and curate stable reusable findings into a user-approved KnowledgeBase creation or update. Use when the user asks to document, curate, create, update, or persist core code, configuration, conventions, routing, verification paths, or system knowledge into KnowledgeBase.
+description: Explore a project system or feature and curate stable reusable findings into a user-approved, OKF-compatible KnowledgeBase update. Use when the user asks to document, curate, create, update, move, structure, route, validate, or persist core code, configuration, conventions, and verification knowledge into KnowledgeBase.
 ---
 
 # KB System Curator
@@ -16,6 +16,9 @@ Use this skill to turn a system or feature investigation into a controlled Knowl
 - Do not edit KnowledgeBase files before the user confirms the entry plan.
 - Before any KnowledgeBase edit, read the applicable framework scope, document-contract, quality, and sync rules.
 - Before any KnowledgeBase edit, read `references/okf-checklist.md` and ensure proposed KnowledgeBase pages are OKF-compatible.
+- Before an entry plan and again before every KnowledgeBase edit, run `scripts/validate_kb_structure.py --root KnowledgeBase --project-dir project --flat-threshold 8 --json`.
+- If the validator reports a flat project structure that requires domains, do not add another top-level project concept page. Propose a user-approved migration first.
+- If `KnowledgeBase/project/domains/` exists, create or move project concept pages only under a selected `domains/<domain>/` directory and update its `index.md`.
 - Before any KnowledgeBase edit, scan the target KnowledgeBase path for mojibake or replacement characters and stop if found unless the user explicitly accepts the risk.
 - Do not copy large source excerpts, full design docs, logs, or volatile code facts into KnowledgeBase.
 - Do not modify generated files, Unity `.meta` files, or protected global Codex files.
@@ -54,13 +57,23 @@ knowledgeRetrieval:
 If retrieval cannot be called from the current environment, set `fallbackUsed=true`, record the reason, then read only:
 
 1. `KnowledgeBase/index.md`
-2. `KnowledgeBase/project/domains/routing.md`
-3. the matched domain `index.md` or `routing.md`
-4. framework rules only when preparing an edit
+2. `KnowledgeBase/project/index.md`
+3. `KnowledgeBase/project/routing.md`
+4. `KnowledgeBase/project/domains/index.md` when it exists
+5. the matched domain `index.md`
+6. the selected target page
+7. framework rules only when preparing an edit
 
-### 2. Propose an initial domain and exploration scope
+### 2. Run structure preflight and propose an initial domain
 
-Use existing routing only as an initial exploration guide, not as the final KnowledgeBase structure decision.
+Read `references/structure-and-migration-gates.md` when the topic belongs to project knowledge. Run the structure validator before proposing a write target.
+
+- If the validator passes and `project/domains/` exists, select the narrowest existing domain before code exploration.
+- If the validator reports `flat_project_requires_domains`, stop content planning and propose only a structure migration.
+- If no existing domain owns the topic, propose the smallest new domain/index structure and wait for confirmation before creating it.
+- Do not create a new concept page directly under `KnowledgeBase/project/` when `domains/` exists.
+
+Then use existing routing only as an initial exploration guide, not as the final KnowledgeBase structure decision.
 
 | Signal | Likely target |
 |---|---|
@@ -104,6 +117,15 @@ The decomposition analysis must decide:
 - which one scope is safe for the current write.
 
 If the evidence indicates multiple subsystems or multiple layers, produce a decomposition plan and ask the user to confirm the current-pass scope before deeper exploration or writing. Do not persist detailed knowledge for multiple independent subsystems in a single pass.
+
+For project knowledge, also decide the placement:
+
+- existing `domains/<domain>/` concept page;
+- existing domain route/index update;
+- a user-approved new domain with its own `index.md`;
+- a user-approved structural migration before feature knowledge is written.
+
+Read `references/structure-and-migration-gates.md` before deciding to add, move, or split project pages.
 
 ### 5. Decide whether cross-checking or validation is needed
 
@@ -192,6 +214,8 @@ Before writing, present an entry plan using `references/entry-plan-template.md`.
 - findings intentionally excluded;
 - open questions and user decisions;
 - encoding and maintenance gates to run.
+- structure-preflight result, selected domain path, and all affected parent indexes;
+- for moves, the old-to-new path mapping and relative-link rebasing scope.
 
 End with a clear confirmation request. Do not edit until the user confirms.
 
@@ -203,13 +227,16 @@ End with a clear confirmation request. Do not edit until the user confirms.
    - `KnowledgeBase/framework/quality-gates.md`
    - `KnowledgeBase/framework/document-contract.md`
    - `references/okf-checklist.md`
-2. Run a narrow mojibake scan over the target KB directory for replacement characters and common broken smart-quote sequences.
-3. If scan fails, stop or ask user to acknowledge/fix before merging new content.
-4. Write new/updated Markdown as UTF-8 without BOM.
-5. Validate OKF compatibility before finalizing.
-6. Keep edits minimal and index-first.
-7. Re-scan edited files.
-8. Report exact changed files and current-turn evidence.
+2. Read `references/structure-and-migration-gates.md` when adding, moving, or restructuring project knowledge.
+3. Run the structure validator. Stop on validation errors unless the confirmed scope is the corresponding structure migration.
+4. Run a narrow mojibake scan over the target KB directory for replacement characters and common broken smart-quote sequences.
+5. If scan fails, stop or ask user to acknowledge/fix before merging new content.
+6. For a move, write and validate the new page before removing the old page; update `resource`, parent/domain navigation, all affected indexes, Markdown links, and rebased source/local links.
+7. Write new/updated Markdown as UTF-8 without BOM.
+8. Validate OKF compatibility before finalizing.
+9. Re-run the structure validator; require no broken links, orphan project documents, missing indexes, or metadata/encoding failures.
+10. Re-scan edited files. Replay an existing keyword corpus after a structural migration, or record a small new corpus in task evidence.
+11. Report exact changed files and current-turn evidence.
 
 ## Final Report
 
@@ -232,6 +259,8 @@ Not persisted:
 Gates:
 - User confirmation: yes/no
 - Encoding scan: passed/failed/not run
+- Structure validator: passed/failed/not run
+- Domain/index placement: <selected domain and updated indexes, or not-applicable>
 - Did not modify generated/.meta/protected files: yes
 
 Next suggestions:
