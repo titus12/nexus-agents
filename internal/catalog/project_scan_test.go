@@ -365,10 +365,10 @@ func TestImportProjectWritesUserHomeNexusIndex(t *testing.T) {
 		t.Fatalf("import project: %v", err)
 	}
 
-	nexusPath := filepath.Join(home, ".nexus")
+	nexusPath := filepath.Join(home, ".nexus", "projects.json")
 	data, err := os.ReadFile(nexusPath)
 	if err != nil {
-		t.Fatalf("expected user home .nexus file: %v", err)
+		t.Fatalf("expected user home .nexus/projects.json file: %v", err)
 	}
 	content := string(data)
 	for _, token := range []string{`"version": 1`, `"projectId": "btd-game-server"`, `"projectName": "btd-game-server"`, `"path": "`} {
@@ -392,7 +392,48 @@ func TestImportProjectWritesUserHomeNexusIndex(t *testing.T) {
 		t.Fatal("expected delete project to remove imported project")
 	}
 	if _, err := os.Stat(nexusPath); !os.IsNotExist(err) {
-		t.Fatalf("expected delete project to remove user home .nexus file when last project is removed, err=%v", err)
+		t.Fatalf("expected delete project to remove user project index when last project is removed, err=%v", err)
+	}
+}
+
+func TestImportProjectMigratesLegacyUserHomeNexusFile(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	writeTestFile(t, root, ".claude/rules/01-communication.md", "communication")
+	writeTestFile(t, home, ".nexus", `{
+  "version": 1,
+  "projects": [
+    {
+      "projectId": "existing",
+      "projectName": "existing",
+      "path": "`+filepath.ToSlash(root)+`",
+      "repoKey": "local:existing",
+      "importedAt": "2026-06-20T10:00:00Z",
+      "lastScannedAt": "2026-06-20T10:30:00Z"
+    }
+  ]
+}`)
+
+	store := NewStoreFromData(BootstrapData{ProjectConfigSets: map[string][]ProjectCopy{}}, nil, nil)
+	if _, err := store.ImportProject(ProjectInput{Name: "existing", Path: root}); err != nil {
+		t.Fatalf("import project with legacy user index: %v", err)
+	}
+
+	nexusRoot := filepath.Join(home, ".nexus")
+	if stat, err := os.Stat(nexusRoot); err != nil || !stat.IsDir() {
+		t.Fatalf("expected legacy .nexus file to become a directory, stat=%#v err=%v", stat, err)
+	}
+	data, err := os.ReadFile(filepath.Join(nexusRoot, "projects.json"))
+	if err != nil {
+		t.Fatalf("expected migrated projects.json: %v", err)
+	}
+	if !strings.Contains(string(data), `"projectId": "existing"`) {
+		t.Fatalf("expected migrated project metadata, got %s", string(data))
+	}
+	if _, err := os.Stat(filepath.Join(home, ".nexus.projects-legacy.json")); err != nil {
+		t.Fatalf("expected preserved legacy project index backup: %v", err)
 	}
 }
 
@@ -931,7 +972,7 @@ func TestNewStoreRestoresProjectsFromUserHomeNexusIndex(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("HOME", home)
 	writeTestFile(t, root, ".claude/rules/01-communication.md", "communication")
-	writeTestFile(t, home, ".nexus", `{
+	writeTestFile(t, home, ".nexus/projects.json", `{
   "version": 1,
   "projects": [
     {
@@ -967,7 +1008,7 @@ func TestImportProjectRefreshesConfigSetWhenUserIndexAlreadyContainsProject(t *t
 	writeTestFile(t, root, ".claude/agents/go-worker.md", "worker markdown")
 	writeTestFile(t, root, ".codex/agents/go-worker.toml", "name = \"worker\"")
 	writeTestFile(t, root, ".claude/rules/go-00-routing.md", "routing markdown")
-	writeTestFile(t, home, ".nexus", `{
+	writeTestFile(t, home, ".nexus/projects.json", `{
   "version": 1,
   "projects": [
     {

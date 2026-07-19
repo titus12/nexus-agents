@@ -17,7 +17,7 @@ var validFrontmatterTypes = map[string]bool{
 	"Template": true, "Decision": true, "Reference": true, "CodingRules": true, "Rules": true, "Checklist": true,
 }
 
-var placeholderPattern = regexp.MustCompile(`(?i)\b(TBD|TODO|FIXME|placeholder|coming soon)\b|待补充|占位|稍后补充`)
+var placeholderPattern = regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?(?:\[[ x]?\]\s*)?(?:TBD|TODO|FIXME|placeholder|coming soon)(?:\s*:|\s*$|\s+[-–—])|待补充|占位|稍后补充`)
 var mojibakePattern = regexp.MustCompile(`(�|Ã.|Â.|â€.|鈥|閳|鐞|閹|婢|鍔|绋|寮圭|闈㈡|鎸夐|缃戠|鍗忚|鎴樻|鐜╂)`)
 
 func Validate(projectRoot string) (ValidationReport, error) {
@@ -75,6 +75,12 @@ func validateBundle(bundle Bundle) []ValidationIssue {
 	}
 	for _, doc := range bundle.Documents {
 		issues = append(issues, validateDocument(doc, docByPath)...)
+		if isFlatGeneratedProjectDocument(doc) {
+			issues = append(issues, ValidationIssue{
+				Severity: "warning", Code: "flat_project_document", Path: doc.Path,
+				Message: "OpenWiki-managed project knowledge should live under KnowledgeBase/project/domains/<domain>/.",
+			})
+		}
 		for _, link := range doc.Links {
 			resolved := resolveKnowledgeRef(doc.Directory, link.Target)
 			if resolved == "" || !strings.HasPrefix(resolved, DefaultRoot+"/") {
@@ -127,6 +133,15 @@ func validateDocument(doc Document, docByPath map[string]bool) []ValidationIssue
 	}
 	if len(fm.Tags) == 0 {
 		issues = append(issues, ValidationIssue{Severity: "warning", Code: "missing_tags", Path: doc.Path, Message: "Frontmatter tags are recommended for routing and knowledge discovery."})
+	}
+	if fm.ManagedBy != "" && fm.ManagedBy != "human" && fm.ManagedBy != "openwiki" && fm.ManagedBy != "nexus" {
+		issues = append(issues, ValidationIssue{Severity: "warning", Code: "unknown_managed_by", Path: doc.Path, Message: "Frontmatter managedBy should be human, openwiki, or nexus."})
+	}
+	for _, sourcePath := range fm.SourcePaths {
+		normalized := normalizedResourcePath(sourcePath)
+		if normalized == ".." || strings.HasPrefix(normalized, "../") || strings.HasPrefix(normalized, "/") {
+			issues = append(issues, ValidationIssue{Severity: "error", Code: "unsafe_source_path", Path: doc.Path, Message: "Frontmatter sourcePaths must contain project-relative paths: " + sourcePath})
+		}
 	}
 	if len(strings.TrimSpace(doc.Body)) < minUsefulBodyChars {
 		issues = append(issues, ValidationIssue{Severity: "warning", Code: "thin_document", Path: doc.Path, Message: "Document body is too small to be useful as workflow knowledge."})
@@ -229,6 +244,9 @@ func validateRoutingCoverage(bundle Bundle, docByPath map[string]bool) []Validat
 		if doc.Name != "README.md" && doc.Name != "index.md" {
 			continue
 		}
+		if strings.HasPrefix(doc.Path, DefaultRoot+"/project/domains/") {
+			continue
+		}
 		if !strings.HasPrefix(doc.Path, DefaultRoot+"/domains/") {
 			continue
 		}
@@ -253,7 +271,7 @@ func validateDomainRoutingAliases(bundle Bundle) []ValidationIssue {
 		"state": true, "data": true, "system": true, "feature": true, "module": true,
 	}
 	for _, doc := range bundle.Documents {
-		if !isDomainRoutingDocument(doc.Path) {
+		if !isDomainRoutingDocument(doc.Path) && !isDomainOverviewDocument(doc.Path) {
 			continue
 		}
 		domain := inferDomainFromPath(doc.Path)
@@ -287,12 +305,26 @@ func validateDomainRoutingAliases(bundle Bundle) []ValidationIssue {
 }
 
 func isDomainRoutingDocument(docPath string) bool {
-	const prefix = DefaultRoot + "/domains/"
-	if !strings.HasPrefix(docPath, prefix) || !strings.HasSuffix(docPath, "/routing.md") {
+	for _, prefix := range domainPathPrefixes() {
+		if !strings.HasPrefix(docPath, prefix) || !strings.HasSuffix(docPath, "/routing.md") {
+			continue
+		}
+		rest := strings.TrimPrefix(docPath, prefix)
+		return strings.Count(rest, "/") == 1
+	}
+	return false
+}
+
+func isFlatGeneratedProjectDocument(doc Document) bool {
+	if doc.Frontmatter.ManagedBy != "openwiki" || doc.Path == DefaultRoot+"/project/index.md" {
 		return false
 	}
-	rest := strings.TrimPrefix(docPath, prefix)
-	return strings.Count(rest, "/") == 1
+	prefix := DefaultRoot + "/project/"
+	if !strings.HasPrefix(doc.Path, prefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(doc.Path, prefix)
+	return !strings.Contains(rest, "/")
 }
 
 func routingAliasValues(aliases RoutingAliases) []string {

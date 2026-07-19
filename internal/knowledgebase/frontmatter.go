@@ -45,6 +45,14 @@ func ParseFrontmatter(content string) (Frontmatter, string, bool) {
 			fm.Owner = value
 		case "timestamp":
 			fm.Timestamp = value
+		case "managed_by", "managedBy":
+			fm.ManagedBy = value
+		case "source_paths", "sourcePaths":
+			fm.SourcePaths = parseInlineList(value)
+		case "source_revision", "sourceRevision":
+			fm.SourceRevision = value
+		case "generated_by", "generatedBy":
+			fm.GeneratedBy = value
 		}
 	}
 	fm.Routing = parseRoutingMetadata(raw)

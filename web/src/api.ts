@@ -17,6 +17,13 @@ import type {
   KnowledgeRenderTree,
   KnowledgeRoutePreview,
   KnowledgeValidationReport,
+  KnowledgeDiscoveryResponse,
+  KnowledgeProposal,
+  KnowledgeSyncProfile,
+  KnowledgeSyncProfileResponse,
+  KnowledgeSyncResult,
+  KnowledgeSyncRun,
+  KnowledgeSyncState,
   LearningCase,
   LearningCaseHit,
   StatisticsTasksResponse,
@@ -212,6 +219,68 @@ export function fetchProjectKnowledgeExportDocument(projectId: string, path: str
 
 export function fetchProjectKnowledgeMaintenance(projectId: string): Promise<KnowledgeMaintenanceReport> {
   return fetchJSON<KnowledgeMaintenanceReport>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/maintenance`);
+}
+
+export function fetchKnowledgeSyncProfile(projectId: string): Promise<KnowledgeSyncProfileResponse> {
+  return fetchJSON<KnowledgeSyncProfileResponse>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/sync-profile`);
+}
+
+export function saveKnowledgeSyncProfile(projectId: string, profile: KnowledgeSyncProfile): Promise<KnowledgeSyncProfileResponse> {
+  return fetchJSON<KnowledgeSyncProfileResponse>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/sync-profile`, {
+    method: "PUT",
+    body: JSON.stringify(profile),
+  });
+}
+
+export function fetchKnowledgeSyncStatus(projectId: string): Promise<KnowledgeSyncState> {
+  return fetchJSON<KnowledgeSyncState>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/sync-status`);
+}
+
+export function discoverKnowledgePolicy(projectId: string): Promise<KnowledgeDiscoveryResponse> {
+  return fetchJSON<KnowledgeDiscoveryResponse>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/discovery-preview`, {
+    method: "POST",
+  });
+}
+
+export function initializeKnowledgePreview(
+  projectId: string,
+  input: { mode?: string; externalReferences?: Array<{ url: string; kind?: string }> } = {},
+): Promise<KnowledgeSyncResult> {
+  return fetchJSON<KnowledgeSyncResult>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/initialize-preview`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function checkKnowledgeUpdates(projectId: string): Promise<KnowledgeSyncResult> {
+  return fetchJSON<KnowledgeSyncResult>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/check-updates`, {
+    method: "POST",
+  });
+}
+
+export function fetchKnowledgeSyncRuns(projectId: string): Promise<KnowledgeSyncRun[]> {
+  return fetchJSON<KnowledgeSyncRun[]>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/runs`);
+}
+
+export function fetchKnowledgeProposals(projectId: string): Promise<KnowledgeProposal[]> {
+  return fetchJSON<KnowledgeProposal[]>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/proposals`);
+}
+
+export function fetchKnowledgeProposal(projectId: string, proposalId: string): Promise<KnowledgeProposal> {
+  return fetchJSON<KnowledgeProposal>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/proposals/${encodeURIComponent(proposalId)}`);
+}
+
+export function applyKnowledgeProposal(projectId: string, proposalId: string, paths: string[] = []): Promise<KnowledgeSyncResult> {
+  return fetchJSON<KnowledgeSyncResult>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/proposals/${encodeURIComponent(proposalId)}/apply`, {
+    method: "POST",
+    body: JSON.stringify({ paths }),
+  });
+}
+
+export function rejectKnowledgeProposal(projectId: string, proposalId: string): Promise<KnowledgeSyncResult> {
+  return fetchJSON<KnowledgeSyncResult>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/proposals/${encodeURIComponent(proposalId)}/reject`, {
+    method: "POST",
+  });
 }
 
 export function fetchLocalDirectories(path?: string): Promise<LocalDirectoriesResponse> {

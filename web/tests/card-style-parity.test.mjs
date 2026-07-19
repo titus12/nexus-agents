@@ -67,7 +67,7 @@ test("project agent rule and skill cards reuse source template footer chips", ()
 
 test("import directory picker opens as a separate modal overlay", () => {
   assert.match(app, /@click="chooseProjectDirectory\(\)"/);
-  assert.match(app, /async function chooseProjectDirectory\(\)/);
+  assert.match(app, /async function chooseProjectDirectory\([^)]*\)/);
   assert.match(app, /fetchNativeLocalDirectory/);
   assert.match(app, /AbortController/);
   assert.match(app, /nativePickerTimeout/);
@@ -124,4 +124,15 @@ test("model proxy page exposes the embedded Codex router endpoints", () => {
   assert.match(app, /\/proxy\/codex\/model-catalog\.json/);
   assert.match(app, /model_provider = "nexus-codex"/);
   assert.match(app, /requires_openai_auth = true/);
+});
+
+test("knowledge sync uses English navigation and dark, readable metadata cards", () => {
+  assert.match(app, /activeKnowledgeView === 'sync'[^>]*>Sync<\/button>/);
+  assert.doesNotMatch(app, /activeKnowledgeView === 'sync'[^>]*>同步<\/button>/);
+  assert.match(styles, /--panel-soft:\s*rgba\(255,\s*255,\s*255,\s*0\.045\)/);
+  assert.match(styles, /\.knowledge-sync-facts\s*\{[^}]*repeat\(auto-fit,\s*minmax\(150px,\s*1fr\)\)/s);
+  assert.match(styles, /\.knowledge-sync-facts\s*\{[^}]*width:\s*100%/s);
+  assert.match(styles, /\.knowledge-sync-facts > div\s*\{[^}]*background:[\s\S]*var\(--bg-card\)/);
+  assert.match(styles, /\.knowledge-sync-facts strong\s*\{[^}]*color:\s*var\(--text-primary\)/s);
+  assert.doesNotMatch(styles, /\.knowledge-sync-facts > div\s*\{[^}]*#f8fafc/s);
 });

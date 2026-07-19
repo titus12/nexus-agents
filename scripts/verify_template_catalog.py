@@ -156,13 +156,30 @@ def main() -> None:
         path
         for path in TEMPLATES.rglob("*")
         if path.suffix.lower() in {".yaml", ".yml"}
+        and path != TEMPLATES / "KnowledgeBase" / "Setting.yaml"
         and not (
             path.name == "openai.yaml"
             and path.parent.name == "agents"
             and TEMPLATES / ".agents" / "skills" in path.parents
         )
     ]
-    expect(not yaml_files, "templates must use copied md/toml files, not yaml manifests")
+    expect(not yaml_files, "templates must use copied md/toml files except the project-owned KnowledgeBase/Setting.yaml policy")
+    require_tokens(
+        "templates/KnowledgeBase/Setting.yaml",
+        [
+            "version: 1",
+            "root: KnowledgeBase/project",
+            "updateMode: proposal",
+            "source: git-tracked",
+            'version: "0.2.0"',
+            "committedChangesOnly: true",
+            "requireApproval: true",
+        ],
+    )
+    require_tokens(
+        "templates/KnowledgeBase/framework/source-of-truth.md",
+        ["OpenWiki", "KnowledgeBase/Setting.yaml", "Pending knowledge changes", "Feishu"],
+    )
 
     for agent in AGENTS:
         require_tokens(

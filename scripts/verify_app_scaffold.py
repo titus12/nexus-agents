@@ -144,7 +144,8 @@ def main() -> None:
         expect(token in smoke_app, f"smoke_app.ps1 missing smoke token {token}")
 
     readme = read("README.md")
-    for token in ["Go backend", "Vue 3", "scripts\\verify_all.ps1", "NEXUS_ADDR"]:
+    expect("Go backend" in readme or "Go 后端" in readme, "README.md missing setup token Go backend/Go 后端")
+    for token in ["Vue 3", "scripts\\verify_all.ps1", "NEXUS_ADDR"]:
         expect(token in readme, f"README.md missing setup token {token}")
 
     for rel in REQUIRED_PLAN_FILES:

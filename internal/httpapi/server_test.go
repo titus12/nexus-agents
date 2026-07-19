@@ -1411,14 +1411,17 @@ func TestInfrastructureEndpoint(t *testing.T) {
 	}
 	getJSON(t, server, "/api/infrastructure", &items)
 
-	if len(items) != 2 {
-		t.Fatalf("expected exactly 2 infrastructure items, got %#v", items)
+	if len(items) != 3 {
+		t.Fatalf("expected exactly 3 infrastructure items, got %#v", items)
 	}
 	if items[0].ID != "rtk" || items[0].GitHubURL != "https://github.com/rtk-ai/rtk" {
 		t.Fatalf("expected first infrastructure item to be RTK with GitHub URL, got %#v", items[0])
 	}
 	if items[1].ID != "codegraph" || items[1].GitHubURL != "https://github.com/colbymchenry/codegraph" {
 		t.Fatalf("expected second infrastructure item to be Codegraph with GitHub URL, got %#v", items[1])
+	}
+	if items[2].ID != "openwiki" || items[2].InstallCommand != "npm install --global openwiki@0.2.0" {
+		t.Fatalf("expected pinned OpenWiki infrastructure metadata, got %#v", items[2])
 	}
 	for _, item := range items {
 		if item.Name == "" || item.Kind == "" || item.Status == "" || item.InstallCommand == "" || len(item.CommonCommands) == 0 {

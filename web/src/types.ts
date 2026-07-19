@@ -731,3 +731,145 @@ export type WorkflowRunFinishInput = {
   metrics?: Record<string, unknown>;
   evidence?: Record<string, unknown>;
 };
+
+export type KnowledgeScanRule = {
+  pattern: string;
+  action: "include" | "exclude";
+  category?: string;
+  priority?: string;
+  reason?: string;
+  confidence?: number;
+  hard?: boolean;
+};
+
+export type KnowledgeSyncProfile = {
+  version: number;
+  knowledge: {
+    root: string;
+    language: string;
+    updateMode: "proposal";
+    defaultBranch: string;
+  };
+  discovery: {
+    strategy: string;
+    generatedFromRevision: string;
+    generatedAt: string;
+    reviewed: boolean;
+    reviewedBy: string;
+  };
+  scan: {
+    source: "git-tracked";
+    rules: KnowledgeScanRule[];
+    limits: { maxFileSizeKB: number; maxFilesPerRun: number };
+  };
+  instructions: { requiredTopics: string[]; additional: string };
+  codeGraph: {
+    enabled: boolean;
+    impactDepth: number;
+    includeCallers: boolean;
+    includeCallees: boolean;
+    includeRelatedTests: boolean;
+  };
+  openWiki: { enabled: boolean; version: string };
+  schedule: { enabled: boolean; intervalMinutes: number; committedChangesOnly: boolean };
+  ownership: { owners: string[]; requireApproval: boolean };
+};
+
+export type KnowledgeInventory = {
+  revision: string;
+  branch: string;
+  trackedFiles: number;
+  files: Array<{ path: string; category: string; size?: number }>;
+  directoryStats: Array<{ path: string; fileCount: number; extensions: Record<string, number> }>;
+  manifests: string[];
+  readmes: string[];
+  existingKnowledge: string[];
+  extensions: Record<string, number>;
+  codeGraphSummary?: string;
+  truncated: boolean;
+};
+
+export type KnowledgeDiscoveryProposal = {
+  revision: string;
+  rules: KnowledgeScanRule[];
+  requiredTopics: string[];
+  uncertain: Array<{ path: string; reason: string; confidence: number }>;
+  warnings: string[];
+  aiRefined: boolean;
+  inventory: KnowledgeInventory;
+};
+
+export type KnowledgeDiscoveryResponse = {
+  proposal: KnowledgeDiscoveryProposal;
+  profile: KnowledgeSyncProfile;
+};
+
+export type KnowledgeSyncState = {
+  projectId: string;
+  projectRoot: string;
+  branch: string;
+  lastProcessedCommit: string;
+  lastKnowledgeHash: string;
+  lastCheckedAt: string;
+  lastSuccessfulAt: string;
+  status: string;
+  pendingProposalId?: string;
+  compilerVersion: string;
+  profileHash: string;
+  lastError?: string;
+};
+
+export type KnowledgeSyncRun = {
+  id: string;
+  projectId: string;
+  kind: string;
+  status: string;
+  branch: string;
+  baseRevision?: string;
+  targetRevision: string;
+  changeClass?: string;
+  proposalId?: string;
+  warnings: string[];
+  error?: string;
+  startedAt: string;
+  endedAt?: string;
+};
+
+export type KnowledgeProposalChange = {
+  path: string;
+  action: string;
+  before?: string;
+  after?: string;
+  managedBy?: string;
+  selected: boolean;
+};
+
+export type KnowledgeProposal = {
+  id: string;
+  projectId: string;
+  projectRoot: string;
+  branch: string;
+  baseRevision?: string;
+  targetRevision: string;
+  profileHash: string;
+  compilerVersion: string;
+  status: string;
+  changes: KnowledgeProposalChange[];
+  evidence: Array<{ kind: string; source: string; summary: string; paths: string[]; revision?: string }>;
+  validation: { valid: boolean; errors: string[]; warnings: string[] };
+  warnings: string[];
+  createdAt: string;
+  resolvedAt?: string;
+};
+
+export type KnowledgeSyncResult = {
+  state: KnowledgeSyncState;
+  run: KnowledgeSyncRun;
+  proposal?: KnowledgeProposal;
+  message: string;
+};
+
+export type KnowledgeSyncProfileResponse = {
+  exists: boolean;
+  profile: KnowledgeSyncProfile;
+};

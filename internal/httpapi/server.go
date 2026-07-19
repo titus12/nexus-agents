@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -26,6 +27,7 @@ import (
 	"nexus-agents/internal/catalog"
 	"nexus-agents/internal/codexrouter"
 	"nexus-agents/internal/knowledgebase"
+	"nexus-agents/internal/knowledgesync"
 	"nexus-agents/internal/taskrunsubmit"
 	"nexus-agents/internal/workflowrunner"
 	webui "nexus-agents/web"
@@ -110,6 +112,7 @@ type Server struct {
 	codexRouter          *codexrouter.Service
 	localDirectoryPicker LocalDirectoryPicker
 	workflowRunner       *workflowrunner.Runner
+	knowledgeSync        *knowledgesync.Service
 	mux                  *http.ServeMux
 	webFS                fs.FS
 	webFileServer        http.Handler
@@ -146,6 +149,15 @@ func NewServerWithEvaluationStore(evaluationStore *catalog.EvaluationStore) http
 }
 
 func newServerWithOptions(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service, picker LocalDirectoryPicker, evaluationStore *catalog.EvaluationStore) http.Handler {
+	return newServerWithKnowledgeSyncOptions(store, infrastructure, router, picker, evaluationStore, nil)
+}
+
+type knowledgeSyncOperationInput struct {
+	Mode               string                            `json:"mode"`
+	ExternalReferences []knowledgesync.ExternalReference `json:"externalReferences,omitempty"`
+}
+
+func newServerWithKnowledgeSyncOptions(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service, picker LocalDirectoryPicker, evaluationStore *catalog.EvaluationStore, knowledgeSync *knowledgesync.Service) http.Handler {
 	if infrastructure == nil {
 		infrastructure = catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{})
 	}
@@ -154,6 +166,11 @@ func newServerWithOptions(store *catalog.Store, infrastructure *catalog.Infrastr
 	}
 	if picker == nil {
 		picker = defaultLocalDirectoryPicker{}
+	}
+	if knowledgeSync == nil {
+		knowledgeSync = knowledgesync.NewService(knowledgesync.ServiceOptions{
+			ExportRoot: projectKnowledgeExportRoot,
+		})
 	}
 	if evaluationStore == nil {
 		var err error
@@ -178,6 +195,7 @@ func newServerWithOptions(store *catalog.Store, infrastructure *catalog.Infrastr
 		codexRouter:          router,
 		localDirectoryPicker: picker,
 		workflowRunner:       workflowrunner.New(taskrunsubmit.Submitter{Store: evaluationStore, TokenLookup: evaluationStore}),
+		knowledgeSync:        knowledgeSync,
 		mux:                  http.NewServeMux(),
 		webFS:                webFS,
 		webFileServer:        http.FileServer(http.FS(webFS)),
@@ -185,6 +203,24 @@ func newServerWithOptions(store *catalog.Store, infrastructure *catalog.Infrastr
 	}
 	server.routes()
 	return server
+}
+
+func NewServerWithStoreAndKnowledgeSync(store *catalog.Store, knowledgeSync *knowledgesync.Service) http.Handler {
+	return NewServerWithStoreKnowledgeSyncAndCodexRouter(store, knowledgeSync, nil)
+}
+
+func NewServerWithStoreKnowledgeSyncAndCodexRouter(store *catalog.Store, knowledgeSync *knowledgesync.Service, router *codexrouter.Service) http.Handler {
+	if router == nil {
+		router = codexrouter.NewService(codexrouter.DefaultConfig())
+	}
+	return newServerWithKnowledgeSyncOptions(
+		store,
+		catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{}),
+		router,
+		defaultLocalDirectoryPicker{},
+		nil,
+		knowledgeSync,
+	)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1186,6 +1222,82 @@ func (s *Server) handleProjectKnowledgePath(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	switch parts[0] {
+	case "sync-profile":
+		s.handleProjectKnowledgeSyncProfile(w, r, projectID, projectRoot)
+	case "sync-status":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		state, err := s.knowledgeSync.Status(projectID)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	case "discovery-preview":
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		proposal, err := s.knowledgeSync.DiscoverPolicy(r.Context(), knowledgesync.ProjectRequest{ProjectID: projectID, ProjectRoot: projectRoot})
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"proposal": proposal,
+			"profile":  knowledgesync.ProfileFromDiscovery(proposal, ""),
+		})
+	case "initialize-preview":
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		var input knowledgeSyncOperationInput
+		if !decodeOptionalLimitedRequest(w, r, &input, 64*1024) {
+			return
+		}
+		request := knowledgesync.InitializeRequest{
+			ProjectRequest: knowledgesync.ProjectRequest{ProjectID: projectID, ProjectRoot: projectRoot},
+			Mode:           input.Mode, ExternalReferences: input.ExternalReferences,
+		}
+		var result knowledgesync.SyncResult
+		var err error
+		switch strings.ToLower(strings.TrimSpace(input.Mode)) {
+		case "adopt":
+			result, err = s.knowledgeSync.AdoptExisting(r.Context(), request.ProjectRequest)
+		case "domain-migrate", "migrate-domains":
+			result, err = s.knowledgeSync.MigrateDomainsPreview(r.Context(), request.ProjectRequest)
+		case "enrich", "check-and-enrich":
+			result, err = s.knowledgeSync.CheckAndEnrich(r.Context(), request)
+		default:
+			result, err = s.knowledgeSync.InitializePreview(r.Context(), request)
+		}
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	case "check-updates":
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		result, err := s.knowledgeSync.CheckUpdates(r.Context(), knowledgesync.ProjectRequest{ProjectID: projectID, ProjectRoot: projectRoot})
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	case "runs":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		runs, err := s.knowledgeSync.Runs(projectID)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, runs)
+	case "proposals":
+		s.handleProjectKnowledgeProposals(w, r, projectID, projectRoot, parts[1:])
 	case "retrieve":
 		if !allowMethods(w, r, http.MethodGet) {
 			return
@@ -1253,6 +1365,101 @@ func (s *Server) handleProjectKnowledgePath(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, report)
 	case "export":
 		s.handleProjectKnowledgeExport(w, r, projectID, projectRoot, parts[1:])
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleProjectKnowledgeSyncProfile(w http.ResponseWriter, r *http.Request, projectID, projectRoot string) {
+	switch r.Method {
+	case http.MethodGet:
+		profile, err := s.knowledgeSync.Profile(projectRoot)
+		if errors.Is(err, knowledgesync.ErrProfileNotFound) {
+			writeJSON(w, http.StatusOK, map[string]any{"exists": false, "profile": knowledgesync.DefaultProfile()})
+			return
+		}
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"exists": true, "profile": profile})
+	case http.MethodPut:
+		var profile knowledgesync.Profile
+		if !decodeLimitedRequest(w, r, &profile, 256*1024) {
+			return
+		}
+		if err := s.knowledgeSync.SaveProfile(projectRoot, profile); err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"exists": true, "profile": profile, "projectId": projectID})
+	default:
+		methodNotAllowed(w, http.MethodGet, http.MethodPut)
+	}
+}
+
+func (s *Server) handleProjectKnowledgeProposals(w http.ResponseWriter, r *http.Request, projectID, projectRoot string, parts []string) {
+	if len(parts) == 0 {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		proposals, err := s.knowledgeSync.Proposals(projectID)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, proposals)
+		return
+	}
+	proposalID := strings.TrimSpace(parts[0])
+	if proposalID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 1 {
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		proposal, err := s.knowledgeSync.Proposal(projectID, proposalID)
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, proposal)
+		return
+	}
+	if len(parts) != 2 || !allowMethods(w, r, http.MethodPost) {
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+		}
+		return
+	}
+	request := knowledgesync.ProjectRequest{ProjectID: projectID, ProjectRoot: projectRoot}
+	switch parts[1] {
+	case "apply":
+		var input knowledgesync.ApplyProposalInput
+		if !decodeOptionalLimitedRequest(w, r, &input, 256*1024) {
+			return
+		}
+		result, err := s.knowledgeSync.ApplyProposal(r.Context(), request, proposalID, input)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		_, _, _, _ = s.store.RescanProject(projectID)
+		_, _ = knowledgebase.ExportProjectKnowledge(projectID, projectRoot, projectKnowledgeExportRoot(projectID))
+		writeJSON(w, http.StatusOK, result)
+	case "reject":
+		result, err := s.knowledgeSync.RejectProposal(request, proposalID)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1675,6 +1882,38 @@ func decodeRequest(w http.ResponseWriter, r *http.Request, target any) bool {
 		return false
 	}
 	return true
+}
+
+func decodeLimitedRequest(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) bool {
+	if r.Body == nil {
+		return true
+	}
+	if maxBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+	return decodeRequest(w, r, target)
+}
+
+func decodeOptionalLimitedRequest(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) bool {
+	if r.Body == nil || r.ContentLength == 0 {
+		return true
+	}
+	return decodeLimitedRequest(w, r, target, maxBytes)
+}
+
+func writeKnowledgeSyncError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, knowledgesync.ErrProjectSyncBusy):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, knowledgesync.ErrProfileNotFound):
+		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+	case os.IsNotExist(err):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case strings.Contains(strings.ToLower(err.Error()), "stale"):
+		http.Error(w, err.Error(), http.StatusConflict)
+	default:
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

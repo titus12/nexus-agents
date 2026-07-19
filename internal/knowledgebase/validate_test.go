@@ -118,6 +118,22 @@ func TestValidateReportsMojibakeContent(t *testing.T) {
 	}
 }
 
+func TestValidateFlagsFlatOpenWikiProjectDocuments(t *testing.T) {
+	root := t.TempDir()
+	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
+	writeTestFile(t, filepath.Join(kb, "index.md"), "# Root\n\n[Project](./project/index.md)")
+	writeTestFile(t, filepath.Join(kb, "log.md"), "# Log")
+	writeTestFile(t, filepath.Join(kb, "project", "index.md"), "# Domains")
+	writeTestFile(t, filepath.Join(kb, "project", "legacy.md"), "---\ntype: Guide\ntitle: Legacy\ndescription: Legacy generated page.\nresource: KnowledgeBase/project/legacy.md\ntags: [legacy]\ntimestamp: 2026-07-19T00:00:00Z\nmanagedBy: openwiki\n---\n# Legacy\n\nGenerated content.")
+	report, err := Validate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasIssueForPath(report.Issues, "flat_project_document", "KnowledgeBase/project/legacy.md") {
+		t.Fatalf("expected flat project warning, got %#v", report.Issues)
+	}
+}
+
 func TestValidateAllowsMojibakeExamplesInsideCode(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))

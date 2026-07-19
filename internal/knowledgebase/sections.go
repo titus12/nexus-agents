@@ -92,13 +92,61 @@ func newKnowledgeSection(doc Document, startLine int, endLine int, heading strin
 }
 
 func inferDomainFromPath(docPath string) string {
-	const prefix = DefaultRoot + "/domains/"
-	if !strings.HasPrefix(docPath, prefix) {
-		return ""
+	for _, prefix := range domainPathPrefixes() {
+		if !strings.HasPrefix(docPath, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(docPath, prefix)
+		domain := strings.Split(rest, "/")[0]
+		return strings.TrimSpace(domain)
 	}
-	rest := strings.TrimPrefix(docPath, prefix)
-	domain := strings.Split(rest, "/")[0]
-	return strings.TrimSpace(domain)
+	return ""
+}
+
+func domainPathPrefixes() []string {
+	return []string{
+		DefaultRoot + "/project/domains/",
+		DefaultRoot + "/domains/",
+	}
+}
+
+func domainRoutingPaths(domain string) []string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil
+	}
+	paths := make([]string, 0, len(domainPathPrefixes()))
+	for _, prefix := range domainPathPrefixes() {
+		paths = append(paths, prefix+domain+"/routing.md")
+	}
+	return paths
+}
+
+func domainOverviewPaths(domain string) []string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil
+	}
+	paths := make([]string, 0, len(domainPathPrefixes())*2)
+	for _, prefix := range domainPathPrefixes() {
+		paths = append(paths, prefix+domain+"/index.md", prefix+domain+"/README.md")
+	}
+	return paths
+}
+
+func isDomainOverviewDocument(docPath string) bool {
+	for _, prefix := range domainPathPrefixes() {
+		if !strings.HasPrefix(docPath, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(docPath, prefix)
+		if strings.Count(rest, "/") != 1 {
+			continue
+		}
+		name := strings.ToLower(path.Base(rest))
+		return name == "index.md" || name == "readme.md"
+	}
+	return false
 }
 
 func estimateTokens(text string) int {

@@ -19,6 +19,11 @@ func TestScanBundleReadsMarkdownAndLinks(t *testing.T) {
 	if !bundle.Exists || len(bundle.Documents) != 2 {
 		t.Fatalf("unexpected bundle: %#v", bundle)
 	}
+	for _, doc := range bundle.Documents {
+		if doc.Path == "KnowledgeBase/domains/actor/index.md" && doc.Reserved {
+			t.Fatal("domain index must remain a typed Domain document")
+		}
+	}
 	totalLinks := 0
 	for _, doc := range bundle.Documents {
 		totalLinks += len(doc.Links)

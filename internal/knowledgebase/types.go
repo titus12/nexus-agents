@@ -40,18 +40,22 @@ type Document struct {
 }
 
 type Frontmatter struct {
-	Type        string          `json:"type,omitempty"`
-	Title       string          `json:"title,omitempty"`
-	Description string          `json:"description,omitempty"`
-	Resource    string          `json:"resource,omitempty"`
-	Tags        []string        `json:"tags,omitempty"`
-	DependsOn   []string        `json:"dependsOn,omitempty"`
-	SeeAlso     []string        `json:"seeAlso,omitempty"`
-	Status      string          `json:"status,omitempty"`
-	Owner       string          `json:"owner,omitempty"`
-	Timestamp   string          `json:"timestamp,omitempty"`
-	Routing     RoutingMetadata `json:"routing,omitempty"`
-	Raw         string          `json:"raw,omitempty"`
+	Type           string          `json:"type,omitempty"`
+	Title          string          `json:"title,omitempty"`
+	Description    string          `json:"description,omitempty"`
+	Resource       string          `json:"resource,omitempty"`
+	Tags           []string        `json:"tags,omitempty"`
+	DependsOn      []string        `json:"dependsOn,omitempty"`
+	SeeAlso        []string        `json:"seeAlso,omitempty"`
+	Status         string          `json:"status,omitempty"`
+	Owner          string          `json:"owner,omitempty"`
+	Timestamp      string          `json:"timestamp,omitempty"`
+	ManagedBy      string          `json:"managedBy,omitempty"`
+	SourcePaths    []string        `json:"sourcePaths,omitempty"`
+	SourceRevision string          `json:"sourceRevision,omitempty"`
+	GeneratedBy    string          `json:"generatedBy,omitempty"`
+	Routing        RoutingMetadata `json:"routing,omitempty"`
+	Raw            string          `json:"raw,omitempty"`
 }
 
 type RoutingMetadata struct {
@@ -277,6 +281,9 @@ func normalizeDocument(doc Document) Document {
 	}
 	if doc.Frontmatter.SeeAlso == nil {
 		doc.Frontmatter.SeeAlso = []string{}
+	}
+	if doc.Frontmatter.SourcePaths == nil {
+		doc.Frontmatter.SourcePaths = []string{}
 	}
 	if doc.Frontmatter.Routing.Aliases.Values == nil {
 		doc.Frontmatter.Routing.Aliases.Values = []string{}

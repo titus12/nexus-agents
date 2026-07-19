@@ -201,7 +201,11 @@ func (s *InfrastructureService) Update(id string) (InfrastructureItem, bool, err
 
 func (s *InfrastructureService) withLocalStatus(item InfrastructureItem) InfrastructureItem {
 	item.LastCheckedAt = nowStamp()
-	output, err := s.runner.Run(item.ID, "--version")
+	versionArgs := []string{"--version"}
+	if item.ID == "openwiki" {
+		versionArgs = []string{"--help"}
+	}
+	output, err := s.runner.Run(item.ID, versionArgs...)
 	if err != nil {
 		item.Status = "missing"
 		item.Output = strings.TrimSpace(output + "\n" + err.Error())
@@ -211,6 +215,11 @@ func (s *InfrastructureService) withLocalStatus(item InfrastructureItem) Infrast
 		item.ExecutablePath = executable
 	}
 	item.Version = parseVersion(output)
+	if item.ID == "openwiki" && item.Version != "0.2.0" {
+		item.Status = "unhealthy"
+		item.Output = strings.TrimSpace(output + "\nNexus requires the tested OpenWiki version 0.2.0.")
+		return item
+	}
 	item.Status = "ready"
 	item.Output = strings.TrimSpace(output)
 	return item
@@ -241,6 +250,19 @@ func infrastructureDefinitions() []InfrastructureItem {
 			GitHubURL:      "https://github.com/colbymchenry/codegraph",
 			InstallCommand: "npm i -g @colbymchenry/codegraph",
 			CommonCommands: []string{"codegraph init -i", "codegraph status", "codegraph sync", "codegraph upgrade --check", "codegraph upgrade"},
+			Source:         "built_in",
+			Installable:    true,
+		},
+		{
+			ID:             "openwiki",
+			Name:           "OpenWiki",
+			Kind:           "knowledge_compiler",
+			Status:         "unknown",
+			Summary:        "Compile code and repository documents into reviewable Markdown knowledge.",
+			Description:    "Nexus runs the pinned OpenWiki release in an isolated Git snapshot, normalizes only its openwiki/ output, validates the result, and presents a proposal instead of allowing direct project writes.",
+			GitHubURL:      "https://github.com/openwiki-ai/openwiki",
+			InstallCommand: "npm install --global openwiki@0.2.0",
+			CommonCommands: []string{"openwiki --help", "openwiki code --update --print"},
 			Source:         "built_in",
 			Installable:    true,
 		},
@@ -280,6 +302,7 @@ func infrastructureInstallCommand(id string) ([]string, bool) {
 	commands := map[string][]string{
 		"rtk":       {"npm", "install", "-g", "rtk"},
 		"codegraph": {"npm", "install", "-g", "@colbymchenry/codegraph"},
+		"openwiki":  {"npm", "install", "--global", "openwiki@0.2.0"},
 		"repomix":   {"npm", "install", "-g", "repomix"},
 	}
 	command, ok := commands[id]
@@ -289,6 +312,7 @@ func infrastructureInstallCommand(id string) ([]string, bool) {
 func infrastructureUpdateCommand(id string) ([]string, bool) {
 	commands := map[string][]string{
 		"codegraph": {"codegraph", "upgrade"},
+		"openwiki":  {"npm", "install", "--global", "openwiki@0.2.0"},
 		"repomix":   {"npm", "update", "-g", "repomix"},
 	}
 	command, ok := commands[id]

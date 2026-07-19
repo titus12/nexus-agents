@@ -353,8 +353,8 @@ def main() -> None:
     expect("promote" not in (common_js + pages_js).lower(), "V1 must not expose project-to-template promotion")
 
     mock_js = read(DESIGN / "js/mock-data.js")
-    for token in ["project: \"all\"", "project: \"btd-game-server\"", "content:", "templateId:", "baseVersion:", "baseHash:", "localVersion:", "syncMode: \"manual\"", "templates/.claude/skills/go-testing/SKILL.md", "projectConfigSets", "status: \"diverged\"", "status: \"detached\""]:
-        expect(token in mock_js, f"mock data missing project/content token {token}")
+    for token in ["projects:", "agents:", "rules:", "skills:", "workflows:", "workflowGraph:", "projectConfigSets:", "modelRoutes:", "runHistory:"]:
+        expect(token in mock_js, f"mock data missing bootstrap collection token {token}")
 
     plan_docs = {
         rel: read(ROOT / "docs" / "plans" / rel)

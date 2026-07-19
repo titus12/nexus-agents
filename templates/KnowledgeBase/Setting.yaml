@@ -1,0 +1,49 @@
+version: 1
+
+knowledge:
+  root: KnowledgeBase/project
+  language: zh-CN
+  updateMode: proposal
+  defaultBranch: develop
+
+discovery:
+  strategy: ai-assisted
+  generatedFromRevision: ""
+  generatedAt: ""
+  reviewed: false
+  reviewedBy: ""
+
+scan:
+  source: git-tracked
+  rules: []
+  limits:
+    maxFileSizeKB: 512
+    maxFilesPerRun: 3000
+
+instructions:
+  requiredTopics:
+    - service-responsibility
+    - integration-boundaries
+    - data-ownership
+    - verification-paths
+  additional: ""
+
+codeGraph:
+  enabled: true
+  impactDepth: 2
+  includeCallers: true
+  includeCallees: true
+  includeRelatedTests: true
+
+openWiki:
+  enabled: true
+  version: "0.2.0"
+
+schedule:
+  enabled: false
+  intervalMinutes: 30
+  committedChangesOnly: true
+
+ownership:
+  owners: []
+  requireApproval: true

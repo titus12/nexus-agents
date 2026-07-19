@@ -1,20 +1,25 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"nexus-agents/internal/catalog"
 	"nexus-agents/internal/codexrouter"
 	"nexus-agents/internal/httpapi"
+	"nexus-agents/internal/knowledgesync"
 )
 
 func main() {
@@ -39,10 +44,51 @@ func main() {
 	router := codexrouter.NewService(codexrouter.DefaultConfig())
 	writeCatalogFile(router)
 
+	store := catalog.NewStore()
+	knowledgeSync := knowledgesync.NewService(knowledgesync.ServiceOptions{})
+	scheduler := &knowledgesync.Scheduler{
+		Service:  knowledgeSync,
+		Projects: scheduledCatalog{store: store},
+		Interval: time.Minute,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	scheduler.Start(ctx)
+	defer scheduler.Stop()
+
+	httpServer := &http.Server{Addr: addr, Handler: httpapi.NewServerWithStoreKnowledgeSyncAndCodexRouter(store, knowledgeSync, router)}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}()
 	log.Printf("nexus-agents listening on %s", addr)
-	if err := http.ListenAndServe(addr, httpapi.NewServerWithCodexRouter(router)); err != nil {
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+type scheduledCatalog struct {
+	store *catalog.Store
+}
+
+func (c scheduledCatalog) KnowledgeSyncProjects() []knowledgesync.ScheduledProject {
+	if c.store == nil {
+		return nil
+	}
+	projects := c.store.Projects()
+	result := make([]knowledgesync.ScheduledProject, 0, len(projects))
+	for _, project := range projects {
+		root := strings.TrimSpace(project.LocalPath)
+		if root == "" {
+			root = strings.TrimSpace(project.Path)
+		}
+		if root != "" {
+			result = append(result, knowledgesync.ScheduledProject{ProjectID: project.ID, ProjectRoot: root})
+		}
+	}
+	return result
 }
 
 func setupLogger() (func(), error) {

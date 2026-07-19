@@ -96,7 +96,7 @@ func Retrieve(projectRoot string, query string, options RetrieveOptions) (Retrie
 		}
 	}
 	for target, sources := range routingTargets {
-		for _, section := range pickSectionsForPath(sectionsByPath, target, terms, 2) {
+		for _, section := range pickSectionsForPath(sectionsByPath, target, terms, 1) {
 			addSection(section, 60, true, "referenced by "+strings.Join(sources, ", "))
 		}
 	}
@@ -235,9 +235,15 @@ func parseRoutingKnowledge(bundle Bundle, matchedDomain string) ([]string, map[s
 		routingDocs = append(routingDocs, projectRouting)
 	}
 	if matchedDomain != "" {
-		domainRouting := DefaultRoot + "/domains/" + matchedDomain + "/routing.md"
-		if docByPath[domainRouting] {
-			routingDocs = append(routingDocs, domainRouting)
+		for _, domainRouting := range domainRoutingPaths(matchedDomain) {
+			if docByPath[domainRouting] {
+				routingDocs = append(routingDocs, domainRouting)
+			}
+		}
+		for _, overview := range domainOverviewPaths(matchedDomain) {
+			if docByPath[overview] && !containsString(routingDocs, overview) {
+				routingDocs = append(routingDocs, overview)
+			}
 		}
 	}
 	for _, doc := range bundle.Documents {
@@ -329,13 +335,22 @@ func okfBoost(section KnowledgeSection, terms []string, matchedDomain string) (f
 			reasons = append(reasons, "project fallback")
 		}
 	}
-	if matchedDomain != "" && section.Path == DefaultRoot+"/domains/"+matchedDomain+"/routing.md" {
-		score += 80
-		reasons = append(reasons, "matched domain routing")
+	if matchedDomain != "" {
+		for _, routingPath := range domainRoutingPaths(matchedDomain) {
+			if section.Path == routingPath {
+				score += 80
+				reasons = append(reasons, "matched domain routing")
+				break
+			}
+		}
 	}
 	if matchedDomain != "" && section.Domain == matchedDomain {
 		score += 20
 		reasons = append(reasons, "same domain "+matchedDomain)
+	}
+	if matchedDomain != "" && section.Domain == matchedDomain && isDomainOverviewDocument(section.Path) {
+		score += 80
+		reasons = append(reasons, "matched domain overview")
 	}
 	if termHitCount(section.Path, terms) > 0 {
 		score += 30
@@ -452,7 +467,7 @@ type routingAliasEntry struct {
 func buildRoutingAliasIndex(bundle Bundle) map[string]routingAliasEntry {
 	index := map[string]routingAliasEntry{}
 	for _, doc := range bundle.Documents {
-		if !isDomainRoutingDocument(doc.Path) {
+		if !isDomainRoutingDocument(doc.Path) && !isDomainOverviewDocument(doc.Path) {
 			continue
 		}
 		domain := inferDomainFromPath(doc.Path)

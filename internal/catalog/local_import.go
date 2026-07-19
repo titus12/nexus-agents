@@ -43,8 +43,18 @@ func prepareImportedProject(name string, projectPath string) (string, string, er
 }
 
 func readUserProjectIndex() (UserProjectIndex, bool) {
-	data, err := os.ReadFile(userNexusPath())
-	if err != nil {
+	var data []byte
+	for _, candidate := range []string{userNexusPath(), legacyUserNexusPath()} {
+		stat, err := os.Stat(candidate)
+		if err != nil || stat.IsDir() {
+			continue
+		}
+		data, err = os.ReadFile(candidate)
+		if err == nil {
+			break
+		}
+	}
+	if len(data) == 0 {
 		return UserProjectIndex{}, false
 	}
 	var index UserProjectIndex
@@ -66,17 +76,51 @@ func writeUserProjectIndex(index UserProjectIndex) error {
 	}
 	if len(index.Projects) == 0 {
 		if err := os.Remove(userNexusPath()); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove user .nexus: %w", err)
+			return fmt.Errorf("remove user project index: %w", err)
 		}
+		_ = os.Remove(userNexusRoot())
 		return nil
 	}
 	data, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal user .nexus: %w", err)
+		return fmt.Errorf("marshal user project index: %w", err)
 	}
 	data = append(data, '\n')
+	if err := prepareUserNexusDirectory(); err != nil {
+		return err
+	}
 	if err := os.WriteFile(userNexusPath(), data, 0o644); err != nil {
-		return fmt.Errorf("write user .nexus: %w", err)
+		return fmt.Errorf("write user project index: %w", err)
+	}
+	return nil
+}
+
+func prepareUserNexusDirectory() error {
+	root := userNexusRoot()
+	stat, err := os.Stat(root)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return fmt.Errorf("create user .nexus directory: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat user .nexus path: %w", err)
+	}
+	if stat.IsDir() {
+		return nil
+	}
+
+	legacyPath := root + ".projects-legacy.json"
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale legacy project index: %w", err)
+	}
+	if err := os.Rename(root, legacyPath); err != nil {
+		return fmt.Errorf("preserve legacy user .nexus project index: %w", err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		_ = os.Rename(legacyPath, root)
+		return fmt.Errorf("create user .nexus directory: %w", err)
 	}
 	return nil
 }
@@ -164,6 +208,14 @@ func restoreProjectsFromUserIndex(library TemplateLibrary) ([]Project, map[strin
 }
 
 func userNexusPath() string {
+	return filepath.Join(userNexusRoot(), "projects.json")
+}
+
+func legacyUserNexusPath() string {
+	return userNexusRoot()
+}
+
+func userNexusRoot() string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		return ".nexus"
