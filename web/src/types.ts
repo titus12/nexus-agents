@@ -242,6 +242,18 @@ export type KnowledgeExportData = {
 export type ProjectInput = {
   name: string;
   path: string;
+  groupIds?: string[];
+};
+
+export type ProjectGroup = {
+  id: string;
+  name: string;
+  projectIds: string[];
+};
+
+export type ProjectGroupInput = {
+  name: string;
+  projectIds?: string[];
 };
 
 export type TemplateProjectType = "general" | "go" | "unity";
@@ -335,6 +347,7 @@ export type ProjectTemplateSyncResult = ProjectRescanResult & {
 export type BootstrapData = {
   templateLibrary: TemplateLibrary;
   projects: Project[];
+  projectGroups: ProjectGroup[];
   projectConfigSets: ProjectConfigSet;
 };
 
@@ -410,10 +423,10 @@ export type ModelRouteResolution = {
 };
 
 export type InfrastructureItem = {
-  id: "rtk" | "codegraph" | string;
+  id: "rtk" | "codegraph" | "openwiki" | "gbrain" | "repomix" | string;
   name: string;
-  kind: "token_proxy" | "code_context" | "context_pack" | string;
-  status: "ready" | "missing" | "unhealthy" | "unknown" | string;
+  kind: "token_proxy" | "code_context" | "knowledge_compiler" | "knowledge_graph" | "context_pack" | string;
+  status: "ready" | "missing" | "not_installed" | "unhealthy" | "unknown" | string;
   summary: string;
   description: string;
   githubUrl: string;
@@ -771,6 +784,35 @@ export type KnowledgeSyncProfile = {
     includeRelatedTests: boolean;
   };
   openWiki: { enabled: boolean; version: string };
+  knowledgeGraph: {
+    enabled: boolean;
+    provider: "gbrain" | string;
+    version: string;
+    brain: string;
+    sourceId: string;
+    engine: "pglite" | string;
+    transport: "stdio" | string;
+    sync: {
+      onProposalApplied: boolean;
+      committedChangesOnly: boolean;
+      retryMinutes: number;
+      maxRetries: number;
+    };
+    export: {
+      includeDomains: boolean;
+      includeFeatures: boolean;
+      includeCodeFacts: boolean;
+      includeExternalEvidence: boolean;
+    };
+    query: {
+      timeoutSeconds: number;
+      maxResults: number;
+      maxGraphDepth: number;
+      shadowEnabled: boolean;
+    };
+    synthesis: { enabled: boolean; automatic: boolean };
+    gaps: { enabled: boolean; createProposal: boolean };
+  };
   schedule: { enabled: boolean; intervalMinutes: number; committedChangesOnly: boolean };
   ownership: { owners: string[]; requireApproval: boolean };
 };
@@ -872,4 +914,136 @@ export type KnowledgeSyncResult = {
 export type KnowledgeSyncProfileResponse = {
   exists: boolean;
   profile: KnowledgeSyncProfile;
+};
+
+export type KnowledgeGraphSyncState = {
+  projectId: string;
+  projectRoot: string;
+  sourceId: string;
+  providerSourceId: string;
+  status: "disabled" | "uninitialized" | "pending" | "syncing" | "ready" | "degraded" | string;
+  branch?: string;
+  lastSyncedRevision?: string;
+  pendingRevision?: string;
+  lastSourceHash?: string;
+  documents: number;
+  documentHashes: Record<string, string>;
+  lastAttemptAt?: string;
+  lastSuccessfulAt?: string;
+  lastError?: string;
+};
+
+export type KnowledgeGraphSyncRun = {
+  id: string;
+  projectId: string;
+  sourceId: string;
+  providerSourceId: string;
+  status: string;
+  revision?: string;
+  sourceHash?: string;
+  documents: number;
+  created: number;
+  updated: number;
+  deleted: number;
+  unchanged: number;
+  attempt: number;
+  error?: string;
+  startedAt: string;
+  endedAt?: string;
+};
+
+export type KnowledgeGraphSyncResult = {
+  sourceId: string;
+  providerSourceId?: string;
+  documents: number;
+  created: number;
+  updated: number;
+  deleted: number;
+  unchanged: number;
+};
+
+export type KnowledgeGraphSyncResponse = {
+  result: KnowledgeGraphSyncResult;
+  state: KnowledgeGraphSyncState;
+};
+
+export type KnowledgeGraphSearchHit = {
+  id: string;
+  sourceId?: string;
+  path?: string;
+  title?: string;
+  snippet?: string;
+  score: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type KnowledgeGraphShadowBaseline = {
+  matchedProject: boolean;
+  matchedDomain?: string;
+  sourceIds?: string[];
+  paths: string[];
+  requiredPaths: string[];
+  scopedPaths?: string[];
+  scopedRequiredPaths?: string[];
+  missingPaths: string[];
+  latencyMs: number;
+  tokenCount: number;
+};
+
+export type KnowledgeGraphShadowRun = {
+  id: string;
+  projectId: string;
+  sourceId: string;
+  sourceIds?: string[];
+  providerSourceId: string;
+  scope?: "project" | "group" | "all" | string;
+  groupId?: string;
+  status: "running" | "ready" | "degraded" | string;
+  query: string;
+  normalizedQuery: string;
+  fts5: KnowledgeGraphShadowBaseline;
+  gbrain: {
+    matchedProject: boolean;
+    matchedDomain?: string;
+    paths: string[];
+    scopedPaths?: string[];
+    hits: KnowledgeGraphSearchHit[];
+    duplicatePaths: string[];
+    latencyMs: number;
+    timedOut: boolean;
+    processRestarts: number;
+    error?: string;
+  };
+  comparison: {
+    domainMatched: boolean;
+    pathOverlap: string[];
+    requiredMatchedPaths: string[];
+    missingExpectedPaths: string[];
+    duplicateDocuments: string[];
+    requiredDocumentPrecision: number;
+    expectedDocumentCoverage: number;
+  };
+  startedAt: string;
+  endedAt: string;
+};
+
+export type KnowledgeGraphShadowSummary = {
+  projectId: string;
+  runs: number;
+  succeeded: number;
+  degraded: number;
+  timeouts: number;
+  timeoutRate: number;
+  domainMatchRate: number;
+  averageRequiredPrecision: number;
+  averageExpectedCoverage: number;
+  duplicatePageRate: number;
+  fts5P95LatencyMs: number;
+  gbrainP95LatencyMs: number;
+  maxObservedRestartCount: number;
+};
+
+export type KnowledgeGraphShadowSearchResponse = {
+  retrieval: KnowledgeRetrievalResult;
+  shadow: KnowledgeGraphShadowRun;
 };

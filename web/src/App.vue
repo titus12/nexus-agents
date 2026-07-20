@@ -6,6 +6,7 @@ import {
   applyTemplateInitialization,
   applyKnowledgeProposal,
   checkKnowledgeUpdates,
+  searchKnowledgeGraph,
   createTemplate,
   createTaskRun,
   createProjectWorkflow,
@@ -58,6 +59,7 @@ import {
   syncProjectCopy,
   syncProjectTemplates,
   saveKnowledgeSyncProfile,
+  updateProjectGroups,
   updateTemplate,
   updateInfrastructure,
   updateWorkflow,
@@ -88,6 +90,7 @@ import type {
   KnowledgeMaintenanceReport,
   KnowledgeRenderedDocument,
   KnowledgeRetrievalResult,
+  KnowledgeGraphShadowRun,
   KnowledgeRenderNode,
   KnowledgeRenderTree,
   KnowledgeRoutePreview,
@@ -104,6 +107,7 @@ import type {
   Project,
   ProjectCopy,
   ProjectCopyKind,
+  ProjectGroup,
   ProjectInput,
   SyncStatus,
   TemplateInput,
@@ -277,6 +281,7 @@ const nativePickerTimeout = 2500;
 
 const templateLibrary = ref<TemplateLibrary>(emptyLibrary);
 const projects = ref<Project[]>([]);
+const projectGroups = ref<ProjectGroup[]>([]);
 const projectConfigSets = ref<Record<string, ProjectCopy[]>>({});
 const projectTemplateSyncing = ref(false);
 const workflows = ref<WorkflowSummary[]>([]);
@@ -312,7 +317,9 @@ const knowledgeExport = ref<KnowledgeExportData | null>(null);
 const knowledgeDocument = ref<KnowledgeRenderedDocument | null>(null);
 const knowledgeRoute = ref<KnowledgeRoutePreview | null>(null);
 const knowledgeRetrieval = ref<KnowledgeRetrievalResult | null>(null);
+const knowledgeShadowRun = ref<KnowledgeGraphShadowRun | null>(null);
 const knowledgeRouteTask = ref("");
+const knowledgeSearchEngine = ref<"gbrain" | "fts5">("gbrain");
 const selectedKnowledgePath = ref("");
 const knowledgeSearch = ref("");
 const activeKnowledgeView = ref<"docs" | "sync" | "check" | "routing" | "maintenance" | "source">("docs");
@@ -357,6 +364,8 @@ const importForm = ref<ProjectInput>({
   name: "",
   path: "",
 });
+const importGroupIds = ref<string[]>([]);
+const projectGroupMembershipIds = ref<string[]>([]);
 
 const templateInitializerForm = ref<{ targetPath: string; projectType: TemplateProjectType }>({
   targetPath: "",
@@ -384,6 +393,12 @@ const templateKindByPage: Partial<Record<Page, TemplateKind>> = {
 
 const currentProject = computed(() => {
   return projects.value.find((project) => project.id === selectedProjectId.value) ?? projects.value[0];
+});
+
+const currentProjectGroups = computed(() => {
+  const projectId = currentProject.value?.id;
+  if (!projectId) return [];
+  return projectGroups.value.filter((group) => group.projectIds.includes(projectId));
 });
 
 const currentProjectCopies = computed(() => {
@@ -1474,6 +1489,10 @@ function projectCopyCount(kind: ProjectCopyKind): number {
   return currentProjectCopies.value.filter((copy) => copy.kind === kind).length;
 }
 
+function groupsForProject(projectId: string): ProjectGroup[] {
+  return projectGroups.value.filter((group) => group.projectIds.includes(projectId));
+}
+
 function statusTone(status: string): string {
   if (status === "synced" || status === "ready" || status === "active") return "green";
   if (status === "template_updated") return "purple";
@@ -1518,8 +1537,14 @@ function openPage(page: Page) {
   }
 }
 
+function syncProjectGroupSelection(projectId: string) {
+  const groups = projectGroups.value.filter((group) => group.projectIds.includes(projectId));
+  projectGroupMembershipIds.value = groups.map((group) => group.id);
+}
+
 function openProject(projectId: string) {
   selectedProjectId.value = projectId;
+  syncProjectGroupSelection(projectId);
   activePage.value = "project-detail";
   drawerMode.value = null;
   workflowEditorMode.value = false;
@@ -1529,6 +1554,7 @@ function openProject(projectId: string) {
 
 async function openProjectResource(projectId: string, page: Page) {
   selectedProjectId.value = projectId;
+  syncProjectGroupSelection(projectId);
   activePage.value = page;
   drawerMode.value = null;
   workflowEditorMode.value = false;
@@ -1767,6 +1793,31 @@ async function previewKnowledgeRouteForCurrentProject() {
   knowledgeError.value = "";
   knowledgeRetrieval.value = await retrieveProjectKnowledge(currentProject.value.id, query, "routing", 6000);
   knowledgeRoute.value = await previewProjectKnowledgeRoute(currentProject.value.id, query);
+}
+
+async function searchKnowledgeForCurrentProject() {
+  if (!currentProject.value) return;
+  const query = knowledgeRouteTask.value.trim();
+  if (!query) {
+    knowledgeError.value = "Enter a task or keyword to find relevant knowledge.";
+    return;
+  }
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    const response = await searchKnowledgeGraph(
+      currentProject.value.id,
+      query,
+      [],
+    );
+    knowledgeShadowRun.value = response.shadow;
+    knowledgeRetrieval.value = knowledgeSearchEngine.value === "gbrain" ? null : response.retrieval;
+    knowledgeRoute.value = null;
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
 }
 
 async function copyText(text: string) {
@@ -2262,6 +2313,11 @@ function useBrowsedDirectory() {
   closeDirectoryBrowser();
 }
 
+function openImportProjectModal() {
+  importGroupIds.value = [];
+  showImportModal.value = true;
+}
+
 function closeDirectoryBrowser() {
   showDirectoryBrowser.value = false;
   directoryBrowserError.value = "";
@@ -2273,17 +2329,27 @@ function baseNameFromPath(path: string): string {
 }
 
 async function importProjectAction() {
-  const project = await importProject(importForm.value);
+  const project = await importProject({ ...importForm.value, groupIds: [...importGroupIds.value] });
   const rescanned = await rescanProject(project.id);
+  await refreshBootstrap();
   projects.value = upsertProject(projects.value, rescanned.project);
-  projectConfigSets.value = {
-    ...projectConfigSets.value,
-    [project.id]: rescanned.copies,
-  };
+  projectConfigSets.value = { ...projectConfigSets.value, [project.id]: rescanned.copies };
   selectedProjectId.value = project.id;
+  projectGroupMembershipIds.value = projectGroups.value.filter((group) => group.projectIds.includes(project.id)).map((group) => group.id);
   activePage.value = "project-detail";
   showImportModal.value = false;
+  importGroupIds.value = [];
   showToast(`已导入项目：${project.name}`);
+}
+
+async function saveCurrentProjectGroups() {
+  if (!currentProject.value) return;
+  const projectId = currentProject.value.id;
+  await updateProjectGroups(projectId, projectGroupMembershipIds.value);
+  await refreshBootstrap();
+  selectedProjectId.value = projectId;
+  projectGroupMembershipIds.value = currentProjectGroups.value.map((group) => group.id);
+  showToast("Project Groups updated.");
 }
 
 async function deleteProjectAction(project: Project) {
@@ -2801,8 +2867,12 @@ function errorMessage(err: unknown): string {
 function applyBootstrap(data: BootstrapData) {
   templateLibrary.value = data.templateLibrary ?? emptyLibrary;
   projects.value = data.projects ?? [];
+  projectGroups.value = data.projectGroups ?? [];
   projectConfigSets.value = data.projectConfigSets ?? {};
   selectedProjectId.value = projects.value[0]?.id ?? selectedProjectId.value;
+  if (selectedProjectId.value) {
+    syncProjectGroupSelection(selectedProjectId.value);
+  }
 }
 
 onMounted(loadData);
@@ -2901,7 +2971,7 @@ onMounted(loadData);
               <div class="page-description">统一导入和管理项目自己的 Agents、Rules、Skills、Workflows 配置副本，模板同步保持手动触发。</div>
               <div class="page-actions">
                 <button class="btn-secondary" type="button" @click="openTemplateInitializer">快速配置新项目</button>
-                <button class="btn-primary" type="button" @click="showImportModal = true">导入项目</button>
+                <button class="btn-primary" type="button" @click="openImportProjectModal">导入项目</button>
               </div>
             </div>
             <div class="stats-row">
@@ -2912,10 +2982,11 @@ onMounted(loadData);
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Project</th><th>Status</th><th>Agents</th><th>Rules</th><th>Skills</th><th>Updated</th><th></th></tr></thead>
+                <thead><tr><th>Project</th><th>Groups</th><th>Status</th><th>Agents</th><th>Rules</th><th>Skills</th><th>Updated</th><th></th></tr></thead>
                 <tbody>
                   <tr v-for="project in projects" :key="project.id">
                     <td><button class="link-btn" type="button" @click="openProject(project.id)">{{ project.name }}</button><div class="dim mono">{{ project.path }}</div></td>
+                    <td><div class="knowledge-terms"><span v-for="group in groupsForProject(project.id)" :key="group.id" class="chip chip-purple">{{ group.name }}</span><span v-if="groupsForProject(project.id).length === 0" class="muted">standalone</span></div></td>
                     <td><span class="chip" :class="`chip-${statusTone(project.status)}`">{{ project.status }}</span></td>
                     <td>{{ project.configSummary.agents }}</td>
                     <td>{{ project.configSummary.rules }}</td>
@@ -2982,6 +3053,20 @@ onMounted(loadData);
                 <div><span>repo key</span><strong class="mono">{{ currentProject.repoKey || '-' }}</strong></div>
                 <div><span>local config</span><strong class="mono">{{ currentProject.localConfigPath || '.nexus' }}</strong></div>
                 <div><span>git ignore</span><strong>{{ currentProject.localConfigIgnored ? 'ignored' : 'not ignored' }}</strong></div>
+              </div>
+              <div class="project-group-membership">
+                <div>
+                  <strong>项目组</strong>
+                  <p class="muted">项目组由 Nexus 统一维护；这里只选择已有项目组，不允许临时输入名称。项目知识仍然只索引一次。</p>
+                </div>
+                <div class="project-group-options">
+                  <label v-for="group in projectGroups" :key="group.id" class="project-group-option">
+                    <input v-model="projectGroupMembershipIds" type="checkbox" :value="group.id" />
+                    <span>{{ group.name }}</span>
+                  </label>
+                  <span v-if="projectGroups.length === 0" class="empty-inline">当前没有可用的项目组。</span>
+                </div>
+                <button class="btn-secondary" type="button" @click="saveCurrentProjectGroups">保存项目组</button>
               </div>
             </section>
             <div class="stats-row">
@@ -3214,12 +3299,54 @@ onMounted(loadData);
                     <div class="kiso-article-head">
                       <div>
                         <h2>Agent Knowledge Routing</h2>
-                        <p class="muted">Find focused KnowledgeBase sections for an agent task. Results use SQLite FTS5, OKF routing, snippets, and a token budget.</p>
+                        <p class="muted">Nexus 会根据当前项目自动使用所属项目组；未加入项目组时只检索当前项目。默认使用 GBrain。</p>
                       </div>
-                      <button class="btn-secondary" type="button" @click="previewKnowledgeRouteForCurrentProject">Find knowledge</button>
+                      <div class="knowledge-sync-actions">
+                        <select v-model="knowledgeSearchEngine" class="field-input knowledge-scope-select">
+                          <option value="gbrain">GBrain</option>
+                          <option value="fts5">SQLite FTS5</option>
+                        </select>
+                        <button class="btn-secondary" type="button" :disabled="knowledgeBusy" @click="searchKnowledgeForCurrentProject">Find knowledge</button>
+                      </div>
                     </div>
-                    <input v-model="knowledgeRouteTask" class="field-input" placeholder="例如：UI、弹窗、ViewModel、网络协议、玩法战斗" @keyup.enter="previewKnowledgeRouteForCurrentProject" />
-                    <div v-if="knowledgeRetrieval" class="knowledge-route-result">
+                    <input v-model="knowledgeRouteTask" class="field-input" placeholder="例如：公会成员加入流程在哪里？" @keyup.enter="searchKnowledgeForCurrentProject" />
+                    <section v-if="knowledgeShadowRun && knowledgeSearchEngine === 'gbrain'" class="knowledge-shadow-panel">
+                      <div class="knowledge-sync-section-head">
+                        <div>
+                          <h3>GBrain Results</h3>
+                          <p class="muted">从当前检索范围内的 GBrain Sources 返回语义检索结果。</p>
+                        </div>
+                        <span class="chip chip-purple">{{ knowledgeShadowRun.gbrain.hits.length }} results</span>
+                      </div>
+                      <div class="knowledge-terms">
+                        <span class="chip chip-teal">scope {{ knowledgeShadowRun.scope || "project" }}</span>
+                        <span v-if="knowledgeShadowRun.groupId" class="chip chip-blue">group {{ knowledgeShadowRun.groupId }}</span>
+                        <span v-if="knowledgeShadowRun.gbrain.timedOut" class="chip chip-red">timeout</span>
+                      </div>
+                      <div v-if="knowledgeShadowRun.gbrain.hits.length === 0" class="empty-inline">No GBrain results.</div>
+                      <div v-for="hit in knowledgeShadowRun.gbrain.hits" :key="`${hit.sourceId || ''}:${hit.id}`" class="knowledge-match-card compact">
+                        <div><strong>{{ hit.title || hit.path || hit.id }}</strong> <span class="muted">score {{ hit.score.toFixed(3) }}</span></div>
+                        <div class="knowledge-terms">
+                          <span v-if="hit.sourceId" class="chip chip-purple">{{ hit.sourceId }}</span>
+                          <span v-if="hit.path" class="chip chip-gray">{{ hit.path }}</span>
+                        </div>
+                        <p v-if="hit.snippet" class="knowledge-snippet">{{ hit.snippet }}</p>
+                      </div>
+                      <p v-if="knowledgeShadowRun.gbrain.error" class="issue-error">{{ knowledgeShadowRun.gbrain.error }}</p>
+                    </section>
+                    <section v-if="knowledgeShadowRun && knowledgeSearchEngine === 'fts5' && knowledgeShadowRun.scope !== 'project'" class="knowledge-shadow-panel">
+                      <div class="knowledge-sync-section-head">
+                        <div>
+                          <h3>SQLite FTS5 Results</h3>
+                          <p class="muted">跨项目范围内命中的文档路径；FTS5 仅作为迁移期回退。</p>
+                        </div>
+                        <span class="chip chip-gray">{{ knowledgeShadowRun.fts5.paths.length }} documents</span>
+                      </div>
+                      <div class="knowledge-terms">
+                        <span v-for="path in knowledgeShadowRun.fts5.scopedPaths || knowledgeShadowRun.fts5.paths" :key="path" class="chip chip-gray">{{ path }}</span>
+                      </div>
+                    </section>
+                    <div v-if="knowledgeRetrieval && knowledgeSearchEngine !== 'gbrain'" class="knowledge-route-result">
                       <div class="kiso-route-grid">
                         <div class="route-metric">
                           <div class="route-metric-label">Matched domain</div>
@@ -3689,7 +3816,7 @@ onMounted(loadData);
           </section>
 
           <section v-else-if="activePage === 'infrastructure'" class="page active">
-            <div class="page-description">Global AI infrastructure used by Nexus Agents to reduce shell-output tokens and improve code-context retrieval. These items are host-level services, not project templates.</div>
+            <div class="page-description">Global AI infrastructure used by Nexus Agents to reduce shell-output tokens, improve code-context retrieval, and maintain the local GBrain knowledge graph. These items are host-level services, not project templates.</div>
             <div class="page-actions infrastructure-actions">
               <button class="btn-primary" type="button" @click="openInfrastructureCatalog">新增基建</button>
             </div>
@@ -3844,6 +3971,15 @@ requires_openai_auth = true</pre>
               <button class="btn-secondary" type="button" @click="chooseProjectDirectory()">选择目录</button>
             </div>
           </label>
+          <div class="project-group-picker">
+            <div class="field-label">项目组 <span class="muted">可选；只能选择 Nexus 中已经维护的项目组</span></div>
+            <label v-for="group in projectGroups" :key="group.id" class="project-group-option">
+              <input v-model="importGroupIds" type="checkbox" :value="group.id" />
+              <span>{{ group.name }}</span>
+              <small>{{ group.projectIds.length }} 个项目</small>
+            </label>
+            <span v-if="projectGroups.length === 0" class="empty-inline">当前没有可选择的项目组，项目将按独立项目导入。</span>
+          </div>
           <div class="scan-preview">
             <span class="chip chip-green">.claude</span>
             <span class="chip chip-green">.codex</span>

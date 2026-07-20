@@ -11,6 +11,12 @@ import type {
   InfrastructureItem,
   KnowledgeExportData,
   KnowledgeExportManifest,
+  KnowledgeGraphSyncResponse,
+  KnowledgeGraphSyncRun,
+  KnowledgeGraphSyncState,
+  KnowledgeGraphShadowRun,
+  KnowledgeGraphShadowSearchResponse,
+  KnowledgeGraphShadowSummary,
   KnowledgeMaintenanceReport,
   KnowledgeRenderedDocument,
   KnowledgeRetrievalResult,
@@ -34,6 +40,8 @@ import type {
   Project,
   ProjectCopy,
   ProjectCopyKind,
+  ProjectGroup,
+  ProjectGroupInput,
   ProjectInput,
   ProjectRescanResult,
   ProjectTemplateSyncResult,
@@ -262,6 +270,45 @@ export function fetchKnowledgeSyncRuns(projectId: string): Promise<KnowledgeSync
   return fetchJSON<KnowledgeSyncRun[]>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/runs`);
 }
 
+export function fetchKnowledgeGraphStatus(projectId: string): Promise<KnowledgeGraphSyncState> {
+  return fetchJSON<KnowledgeGraphSyncState>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/status`);
+}
+
+export function fetchKnowledgeGraphRuns(projectId: string): Promise<KnowledgeGraphSyncRun[]> {
+  return fetchJSON<KnowledgeGraphSyncRun[]>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/runs`);
+}
+
+export function syncKnowledgeGraph(projectId: string): Promise<KnowledgeGraphSyncResponse> {
+  return fetchJSON<KnowledgeGraphSyncResponse>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/sync`, {
+    method: "POST",
+  });
+}
+
+export function rebuildKnowledgeGraph(projectId: string): Promise<KnowledgeGraphSyncResponse> {
+  return fetchJSON<KnowledgeGraphSyncResponse>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/rebuild`, {
+    method: "POST",
+  });
+}
+
+export function searchKnowledgeGraph(
+  projectId: string,
+  query: string,
+  expectedPaths: string[] = [],
+): Promise<KnowledgeGraphShadowSearchResponse> {
+  return fetchJSON<KnowledgeGraphShadowSearchResponse>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/shadow-search`, {
+    method: "POST",
+    body: JSON.stringify({ query, mode: "routing", maxTokens: 6000, expectedPaths }),
+  });
+}
+
+export function fetchKnowledgeGraphShadowRuns(projectId: string, limit = 50): Promise<KnowledgeGraphShadowRun[]> {
+  return fetchJSON<KnowledgeGraphShadowRun[]>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/shadow-runs?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export function fetchKnowledgeGraphShadowSummary(projectId: string): Promise<KnowledgeGraphShadowSummary> {
+  return fetchJSON<KnowledgeGraphShadowSummary>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/shadow-summary`);
+}
+
 export function fetchKnowledgeProposals(projectId: string): Promise<KnowledgeProposal[]> {
   return fetchJSON<KnowledgeProposal[]>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/proposals`);
 }
@@ -307,6 +354,37 @@ export function importProject(input: ProjectInput): Promise<Project> {
   return fetchJSON<Project>("/api/projects/import", {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+export function fetchProjectGroups(): Promise<ProjectGroup[]> {
+  return fetchJSON<ProjectGroup[]>("/api/project-groups");
+}
+
+export function createProjectGroup(input: ProjectGroupInput): Promise<ProjectGroup> {
+  return fetchJSON<ProjectGroup>("/api/project-groups", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateProjectGroup(groupId: string, input: ProjectGroupInput): Promise<ProjectGroup> {
+  return fetchJSON<ProjectGroup>(`/api/project-groups/${encodeURIComponent(groupId)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteProjectGroup(groupId: string): Promise<void> {
+  await fetchJSON<void>(`/api/project-groups/${encodeURIComponent(groupId)}`, {
+    method: "DELETE",
+  });
+}
+
+export function updateProjectGroups(projectId: string, groupIds: string[]): Promise<ProjectGroup[]> {
+  return fetchJSON<ProjectGroup[]>(`/api/projects/${encodeURIComponent(projectId)}/groups`, {
+    method: "PUT",
+    body: JSON.stringify({ groupIds }),
   });
 }
 

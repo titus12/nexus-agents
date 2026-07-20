@@ -113,3 +113,34 @@ func TestProposalRejectsInvalidOrExplicitlyEmptySelection(t *testing.T) {
 		t.Fatal("explicitly empty selection should not apply all files")
 	}
 }
+
+func TestProposalApplyRollsBackEarlierWritesWhenLaterChangeFails(t *testing.T) {
+	projectRoot := initTestRepository(t)
+	target := "KnowledgeBase/project/domains/runtime/index.md"
+	writeRepoFile(t, projectRoot, target, "before\n")
+	runGit(t, projectRoot, "add", ".")
+	runGit(t, projectRoot, "commit", "-m", "knowledge baseline")
+	gitState, err := ReadGitState(context.Background(), ExecGitRunner{}, projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := KnowledgeProposal{
+		ID: "rollback-test", ProjectID: "project", ProjectRoot: projectRoot,
+		Branch: gitState.Branch, TargetRevision: gitState.Head, Status: ProposalPending,
+		Validation: ProposalValidation{Valid: true, Errors: []string{}, Warnings: []string{}},
+		Changes: []ProposalChange{
+			{Path: target, Action: "update", Before: "before\n", After: "after\n", Selected: true},
+			{Path: "KnowledgeBase/project/domains/runtime/fail.md", Action: "unsupported", After: "fail\n", Selected: true},
+		},
+	}
+	if _, err := ApplyProposal(context.Background(), ExecGitRunner{}, NewStateStore(t.TempDir()), projectRoot, proposal, ApplyProposalInput{}); err == nil {
+		t.Fatal("expected unsupported later change to fail")
+	}
+	data, err := os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(target)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "before\n" {
+		t.Fatalf("earlier write was not rolled back: %q", data)
+	}
+}

@@ -451,6 +451,35 @@ func expandQueryTerms(query string) []string {
 	for _, part := range strings.FieldsFunc(lower, splitter) {
 		add(part)
 	}
+	deterministicExpansions := []struct {
+		Needle string
+		Terms  []string
+	}{
+		{Needle: "模型路由", Terms: []string{"model", "routing", "model-routing"}},
+		{Needle: "知识库", Terms: []string{"knowledgebase", "knowledge base"}},
+		{Needle: "扫描", Terms: []string{"scan", "scanning"}},
+		{Needle: "仓库", Terms: []string{"repository"}},
+		{Needle: "检索", Terms: []string{"search", "retrieval"}},
+		{Needle: "上下文", Terms: []string{"context"}},
+		{Needle: "加载", Terms: []string{"loading"}},
+		{Needle: "模板", Terms: []string{"template"}},
+		{Needle: "初始化", Terms: []string{"initialization"}},
+		{Needle: "同步", Terms: []string{"sync", "synchronization"}},
+		{Needle: "工作流", Terms: []string{"workflow"}},
+		{Needle: "评估", Terms: []string{"evaluation"}},
+		{Needle: "依赖", Terms: []string{"dependency"}},
+		{Needle: "功能", Terms: []string{"feature"}},
+		{Needle: "入口", Terms: []string{"entrypoint", "api"}},
+		{Needle: "session-id", Terms: []string{"model routing", "session telemetry"}},
+		{Needle: "session id", Terms: []string{"model routing", "session telemetry"}},
+	}
+	for _, expansion := range deterministicExpansions {
+		if strings.Contains(lower, expansion.Needle) {
+			for _, term := range expansion.Terms {
+				add(term)
+			}
+		}
+	}
 	if len(terms) == 0 && lower != "" {
 		add(lower)
 	}
@@ -534,6 +563,23 @@ func inferDomainFromRoutingAliases(terms []string, aliasIndex map[string]routing
 		normalized := normalizeAlias(term)
 		if entry, ok := aliasIndex[normalized]; ok {
 			return entry.Domain, MatchedAlias{Alias: entry.Alias, PairedAlias: entry.PairedAlias, Domain: entry.Domain, Source: entry.Source}
+		}
+	}
+	for _, term := range terms {
+		normalized := normalizeAlias(term)
+		bestAlias := ""
+		var bestEntry routingAliasEntry
+		for alias, entry := range aliasIndex {
+			if alias != "" && strings.Contains(normalized, alias) && len(alias) > len(bestAlias) {
+				bestAlias = alias
+				bestEntry = entry
+			}
+		}
+		if bestAlias != "" {
+			return bestEntry.Domain, MatchedAlias{
+				Alias: bestEntry.Alias, PairedAlias: bestEntry.PairedAlias,
+				Domain: bestEntry.Domain, Source: bestEntry.Source,
+			}
 		}
 	}
 	for alias, entry := range aliasIndex {

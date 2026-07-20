@@ -15,31 +15,34 @@ import (
 	"time"
 
 	"nexus-agents/internal/knowledgebase"
+	"nexus-agents/internal/knowledgegraph"
 	"nexus-agents/internal/wikicompiler"
 )
 
 var ErrProjectSyncBusy = errors.New("knowledge synchronization is already running for this project")
 
 type ServiceOptions struct {
-	Store      *StateStore
-	Git        GitRunner
-	Compiler   wikicompiler.Provider
-	Discovery  DiscoveryClient
-	CodeGraph  CodeGraphClient
-	External   ExternalSourceClient
-	ExportRoot func(projectID string) string
+	Store          *StateStore
+	Git            GitRunner
+	Compiler       wikicompiler.Provider
+	Discovery      DiscoveryClient
+	CodeGraph      CodeGraphClient
+	External       ExternalSourceClient
+	ExportRoot     func(projectID string) string
+	KnowledgeGraph knowledgegraph.SyncCoordinator
 }
 
 type Service struct {
-	store      *StateStore
-	git        GitRunner
-	compiler   wikicompiler.Provider
-	discovery  DiscoveryClient
-	codeGraph  CodeGraphClient
-	external   ExternalSourceClient
-	exportRoot func(projectID string) string
-	mu         sync.Mutex
-	running    map[string]bool
+	store          *StateStore
+	git            GitRunner
+	compiler       wikicompiler.Provider
+	discovery      DiscoveryClient
+	codeGraph      CodeGraphClient
+	external       ExternalSourceClient
+	exportRoot     func(projectID string) string
+	knowledgeGraph knowledgegraph.SyncCoordinator
+	mu             sync.Mutex
+	running        map[string]bool
 }
 
 type ProjectRequest struct {
@@ -82,7 +85,7 @@ func NewService(options ServiceOptions) *Service {
 	return &Service{
 		store: options.Store, git: options.Git, compiler: options.Compiler,
 		discovery: options.Discovery, codeGraph: options.CodeGraph, external: options.External,
-		exportRoot: options.ExportRoot, running: map[string]bool{},
+		exportRoot: options.ExportRoot, knowledgeGraph: options.KnowledgeGraph, running: map[string]bool{},
 	}
 }
 
@@ -173,6 +176,7 @@ func (s *Service) AdoptExisting(ctx context.Context, request ProjectRequest) (Sy
 		return SyncResult{}, err
 	}
 	_ = s.export(request.ProjectID, request.ProjectRoot)
+	s.queueKnowledgeGraph(profile, request, gitState.Branch, gitState.Head)
 	return SyncResult{State: state, Run: run, Message: "Existing knowledge base adopted without file changes."}, nil
 }
 
@@ -430,6 +434,7 @@ func (s *Service) CheckUpdates(ctx context.Context, request ProjectRequest) (Syn
 		run.MessageFallback()
 		_ = s.store.SaveRun(run)
 		_ = s.store.SaveState(state)
+		s.queueKnowledgeGraphFromProject(request, gitState.Branch, gitState.Head)
 		return SyncResult{State: state, Run: run, Message: "Only approved KB files changed; validation and export were refreshed without OpenWiki."}, nil
 	case ChangeTestsOnly, ChangeGenerated:
 		state.LastProcessedCommit = gitState.Head
@@ -500,7 +505,315 @@ func (s *Service) ApplyProposal(ctx context.Context, request ProjectRequest, pro
 	}
 	_ = s.store.SaveRun(run)
 	log.Printf("[knowledge-sync] apply project=%s proposal=%s status=succeeded duration_ms=%d applied_paths=%d validation_warnings=%d", request.ProjectID, proposalID, time.Since(started).Milliseconds(), selectedProposalChangeCount(applied.Changes), len(run.Warnings))
+	s.queueKnowledgeGraphFromProject(request, applied.Branch, applied.TargetRevision)
 	return SyncResult{State: state, Run: run, Proposal: &applied, Message: "Selected knowledge files were applied locally; review and commit them through the normal project PR flow."}, nil
+}
+
+func (s *Service) KnowledgeGraphStatus(projectID string) (knowledgegraph.SyncState, error) {
+	if s.knowledgeGraph == nil {
+		return knowledgegraph.SyncState{
+			ProjectID: projectID, Status: knowledgegraph.SyncStatusDisabled,
+			DocumentHashes: map[string]string{},
+		}, nil
+	}
+	return s.knowledgeGraph.State(projectID)
+}
+
+func (s *Service) KnowledgeGraphRuns(projectID string) ([]knowledgegraph.SyncRun, error) {
+	if s.knowledgeGraph == nil {
+		return []knowledgegraph.SyncRun{}, nil
+	}
+	return s.knowledgeGraph.Runs(projectID)
+}
+
+func (s *Service) QueueKnowledgeGraphShadowSearch(request ProjectRequest, retrieval knowledgebase.RetrievalResult, latency time.Duration) error {
+	coordinator, profile, err := s.shadowSearchCoordinator(request)
+	if err != nil {
+		return err
+	}
+	return coordinator.QueueShadowSearch(shadowSearchRequest(profile, request, retrieval, latency, nil))
+}
+
+func (s *Service) CompareKnowledgeGraphSearch(ctx context.Context, request ProjectRequest, retrieval knowledgebase.RetrievalResult, latency time.Duration, expectedPaths []string) (knowledgegraph.ShadowSearchRun, error) {
+	return s.CompareKnowledgeGraphSearchScoped(ctx, request, []ScopedKnowledgeRetrieval{{
+		ProjectRequest: request, Retrieval: retrieval, Latency: latency,
+	}}, "project", "", expectedPaths)
+}
+
+type ScopedKnowledgeRetrieval struct {
+	ProjectRequest
+	Retrieval knowledgebase.RetrievalResult
+	Latency   time.Duration
+}
+
+func (s *Service) CompareKnowledgeGraphSearchScoped(
+	ctx context.Context,
+	primary ProjectRequest,
+	retrievals []ScopedKnowledgeRetrieval,
+	scope string,
+	groupID string,
+	expectedPaths []string,
+) (knowledgegraph.ShadowSearchRun, error) {
+	coordinator, primaryProfile, err := s.shadowSearchCoordinator(primary)
+	if err != nil {
+		return knowledgegraph.ShadowSearchRun{}, err
+	}
+	request, err := scopedShadowSearchRequest(primaryProfile, primary, retrievals, scope, groupID, expectedPaths)
+	if err != nil {
+		return knowledgegraph.ShadowSearchRun{}, err
+	}
+	return coordinator.ShadowSearchNow(ctx, request)
+}
+
+func (s *Service) KnowledgeGraphShadowRuns(projectID string, limit int) ([]knowledgegraph.ShadowSearchRun, error) {
+	coordinator, ok := s.knowledgeGraph.(knowledgegraph.ShadowSearchCoordinator)
+	if !ok {
+		return []knowledgegraph.ShadowSearchRun{}, nil
+	}
+	return coordinator.ShadowSearchRuns(projectID, limit)
+}
+
+func (s *Service) KnowledgeGraphShadowSummary(projectID string) (knowledgegraph.ShadowSearchSummary, error) {
+	coordinator, ok := s.knowledgeGraph.(knowledgegraph.ShadowSearchCoordinator)
+	if !ok {
+		return knowledgegraph.ShadowSearchSummary{ProjectID: projectID}, nil
+	}
+	return coordinator.ShadowSearchSummary(projectID)
+}
+
+func (s *Service) shadowSearchCoordinator(request ProjectRequest) (knowledgegraph.ShadowSearchCoordinator, Profile, error) {
+	if err := validateProjectRequest(request); err != nil {
+		return nil, Profile{}, err
+	}
+	coordinator, ok := s.knowledgeGraph.(knowledgegraph.ShadowSearchCoordinator)
+	if !ok {
+		return nil, Profile{}, knowledgegraph.ErrProviderDisabled
+	}
+	profile, err := LoadProfile(request.ProjectRoot)
+	if err != nil {
+		return nil, Profile{}, err
+	}
+	if !profile.KnowledgeGraph.Enabled || !profile.KnowledgeGraph.Query.ShadowEnabled {
+		return nil, Profile{}, knowledgegraph.ErrProviderDisabled
+	}
+	return coordinator, profile, nil
+}
+
+func shadowSearchRequest(profile Profile, request ProjectRequest, retrieval knowledgebase.RetrievalResult, latency time.Duration, expectedPaths []string) knowledgegraph.ShadowSearchRequest {
+	sourceID := graphSourceID(profile, request.ProjectID)
+	paths := make([]string, 0, len(retrieval.Required)+len(retrieval.Optional)+len(retrieval.Related))
+	required := make([]string, 0, len(retrieval.Required))
+	for _, item := range retrieval.Required {
+		paths = append(paths, item.Path)
+		required = append(required, item.Path)
+	}
+	for _, item := range retrieval.Optional {
+		paths = append(paths, item.Path)
+	}
+	for _, item := range retrieval.Related {
+		paths = append(paths, item.Path)
+	}
+	return knowledgegraph.ShadowSearchRequest{
+		ProjectID: request.ProjectID, ProjectRoot: request.ProjectRoot, SourceID: sourceID,
+		SourceIDs: []string{sourceID}, Scope: "project",
+		Query: retrieval.Query, SearchQuery: normalizedGraphSearchQuery(retrieval),
+		Limit:         profile.KnowledgeGraph.Query.MaxResults,
+		Timeout:       time.Duration(profile.KnowledgeGraph.Query.TimeoutSeconds) * time.Second,
+		ExpectedPaths: expectedPaths,
+		FTS5: knowledgegraph.ShadowSearchBaseline{
+			MatchedProject: len(paths) > 0, MatchedDomain: retrieval.MatchedDomain,
+			SourceIDs: []string{sourceID},
+			Paths:     paths, RequiredPaths: required, MissingPaths: retrieval.MissingFiles,
+			LatencyMS: latency.Milliseconds(), TokenCount: retrieval.TokenBudget.UsedTokens,
+		},
+	}
+}
+
+func scopedShadowSearchRequest(
+	primaryProfile Profile,
+	primary ProjectRequest,
+	retrievals []ScopedKnowledgeRetrieval,
+	scope string,
+	groupID string,
+	expectedPaths []string,
+) (knowledgegraph.ShadowSearchRequest, error) {
+	if len(retrievals) == 0 {
+		return knowledgegraph.ShadowSearchRequest{}, fmt.Errorf("shadow search scope has no projects")
+	}
+	var primaryRetrieval knowledgebase.RetrievalResult
+	sourceIDs := make([]string, 0, len(retrievals))
+	paths := make([]string, 0)
+	required := make([]string, 0)
+	scopedPaths := make([]string, 0)
+	scopedRequired := make([]string, 0)
+	missing := make([]string, 0)
+	var totalLatency time.Duration
+	totalTokens := 0
+	for _, item := range retrievals {
+		profile, err := LoadProfile(item.ProjectRoot)
+		if err != nil {
+			if errors.Is(err, ErrProfileNotFound) {
+				continue
+			}
+			return knowledgegraph.ShadowSearchRequest{}, err
+		}
+		if !profile.KnowledgeGraph.Enabled || !profile.KnowledgeGraph.Query.ShadowEnabled {
+			continue
+		}
+		sourceID := graphSourceID(profile, item.ProjectID)
+		sourceIDs = append(sourceIDs, sourceID)
+		if item.ProjectID == primary.ProjectID {
+			primaryRetrieval = item.Retrieval
+		}
+		for _, contextItem := range item.Retrieval.Required {
+			paths = append(paths, contextItem.Path)
+			required = append(required, contextItem.Path)
+			scopedPaths = append(scopedPaths, sourceID+"::"+contextItem.Path)
+			scopedRequired = append(scopedRequired, sourceID+"::"+contextItem.Path)
+		}
+		for _, contextItem := range item.Retrieval.Optional {
+			paths = append(paths, contextItem.Path)
+			scopedPaths = append(scopedPaths, sourceID+"::"+contextItem.Path)
+		}
+		for _, contextItem := range item.Retrieval.Related {
+			paths = append(paths, contextItem.Path)
+			scopedPaths = append(scopedPaths, sourceID+"::"+contextItem.Path)
+		}
+		for _, missingPath := range item.Retrieval.MissingFiles {
+			missing = append(missing, sourceID+"::"+missingPath)
+		}
+		totalLatency += item.Latency
+		totalTokens += item.Retrieval.TokenBudget.UsedTokens
+	}
+	sourceIDs = uniqueSorted(sourceIDs)
+	if len(sourceIDs) == 0 {
+		return knowledgegraph.ShadowSearchRequest{}, fmt.Errorf("shadow search scope has no knowledge graph sources")
+	}
+	if strings.TrimSpace(primaryRetrieval.Query) == "" {
+		primaryRetrieval = retrievals[0].Retrieval
+	}
+	primarySourceID := graphSourceID(primaryProfile, primary.ProjectID)
+	return knowledgegraph.ShadowSearchRequest{
+		ProjectID: primary.ProjectID, ProjectRoot: primary.ProjectRoot,
+		SourceID: primarySourceID, SourceIDs: sourceIDs,
+		Scope: strings.ToLower(strings.TrimSpace(scope)), GroupID: strings.TrimSpace(groupID),
+		Query: primaryRetrieval.Query, SearchQuery: normalizedGraphSearchQuery(primaryRetrieval),
+		Limit:         primaryProfile.KnowledgeGraph.Query.MaxResults,
+		Timeout:       time.Duration(primaryProfile.KnowledgeGraph.Query.TimeoutSeconds) * time.Second,
+		ExpectedPaths: expectedPaths,
+		FTS5: knowledgegraph.ShadowSearchBaseline{
+			MatchedProject: len(scopedPaths) > 0, MatchedDomain: primaryRetrieval.MatchedDomain,
+			SourceIDs: sourceIDs,
+			Paths:     paths, RequiredPaths: required,
+			ScopedPaths: scopedPaths, ScopedRequiredPaths: scopedRequired,
+			MissingPaths: missing, LatencyMS: totalLatency.Milliseconds(), TokenCount: totalTokens,
+		},
+	}, nil
+}
+
+func graphSourceID(profile Profile, projectID string) string {
+	sourceID := strings.TrimSpace(profile.KnowledgeGraph.SourceID)
+	if sourceID == "" || sourceID == "project:auto" {
+		sourceID = "project:" + projectID
+	}
+	return sourceID
+}
+
+func normalizedGraphSearchQuery(retrieval knowledgebase.RetrievalResult) string {
+	if value := strings.TrimSpace(retrieval.QueryRewrite.EnglishQuery); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(retrieval.MatchedAlias.PairedAlias); value != "" && isASCIIQuery(value) {
+		return value
+	}
+	if value := strings.TrimSpace(retrieval.MatchedDomain); value != "" {
+		return strings.ReplaceAll(value, "-", " ")
+	}
+	values := make([]string, 0, 6)
+	seen := map[string]bool{}
+	for _, term := range append(append([]string(nil), retrieval.QueryRewrite.Keywords...), retrieval.Terms...) {
+		term = strings.TrimSpace(term)
+		if term == "" || !isASCIIQuery(term) || seen[strings.ToLower(term)] {
+			continue
+		}
+		seen[strings.ToLower(term)] = true
+		values = append(values, term)
+		if len(values) == 6 {
+			break
+		}
+	}
+	if len(values) > 0 {
+		return strings.Join(values, " ")
+	}
+	return retrieval.Query
+}
+
+func isASCIIQuery(value string) bool {
+	for _, char := range value {
+		if char > 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) SyncKnowledgeGraph(ctx context.Context, request ProjectRequest, force bool) (knowledgegraph.GraphSyncResult, error) {
+	if s.knowledgeGraph == nil {
+		return knowledgegraph.GraphSyncResult{}, knowledgegraph.ErrProviderDisabled
+	}
+	if err := validateProjectRequest(request); err != nil {
+		return knowledgegraph.GraphSyncResult{}, err
+	}
+	profile, err := LoadProfile(request.ProjectRoot)
+	if err != nil {
+		return knowledgegraph.GraphSyncResult{}, err
+	}
+	if !profile.KnowledgeGraph.Enabled {
+		return knowledgegraph.GraphSyncResult{}, knowledgegraph.ErrProviderDisabled
+	}
+	gitState, err := ReadGitState(ctx, s.git, request.ProjectRoot)
+	if err != nil {
+		return knowledgegraph.GraphSyncResult{}, err
+	}
+	return s.knowledgeGraph.SyncNow(ctx, graphSyncRequest(profile, request, gitState.Branch, gitState.Head, force))
+}
+
+func (s *Service) queueKnowledgeGraphFromProject(request ProjectRequest, branch, revision string) {
+	profile, err := LoadProfile(request.ProjectRoot)
+	if err != nil {
+		log.Printf("[knowledge-graph] queue project=%s status=skipped error=%q", request.ProjectID, boundedText(err.Error(), 500))
+		return
+	}
+	s.queueKnowledgeGraph(profile, request, branch, revision)
+}
+
+func (s *Service) queueKnowledgeGraph(profile Profile, request ProjectRequest, branch, revision string) {
+	if s.knowledgeGraph == nil || !profile.KnowledgeGraph.Enabled || !profile.KnowledgeGraph.Sync.OnProposalApplied {
+		return
+	}
+	graphRequest := graphSyncRequest(profile, request, branch, revision, false)
+	if err := s.knowledgeGraph.QueueSync(graphRequest); err != nil {
+		log.Printf("[knowledge-graph] queue project=%s source=%s status=failed error=%q",
+			request.ProjectID, graphRequest.SourceID, boundedText(err.Error(), 500))
+		return
+	}
+	log.Printf("[knowledge-graph] queue project=%s source=%s status=pending revision=%s",
+		request.ProjectID, graphRequest.SourceID, revision)
+}
+
+func graphSyncRequest(profile Profile, request ProjectRequest, branch, revision string, force bool) knowledgegraph.SyncRequest {
+	sourceID := strings.TrimSpace(profile.KnowledgeGraph.SourceID)
+	if sourceID == "" || sourceID == "project:auto" {
+		sourceID = "project:" + request.ProjectID
+	}
+	return knowledgegraph.SyncRequest{
+		ProjectID: request.ProjectID, ProjectRoot: request.ProjectRoot,
+		SourceID: sourceID, Branch: branch, Revision: revision, Force: force,
+		RetryDelay:      time.Duration(profile.KnowledgeGraph.Sync.RetryMinutes) * time.Minute,
+		MaxRetries:      profile.KnowledgeGraph.Sync.MaxRetries,
+		IncludeDomains:  profile.KnowledgeGraph.Export.IncludeDomains,
+		IncludeFeatures: profile.KnowledgeGraph.Export.IncludeFeatures,
+	}
 }
 
 func (s *Service) RejectProposal(request ProjectRequest, proposalID string) (SyncResult, error) {

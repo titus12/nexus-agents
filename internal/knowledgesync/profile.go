@@ -13,28 +13,33 @@ import (
 	"sort"
 	"strings"
 
+	"nexus-agents/internal/knowledgegraph/gbrain"
+
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	ProfileVersion        = 1
-	ProfileRelativePath   = "KnowledgeBase/Setting.yaml"
-	DefaultKnowledgeRoot  = "KnowledgeBase/project"
-	TestedOpenWikiVersion = "0.2.0"
+	ProfileVersion               = 1
+	ProfileRelativePath          = "KnowledgeBase/Setting.yaml"
+	DefaultKnowledgeRoot         = "KnowledgeBase/project"
+	TestedOpenWikiVersion        = "0.2.0"
+	TestedKnowledgeGraphProvider = "gbrain"
+	TestedGBrainVersion          = gbrain.TestedVersion
 )
 
 var ErrProfileNotFound = errors.New("knowledge sync profile not found")
 
 type Profile struct {
-	Version      int                 `json:"version" yaml:"version"`
-	Knowledge    KnowledgeSettings   `json:"knowledge" yaml:"knowledge"`
-	Discovery    DiscoverySettings   `json:"discovery" yaml:"discovery"`
-	Scan         ScanSettings        `json:"scan" yaml:"scan"`
-	Instructions InstructionSettings `json:"instructions" yaml:"instructions"`
-	CodeGraph    CodeGraphSettings   `json:"codeGraph" yaml:"codeGraph"`
-	OpenWiki     OpenWikiSettings    `json:"openWiki" yaml:"openWiki"`
-	Schedule     ScheduleSettings    `json:"schedule" yaml:"schedule"`
-	Ownership    OwnershipSettings   `json:"ownership" yaml:"ownership"`
+	Version        int                    `json:"version" yaml:"version"`
+	Knowledge      KnowledgeSettings      `json:"knowledge" yaml:"knowledge"`
+	Discovery      DiscoverySettings      `json:"discovery" yaml:"discovery"`
+	Scan           ScanSettings           `json:"scan" yaml:"scan"`
+	Instructions   InstructionSettings    `json:"instructions" yaml:"instructions"`
+	CodeGraph      CodeGraphSettings      `json:"codeGraph" yaml:"codeGraph"`
+	OpenWiki       OpenWikiSettings       `json:"openWiki" yaml:"openWiki"`
+	KnowledgeGraph KnowledgeGraphSettings `json:"knowledgeGraph" yaml:"knowledgeGraph"`
+	Schedule       ScheduleSettings       `json:"schedule" yaml:"schedule"`
+	Ownership      OwnershipSettings      `json:"ownership" yaml:"ownership"`
 }
 
 type KnowledgeSettings struct {
@@ -91,6 +96,52 @@ type OpenWikiSettings struct {
 	Version string `json:"version" yaml:"version"`
 }
 
+type KnowledgeGraphSettings struct {
+	Enabled   bool                            `json:"enabled" yaml:"enabled"`
+	Provider  string                          `json:"provider" yaml:"provider"`
+	Version   string                          `json:"version" yaml:"version"`
+	Brain     string                          `json:"brain" yaml:"brain"`
+	SourceID  string                          `json:"sourceId" yaml:"sourceId"`
+	Engine    string                          `json:"engine" yaml:"engine"`
+	Transport string                          `json:"transport" yaml:"transport"`
+	Sync      KnowledgeGraphSyncSettings      `json:"sync" yaml:"sync"`
+	Export    KnowledgeGraphExportSettings    `json:"export" yaml:"export"`
+	Query     KnowledgeGraphQuerySettings     `json:"query" yaml:"query"`
+	Synthesis KnowledgeGraphSynthesisSettings `json:"synthesis" yaml:"synthesis"`
+	Gaps      KnowledgeGraphGapSettings       `json:"gaps" yaml:"gaps"`
+}
+
+type KnowledgeGraphSyncSettings struct {
+	OnProposalApplied    bool `json:"onProposalApplied" yaml:"onProposalApplied"`
+	CommittedChangesOnly bool `json:"committedChangesOnly" yaml:"committedChangesOnly"`
+	RetryMinutes         int  `json:"retryMinutes" yaml:"retryMinutes"`
+	MaxRetries           int  `json:"maxRetries" yaml:"maxRetries"`
+}
+
+type KnowledgeGraphExportSettings struct {
+	IncludeDomains          bool `json:"includeDomains" yaml:"includeDomains"`
+	IncludeFeatures         bool `json:"includeFeatures" yaml:"includeFeatures"`
+	IncludeCodeFacts        bool `json:"includeCodeFacts" yaml:"includeCodeFacts"`
+	IncludeExternalEvidence bool `json:"includeExternalEvidence" yaml:"includeExternalEvidence"`
+}
+
+type KnowledgeGraphQuerySettings struct {
+	TimeoutSeconds int  `json:"timeoutSeconds" yaml:"timeoutSeconds"`
+	MaxResults     int  `json:"maxResults" yaml:"maxResults"`
+	MaxGraphDepth  int  `json:"maxGraphDepth" yaml:"maxGraphDepth"`
+	ShadowEnabled  bool `json:"shadowEnabled" yaml:"shadowEnabled"`
+}
+
+type KnowledgeGraphSynthesisSettings struct {
+	Enabled   bool `json:"enabled" yaml:"enabled"`
+	Automatic bool `json:"automatic" yaml:"automatic"`
+}
+
+type KnowledgeGraphGapSettings struct {
+	Enabled        bool `json:"enabled" yaml:"enabled"`
+	CreateProposal bool `json:"createProposal" yaml:"createProposal"`
+}
+
 type ScheduleSettings struct {
 	Enabled              bool `json:"enabled" yaml:"enabled"`
 	IntervalMinutes      int  `json:"intervalMinutes" yaml:"intervalMinutes"`
@@ -123,7 +174,26 @@ func DefaultProfile() Profile {
 		CodeGraph: CodeGraphSettings{
 			Enabled: true, ImpactDepth: 2, IncludeCallers: true, IncludeCallees: true, IncludeRelatedTests: true,
 		},
-		OpenWiki:  OpenWikiSettings{Enabled: true, Version: TestedOpenWikiVersion},
+		OpenWiki: OpenWikiSettings{Enabled: true, Version: TestedOpenWikiVersion},
+		KnowledgeGraph: KnowledgeGraphSettings{
+			Enabled:   true,
+			Provider:  TestedKnowledgeGraphProvider,
+			Version:   TestedGBrainVersion,
+			Brain:     "nexus-development",
+			SourceID:  "project:auto",
+			Engine:    "pglite",
+			Transport: "stdio",
+			Sync: KnowledgeGraphSyncSettings{
+				OnProposalApplied: true, CommittedChangesOnly: true, RetryMinutes: 5, MaxRetries: 5,
+			},
+			Export: KnowledgeGraphExportSettings{
+				IncludeDomains: true, IncludeFeatures: true,
+			},
+			Query: KnowledgeGraphQuerySettings{
+				TimeoutSeconds: 10, MaxResults: 20, MaxGraphDepth: 3, ShadowEnabled: true,
+			},
+			Gaps: KnowledgeGraphGapSettings{CreateProposal: true},
+		},
 		Schedule:  ScheduleSettings{IntervalMinutes: 30, CommittedChangesOnly: true},
 		Ownership: OwnershipSettings{Owners: []string{}, RequireApproval: true},
 	}
@@ -215,6 +285,47 @@ func ValidateProfile(profile Profile) error {
 	if profile.CodeGraph.ImpactDepth < 0 || profile.CodeGraph.ImpactDepth > 5 {
 		return fmt.Errorf("codeGraph.impactDepth must be between 0 and 5")
 	}
+	if profile.KnowledgeGraph.Enabled {
+		if profile.KnowledgeGraph.Provider != TestedKnowledgeGraphProvider {
+			return fmt.Errorf("knowledgeGraph.provider must be %s in the PGLite release", TestedKnowledgeGraphProvider)
+		}
+		if profile.KnowledgeGraph.Version != TestedGBrainVersion {
+			return fmt.Errorf("knowledgeGraph.version must be the tested GBrain version %s", TestedGBrainVersion)
+		}
+		if profile.KnowledgeGraph.Brain == "" {
+			return fmt.Errorf("knowledgeGraph.brain is required")
+		}
+		if profile.KnowledgeGraph.SourceID == "" {
+			return fmt.Errorf("knowledgeGraph.sourceId is required")
+		}
+		if profile.KnowledgeGraph.Engine != "pglite" {
+			return fmt.Errorf("knowledgeGraph.engine must be pglite in the local release")
+		}
+		if profile.KnowledgeGraph.Transport != "stdio" {
+			return fmt.Errorf("knowledgeGraph.transport must be stdio in the local release")
+		}
+		if !profile.KnowledgeGraph.Sync.CommittedChangesOnly {
+			return fmt.Errorf("knowledgeGraph.sync.committedChangesOnly must be true")
+		}
+		if profile.KnowledgeGraph.Sync.RetryMinutes < 1 || profile.KnowledgeGraph.Sync.RetryMinutes > 10080 {
+			return fmt.Errorf("knowledgeGraph.sync.retryMinutes must be between 1 and 10080")
+		}
+		if profile.KnowledgeGraph.Sync.MaxRetries < 0 || profile.KnowledgeGraph.Sync.MaxRetries > 100 {
+			return fmt.Errorf("knowledgeGraph.sync.maxRetries must be between 0 and 100")
+		}
+		if profile.KnowledgeGraph.Query.TimeoutSeconds < 1 || profile.KnowledgeGraph.Query.TimeoutSeconds > 300 {
+			return fmt.Errorf("knowledgeGraph.query.timeoutSeconds must be between 1 and 300")
+		}
+		if profile.KnowledgeGraph.Query.MaxResults < 1 || profile.KnowledgeGraph.Query.MaxResults > 500 {
+			return fmt.Errorf("knowledgeGraph.query.maxResults must be between 1 and 500")
+		}
+		if profile.KnowledgeGraph.Query.MaxGraphDepth < 1 || profile.KnowledgeGraph.Query.MaxGraphDepth > 10 {
+			return fmt.Errorf("knowledgeGraph.query.maxGraphDepth must be between 1 and 10")
+		}
+		if profile.KnowledgeGraph.Synthesis.Automatic && !profile.KnowledgeGraph.Synthesis.Enabled {
+			return fmt.Errorf("knowledgeGraph.synthesis.automatic requires synthesis.enabled")
+		}
+	}
 	if len(profile.Scan.Rules) > 500 {
 		return fmt.Errorf("scan.rules exceeds the 500 rule limit")
 	}
@@ -252,6 +363,12 @@ func normalizeProfile(profile *Profile) {
 	profile.Instructions.RequiredTopics = uniqueSorted(profile.Instructions.RequiredTopics)
 	profile.Instructions.Additional = strings.TrimSpace(profile.Instructions.Additional)
 	profile.OpenWiki.Version = strings.TrimPrefix(strings.TrimSpace(profile.OpenWiki.Version), "v")
+	profile.KnowledgeGraph.Provider = strings.ToLower(strings.TrimSpace(profile.KnowledgeGraph.Provider))
+	profile.KnowledgeGraph.Version = strings.TrimPrefix(strings.TrimSpace(profile.KnowledgeGraph.Version), "v")
+	profile.KnowledgeGraph.Brain = strings.TrimSpace(profile.KnowledgeGraph.Brain)
+	profile.KnowledgeGraph.SourceID = strings.TrimSpace(profile.KnowledgeGraph.SourceID)
+	profile.KnowledgeGraph.Engine = strings.ToLower(strings.TrimSpace(profile.KnowledgeGraph.Engine))
+	profile.KnowledgeGraph.Transport = strings.ToLower(strings.TrimSpace(profile.KnowledgeGraph.Transport))
 	profile.Ownership.Owners = uniqueSorted(profile.Ownership.Owners)
 	if profile.Ownership.Owners == nil {
 		profile.Ownership.Owners = []string{}

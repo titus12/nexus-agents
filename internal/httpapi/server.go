@@ -27,6 +27,7 @@ import (
 	"nexus-agents/internal/catalog"
 	"nexus-agents/internal/codexrouter"
 	"nexus-agents/internal/knowledgebase"
+	"nexus-agents/internal/knowledgegraph"
 	"nexus-agents/internal/knowledgesync"
 	"nexus-agents/internal/taskrunsubmit"
 	"nexus-agents/internal/workflowrunner"
@@ -157,6 +158,16 @@ type knowledgeSyncOperationInput struct {
 	ExternalReferences []knowledgesync.ExternalReference `json:"externalReferences,omitempty"`
 }
 
+type knowledgeShadowSearchInput struct {
+	Query         string   `json:"query"`
+	Mode          string   `json:"mode"`
+	Limit         int      `json:"limit"`
+	MaxTokens     int      `json:"maxTokens"`
+	Scope         string   `json:"scope,omitempty"`
+	GroupID       string   `json:"groupId,omitempty"`
+	ExpectedPaths []string `json:"expectedPaths,omitempty"`
+}
+
 func newServerWithKnowledgeSyncOptions(store *catalog.Store, infrastructure *catalog.InfrastructureService, router *codexrouter.Service, picker LocalDirectoryPicker, evaluationStore *catalog.EvaluationStore, knowledgeSync *knowledgesync.Service) http.Handler {
 	if infrastructure == nil {
 		infrastructure = catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{})
@@ -248,6 +259,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/debug/codex-model-probe", s.handleCodexModelProbe)
 	s.mux.HandleFunc("/api/model-routes/resolve", s.handleModelRouteResolve)
 	s.mux.HandleFunc("/api/model-routes", s.handleModelRoutes)
+	s.mux.HandleFunc("/api/project-groups", s.handleProjectGroups)
+	s.mux.HandleFunc("/api/project-groups/", s.handleProjectGroupPath)
 	s.mux.HandleFunc("/api/projects", s.handleProjects)
 	s.mux.HandleFunc("/api/projects/", s.handleProjectPath)
 	s.mux.HandleFunc("/api/templates/", s.handleTemplates)
@@ -969,6 +982,71 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.Projects())
 }
 
+func (s *Server) handleProjectGroups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.store.ProjectGroups())
+	case http.MethodPost:
+		var input catalog.ProjectGroupInput
+		if !decodeLimitedRequest(w, r, &input, 64*1024) {
+			return
+		}
+		group, err := s.store.CreateProjectGroup(input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusCreated, group)
+	default:
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s *Server) handleProjectGroupPath(w http.ResponseWriter, r *http.Request) {
+	groupID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/project-groups/"), "/")
+	if groupID == "" || strings.Contains(groupID, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		group, ok := s.store.ProjectGroupByID(groupID)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, group)
+	case http.MethodPut:
+		var input catalog.ProjectGroupInput
+		if !decodeLimitedRequest(w, r, &input, 64*1024) {
+			return
+		}
+		group, ok, err := s.store.UpdateProjectGroup(groupID, input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, group)
+	case http.MethodDelete:
+		ok, err := s.store.DeleteProjectGroup(groupID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		methodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+	}
+}
+
 func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/projects/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -1019,6 +1097,36 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, preview)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "groups" {
+		switch r.Method {
+		case http.MethodGet:
+			groups, ok := s.store.ProjectGroupsForProject(projectID)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			writeJSON(w, http.StatusOK, groups)
+		case http.MethodPut:
+			var input catalog.ProjectGroupMembershipInput
+			if !decodeLimitedRequest(w, r, &input, 64*1024) {
+				return
+			}
+			groups, ok, err := s.store.SetProjectGroups(projectID, input.GroupIDs)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			writeJSON(w, http.StatusOK, groups)
+		default:
+			methodNotAllowed(w, http.MethodGet, http.MethodPut)
+		}
 		return
 	}
 
@@ -1304,6 +1412,7 @@ func (s *Server) handleProjectKnowledgePath(w http.ResponseWriter, r *http.Reque
 		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		maxTokens, _ := strconv.Atoi(r.URL.Query().Get("maxTokens"))
+		started := time.Now()
 		result, err := knowledgebase.Retrieve(projectRoot, r.URL.Query().Get("q"), knowledgebase.RetrieveOptions{
 			Mode:      r.URL.Query().Get("mode"),
 			Limit:     limit,
@@ -1312,6 +1421,13 @@ func (s *Server) handleProjectKnowledgePath(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if err := s.knowledgeSync.QueueKnowledgeGraphShadowSearch(
+			knowledgesync.ProjectRequest{ProjectID: projectID, ProjectRoot: projectRoot},
+			result,
+			time.Since(started),
+		); err != nil && !errors.Is(err, knowledgegraph.ErrProviderDisabled) && !errors.Is(err, knowledgesync.ErrProfileNotFound) {
+			log.Printf("[knowledge-graph] shadow-search queue project=%s status=skipped error=%q", projectID, err.Error())
 		}
 		writeJSON(w, http.StatusOK, result)
 	case "validate":
@@ -1365,9 +1481,212 @@ func (s *Server) handleProjectKnowledgePath(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, report)
 	case "export":
 		s.handleProjectKnowledgeExport(w, r, projectID, projectRoot, parts[1:])
+	case "graph":
+		s.handleProjectKnowledgeGraph(w, r, projectID, projectRoot, parts[1:])
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleProjectKnowledgeGraph(w http.ResponseWriter, r *http.Request, projectID, projectRoot string, parts []string) {
+	if len(parts) != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	switch parts[0] {
+	case "status":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		state, err := s.knowledgeSync.KnowledgeGraphStatus(projectID)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	case "runs":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		runs, err := s.knowledgeSync.KnowledgeGraphRuns(projectID)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, runs)
+	case "shadow-runs":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		runs, err := s.knowledgeSync.KnowledgeGraphShadowRuns(projectID, limit)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, runs)
+	case "shadow-summary":
+		if !allowMethods(w, r, http.MethodGet) {
+			return
+		}
+		summary, err := s.knowledgeSync.KnowledgeGraphShadowSummary(projectID)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
+	case "shadow-search":
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		var input knowledgeShadowSearchInput
+		if !decodeLimitedRequest(w, r, &input, 128*1024) {
+			return
+		}
+		if strings.TrimSpace(input.Query) == "" {
+			http.Error(w, "query is required", http.StatusBadRequest)
+			return
+		}
+		scopeProjects, scope, resolvedGroupID, err := s.shadowSearchProjects(projectID, input.Scope, input.GroupID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		retrievals := make([]knowledgesync.ScopedKnowledgeRetrieval, 0, len(scopeProjects))
+		var retrieval knowledgebase.RetrievalResult
+		for _, project := range scopeProjects {
+			root := strings.TrimSpace(project.LocalPath)
+			if root == "" {
+				root = strings.TrimSpace(project.Path)
+			}
+			if root == "" {
+				continue
+			}
+			options := knowledgebase.RetrieveOptions{
+				Mode: input.Mode, Limit: input.Limit, MaxTokens: input.MaxTokens,
+			}
+			if project.ID != projectID {
+				disabled := false
+				options.QueryRewrite.Enabled = &disabled
+			}
+			started := time.Now()
+			projectRetrieval, retrieveErr := knowledgebase.Retrieve(root, input.Query, options)
+			if retrieveErr != nil {
+				http.Error(w, retrieveErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if project.ID == projectID {
+				retrieval = projectRetrieval
+			}
+			retrievals = append(retrievals, knowledgesync.ScopedKnowledgeRetrieval{
+				ProjectRequest: knowledgesync.ProjectRequest{ProjectID: project.ID, ProjectRoot: root},
+				Retrieval:      projectRetrieval, Latency: time.Since(started),
+			})
+		}
+		run, shadowErr := s.knowledgeSync.CompareKnowledgeGraphSearchScoped(
+			r.Context(),
+			knowledgesync.ProjectRequest{ProjectID: projectID, ProjectRoot: projectRoot},
+			retrievals,
+			scope,
+			resolvedGroupID,
+			input.ExpectedPaths,
+		)
+		if shadowErr != nil && run.ID == "" {
+			writeKnowledgeSyncError(w, shadowErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"retrieval": retrieval, "shadow": run, "scopeProjects": scopeProjects,
+		})
+	case "sync", "rebuild":
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		result, err := s.knowledgeSync.SyncKnowledgeGraph(
+			r.Context(),
+			knowledgesync.ProjectRequest{ProjectID: projectID, ProjectRoot: projectRoot},
+			parts[0] == "rebuild",
+		)
+		if err != nil {
+			writeKnowledgeSyncError(w, err)
+			return
+		}
+		state, _ := s.knowledgeSync.KnowledgeGraphStatus(projectID)
+		writeJSON(w, http.StatusOK, map[string]any{"result": result, "state": state})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) shadowSearchProjects(projectID, requestedScope, groupID string) ([]catalog.Project, string, string, error) {
+	current, ok := s.store.ProjectByID(projectID)
+	if !ok {
+		return nil, "", "", fmt.Errorf("project %s was not found", projectID)
+	}
+	scope := strings.ToLower(strings.TrimSpace(requestedScope))
+	if scope == "" {
+		groups, exists := s.store.ProjectGroupsForProject(projectID)
+		if !exists || len(groups) == 0 {
+			return []catalog.Project{current}, "project", "", nil
+		}
+		projects := make([]catalog.Project, 0)
+		for _, group := range groups {
+			groupProjects, found := s.store.ProjectsForGroup(group.ID)
+			if !found {
+				continue
+			}
+			projects = append(projects, groupProjects...)
+		}
+		resolvedGroupID := ""
+		if len(groups) == 1 {
+			resolvedGroupID = groups[0].ID
+		}
+		return orderScopedProjects(current, projects), "group", resolvedGroupID, nil
+	}
+	var projects []catalog.Project
+	switch scope {
+	case "project":
+		projects = []catalog.Project{current}
+	case "group":
+		groupID = strings.TrimSpace(groupID)
+		if groupID == "" {
+			return nil, "", "", fmt.Errorf("groupId is required for group scope")
+		}
+		groupProjects, exists := s.store.ProjectsForGroup(groupID)
+		if !exists {
+			return nil, "", "", fmt.Errorf("project group %s was not found", groupID)
+		}
+		member := false
+		for _, project := range groupProjects {
+			if project.ID == projectID {
+				member = true
+				break
+			}
+		}
+		if !member {
+			return nil, "", "", fmt.Errorf("project %s is not a member of group %s", projectID, groupID)
+		}
+		projects = groupProjects
+	case "all":
+		projects = s.store.Projects()
+	default:
+		return nil, "", "", fmt.Errorf("scope must be project, group, or all")
+	}
+	return orderScopedProjects(current, projects), scope, groupID, nil
+}
+
+func orderScopedProjects(current catalog.Project, projects []catalog.Project) []catalog.Project {
+	ordered := make([]catalog.Project, 0, len(projects))
+	ordered = append(ordered, current)
+	seen := map[string]bool{current.ID: true}
+	for _, project := range projects {
+		if seen[project.ID] {
+			continue
+		}
+		seen[project.ID] = true
+		ordered = append(ordered, project)
+	}
+	return ordered
 }
 
 func (s *Server) handleProjectKnowledgeSyncProfile(w http.ResponseWriter, r *http.Request, projectID, projectRoot string) {
@@ -1907,6 +2226,10 @@ func writeKnowledgeSyncError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, knowledgesync.ErrProfileNotFound):
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+	case errors.Is(err, knowledgegraph.ErrProviderDisabled):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	case errors.Is(err, knowledgegraph.ErrProviderUnavailable):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	case os.IsNotExist(err):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case strings.Contains(strings.ToLower(err.Error()), "stale"):

@@ -77,6 +77,9 @@ function Invoke-Json {
 try {
   $env:GOCACHE = Join-Path $root ".cache\go-build"
   $env:NEXUS_ADDR = ":$port"
+  # Smoke verification must never attach to or contend with the developer's
+  # active GBrain/PGLite process.
+  $env:NEXUS_KNOWLEDGE_GRAPH_ENABLED = "false"
 
   $goProcess = Start-Process -FilePath "go" `
     -ArgumentList @("run", ".\cmd\nexus-agents") `

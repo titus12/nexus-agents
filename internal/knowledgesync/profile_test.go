@@ -28,6 +28,11 @@ func TestProfileRoundTripAndSafetyRules(t *testing.T) {
 	if len(EffectiveRules(parsed)) <= len(parsed.Scan.Rules) {
 		t.Fatal("hard safety rules were not appended")
 	}
+	if parsed.KnowledgeGraph.Provider != TestedKnowledgeGraphProvider ||
+		parsed.KnowledgeGraph.Version != TestedGBrainVersion ||
+		parsed.KnowledgeGraph.Engine != "pglite" {
+		t.Fatalf("knowledge graph settings = %#v", parsed.KnowledgeGraph)
+	}
 	if !IsHardExcluded("services/auth/.env.production") || !IsHardExcluded("web/node_modules/vue/index.js") {
 		t.Fatal("expected sensitive and dependency paths to be hard excluded")
 	}
@@ -45,6 +50,16 @@ func TestProfileRejectsUnsafePathsAndModes(t *testing.T) {
 	profile.Knowledge.UpdateMode = "automatic"
 	if _, err := SerializeProfile(profile); err == nil {
 		t.Fatal("automatic update mode should be rejected")
+	}
+	profile = DefaultProfile()
+	profile.KnowledgeGraph.Transport = "http"
+	if _, err := SerializeProfile(profile); err == nil {
+		t.Fatal("HTTP transport should be rejected in the local PGLite release")
+	}
+	profile = DefaultProfile()
+	profile.KnowledgeGraph.Version = "latest"
+	if _, err := SerializeProfile(profile); err == nil {
+		t.Fatal("an unpinned GBrain version should be rejected")
 	}
 }
 
@@ -71,5 +86,24 @@ func TestLoadAndSaveProfile(t *testing.T) {
 	}
 	if len(loaded.Ownership.Owners) != 2 || loaded.Ownership.Owners[0] != "team-a" {
 		t.Fatalf("owners = %#v", loaded.Ownership.Owners)
+	}
+}
+
+func TestRepositoryKnowledgeProfilesMatchCurrentSchema(t *testing.T) {
+	for _, relative := range []string{
+		filepath.Join("..", "..", "KnowledgeBase", "Setting.yaml"),
+		filepath.Join("..", "..", "templates", "KnowledgeBase", "Setting.yaml"),
+	} {
+		data, err := os.ReadFile(relative)
+		if err != nil {
+			t.Fatalf("read %s: %v", relative, err)
+		}
+		profile, err := ParseProfile(data)
+		if err != nil {
+			t.Fatalf("parse %s: %v", relative, err)
+		}
+		if !profile.KnowledgeGraph.Enabled || profile.KnowledgeGraph.Version != TestedGBrainVersion {
+			t.Fatalf("knowledge graph settings in %s = %#v", relative, profile.KnowledgeGraph)
+		}
 	}
 }

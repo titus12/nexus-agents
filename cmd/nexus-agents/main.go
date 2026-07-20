@@ -19,6 +19,8 @@ import (
 	"nexus-agents/internal/catalog"
 	"nexus-agents/internal/codexrouter"
 	"nexus-agents/internal/httpapi"
+	"nexus-agents/internal/knowledgegraph"
+	"nexus-agents/internal/knowledgegraph/gbrain"
 	"nexus-agents/internal/knowledgesync"
 )
 
@@ -45,14 +47,40 @@ func main() {
 	writeCatalogFile(router)
 
 	store := catalog.NewStore()
-	knowledgeSync := knowledgesync.NewService(knowledgesync.ServiceOptions{})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	graphProvider := configureKnowledgeGraphProvider()
+	graphService := knowledgegraph.NewService(knowledgegraph.ServiceOptions{
+		Provider: graphProvider,
+		Logf:     log.Printf,
+	})
+	go func() {
+		if err := graphService.Start(ctx); err != nil {
+			health, _ := graphProvider.Health(context.Background())
+			log.Printf("knowledge graph unavailable status=%s: %v", health.Status, err)
+			return
+		}
+		health, _ := graphProvider.Health(context.Background())
+		log.Printf(
+			"knowledge graph ready provider=%s engine=%s transport=%s pid=%d",
+			health.Provider, health.Engine, health.Transport, health.ProcessID,
+		)
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := graphService.Stop(shutdownCtx); err != nil {
+			log.Printf("knowledge graph stop: %v", err)
+		}
+	}()
+	knowledgeSync := knowledgesync.NewService(knowledgesync.ServiceOptions{
+		KnowledgeGraph: graphService,
+	})
 	scheduler := &knowledgesync.Scheduler{
 		Service:  knowledgeSync,
 		Projects: scheduledCatalog{store: store},
 		Interval: time.Minute,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	scheduler.Start(ctx)
 	defer scheduler.Stop()
 
@@ -67,6 +95,29 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+func configureKnowledgeGraphProvider() knowledgegraph.KnowledgeGraphProvider {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NEXUS_KNOWLEDGE_GRAPH_ENABLED"))) {
+	case "0", "false", "no", "off":
+		log.Printf("knowledge graph runtime disabled by NEXUS_KNOWLEDGE_GRAPH_ENABLED")
+		return knowledgegraph.NoopProvider{}
+	}
+
+	options := gbrain.DefaultProcessOptions()
+	options.Logf = log.Printf
+	if value := strings.TrimSpace(os.Getenv("NEXUS_GBRAIN_EXECUTABLE")); value != "" {
+		options.ExecutablePath = value
+	}
+	if value := strings.TrimSpace(os.Getenv("NEXUS_GBRAIN_HOME")); value != "" {
+		options.HomeDir = value
+		options.DatabasePath = filepath.Join(value, "brain.db")
+	}
+	if value := strings.TrimSpace(os.Getenv("NEXUS_GBRAIN_DATABASE_PATH")); value != "" {
+		options.DatabasePath = value
+	}
+	provider := gbrain.NewProvider(options)
+	return provider
 }
 
 type scheduledCatalog struct {
