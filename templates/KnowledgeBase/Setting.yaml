@@ -1,0 +1,79 @@
+version: 1
+
+knowledge:
+  root: KnowledgeBase/project
+  language: zh-CN
+  updateMode: proposal
+  defaultBranch: develop
+
+discovery:
+  strategy: ai-assisted
+  generatedFromRevision: ""
+  generatedAt: ""
+  reviewed: false
+  reviewedBy: ""
+
+scan:
+  source: git-tracked
+  rules: []
+  limits:
+    maxFileSizeKB: 512
+    maxFilesPerRun: 3000
+
+instructions:
+  requiredTopics:
+    - service-responsibility
+    - integration-boundaries
+    - data-ownership
+    - verification-paths
+  additional: ""
+
+codeGraph:
+  enabled: true
+  impactDepth: 2
+  includeCallers: true
+  includeCallees: true
+  includeRelatedTests: true
+
+openWiki:
+  enabled: true
+  version: "0.2.0"
+
+knowledgeGraph:
+  enabled: true
+  provider: gbrain
+  version: "0.42.62.0"
+  brain: nexus-development
+  sourceId: project:auto
+  engine: pglite
+  transport: stdio
+  sync:
+    onProposalApplied: true
+    committedChangesOnly: true
+    retryMinutes: 5
+    maxRetries: 5
+  export:
+    includeDomains: true
+    includeFeatures: true
+    includeCodeFacts: false
+    includeExternalEvidence: false
+  query:
+    timeoutSeconds: 10
+    maxResults: 20
+    maxGraphDepth: 3
+    shadowEnabled: true
+  synthesis:
+    enabled: false
+    automatic: false
+  gaps:
+    enabled: false
+    createProposal: true
+
+schedule:
+  enabled: false
+  intervalMinutes: 30
+  committedChangesOnly: true
+
+ownership:
+  owners: []
+  requireApproval: true

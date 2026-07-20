@@ -40,18 +40,22 @@ type Document struct {
 }
 
 type Frontmatter struct {
-	Type        string          `json:"type,omitempty"`
-	Title       string          `json:"title,omitempty"`
-	Description string          `json:"description,omitempty"`
-	Resource    string          `json:"resource,omitempty"`
-	Tags        []string        `json:"tags,omitempty"`
-	DependsOn   []string        `json:"dependsOn,omitempty"`
-	SeeAlso     []string        `json:"seeAlso,omitempty"`
-	Status      string          `json:"status,omitempty"`
-	Owner       string          `json:"owner,omitempty"`
-	Timestamp   string          `json:"timestamp,omitempty"`
-	Routing     RoutingMetadata `json:"routing,omitempty"`
-	Raw         string          `json:"raw,omitempty"`
+	Type           string          `json:"type,omitempty"`
+	Title          string          `json:"title,omitempty"`
+	Description    string          `json:"description,omitempty"`
+	Resource       string          `json:"resource,omitempty"`
+	Tags           []string        `json:"tags,omitempty"`
+	DependsOn      []string        `json:"dependsOn,omitempty"`
+	SeeAlso        []string        `json:"seeAlso,omitempty"`
+	Status         string          `json:"status,omitempty"`
+	Owner          string          `json:"owner,omitempty"`
+	Timestamp      string          `json:"timestamp,omitempty"`
+	ManagedBy      string          `json:"managedBy,omitempty"`
+	SourcePaths    []string        `json:"sourcePaths,omitempty"`
+	SourceRevision string          `json:"sourceRevision,omitempty"`
+	GeneratedBy    string          `json:"generatedBy,omitempty"`
+	Routing        RoutingMetadata `json:"routing,omitempty"`
+	Raw            string          `json:"raw,omitempty"`
 }
 
 type RoutingMetadata struct {
@@ -145,6 +149,13 @@ type RetrieveOptions struct {
 type RetrievalResult struct {
 	Query                   string                 `json:"query"`
 	Mode                    string                 `json:"mode"`
+	Engine                  string                 `json:"engine,omitempty"`
+	Scope                   string                 `json:"scope,omitempty"`
+	ProjectIDs              []string               `json:"projectIds,omitempty"`
+	NormalizedQuery         string                 `json:"normalizedQuery,omitempty"`
+	Sources                 []KnowledgeSource      `json:"sources,omitempty"`
+	Degraded                bool                   `json:"degraded,omitempty"`
+	FallbackReason          string                 `json:"fallbackReason,omitempty"`
 	MatchedDomain           string                 `json:"matchedDomain,omitempty"`
 	MatchedAlias            MatchedAlias           `json:"matchedAlias,omitempty"`
 	Confidence              float64                `json:"confidence"`
@@ -159,6 +170,21 @@ type RetrievalResult struct {
 	QueryRewrite            QueryRewriteResult     `json:"queryRewrite,omitempty"`
 	TokenBudget             TokenBudget            `json:"tokenBudget"`
 	Reason                  string                 `json:"reason"`
+}
+
+type KnowledgeSource struct {
+	ProjectID string  `json:"projectId"`
+	SourceID  string  `json:"sourceId"`
+	Path      string  `json:"path"`
+	Title     string  `json:"title,omitempty"`
+	Revision  string  `json:"revision,omitempty"`
+	Score     float64 `json:"score"`
+	Snippet   string  `json:"snippet,omitempty"`
+}
+
+type ContextPackDocument struct {
+	KnowledgeSource
+	Content string `json:"-"`
 }
 
 type QueryRewriteOptions struct {
@@ -187,6 +213,9 @@ type QueryRewriteResult struct {
 }
 
 type KnowledgeContextItem struct {
+	ProjectID string   `json:"projectId,omitempty"`
+	SourceID  string   `json:"sourceId,omitempty"`
+	Revision  string   `json:"revision,omitempty"`
 	Path      string   `json:"path"`
 	Title     string   `json:"title"`
 	Type      string   `json:"type,omitempty"`
@@ -277,6 +306,9 @@ func normalizeDocument(doc Document) Document {
 	}
 	if doc.Frontmatter.SeeAlso == nil {
 		doc.Frontmatter.SeeAlso = []string{}
+	}
+	if doc.Frontmatter.SourcePaths == nil {
+		doc.Frontmatter.SourcePaths = []string{}
 	}
 	if doc.Frontmatter.Routing.Aliases.Values == nil {
 		doc.Frontmatter.Routing.Aliases.Values = []string{}

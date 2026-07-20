@@ -22,6 +22,9 @@ Use this skill to turn a system or feature investigation into a controlled Knowl
 - Before any KnowledgeBase edit, scan the target KnowledgeBase path for mojibake or replacement characters and stop if found unless the user explicitly accepts the risk.
 - Do not copy large source excerpts, full design docs, logs, or volatile code facts into KnowledgeBase.
 - Do not modify generated files, Unity `.meta` files, or protected global Codex files.
+- When Nexus Knowledge Sync APIs are available, prefer discovery, isolated OpenWiki compilation, and a Nexus Proposal over directly authoring broad KnowledgeBase changes.
+- Never treat a pending Nexus Proposal as stable retrieved knowledge.
+- Preserve the team-owned `KnowledgeBase/Setting.yaml` and project-owned `KnowledgeBase/project/**` boundaries.
 
 ## Required Inputs
 
@@ -38,9 +41,23 @@ If the same name can refer to multiple systems or domains, ask one concise clari
 
 ## Workflow
 
+### 0. Prefer Nexus Knowledge Sync for broad or repository-wide curation
+
+Use Nexus Knowledge Sync when the request involves initial KB generation, repository-wide scanning, stale-knowledge checking, or multi-file enrichment:
+
+1. Review or generate `KnowledgeBase/Setting.yaml`.
+2. Run initialization or check-and-enrich to create a Proposal.
+3. Review generated paths, evidence, validation, and before/after diffs.
+4. Apply selected files only after explicit approval.
+5. Continue with the narrow manual curation workflow below only for unresolved, human-managed, or high-context pages.
+
+OpenWiki is a compiler, not the source of truth. Current source and CodeGraph facts remain authoritative.
+
 ### 1. Retrieve existing knowledge first
 
-Use the repository root folder name as the project id, query with the system/function name and clues, mode `context`, maxTokens `6000`.
+Prefer `$nexus-knowledge-retrieval` so the helper resolves the exact Nexus Project
+from the current repository path and Nexus infers its Project Group. Query with
+the system/function name and clues, mode `context`, maxTokens `6000`.
 
 Record:
 

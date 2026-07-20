@@ -4,7 +4,7 @@ title: KnowledgeBase Quality Gates
 description: Defines mandatory quality checks for encoding, OKF structure, navigation, links, duplication, and final review.
 resource: KnowledgeBase/framework/quality-gates.md
 tags: [knowledge-base, framework, quality, okf]
-timestamp: 2026-07-10T00:00:00+08:00
+timestamp: 2026-07-19T00:00:00+08:00
 ---
 
 # KnowledgeBase Quality Gates
@@ -37,3 +37,11 @@ timestamp: 2026-07-10T00:00:00+08:00
 - Check frontmatter, timestamps, and tags on edited concept documents.
 - Check for duplicated routing, stale source paths, and cross-domain leakage.
 - Report exact changed files and the evidence used for the change.
+
+## Generated proposal gate
+
+- Accept generated paths only below `KnowledgeBase/project/**`.
+- Reject absolute paths, `..` traversal, binary output, invalid UTF-8, and safety-excluded source material.
+- Normalize OpenWiki root and nested indexes, `resource` paths, and internal links before validation.
+- Require Proposal target HEAD and project-root checks immediately before applying selected files.
+- Never apply, commit, branch, push, or open a pull request automatically.

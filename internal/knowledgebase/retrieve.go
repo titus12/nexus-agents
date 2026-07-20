@@ -96,7 +96,7 @@ func Retrieve(projectRoot string, query string, options RetrieveOptions) (Retrie
 		}
 	}
 	for target, sources := range routingTargets {
-		for _, section := range pickSectionsForPath(sectionsByPath, target, terms, 2) {
+		for _, section := range pickSectionsForPath(sectionsByPath, target, terms, 1) {
 			addSection(section, 60, true, "referenced by "+strings.Join(sources, ", "))
 		}
 	}
@@ -235,9 +235,15 @@ func parseRoutingKnowledge(bundle Bundle, matchedDomain string) ([]string, map[s
 		routingDocs = append(routingDocs, projectRouting)
 	}
 	if matchedDomain != "" {
-		domainRouting := DefaultRoot + "/domains/" + matchedDomain + "/routing.md"
-		if docByPath[domainRouting] {
-			routingDocs = append(routingDocs, domainRouting)
+		for _, domainRouting := range domainRoutingPaths(matchedDomain) {
+			if docByPath[domainRouting] {
+				routingDocs = append(routingDocs, domainRouting)
+			}
+		}
+		for _, overview := range domainOverviewPaths(matchedDomain) {
+			if docByPath[overview] && !containsString(routingDocs, overview) {
+				routingDocs = append(routingDocs, overview)
+			}
 		}
 	}
 	for _, doc := range bundle.Documents {
@@ -329,13 +335,22 @@ func okfBoost(section KnowledgeSection, terms []string, matchedDomain string) (f
 			reasons = append(reasons, "project fallback")
 		}
 	}
-	if matchedDomain != "" && section.Path == DefaultRoot+"/domains/"+matchedDomain+"/routing.md" {
-		score += 80
-		reasons = append(reasons, "matched domain routing")
+	if matchedDomain != "" {
+		for _, routingPath := range domainRoutingPaths(matchedDomain) {
+			if section.Path == routingPath {
+				score += 80
+				reasons = append(reasons, "matched domain routing")
+				break
+			}
+		}
 	}
 	if matchedDomain != "" && section.Domain == matchedDomain {
 		score += 20
 		reasons = append(reasons, "same domain "+matchedDomain)
+	}
+	if matchedDomain != "" && section.Domain == matchedDomain && isDomainOverviewDocument(section.Path) {
+		score += 80
+		reasons = append(reasons, "matched domain overview")
 	}
 	if termHitCount(section.Path, terms) > 0 {
 		score += 30
@@ -436,6 +451,35 @@ func expandQueryTerms(query string) []string {
 	for _, part := range strings.FieldsFunc(lower, splitter) {
 		add(part)
 	}
+	deterministicExpansions := []struct {
+		Needle string
+		Terms  []string
+	}{
+		{Needle: "模型路由", Terms: []string{"model", "routing", "model-routing"}},
+		{Needle: "知识库", Terms: []string{"knowledgebase", "knowledge base"}},
+		{Needle: "扫描", Terms: []string{"scan", "scanning"}},
+		{Needle: "仓库", Terms: []string{"repository"}},
+		{Needle: "检索", Terms: []string{"search", "retrieval"}},
+		{Needle: "上下文", Terms: []string{"context"}},
+		{Needle: "加载", Terms: []string{"loading"}},
+		{Needle: "模板", Terms: []string{"template"}},
+		{Needle: "初始化", Terms: []string{"initialization"}},
+		{Needle: "同步", Terms: []string{"sync", "synchronization"}},
+		{Needle: "工作流", Terms: []string{"workflow"}},
+		{Needle: "评估", Terms: []string{"evaluation"}},
+		{Needle: "依赖", Terms: []string{"dependency"}},
+		{Needle: "功能", Terms: []string{"feature"}},
+		{Needle: "入口", Terms: []string{"entrypoint", "api"}},
+		{Needle: "session-id", Terms: []string{"model routing", "session telemetry"}},
+		{Needle: "session id", Terms: []string{"model routing", "session telemetry"}},
+	}
+	for _, expansion := range deterministicExpansions {
+		if strings.Contains(lower, expansion.Needle) {
+			for _, term := range expansion.Terms {
+				add(term)
+			}
+		}
+	}
 	if len(terms) == 0 && lower != "" {
 		add(lower)
 	}
@@ -452,7 +496,7 @@ type routingAliasEntry struct {
 func buildRoutingAliasIndex(bundle Bundle) map[string]routingAliasEntry {
 	index := map[string]routingAliasEntry{}
 	for _, doc := range bundle.Documents {
-		if !isDomainRoutingDocument(doc.Path) {
+		if !isDomainRoutingDocument(doc.Path) && !isDomainOverviewDocument(doc.Path) {
 			continue
 		}
 		domain := inferDomainFromPath(doc.Path)
@@ -519,6 +563,23 @@ func inferDomainFromRoutingAliases(terms []string, aliasIndex map[string]routing
 		normalized := normalizeAlias(term)
 		if entry, ok := aliasIndex[normalized]; ok {
 			return entry.Domain, MatchedAlias{Alias: entry.Alias, PairedAlias: entry.PairedAlias, Domain: entry.Domain, Source: entry.Source}
+		}
+	}
+	for _, term := range terms {
+		normalized := normalizeAlias(term)
+		bestAlias := ""
+		var bestEntry routingAliasEntry
+		for alias, entry := range aliasIndex {
+			if alias != "" && strings.Contains(normalized, alias) && len(alias) > len(bestAlias) {
+				bestAlias = alias
+				bestEntry = entry
+			}
+		}
+		if bestAlias != "" {
+			return bestEntry.Domain, MatchedAlias{
+				Alias: bestEntry.Alias, PairedAlias: bestEntry.PairedAlias,
+				Domain: bestEntry.Domain, Source: bestEntry.Source,
+			}
 		}
 	}
 	for alias, entry := range aliasIndex {

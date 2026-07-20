@@ -153,6 +153,73 @@ func TestRetrieveChineseQueryUsesRewriteTermsForEnglishKnowledge(t *testing.T) {
 	}
 }
 
+func TestRetrieveSupportsProjectScopedDomains(t *testing.T) {
+	root := t.TempDir()
+	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
+	writeTestFile(t, filepath.Join(kb, "index.md"), "# Root\n\n[Project](./project/index.md)")
+	writeTestFile(t, filepath.Join(kb, "log.md"), "# Log")
+	writeTestFile(t, filepath.Join(kb, "project", "index.md"), "# Project Domains\n\n[Model Routing](./domains/model-routing/index.md)")
+	writeTestFile(t, filepath.Join(kb, "project", "domains", "model-routing", "index.md"), okfDoc(
+		"Domain",
+		"Model Routing",
+		"KnowledgeBase/project/domains/model-routing/index.md",
+		"# Model Routing\n\nCodex proxy provider selection and model route changes start in `internal/codexrouter/router.go`.",
+	))
+
+	result, err := Retrieve(root, "change codex model routing provider", RetrieveOptions{
+		Mode:      RetrieveModeRouting,
+		Limit:     8,
+		MaxTokens: 1200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MatchedDomain != "model-routing" {
+		t.Fatalf("expected project-scoped model-routing domain, got %#v", result)
+	}
+	if !hasContextPath(result.Required, "KnowledgeBase/project/domains/model-routing/index.md") {
+		t.Fatalf("expected project domain page in required context: %#v", result.Required)
+	}
+}
+
+func TestRetrieveUsesAliasesDeclaredOnDomainIndex(t *testing.T) {
+	root := t.TempDir()
+	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))
+	writeTestFile(t, filepath.Join(kb, "project", "domains", "model-routing", "index.md"), `---
+type: Domain
+title: Model Routing
+description: Model route selection and proxy behavior.
+resource: KnowledgeBase/project/domains/model-routing/index.md
+tags: [model-routing]
+timestamp: 2026-07-19T00:00:00Z
+routing:
+  aliases:
+    zh: [模型路由, 模型代理]
+    en: [model routing, model proxy]
+---
+# Model Routing
+
+Routes models to upstream providers.
+`)
+	disabled := false
+	result, err := Retrieve(root, "模型路由会影响哪些入口", RetrieveOptions{
+		Mode:         RetrieveModeRouting,
+		QueryRewrite: QueryRewriteOptions{Enabled: &disabled},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MatchedDomain != "model-routing" {
+		t.Fatalf("expected model-routing, got %q", result.MatchedDomain)
+	}
+	if result.MatchedAlias.Alias != "模型路由" {
+		t.Fatalf("expected Domain index alias match, got %#v", result.MatchedAlias)
+	}
+	if !hasContextPath(result.Required, "KnowledgeBase/project/domains/model-routing/index.md") {
+		t.Fatalf("expected matched Domain overview in required context: %#v", result.Required)
+	}
+}
+
 func TestRetrieveUnknownQueryKeepsContextSmall(t *testing.T) {
 	root := t.TempDir()
 	kb := filepath.Join(root, filepath.FromSlash(DefaultRoot))

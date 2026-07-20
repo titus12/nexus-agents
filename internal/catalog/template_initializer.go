@@ -226,6 +226,7 @@ AGENTS.md
 
 # Generated/shared KnowledgeBase configuration
 KnowledgeBase/*
+!KnowledgeBase/Setting.yaml
 !KnowledgeBase/project/
 !KnowledgeBase/project/**
 # <<< Nexus Agents AI configuration <<<
@@ -393,7 +394,10 @@ func isSharedWorkflowInitializationPath(relativePath string) bool {
 }
 
 func isProtectedTemplateInitializationPath(relativePath string) bool {
-	return relativePath == "KnowledgeBase/project" || strings.HasPrefix(relativePath, "KnowledgeBase/project/")
+	normalized := filepath.ToSlash(filepath.Clean(relativePath))
+	return normalized == "KnowledgeBase/Setting.yaml" ||
+		normalized == "KnowledgeBase/project" ||
+		strings.HasPrefix(normalized, "KnowledgeBase/project/")
 }
 
 func safeTemplateInitializationTarget(targetRoot string, relativePath string) (string, error) {

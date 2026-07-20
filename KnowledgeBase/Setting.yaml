@@ -1,0 +1,284 @@
+version: 1
+knowledge:
+  root: KnowledgeBase/project
+  language: zh-CN
+  updateMode: proposal
+  defaultBranch: develop
+discovery:
+  strategy: ai-assisted
+  generatedFromRevision: f56b64553d0eca0da65e02e120c14784e9facfe0
+  generatedAt: "2026-07-19T17:26:06+08:00"
+  reviewed: true
+  reviewedBy: local-developer
+scan:
+  source: git-tracked
+  rules:
+    - pattern: '*.go'
+      action: include
+      category: source
+      priority: high
+      reason: Core Go source code and tests explaining behavior
+      confidence: 0.95
+    - pattern: '*.md'
+      action: include
+      category: docs
+      priority: high
+      reason: Documentation, plans, specs, and knowledge base entries
+      confidence: 0.98
+    - pattern: '*.yaml'
+      action: include
+      category: config
+      priority: high
+      reason: Agent and skill configuration manifests
+      confidence: 0.95
+    - pattern: '*.toml'
+      action: include
+      category: config
+      priority: high
+      reason: Codex agent configuration files
+      confidence: 0.95
+    - pattern: '*.json'
+      action: include
+      category: config
+      priority: medium
+      reason: Manifests and configuration (excluding lock files)
+      confidence: 0.85
+    - pattern: go.mod
+      action: include
+      category: manifest
+      priority: high
+      reason: Go module manifest
+      confidence: 0.99
+    - pattern: package.json
+      action: include
+      category: manifest
+      priority: high
+      reason: Node.js package manifest (web)
+      confidence: 0.99
+    - pattern: web/tsconfig.json
+      action: include
+      category: config
+      priority: medium
+      reason: TypeScript configuration
+      confidence: 0.95
+    - pattern: web/vite.config.ts
+      action: include
+      category: config
+      priority: medium
+      reason: Vite build configuration
+      confidence: 0.95
+    - pattern: '*.vue'
+      action: include
+      category: source
+      priority: high
+      reason: Vue components (web frontend)
+      confidence: 0.95
+    - pattern: '*.ts'
+      action: include
+      category: source
+      priority: high
+      reason: TypeScript source files (web frontend)
+      confidence: 0.95
+    - pattern: '*.css'
+      action: include
+      category: style
+      priority: medium
+      reason: Stylesheets
+      confidence: 0.9
+    - pattern: '*.html'
+      action: include
+      category: source
+      priority: medium
+      reason: HTML files (design pages, overlays, docs)
+      confidence: 0.85
+    - pattern: '*.ps1'
+      action: include
+      category: script
+      priority: high
+      reason: PowerShell scripts for development and verification
+      confidence: 0.95
+    - pattern: '*.py'
+      action: include
+      category: script
+      priority: high
+      reason: Python scripts for verification and curation
+      confidence: 0.95
+    - pattern: '*.mjs'
+      action: include
+      category: script
+      priority: high
+      reason: JavaScript modules for build and tests
+      confidence: 0.95
+    - pattern: '*.bat'
+      action: include
+      category: script
+      priority: medium
+      reason: Batch script for restarting local server
+      confidence: 0.85
+    - pattern: .gitignore
+      action: include
+      category: config
+      priority: low
+      reason: Git ignore rules (valuable for repository understanding)
+      confidence: 0.7
+    - pattern: templates/**
+      action: include
+      category: template
+      priority: high
+      reason: Agent skills, workflow templates, and knowledge base framework
+      confidence: 0.98
+    - pattern: docs/**
+      action: include
+      category: docs
+      priority: high
+      reason: Design plans and specifications
+      confidence: 0.98
+    - pattern: design/**
+      action: include
+      category: design
+      priority: high
+      reason: Frontend design prototypes and mockups
+      confidence: 0.95
+    - pattern: internal/**/*.go
+      action: include
+      category: source
+      priority: high
+      reason: Core Go packages (catalog, router, httpapi, knowledgebase, etc.)
+      confidence: 0.99
+    - pattern: cmd/**/*.go
+      action: include
+      category: source
+      priority: high
+      reason: Command entry points
+      confidence: 0.99
+    - pattern: web/src/**
+      action: include
+      category: source
+      priority: high
+      reason: Vue source code and API client
+      confidence: 0.98
+    - pattern: web/tests/**
+      action: include
+      category: tests
+      priority: high
+      reason: Web frontend tests explaining behavior
+      confidence: 0.95
+    - pattern: scripts/**
+      action: include
+      category: script
+      priority: high
+      reason: Build, verification, and sync scripts
+      confidence: 0.95
+    - pattern: .codegraph/**
+      action: exclude
+      category: generated
+      priority: high
+      reason: Generated code graph database and lock files
+      confidence: 0.99
+    - pattern: .idea/**
+      action: exclude
+      category: ide_config
+      priority: high
+      reason: IDE configuration (not project source)
+      confidence: 0.99
+    - pattern: go.sum
+      action: exclude
+      category: generated_dependency
+      priority: high
+      reason: Auto-generated Go checksum file
+      confidence: 0.99
+    - pattern: package-lock.json
+      action: exclude
+      category: generated_dependency
+      priority: high
+      reason: Auto-generated npm lock file
+      confidence: 0.99
+    - pattern: web/package-lock.json
+      action: exclude
+      category: generated_dependency
+      priority: high
+      reason: Auto-generated npm lock file
+      confidence: 0.99
+    - pattern: web/.vite/**
+      action: exclude
+      category: generated
+      priority: high
+      reason: Vite build cache and generated deps
+      confidence: 0.99
+    - pattern: '**/.gitkeep'
+      action: exclude
+      category: placeholder
+      priority: low
+      reason: Empty placeholder file
+      confidence: 0.9
+    - pattern: '*.lock'
+      action: exclude
+      category: generated_dependency
+      priority: high
+      reason: Lock files (generally generated)
+      confidence: 0.95
+    - pattern: '*.pid'
+      action: exclude
+      category: runtime
+      priority: high
+      reason: Process ID file (runtime artifact)
+      confidence: 0.95
+  limits:
+    maxFileSizeKB: 512
+    maxFilesPerRun: 3000
+instructions:
+  requiredTopics:
+    - agents
+    - api
+    - architecture
+    - design
+    - go
+    - knowledgebase
+    - templates
+    - workflow
+  additional: ""
+codeGraph:
+  enabled: true
+  impactDepth: 2
+  includeCallers: true
+  includeCallees: true
+  includeRelatedTests: true
+openWiki:
+  enabled: true
+  version: 0.2.0
+knowledgeGraph:
+  enabled: true
+  provider: gbrain
+  version: 0.42.62.0
+  brain: nexus-development
+  sourceId: project:nexus-agents
+  engine: pglite
+  transport: stdio
+  sync:
+    onProposalApplied: true
+    committedChangesOnly: true
+    retryMinutes: 5
+    maxRetries: 5
+  export:
+    includeDomains: true
+    includeFeatures: true
+    includeCodeFacts: false
+    includeExternalEvidence: false
+  query:
+    timeoutSeconds: 10
+    maxResults: 20
+    maxGraphDepth: 3
+    shadowEnabled: true
+  synthesis:
+    enabled: false
+    automatic: false
+  gaps:
+    enabled: false
+    createProposal: true
+schedule:
+  enabled: false
+  intervalMinutes: 30
+  committedChangesOnly: true
+ownership:
+  owners: []
+  requireApproval: true

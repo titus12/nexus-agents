@@ -4,6 +4,8 @@ import { NDataTable, NTooltip, type DataTableColumns } from "naive-ui";
 import {
   addProjectCopyFromTemplate,
   applyTemplateInitialization,
+  applyKnowledgeProposal,
+  checkKnowledgeUpdates,
   createTemplate,
   createTaskRun,
   createProjectWorkflow,
@@ -25,6 +27,10 @@ import {
   fetchTaskRuns,
   fetchInfrastructure,
   fetchInfrastructureCatalog,
+  fetchKnowledgeProposals,
+  fetchKnowledgeSyncProfile,
+  fetchKnowledgeSyncRuns,
+  fetchKnowledgeSyncStatus,
   fetchLocalDirectories,
   fetchNativeLocalDirectory,
   fetchModelRoutes,
@@ -41,13 +47,18 @@ import {
   fetchWorkflows,
   installInfrastructure,
   importProject,
+  initializeKnowledgePreview,
+  discoverKnowledgePolicy,
   rebuildLearningCaseIndex,
   resolveModelRoute,
   reviewEvaluationProposal,
+  rejectKnowledgeProposal,
   runPendingEvaluations,
   rescanProject,
   syncProjectCopy,
   syncProjectTemplates,
+  saveKnowledgeSyncProfile,
+  updateProjectGroups,
   updateTemplate,
   updateInfrastructure,
   updateWorkflow,
@@ -82,6 +93,11 @@ import type {
   KnowledgeRenderTree,
   KnowledgeRoutePreview,
   KnowledgeValidationReport,
+  KnowledgeDiscoveryResponse,
+  KnowledgeProposal,
+  KnowledgeSyncProfile,
+  KnowledgeSyncRun,
+  KnowledgeSyncState,
   LocalDirectoryEntry,
   LocalDirectoriesResponse,
   ModelRoute,
@@ -89,6 +105,7 @@ import type {
   Project,
   ProjectCopy,
   ProjectCopyKind,
+  ProjectGroup,
   ProjectInput,
   SyncStatus,
   TemplateInput,
@@ -262,6 +279,7 @@ const nativePickerTimeout = 2500;
 
 const templateLibrary = ref<TemplateLibrary>(emptyLibrary);
 const projects = ref<Project[]>([]);
+const projectGroups = ref<ProjectGroup[]>([]);
 const projectConfigSets = ref<Record<string, ProjectCopy[]>>({});
 const projectTemplateSyncing = ref(false);
 const workflows = ref<WorkflowSummary[]>([]);
@@ -298,11 +316,21 @@ const knowledgeDocument = ref<KnowledgeRenderedDocument | null>(null);
 const knowledgeRoute = ref<KnowledgeRoutePreview | null>(null);
 const knowledgeRetrieval = ref<KnowledgeRetrievalResult | null>(null);
 const knowledgeRouteTask = ref("");
+const knowledgeSearchEngine = ref<"gbrain" | "fts5">("gbrain");
 const selectedKnowledgePath = ref("");
 const knowledgeSearch = ref("");
-const activeKnowledgeView = ref<"docs" | "check" | "routing" | "maintenance" | "source">("docs");
+const activeKnowledgeView = ref<"docs" | "sync" | "check" | "routing" | "maintenance" | "source">("docs");
 const knowledgeBusy = ref(false);
 const knowledgeError = ref("");
+const knowledgeSyncProfile = ref<KnowledgeSyncProfile | null>(null);
+const knowledgeSyncProfileExists = ref(false);
+const knowledgeSyncStatus = ref<KnowledgeSyncState | null>(null);
+const knowledgeDiscovery = ref<KnowledgeDiscoveryResponse | null>(null);
+const knowledgeSyncRuns = ref<KnowledgeSyncRun[]>([]);
+const knowledgeProposals = ref<KnowledgeProposal[]>([]);
+const selectedKnowledgeProposal = ref<KnowledgeProposal | null>(null);
+const selectedKnowledgeProposalPaths = ref<string[]>([]);
+const knowledgeExternalReferences = ref("");
 const selectedRoute = ref<ModelRoute | null>(null);
 const proxyResult = ref<ModelRouteResolution | null>(null);
 const proxyError = ref("");
@@ -333,6 +361,8 @@ const importForm = ref<ProjectInput>({
   name: "",
   path: "",
 });
+const importGroupIds = ref<string[]>([]);
+const projectGroupMembershipIds = ref<string[]>([]);
 
 const templateInitializerForm = ref<{ targetPath: string; projectType: TemplateProjectType }>({
   targetPath: "",
@@ -360,6 +390,12 @@ const templateKindByPage: Partial<Record<Page, TemplateKind>> = {
 
 const currentProject = computed(() => {
   return projects.value.find((project) => project.id === selectedProjectId.value) ?? projects.value[0];
+});
+
+const currentProjectGroups = computed(() => {
+  const projectId = currentProject.value?.id;
+  if (!projectId) return [];
+  return projectGroups.value.filter((group) => group.projectIds.includes(projectId));
 });
 
 const currentProjectCopies = computed(() => {
@@ -1450,6 +1486,10 @@ function projectCopyCount(kind: ProjectCopyKind): number {
   return currentProjectCopies.value.filter((copy) => copy.kind === kind).length;
 }
 
+function groupsForProject(projectId: string): ProjectGroup[] {
+  return projectGroups.value.filter((group) => group.projectIds.includes(projectId));
+}
+
 function statusTone(status: string): string {
   if (status === "synced" || status === "ready" || status === "active") return "green";
   if (status === "template_updated") return "purple";
@@ -1494,8 +1534,14 @@ function openPage(page: Page) {
   }
 }
 
+function syncProjectGroupSelection(projectId: string) {
+  const groups = projectGroups.value.filter((group) => group.projectIds.includes(projectId));
+  projectGroupMembershipIds.value = groups.map((group) => group.id);
+}
+
 function openProject(projectId: string) {
   selectedProjectId.value = projectId;
+  syncProjectGroupSelection(projectId);
   activePage.value = "project-detail";
   drawerMode.value = null;
   workflowEditorMode.value = false;
@@ -1505,13 +1551,14 @@ function openProject(projectId: string) {
 
 async function openProjectResource(projectId: string, page: Page) {
   selectedProjectId.value = projectId;
+  syncProjectGroupSelection(projectId);
   activePage.value = page;
   drawerMode.value = null;
   workflowEditorMode.value = false;
   workflowConnectMode.value = false;
   pendingConnectionFrom.value = "";
   if (page === "project-knowledge") {
-    await loadKnowledgeExport(projectId);
+    await Promise.all([loadKnowledgeExport(projectId), loadKnowledgeSync(projectId)]);
     return;
   }
   const copies = await fetchProjectConfig(projectId);
@@ -1541,6 +1588,167 @@ async function loadKnowledgeExport(projectId = currentProject.value?.id ?? "") {
   }
 }
 
+async function loadKnowledgeSync(projectId = currentProject.value?.id ?? "") {
+  if (!projectId) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    const [profileResponse, status, runs, proposals] = await Promise.all([
+      fetchKnowledgeSyncProfile(projectId),
+      fetchKnowledgeSyncStatus(projectId),
+      fetchKnowledgeSyncRuns(projectId),
+      fetchKnowledgeProposals(projectId),
+    ]);
+    knowledgeSyncProfile.value = profileResponse.profile;
+    knowledgeSyncProfileExists.value = profileResponse.exists;
+    knowledgeSyncStatus.value = status;
+    knowledgeSyncRuns.value = runs;
+    knowledgeProposals.value = proposals;
+    selectedKnowledgeProposal.value =
+      proposals.find((proposal) => proposal.id === status.pendingProposalId) ??
+      proposals.find((proposal) => proposal.status === "pending") ??
+      proposals[0] ??
+      null;
+    selectedKnowledgeProposalPaths.value =
+      selectedKnowledgeProposal.value?.changes.filter((change) => change.selected).map((change) => change.path) ?? [];
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+async function discoverKnowledgePolicyForCurrentProject() {
+  if (!currentProject.value) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    knowledgeDiscovery.value = await discoverKnowledgePolicy(currentProject.value.id);
+    knowledgeSyncProfile.value = knowledgeDiscovery.value.profile;
+    activeKnowledgeView.value = "sync";
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+async function saveKnowledgePolicyForCurrentProject() {
+  if (!currentProject.value || !knowledgeSyncProfile.value) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    const profile: KnowledgeSyncProfile = {
+      ...knowledgeSyncProfile.value,
+      discovery: {
+        ...knowledgeSyncProfile.value.discovery,
+        reviewed: true,
+        reviewedBy: knowledgeSyncProfile.value.discovery.reviewedBy || "local-developer",
+      },
+    };
+    const response = await saveKnowledgeSyncProfile(currentProject.value.id, profile);
+    knowledgeSyncProfile.value = response.profile;
+    knowledgeSyncProfileExists.value = response.exists;
+    showToast("扫描策略已保存到 KnowledgeBase/Setting.yaml");
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+function parsedKnowledgeExternalReferences() {
+  return knowledgeExternalReferences.value
+    .split(/\r?\n/)
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .slice(0, 10)
+    .map((url) => ({ url, kind: "feishu" }));
+}
+
+async function runKnowledgeInitialization(mode = "initialize") {
+  if (!currentProject.value) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    const result = await initializeKnowledgePreview(currentProject.value.id, {
+      mode,
+      externalReferences: mode === "adopt" ? [] : parsedKnowledgeExternalReferences(),
+    });
+    showToast(result.message);
+    await loadKnowledgeSync(currentProject.value.id);
+    if (result.proposal) {
+      selectedKnowledgeProposal.value = result.proposal;
+      selectedKnowledgeProposalPaths.value = result.proposal.changes.map((change) => change.path);
+    }
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+async function checkKnowledgeUpdatesForCurrentProject() {
+  if (!currentProject.value) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    const result = await checkKnowledgeUpdates(currentProject.value.id);
+    showToast(result.message);
+    await loadKnowledgeSync(currentProject.value.id);
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+function selectKnowledgeProposal(proposal: KnowledgeProposal) {
+  selectedKnowledgeProposal.value = proposal;
+  selectedKnowledgeProposalPaths.value = proposal.changes.filter((change) => change.selected).map((change) => change.path);
+}
+
+function toggleKnowledgeProposalPath(path: string) {
+  const selected = new Set(selectedKnowledgeProposalPaths.value);
+  if (selected.has(path)) selected.delete(path);
+  else selected.add(path);
+  selectedKnowledgeProposalPaths.value = [...selected];
+}
+
+async function applySelectedKnowledgeProposal() {
+  if (!currentProject.value || !selectedKnowledgeProposal.value) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    const result = await applyKnowledgeProposal(
+      currentProject.value.id,
+      selectedKnowledgeProposal.value.id,
+      selectedKnowledgeProposalPaths.value,
+    );
+    showToast(result.message);
+    await Promise.all([loadKnowledgeSync(currentProject.value.id), loadKnowledgeExport(currentProject.value.id)]);
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
+async function rejectSelectedKnowledgeProposal() {
+  if (!currentProject.value || !selectedKnowledgeProposal.value) return;
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    const result = await rejectKnowledgeProposal(currentProject.value.id, selectedKnowledgeProposal.value.id);
+    showToast(result.message);
+    await loadKnowledgeSync(currentProject.value.id);
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
+}
+
 async function refreshKnowledgeExportForCurrentProject() {
   if (!currentProject.value) return;
   knowledgeBusy.value = true;
@@ -1558,9 +1766,9 @@ async function refreshKnowledgeExportForCurrentProject() {
   }
 }
 
-async function openKnowledgeDocument(path: string) {
+async function openKnowledgeDocument(path: string, projectId = "") {
   if (!currentProject.value) return;
-  knowledgeDocument.value = await fetchProjectKnowledgeExportDocument(currentProject.value.id, path);
+  knowledgeDocument.value = await fetchProjectKnowledgeExportDocument(projectId || currentProject.value.id, path);
   selectedKnowledgePath.value = path;
   activeKnowledgeView.value = "docs";
 }
@@ -1582,6 +1790,31 @@ async function previewKnowledgeRouteForCurrentProject() {
   knowledgeError.value = "";
   knowledgeRetrieval.value = await retrieveProjectKnowledge(currentProject.value.id, query, "routing", 6000);
   knowledgeRoute.value = await previewProjectKnowledgeRoute(currentProject.value.id, query);
+}
+
+async function searchKnowledgeForCurrentProject() {
+  if (!currentProject.value) return;
+  const query = knowledgeRouteTask.value.trim();
+  if (!query) {
+    knowledgeError.value = "Enter a task or keyword to find relevant knowledge.";
+    return;
+  }
+  knowledgeBusy.value = true;
+  knowledgeError.value = "";
+  try {
+    knowledgeRetrieval.value = await retrieveProjectKnowledge(
+      currentProject.value.id,
+      query,
+      "context",
+      6000,
+      knowledgeSearchEngine.value,
+    );
+    knowledgeRoute.value = null;
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    knowledgeBusy.value = false;
+  }
 }
 
 async function copyText(text: string) {
@@ -2077,6 +2310,11 @@ function useBrowsedDirectory() {
   closeDirectoryBrowser();
 }
 
+function openImportProjectModal() {
+  importGroupIds.value = [];
+  showImportModal.value = true;
+}
+
 function closeDirectoryBrowser() {
   showDirectoryBrowser.value = false;
   directoryBrowserError.value = "";
@@ -2088,17 +2326,27 @@ function baseNameFromPath(path: string): string {
 }
 
 async function importProjectAction() {
-  const project = await importProject(importForm.value);
+  const project = await importProject({ ...importForm.value, groupIds: [...importGroupIds.value] });
   const rescanned = await rescanProject(project.id);
+  await refreshBootstrap();
   projects.value = upsertProject(projects.value, rescanned.project);
-  projectConfigSets.value = {
-    ...projectConfigSets.value,
-    [project.id]: rescanned.copies,
-  };
+  projectConfigSets.value = { ...projectConfigSets.value, [project.id]: rescanned.copies };
   selectedProjectId.value = project.id;
+  projectGroupMembershipIds.value = projectGroups.value.filter((group) => group.projectIds.includes(project.id)).map((group) => group.id);
   activePage.value = "project-detail";
   showImportModal.value = false;
+  importGroupIds.value = [];
   showToast(`已导入项目：${project.name}`);
+}
+
+async function saveCurrentProjectGroups() {
+  if (!currentProject.value) return;
+  const projectId = currentProject.value.id;
+  await updateProjectGroups(projectId, projectGroupMembershipIds.value);
+  await refreshBootstrap();
+  selectedProjectId.value = projectId;
+  projectGroupMembershipIds.value = currentProjectGroups.value.map((group) => group.id);
+  showToast("Project Groups updated.");
 }
 
 async function deleteProjectAction(project: Project) {
@@ -2616,8 +2864,12 @@ function errorMessage(err: unknown): string {
 function applyBootstrap(data: BootstrapData) {
   templateLibrary.value = data.templateLibrary ?? emptyLibrary;
   projects.value = data.projects ?? [];
+  projectGroups.value = data.projectGroups ?? [];
   projectConfigSets.value = data.projectConfigSets ?? {};
   selectedProjectId.value = projects.value[0]?.id ?? selectedProjectId.value;
+  if (selectedProjectId.value) {
+    syncProjectGroupSelection(selectedProjectId.value);
+  }
 }
 
 onMounted(loadData);
@@ -2716,7 +2968,7 @@ onMounted(loadData);
               <div class="page-description">统一导入和管理项目自己的 Agents、Rules、Skills、Workflows 配置副本，模板同步保持手动触发。</div>
               <div class="page-actions">
                 <button class="btn-secondary" type="button" @click="openTemplateInitializer">快速配置新项目</button>
-                <button class="btn-primary" type="button" @click="showImportModal = true">导入项目</button>
+                <button class="btn-primary" type="button" @click="openImportProjectModal">导入项目</button>
               </div>
             </div>
             <div class="stats-row">
@@ -2727,10 +2979,11 @@ onMounted(loadData);
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Project</th><th>Status</th><th>Agents</th><th>Rules</th><th>Skills</th><th>Updated</th><th></th></tr></thead>
+                <thead><tr><th>Project</th><th>Groups</th><th>Status</th><th>Agents</th><th>Rules</th><th>Skills</th><th>Updated</th><th></th></tr></thead>
                 <tbody>
                   <tr v-for="project in projects" :key="project.id">
                     <td><button class="link-btn" type="button" @click="openProject(project.id)">{{ project.name }}</button><div class="dim mono">{{ project.path }}</div></td>
+                    <td><div class="knowledge-terms"><span v-for="group in groupsForProject(project.id)" :key="group.id" class="chip chip-purple">{{ group.name }}</span><span v-if="groupsForProject(project.id).length === 0" class="muted">standalone</span></div></td>
                     <td><span class="chip" :class="`chip-${statusTone(project.status)}`">{{ project.status }}</span></td>
                     <td>{{ project.configSummary.agents }}</td>
                     <td>{{ project.configSummary.rules }}</td>
@@ -2798,6 +3051,20 @@ onMounted(loadData);
                 <div><span>local config</span><strong class="mono">{{ currentProject.localConfigPath || '.nexus' }}</strong></div>
                 <div><span>git ignore</span><strong>{{ currentProject.localConfigIgnored ? 'ignored' : 'not ignored' }}</strong></div>
               </div>
+              <div class="project-group-membership">
+                <div>
+                  <strong>项目组</strong>
+                  <p class="muted">项目组由 Nexus 统一维护；这里只选择已有项目组，不允许临时输入名称。项目知识仍然只索引一次。</p>
+                </div>
+                <div class="project-group-options">
+                  <label v-for="group in projectGroups" :key="group.id" class="project-group-option">
+                    <input v-model="projectGroupMembershipIds" type="checkbox" :value="group.id" />
+                    <span>{{ group.name }}</span>
+                  </label>
+                  <span v-if="projectGroups.length === 0" class="empty-inline">当前没有可用的项目组。</span>
+                </div>
+                <button class="btn-secondary" type="button" @click="saveCurrentProjectGroups">保存项目组</button>
+              </div>
             </section>
             <div class="stats-row">
               <div class="stat-card"><div class="stat-icon purple">A</div><div><div class="stat-num">{{ currentProject.configSummary.agents }}</div><div class="stat-label">Agents</div></div></div>
@@ -2853,6 +3120,7 @@ onMounted(loadData);
               <div v-if="knowledgeError" class="empty-state danger">{{ knowledgeError }}</div>
               <nav class="kiso-tabs" aria-label="Knowledge views">
                 <button type="button" :class="{ active: activeKnowledgeView === 'docs' }" @click="activeKnowledgeView = 'docs'">Docs</button>
+                <button type="button" :class="{ active: activeKnowledgeView === 'sync' }" @click="activeKnowledgeView = 'sync'">Sync</button>
                 <button type="button" :class="{ active: activeKnowledgeView === 'check' }" @click="activeKnowledgeView = 'check'">Check</button>
                 <button type="button" :class="{ active: activeKnowledgeView === 'routing' }" @click="activeKnowledgeView = 'routing'">Routing</button>
                 <button type="button" :class="{ active: activeKnowledgeView === 'maintenance' }" @click="activeKnowledgeView = 'maintenance'">Maintenance</button>
@@ -2888,6 +3156,132 @@ onMounted(loadData);
                     <div v-else class="empty-state">Select a document from the navigation.</div>
                   </article>
 
+                  <article v-else-if="activeKnowledgeView === 'sync'" class="kiso-article knowledge-sync-panel">
+                    <div class="kiso-article-head">
+                      <div>
+                        <h2>Knowledge Sync</h2>
+                        <p class="muted">CodeGraph 提供代码事实，OpenWiki 在隔离快照中生成 Markdown，Nexus 校验后只产生待审核 Proposal。</p>
+                      </div>
+                      <span class="chip chip-purple">{{ knowledgeSyncStatus?.status || "uninitialized" }}</span>
+                    </div>
+
+                    <div class="knowledge-sync-facts">
+                      <div><span>branch</span><strong class="mono">{{ knowledgeSyncStatus?.branch || "-" }}</strong></div>
+                      <div><span>last processed</span><strong class="mono">{{ knowledgeSyncStatus?.lastProcessedCommit?.slice(0, 12) || "-" }}</strong></div>
+                      <div><span>OpenWiki</span><strong>{{ knowledgeSyncProfile?.openWiki.enabled ? `v${knowledgeSyncProfile.openWiki.version}` : "disabled" }}</strong></div>
+                      <div><span>CodeGraph</span><strong>{{ knowledgeSyncProfile?.codeGraph.enabled ? `depth ${knowledgeSyncProfile.codeGraph.impactDepth}` : "disabled" }}</strong></div>
+                    </div>
+
+                    <section class="knowledge-sync-section">
+                      <div class="knowledge-sync-section-head">
+                        <div>
+                          <h3>1. 扫描策略</h3>
+                          <p class="muted">AI 只根据 Git 文件清单、目录统计、Manifest、README 和 CodeGraph 摘要提议规则；Nexus 再做硬安全校验。</p>
+                        </div>
+                        <div class="knowledge-sync-actions">
+                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy" @click="discoverKnowledgePolicyForCurrentProject">生成策略</button>
+                          <button class="btn-primary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfile" @click="saveKnowledgePolicyForCurrentProject">保存 Setting.yaml</button>
+                        </div>
+                      </div>
+                      <div v-if="knowledgeDiscovery" class="knowledge-discovery-summary">
+                        <span class="chip chip-teal">{{ knowledgeDiscovery.proposal.inventory.trackedFiles }} tracked</span>
+                        <span class="chip chip-purple">{{ knowledgeDiscovery.proposal.rules.length }} rules</span>
+                        <span class="chip chip-orange">{{ knowledgeDiscovery.proposal.uncertain.length }} uncertain</span>
+                        <span class="chip chip-gray">{{ knowledgeDiscovery.proposal.aiRefined ? "AI refined" : "deterministic fallback" }}</span>
+                      </div>
+                      <div v-if="knowledgeSyncProfile?.scan.rules.length" class="knowledge-policy-list">
+                        <div v-for="rule in knowledgeSyncProfile.scan.rules" :key="`${rule.action}-${rule.pattern}`" class="knowledge-policy-row">
+                          <span class="chip" :class="rule.action === 'include' ? 'chip-green' : 'chip-red'">{{ rule.action }}</span>
+                          <code>{{ rule.pattern }}</code>
+                          <span>{{ rule.category || "general" }}</span>
+                          <small>{{ rule.reason }}</small>
+                          <b v-if="rule.confidence">{{ Math.round(rule.confidence * 100) }}%</b>
+                        </div>
+                      </div>
+                      <div v-else class="empty-inline">尚未生成或保存项目扫描策略。</div>
+                      <ul v-if="knowledgeDiscovery?.proposal.warnings.length" class="knowledge-list">
+                        <li v-for="warning in knowledgeDiscovery.proposal.warnings" :key="warning">{{ warning }}</li>
+                      </ul>
+                    </section>
+
+                    <section class="knowledge-sync-section">
+                      <div class="knowledge-sync-section-head">
+                        <div>
+                          <h3>2. 初始化 / 增量检查</h3>
+                          <p class="muted">飞书链接仅在本次初始化或补全中作为辅助依据，不保存到 Setting.yaml，也不会持续同步。</p>
+                        </div>
+                        <div class="knowledge-sync-actions">
+                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('adopt')">采用现有 KB</button>
+                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('enrich')">检查并补全</button>
+                          <button class="btn-primary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('initialize')">初始化 Proposal</button>
+                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="checkKnowledgeUpdatesForCurrentProject">检查 Git 更新</button>
+                        </div>
+                      </div>
+                      <textarea v-model="knowledgeExternalReferences" class="field-input knowledge-external-input" rows="3" placeholder="可选：每行一个飞书文档 HTTPS 链接，仅用于本次初始化/补全"></textarea>
+                      <div v-if="knowledgeSyncRuns.length" class="knowledge-run-list">
+                        <div v-for="run in knowledgeSyncRuns.slice(0, 5)" :key="run.id" class="knowledge-run-row">
+                          <span class="chip" :class="run.status === 'succeeded' ? 'chip-green' : 'chip-red'">{{ run.status }}</span>
+                          <strong>{{ run.kind }}</strong>
+                          <code>{{ run.targetRevision?.slice(0, 12) }}</code>
+                          <span>{{ run.changeClass || "-" }}</span>
+                          <small>{{ formatShortDate(run.startedAt) }}</small>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="knowledge-sync-section">
+                      <div class="knowledge-sync-section-head">
+                        <div>
+                          <h3>3. Proposal 审核</h3>
+                          <p class="muted">Pending Proposal 不参与稳定知识检索。应用前会再次检查项目路径与当前 HEAD，防止过期结果覆盖。</p>
+                        </div>
+                        <div class="knowledge-sync-actions">
+                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || selectedKnowledgeProposal?.status !== 'pending'" @click="rejectSelectedKnowledgeProposal">拒绝</button>
+                          <button class="btn-primary" type="button" :disabled="knowledgeBusy || selectedKnowledgeProposal?.status !== 'pending' || selectedKnowledgeProposalPaths.length === 0" @click="applySelectedKnowledgeProposal">应用所选文件</button>
+                        </div>
+                      </div>
+                      <div v-if="knowledgeProposals.length" class="knowledge-proposal-tabs">
+                        <button v-for="proposal in knowledgeProposals" :key="proposal.id" type="button" :class="{ active: selectedKnowledgeProposal?.id === proposal.id }" @click="selectKnowledgeProposal(proposal)">
+                          {{ proposal.id }} · {{ proposal.status }}
+                        </button>
+                      </div>
+                      <template v-if="selectedKnowledgeProposal">
+                        <div class="knowledge-sync-facts">
+                          <div><span>base</span><strong class="mono">{{ selectedKnowledgeProposal.baseRevision?.slice(0, 12) || "-" }}</strong></div>
+                          <div><span>target</span><strong class="mono">{{ selectedKnowledgeProposal.targetRevision.slice(0, 12) }}</strong></div>
+                          <div><span>compiler</span><strong>OpenWiki {{ selectedKnowledgeProposal.compilerVersion }}</strong></div>
+                          <div><span>validation</span><strong>{{ selectedKnowledgeProposal.validation.valid ? "valid" : "errors" }}</strong></div>
+                        </div>
+                        <div v-for="change in selectedKnowledgeProposal.changes" :key="change.path" class="knowledge-change-card">
+                          <label>
+                            <input type="checkbox" :checked="selectedKnowledgeProposalPaths.includes(change.path)" :disabled="selectedKnowledgeProposal.status !== 'pending'" @change="toggleKnowledgeProposalPath(change.path)" />
+                            <span class="chip chip-purple">{{ change.action }}</span>
+                            <code>{{ change.path }}</code>
+                          </label>
+                          <details>
+                            <summary>查看 before / after</summary>
+                            <div class="knowledge-diff-grid">
+                              <pre>{{ change.before || "(new file)" }}</pre>
+                              <pre>{{ change.after || "(deleted)" }}</pre>
+                            </div>
+                          </details>
+                        </div>
+                        <ul v-if="selectedKnowledgeProposal.validation.errors.length || selectedKnowledgeProposal.validation.warnings.length" class="knowledge-list">
+                          <li v-for="error in selectedKnowledgeProposal.validation.errors" :key="`error-${error}`" class="issue-error">{{ error }}</li>
+                          <li v-for="warning in selectedKnowledgeProposal.validation.warnings" :key="`warning-${warning}`" class="issue-warning">{{ warning }}</li>
+                        </ul>
+                        <div v-if="selectedKnowledgeProposal.evidence.length" class="knowledge-evidence-list">
+                          <div v-for="evidence in selectedKnowledgeProposal.evidence" :key="`${evidence.kind}-${evidence.source}`">
+                            <span class="chip chip-gray">{{ evidence.kind }}</span>
+                            <strong>{{ evidence.source }}</strong>
+                            <p>{{ evidence.summary }}</p>
+                          </div>
+                        </div>
+                      </template>
+                      <div v-else class="empty-inline">当前没有知识更新 Proposal。</div>
+                    </section>
+                  </article>
+
                   <article v-else-if="activeKnowledgeView === 'check'" class="kiso-article">
                     <div class="kiso-article-head"><h2>OKF validation</h2><span class="chip" :class="knowledgeExport?.manifest.summary.errors ? 'chip-red' : 'chip-green'">{{ knowledgeSiteStatus() }}</span></div>
                     <div v-if="knowledgeValidationIssues(knowledgeExport?.validation).length === 0" class="empty-inline">No validation issues.</div>
@@ -2902,13 +3296,23 @@ onMounted(loadData);
                     <div class="kiso-article-head">
                       <div>
                         <h2>Agent Knowledge Routing</h2>
-                        <p class="muted">Find focused KnowledgeBase sections for an agent task. Results use SQLite FTS5, OKF routing, snippets, and a token budget.</p>
+                        <p class="muted">Nexus 会根据当前项目自动使用所属项目组；未加入项目组时只检索当前项目。默认使用 GBrain。</p>
                       </div>
-                      <button class="btn-secondary" type="button" @click="previewKnowledgeRouteForCurrentProject">Find knowledge</button>
+                      <div class="knowledge-sync-actions">
+                        <select v-model="knowledgeSearchEngine" class="field-input knowledge-scope-select">
+                          <option value="gbrain">GBrain</option>
+                          <option value="fts5">SQLite FTS5</option>
+                        </select>
+                        <button class="btn-secondary" type="button" :disabled="knowledgeBusy" @click="searchKnowledgeForCurrentProject">Find knowledge</button>
+                      </div>
                     </div>
-                    <input v-model="knowledgeRouteTask" class="field-input" placeholder="例如：UI、弹窗、ViewModel、网络协议、玩法战斗" @keyup.enter="previewKnowledgeRouteForCurrentProject" />
+                    <input v-model="knowledgeRouteTask" class="field-input" placeholder="例如：公会成员加入流程在哪里？" @keyup.enter="searchKnowledgeForCurrentProject" />
                     <div v-if="knowledgeRetrieval" class="knowledge-route-result">
                       <div class="kiso-route-grid">
+                        <div class="route-metric">
+                          <div class="route-metric-label">Engine / scope</div>
+                          <div class="route-value">{{ knowledgeRetrieval.engine || knowledgeSearchEngine }} / {{ knowledgeRetrieval.scope || "project" }}</div>
+                        </div>
                         <div class="route-metric">
                           <div class="route-metric-label">Matched domain</div>
                           <div class="route-value">{{ knowledgeRetrieval.matchedDomain || "project" }}</div>
@@ -2922,6 +3326,7 @@ onMounted(loadData);
                           <div class="route-value">{{ knowledgeRetrieval.tokenBudget.usedTokens }} / {{ knowledgeRetrieval.tokenBudget.maxTokens }}</div>
                         </div>
                       </div>
+                      <p v-if="knowledgeRetrieval.degraded" class="issue-error">GBrain degraded; using FTS5 fallback: {{ knowledgeRetrieval.fallbackReason || "unknown reason" }}</p>
                       <p v-if="knowledgeRetrieval.matchedAlias?.alias" class="route-alias-note">
                         Matched alias:
                         <code>{{ knowledgeRetrieval.matchedAlias.alias }}</code>
@@ -2936,9 +3341,14 @@ onMounted(loadData);
                       <section>
                         <h3>Required knowledge</h3>
                         <div v-if="knowledgeRetrieval.required.length === 0" class="empty-inline">No required sections matched.</div>
-                        <div v-for="item in knowledgeRetrieval.required" :key="`${item.path}-${item.startLine}`" class="knowledge-match-card">
-                          <button class="link-btn mono" type="button" @click="openKnowledgeDocument(item.path)">{{ item.path }}</button>
+                        <div v-for="item in knowledgeRetrieval.required" :key="`${item.sourceId || ''}:${item.path}-${item.startLine}`" class="knowledge-match-card">
+                          <button class="link-btn mono" type="button" @click="openKnowledgeDocument(item.path, item.projectId)">{{ item.path }}</button>
                           <div><strong>{{ item.heading || item.title }}</strong> <span class="muted">score {{ Math.round(item.score) }} · {{ item.tokens }} tokens</span></div>
+                          <div class="knowledge-terms">
+                            <span v-if="item.projectId" class="chip chip-purple">{{ item.projectId }}</span>
+                            <span v-if="item.sourceId" class="chip chip-gray">{{ item.sourceId }}</span>
+                            <span v-if="item.revision" class="chip chip-blue">{{ item.revision }}</span>
+                          </div>
                           <div class="knowledge-terms"><span v-for="reason in item.reasons" :key="reason" class="chip chip-blue">{{ reason }}</span></div>
                           <p v-if="item.snippet" class="knowledge-snippet" v-html="item.snippet"></p>
                         </div>
@@ -3377,7 +3787,7 @@ onMounted(loadData);
           </section>
 
           <section v-else-if="activePage === 'infrastructure'" class="page active">
-            <div class="page-description">Global AI infrastructure used by Nexus Agents to reduce shell-output tokens and improve code-context retrieval. These items are host-level services, not project templates.</div>
+            <div class="page-description">Global AI infrastructure used by Nexus Agents to reduce shell-output tokens, improve code-context retrieval, and maintain the local GBrain knowledge graph. These items are host-level services, not project templates.</div>
             <div class="page-actions infrastructure-actions">
               <button class="btn-primary" type="button" @click="openInfrastructureCatalog">新增基建</button>
             </div>
@@ -3532,6 +3942,15 @@ requires_openai_auth = true</pre>
               <button class="btn-secondary" type="button" @click="chooseProjectDirectory()">选择目录</button>
             </div>
           </label>
+          <div class="project-group-picker">
+            <div class="field-label">项目组 <span class="muted">可选；只能选择 Nexus 中已经维护的项目组</span></div>
+            <label v-for="group in projectGroups" :key="group.id" class="project-group-option">
+              <input v-model="importGroupIds" type="checkbox" :value="group.id" />
+              <span>{{ group.name }}</span>
+              <small>{{ group.projectIds.length }} 个项目</small>
+            </label>
+            <span v-if="projectGroups.length === 0" class="empty-inline">当前没有可选择的项目组，项目将按独立项目导入。</span>
+          </div>
           <div class="scan-preview">
             <span class="chip chip-green">.claude</span>
             <span class="chip chip-green">.codex</span>

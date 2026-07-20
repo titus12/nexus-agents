@@ -20,8 +20,9 @@ type UserProjectRecord struct {
 }
 
 type UserProjectIndex struct {
-	Version  int                 `json:"version"`
-	Projects []UserProjectRecord `json:"projects"`
+	Version       int                 `json:"version"`
+	Projects      []UserProjectRecord `json:"projects"`
+	ProjectGroups []ProjectGroup      `json:"projectGroups,omitempty"`
 }
 
 func prepareImportedProject(name string, projectPath string) (string, string, error) {
@@ -43,8 +44,18 @@ func prepareImportedProject(name string, projectPath string) (string, string, er
 }
 
 func readUserProjectIndex() (UserProjectIndex, bool) {
-	data, err := os.ReadFile(userNexusPath())
-	if err != nil {
+	var data []byte
+	for _, candidate := range []string{userNexusPath(), legacyUserNexusPath()} {
+		stat, err := os.Stat(candidate)
+		if err != nil || stat.IsDir() {
+			continue
+		}
+		data, err = os.ReadFile(candidate)
+		if err == nil {
+			break
+		}
+	}
+	if len(data) == 0 {
 		return UserProjectIndex{}, false
 	}
 	var index UserProjectIndex
@@ -57,6 +68,9 @@ func readUserProjectIndex() (UserProjectIndex, bool) {
 	if index.Projects == nil {
 		index.Projects = []UserProjectRecord{}
 	}
+	if index.ProjectGroups == nil {
+		index.ProjectGroups = []ProjectGroup{}
+	}
 	return index, true
 }
 
@@ -64,19 +78,53 @@ func writeUserProjectIndex(index UserProjectIndex) error {
 	if index.Version == 0 {
 		index.Version = 1
 	}
-	if len(index.Projects) == 0 {
+	if len(index.Projects) == 0 && len(index.ProjectGroups) == 0 {
 		if err := os.Remove(userNexusPath()); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove user .nexus: %w", err)
+			return fmt.Errorf("remove user project index: %w", err)
 		}
+		_ = os.Remove(userNexusRoot())
 		return nil
 	}
 	data, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal user .nexus: %w", err)
+		return fmt.Errorf("marshal user project index: %w", err)
 	}
 	data = append(data, '\n')
+	if err := prepareUserNexusDirectory(); err != nil {
+		return err
+	}
 	if err := os.WriteFile(userNexusPath(), data, 0o644); err != nil {
-		return fmt.Errorf("write user .nexus: %w", err)
+		return fmt.Errorf("write user project index: %w", err)
+	}
+	return nil
+}
+
+func prepareUserNexusDirectory() error {
+	root := userNexusRoot()
+	stat, err := os.Stat(root)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return fmt.Errorf("create user .nexus directory: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat user .nexus path: %w", err)
+	}
+	if stat.IsDir() {
+		return nil
+	}
+
+	legacyPath := root + ".projects-legacy.json"
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale legacy project index: %w", err)
+	}
+	if err := os.Rename(root, legacyPath); err != nil {
+		return fmt.Errorf("preserve legacy user .nexus project index: %w", err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		_ = os.Rename(legacyPath, root)
+		return fmt.Errorf("create user .nexus directory: %w", err)
 	}
 	return nil
 }
@@ -123,10 +171,17 @@ func removeUserProjectRecord(projectPath string) error {
 	return writeUserProjectIndex(index)
 }
 
-func restoreProjectsFromUserIndex(library TemplateLibrary) ([]Project, map[string][]ProjectCopy) {
+func persistUserProjectGroups(groups []ProjectGroup) error {
+	index, _ := readUserProjectIndex()
+	index.Version = max(index.Version, 2)
+	index.ProjectGroups = cloneProjectGroups(groups)
+	return writeUserProjectIndex(index)
+}
+
+func restoreProjectsFromUserIndex(library TemplateLibrary) ([]Project, map[string][]ProjectCopy, []ProjectGroup) {
 	index, ok := readUserProjectIndex()
-	if !ok || len(index.Projects) == 0 {
-		return nil, map[string][]ProjectCopy{}
+	if !ok {
+		return nil, map[string][]ProjectCopy{}, []ProjectGroup{}
 	}
 	projects := make([]Project, 0, len(index.Projects))
 	configSets := make(map[string][]ProjectCopy, len(index.Projects))
@@ -159,11 +214,40 @@ func restoreProjectsFromUserIndex(library TemplateLibrary) ([]Project, map[strin
 		filtered = append(filtered, record)
 	}
 	index.Projects = filtered
+	projectIDs := map[string]bool{}
+	for _, project := range projects {
+		projectIDs[project.ID] = true
+	}
+	groups := make([]ProjectGroup, 0, len(index.ProjectGroups))
+	for _, group := range index.ProjectGroups {
+		group.ID = strings.TrimSpace(group.ID)
+		group.Name = strings.TrimSpace(group.Name)
+		if group.ID == "" || group.Name == "" {
+			continue
+		}
+		filteredProjectIDs := make([]string, 0, len(group.ProjectIDs))
+		for _, projectID := range uniqueProjectIDs(group.ProjectIDs) {
+			if projectIDs[projectID] {
+				filteredProjectIDs = append(filteredProjectIDs, projectID)
+			}
+		}
+		group.ProjectIDs = filteredProjectIDs
+		groups = append(groups, group)
+	}
+	index.ProjectGroups = cloneProjectGroups(groups)
 	_ = writeUserProjectIndex(index)
-	return projects, configSets
+	return projects, configSets, groups
 }
 
 func userNexusPath() string {
+	return filepath.Join(userNexusRoot(), "projects.json")
+}
+
+func legacyUserNexusPath() string {
+	return userNexusRoot()
+}
+
+func userNexusRoot() string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		return ".nexus"

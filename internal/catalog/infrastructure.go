@@ -15,9 +15,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"nexus-agents/internal/knowledgegraph/gbrain"
 )
 
 type InfrastructureItem struct {
@@ -41,6 +44,7 @@ type InfrastructureItem struct {
 type InfrastructureServiceOptions struct {
 	Runner     InfrastructureCommandRunner
 	RTKUpdater InfrastructureUpdater
+	ToolRoot   string
 }
 
 type InfrastructureCommandRunner interface {
@@ -51,6 +55,10 @@ type InfrastructureCommandRunnerFunc func(name string, args ...string) (string, 
 
 func (fn InfrastructureCommandRunnerFunc) Run(name string, args ...string) (string, error) {
 	return fn(name, args...)
+}
+
+type InfrastructureEnvironmentCommandRunner interface {
+	RunWithEnvironment(environment map[string]string, name string, args ...string) (string, error)
 }
 
 type InfrastructureUpdater interface {
@@ -66,6 +74,7 @@ func (fn InfrastructureUpdaterFunc) Update() (string, error) {
 type InfrastructureService struct {
 	runner            InfrastructureCommandRunner
 	rtkUpdater        InfrastructureUpdater
+	toolRoot          string
 	mu                sync.Mutex
 	installedOptional map[string]bool
 }
@@ -79,9 +88,14 @@ func NewInfrastructureService(options InfrastructureServiceOptions) *Infrastruct
 	if rtkUpdater == nil {
 		rtkUpdater = InfrastructureUpdaterFunc(updateRTKFromGitHub)
 	}
+	toolRoot := strings.TrimSpace(options.ToolRoot)
+	if toolRoot == "" {
+		toolRoot = defaultManagedToolRoot()
+	}
 	return &InfrastructureService{
 		runner:            runner,
 		rtkUpdater:        rtkUpdater,
+		toolRoot:          toolRoot,
 		installedOptional: map[string]bool{},
 	}
 }
@@ -143,7 +157,18 @@ func (s *InfrastructureService) Install(id string) (InfrastructureItem, bool, er
 		return item, true, nil
 	}
 
-	output, err := s.runner.Run(command[0], command[1:]...)
+	if id == "gbrain" {
+		if output, err := s.runner.Run("bun", "--version"); err != nil {
+			item.Status = "not_installed"
+			item.Output = strings.TrimSpace(output + "\nBun is required before GBrain can be installed.\n" + err.Error())
+			return item, true, nil
+		}
+		if err := os.MkdirAll(s.gbrainBinDir(), 0o755); err != nil {
+			return InfrastructureItem{}, true, fmt.Errorf("create GBrain managed tool directory: %w", err)
+		}
+	}
+
+	output, err := s.runInstallCommand(id, command)
 	if err != nil {
 		item.Status = "unhealthy"
 		item.Output = strings.TrimSpace(output + "\n" + err.Error())
@@ -187,7 +212,17 @@ func (s *InfrastructureService) Update(id string) (InfrastructureItem, bool, err
 	if !ok {
 		return InfrastructureItem{}, false, nil
 	}
-	output, err := s.runner.Run(command[0], command[1:]...)
+	if id == "gbrain" {
+		if output, err := s.runner.Run("bun", "--version"); err != nil {
+			item.Status = "not_installed"
+			item.Output = strings.TrimSpace(output + "\nBun is required before GBrain can be updated.\n" + err.Error())
+			return item, true, nil
+		}
+		if err := os.MkdirAll(s.gbrainBinDir(), 0o755); err != nil {
+			return InfrastructureItem{}, true, fmt.Errorf("create GBrain managed tool directory: %w", err)
+		}
+	}
+	output, err := s.runInstallCommand(id, command)
 	if err != nil {
 		item = s.withLocalStatus(item)
 		item.Status = "unhealthy"
@@ -201,16 +236,51 @@ func (s *InfrastructureService) Update(id string) (InfrastructureItem, bool, err
 
 func (s *InfrastructureService) withLocalStatus(item InfrastructureItem) InfrastructureItem {
 	item.LastCheckedAt = nowStamp()
-	output, err := s.runner.Run(item.ID, "--version")
+	if item.ID == "gbrain" {
+		bunOutput, err := s.runner.Run("bun", "--version")
+		if err != nil {
+			item.Status = "not_installed"
+			item.Output = strings.TrimSpace(bunOutput + "\nBun runtime is required by GBrain.")
+			return item
+		}
+	}
+	versionArgs := []string{"--version"}
+	if item.ID == "openwiki" {
+		versionArgs = []string{"--help"}
+	}
+	executable := item.ID
+	if item.ID == "gbrain" {
+		executable = s.gbrainExecutable()
+	}
+	output, err := s.runner.Run(executable, versionArgs...)
 	if err != nil {
 		item.Status = "missing"
+		if item.ID == "gbrain" {
+			item.Status = "not_installed"
+		}
 		item.Output = strings.TrimSpace(output + "\n" + err.Error())
 		return item
 	}
-	if executable, err := exec.LookPath(item.ID); err == nil {
-		item.ExecutablePath = executable
+	if item.ID == "gbrain" {
+		if path, err := exec.LookPath(executable); err == nil {
+			item.ExecutablePath = path
+		} else if filepath.IsAbs(executable) {
+			item.ExecutablePath = executable
+		}
+	} else if path, err := exec.LookPath(item.ID); err == nil {
+		item.ExecutablePath = path
 	}
 	item.Version = parseVersion(output)
+	if item.ID == "openwiki" && item.Version != "0.2.0" {
+		item.Status = "unhealthy"
+		item.Output = strings.TrimSpace(output + "\nNexus requires the tested OpenWiki version 0.2.0.")
+		return item
+	}
+	if item.ID == "gbrain" && item.Version != testedGBrainVersion {
+		item.Status = "unhealthy"
+		item.Output = strings.TrimSpace(output + "\nNexus requires the tested GBrain version " + testedGBrainVersion + ".")
+		return item
+	}
 	item.Status = "ready"
 	item.Output = strings.TrimSpace(output)
 	return item
@@ -241,6 +311,32 @@ func infrastructureDefinitions() []InfrastructureItem {
 			GitHubURL:      "https://github.com/colbymchenry/codegraph",
 			InstallCommand: "npm i -g @colbymchenry/codegraph",
 			CommonCommands: []string{"codegraph init -i", "codegraph status", "codegraph sync", "codegraph upgrade --check", "codegraph upgrade"},
+			Source:         "built_in",
+			Installable:    true,
+		},
+		{
+			ID:             "openwiki",
+			Name:           "OpenWiki",
+			Kind:           "knowledge_compiler",
+			Status:         "unknown",
+			Summary:        "Compile code and repository documents into reviewable Markdown knowledge.",
+			Description:    "Nexus runs the pinned OpenWiki release in an isolated Git snapshot, normalizes only its openwiki/ output, validates the result, and presents a proposal instead of allowing direct project writes.",
+			GitHubURL:      "https://github.com/openwiki-ai/openwiki",
+			InstallCommand: "npm install --global openwiki@0.2.0",
+			CommonCommands: []string{"openwiki --help", "openwiki code --update --print"},
+			Source:         "built_in",
+			Installable:    true,
+		},
+		{
+			ID:             "gbrain",
+			Name:           "GBrain",
+			Kind:           "knowledge_graph",
+			Status:         "unknown",
+			Summary:        "Local knowledge retrieval and typed graph engine backed by embedded PGLite.",
+			Description:    "Nexus manages a pinned GBrain package and one long-lived stdio MCP process. Approved KnowledgeBase Markdown remains canonical; GBrain data is a rebuildable derived index.",
+			GitHubURL:      "https://github.com/garrytan/gbrain",
+			InstallCommand: "bun install --global github:garrytan/gbrain#" + testedGBrainCommit,
+			CommonCommands: []string{"gbrain --version", "gbrain init --pglite", "gbrain serve", "gbrain doctor"},
 			Source:         "built_in",
 			Installable:    true,
 		},
@@ -280,6 +376,8 @@ func infrastructureInstallCommand(id string) ([]string, bool) {
 	commands := map[string][]string{
 		"rtk":       {"npm", "install", "-g", "rtk"},
 		"codegraph": {"npm", "install", "-g", "@colbymchenry/codegraph"},
+		"openwiki":  {"npm", "install", "--global", "openwiki@0.2.0"},
+		"gbrain":    {"bun", "install", "--global", "github:garrytan/gbrain#" + testedGBrainCommit},
 		"repomix":   {"npm", "install", "-g", "repomix"},
 	}
 	command, ok := commands[id]
@@ -289,6 +387,8 @@ func infrastructureInstallCommand(id string) ([]string, bool) {
 func infrastructureUpdateCommand(id string) ([]string, bool) {
 	commands := map[string][]string{
 		"codegraph": {"codegraph", "upgrade"},
+		"openwiki":  {"npm", "install", "--global", "openwiki@0.2.0"},
+		"gbrain":    {"bun", "install", "--global", "github:garrytan/gbrain#" + testedGBrainCommit},
 		"repomix":   {"npm", "update", "-g", "repomix"},
 	}
 	command, ok := commands[id]
@@ -313,8 +413,92 @@ type execCommandRunner struct{}
 
 func (execCommandRunner) Run(name string, args ...string) (string, error) {
 	command := exec.Command(name, args...)
+	configureHiddenCommand(command)
 	output, err := command.CombinedOutput()
 	return string(output), err
+}
+
+func (execCommandRunner) RunWithEnvironment(environment map[string]string, name string, args ...string) (string, error) {
+	command := exec.Command(name, args...)
+	command.Env = mergeEnvironment(os.Environ(), environment)
+	configureHiddenCommand(command)
+	output, err := command.CombinedOutput()
+	return string(output), err
+}
+
+const (
+	testedGBrainVersion = gbrain.TestedVersion
+	testedGBrainCommit  = gbrain.TestedCommit
+)
+
+func mergeEnvironment(base []string, overrides map[string]string) []string {
+	overrideKeys := make(map[string]bool, len(overrides))
+	for key := range overrides {
+		overrideKeys[environmentKey(key)] = true
+	}
+	merged := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		separator := strings.IndexByte(entry, '=')
+		if separator <= 0 || !overrideKeys[environmentKey(entry[:separator])] {
+			merged = append(merged, entry)
+		}
+	}
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		merged = append(merged, key+"="+overrides[key])
+	}
+	return merged
+}
+
+func environmentKey(key string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(key)
+	}
+	return key
+}
+
+func defaultManagedToolRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".nexus", "tools")
+	}
+	return filepath.Join(home, ".nexus", "tools")
+}
+
+func (s *InfrastructureService) gbrainInstallRoot() string {
+	return filepath.Join(s.toolRoot, "gbrain", testedGBrainCommit)
+}
+
+func (s *InfrastructureService) gbrainBinDir() string {
+	return filepath.Join(s.gbrainInstallRoot(), "bin")
+}
+
+func (s *InfrastructureService) gbrainExecutable() string {
+	for _, name := range []string{"gbrain.exe", "gbrain", "gbrain.cmd", "gbrain.ps1"} {
+		candidate := filepath.Join(s.gbrainBinDir(), name)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return "gbrain"
+}
+
+func (s *InfrastructureService) runInstallCommand(id string, command []string) (string, error) {
+	if id != "gbrain" {
+		return s.runner.Run(command[0], command[1:]...)
+	}
+	environment := map[string]string{
+		"BUN_INSTALL_GLOBAL_DIR": s.gbrainInstallRoot(),
+		"BUN_INSTALL_BIN":        s.gbrainBinDir(),
+	}
+	if runner, ok := s.runner.(InfrastructureEnvironmentCommandRunner); ok {
+		return runner.RunWithEnvironment(environment, command[0], command[1:]...)
+	}
+	return s.runner.Run(command[0], command[1:]...)
 }
 
 type githubRelease struct {

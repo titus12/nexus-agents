@@ -8,8 +8,6 @@ import (
 	"strings"
 )
 
-const protectedProjectKnowledgePath = "KnowledgeBase/project"
-
 type templateSyncCounts struct {
 	overwritten int
 	created     int
@@ -149,7 +147,9 @@ func synchronizeTemplateTree(templateRoot string, projectRoot string) (templateS
 
 func isProtectedProjectKnowledgePath(relativePath string) bool {
 	normalized := filepath.ToSlash(filepath.Clean(relativePath))
-	return normalized == protectedProjectKnowledgePath || strings.HasPrefix(normalized, protectedProjectKnowledgePath+"/")
+	return normalized == "KnowledgeBase/Setting.yaml" ||
+		normalized == "KnowledgeBase/project" ||
+		strings.HasPrefix(normalized, "KnowledgeBase/project/")
 }
 
 func safeProjectDestination(projectRoot string, relativePath string) (string, error) {

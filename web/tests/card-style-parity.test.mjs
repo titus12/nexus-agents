@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const designStyles = readFileSync(new URL("../../design/shared.css", import.meta.url), "utf8");
 const app = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 
 function projectResourceSection() {
   const start = app.indexOf('v-else-if="activePage === \'project-agents\'');
@@ -67,7 +68,7 @@ test("project agent rule and skill cards reuse source template footer chips", ()
 
 test("import directory picker opens as a separate modal overlay", () => {
   assert.match(app, /@click="chooseProjectDirectory\(\)"/);
-  assert.match(app, /async function chooseProjectDirectory\(\)/);
+  assert.match(app, /async function chooseProjectDirectory\([^)]*\)/);
   assert.match(app, /fetchNativeLocalDirectory/);
   assert.match(app, /AbortController/);
   assert.match(app, /nativePickerTimeout/);
@@ -113,9 +114,13 @@ test("system infrastructure page renders managed cards and curated third-party i
   assert.match(app, />安装</);
   assert.match(app, /infrastructure-card/);
   assert.match(styles, /\.infrastructure-card\s*\{/);
+  assert.match(styles, /\.infrastructure-card\.gbrain\s*\{\s*--asset-accent:\s*#817cff;/);
+  assert.match(types, /id:\s*"rtk"\s*\|\s*"codegraph"\s*\|\s*"openwiki"\s*\|\s*"gbrain"/);
+  assert.match(types, /"knowledge_graph"/);
 
   const section = infrastructureSection();
   assert.doesNotMatch(section, /lastCheckedAt/);
+  assert.match(section, /local GBrain knowledge graph/);
 });
 
 test("model proxy page exposes the embedded Codex router endpoints", () => {
@@ -124,4 +129,32 @@ test("model proxy page exposes the embedded Codex router endpoints", () => {
   assert.match(app, /\/proxy\/codex\/model-catalog\.json/);
   assert.match(app, /model_provider = "nexus-codex"/);
   assert.match(app, /requires_openai_auth = true/);
+});
+
+test("knowledge sync uses English navigation and dark, readable metadata cards", () => {
+  assert.match(app, /activeKnowledgeView === 'sync'[^>]*>Sync<\/button>/);
+  assert.doesNotMatch(app, /activeKnowledgeView === 'sync'[^>]*>同步<\/button>/);
+  assert.match(styles, /--panel-soft:\s*rgba\(255,\s*255,\s*255,\s*0\.045\)/);
+  assert.match(styles, /\.knowledge-sync-facts\s*\{[^}]*repeat\(auto-fit,\s*minmax\(150px,\s*1fr\)\)/s);
+  assert.match(styles, /\.knowledge-sync-facts\s*\{[^}]*width:\s*100%/s);
+  assert.match(styles, /\.knowledge-sync-facts > div\s*\{[^}]*background:[\s\S]*var\(--bg-card\)/);
+  assert.match(styles, /\.knowledge-sync-facts strong\s*\{[^}]*color:\s*var\(--text-primary\)/s);
+  assert.doesNotMatch(styles, /\.knowledge-sync-facts > div\s*\{[^}]*#f8fafc/s);
+});
+
+test("project groups compose sources without duplicating project knowledge", () => {
+  assert.match(types, /export type ProjectGroup = \{[\s\S]*projectIds: string\[\]/);
+  assert.match(app, /项目组由 Nexus 统一维护/);
+  assert.match(app, /只能选择 Nexus 中已经维护的项目组/);
+  assert.doesNotMatch(app, /importNewGroupName/);
+  assert.doesNotMatch(app, /projectNewGroupName/);
+  assert.doesNotMatch(app, /knowledgeSearchScope/);
+  assert.doesNotMatch(app, /knowledgeSearchGroupId/);
+  assert.match(app, /根据当前项目自动使用所属项目组/);
+  assert.match(app, /const knowledgeSearchEngine = ref<"gbrain" \| "fts5">\("gbrain"\)/);
+  assert.match(app, /<option value="gbrain">GBrain<\/option>/);
+  assert.match(app, /<option value="fts5">SQLite FTS5<\/option>/);
+  assert.doesNotMatch(app, /<option value="compare">Compare<\/option>/);
+  assert.match(styles, /\.project-group-picker,/);
+  assert.match(styles, /\.knowledge-scope-select\s*\{/);
 });

@@ -215,3 +215,40 @@ GET  /proxy/codex/health
 GET  /proxy/codex/model-catalog.json
 GET  /proxy/codex/v1/models
 ```
+## Knowledge Sync（OpenWiki）
+
+项目知识同步使用以下职责边界：
+
+- `CodeGraph`：当前代码事实、调用关系和影响分析接口；
+- `OpenWiki 0.2.0`：在 Nexus 创建的隔离 Git 快照中生成 Markdown；
+- `Nexus`：扫描策略、规范化、校验、Proposal 审核、应用和检索；
+- `KnowledgeBase/Setting.yaml`：项目团队提交到 Git 的扫描与维护策略；
+- `KnowledgeBase/project/**`：审核通过后提交到项目 Git 的稳定知识。
+
+安装固定版本的 OpenWiki：
+
+```powershell
+npm install --global openwiki@0.2.0
+openwiki --help
+```
+
+可选的 AI 扫描策略服务使用 OpenAI-compatible Chat Completions JSON 接口：
+
+```powershell
+$env:NEXUS_KNOWLEDGE_DISCOVERY_URL="https://example.internal/v1/chat/completions"
+$env:NEXUS_KNOWLEDGE_DISCOVERY_MODEL="your-model"
+$env:NEXUS_KNOWLEDGE_DISCOVERY_API_KEY="..."
+```
+
+未配置时，Nexus 使用确定性的 Git 清单策略，不阻塞初始化。
+
+可选的飞书转 Markdown 服务通过运行时环境配置，不会写入项目配置：
+
+```powershell
+$env:NEXUS_EXTERNAL_MARKDOWN_URL="https://example.internal/convert-to-markdown"
+$env:NEXUS_EXTERNAL_MARKDOWN_TOKEN="..."
+```
+
+转换服务接收 `{"url":"https://..."}`，返回包含 `title`、`markdown`、可选
+`revision`/`updatedAt` 的 JSON。飞书快照只用于本次初始化或补全，代码和
+CodeGraph 事实始终优先。

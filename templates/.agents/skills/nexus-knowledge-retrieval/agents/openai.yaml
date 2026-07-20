@@ -1,0 +1,5 @@
+interface:
+  display_name: "Nexus Knowledge Retrieval"
+  short_description: "Load approved GBrain knowledge for the current repository."
+  default_prompt: "Use $nexus-knowledge-retrieval to load the current project or Project Group knowledge before implementation."
+

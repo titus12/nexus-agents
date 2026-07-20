@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $goProcess = $null
 $smokeOk = $false
+$smokeProjectRoot = $null
 
 function Get-FreeSmokePort {
   for ($i = 0; $i -lt 40; $i++) {
@@ -76,6 +77,9 @@ function Invoke-Json {
 try {
   $env:GOCACHE = Join-Path $root ".cache\go-build"
   $env:NEXUS_ADDR = ":$port"
+  # Smoke verification must never attach to or contend with the developer's
+  # active GBrain/PGLite process.
+  $env:NEXUS_KNOWLEDGE_GRAPH_ENABLED = "false"
 
   $goProcess = Start-Process -FilePath "go" `
     -ArgumentList @("run", ".\cmd\nexus-agents") `
@@ -108,14 +112,28 @@ try {
   if ($createdRule.kind -ne "rule") {
     throw "Template create did not return a rule."
   }
-  Invoke-WebRequest -UseBasicParsing -Method Delete -TimeoutSec 5 "$base/api/templates/.claude/rules/$($createdRule.id)" | Out-Null
+  Invoke-WebRequest -UseBasicParsing -Method Delete -TimeoutSec 5 "$base/api/templates/rules/$($createdRule.id)" | Out-Null
 
   $agents = Invoke-Json "$base/api/templates/agents"
   if ($agents[0].modelTier -eq $null -or $agents[0].relatedRules.Count -eq 0 -or $agents[0].content -eq $null) {
     throw "Agent template metadata was incomplete."
   }
 
-  $syncPreview = Invoke-Json "$base/api/projects/btd-game-server/sync-preview"
+  $smokeProjectRoot = Join-Path ([System.IO.Path]::GetTempPath()) "nexus-agents-smoke-project-$port"
+  New-Item -ItemType Directory -Force -Path (Join-Path $smokeProjectRoot ".claude\agents") | Out-Null
+  New-Item -ItemType Directory -Force -Path (Join-Path $smokeProjectRoot ".codex\agents") | Out-Null
+  New-Item -ItemType Directory -Force -Path (Join-Path $smokeProjectRoot ".claude\workflows") | Out-Null
+  Copy-Item -LiteralPath (Join-Path $root "templates\.claude\agents\go-worker.md") -Destination (Join-Path $smokeProjectRoot ".claude\agents\go-worker.md")
+  Copy-Item -LiteralPath (Join-Path $root "templates\.codex\agents\go-worker.toml") -Destination (Join-Path $smokeProjectRoot ".codex\agents\go-worker.toml")
+  Copy-Item -LiteralPath (Join-Path $root "templates\.claude\workflows\go-feature-development.md") -Destination (Join-Path $smokeProjectRoot ".claude\workflows\go-feature-development.md")
+  Copy-Item -LiteralPath (Join-Path $root "templates\.claude\workflows\go-feature-development.graph.json") -Destination (Join-Path $smokeProjectRoot ".claude\workflows\go-feature-development.graph.json")
+  $importBody = @{ name = "smoke-project"; path = $smokeProjectRoot } | ConvertTo-Json -Compress
+  $smokeProject = Invoke-Json "$base/api/projects/import" "POST" $importBody
+  if ([string]::IsNullOrWhiteSpace($smokeProject.id)) {
+    throw "Smoke project import did not return a project id."
+  }
+
+  $syncPreview = Invoke-Json "$base/api/projects/$($smokeProject.id)/sync-preview"
   if ($syncPreview.Count -eq 0 -or $syncPreview[0].syncMode -ne "manual") {
     throw "Project sync preview did not expose manual sync copies."
   }
@@ -131,7 +149,7 @@ try {
     throw "Could not find worker project copy in sync preview."
   }
 
-  $syncedCopy = Invoke-Json "$base/api/projects/btd-game-server/config/$($workerCopy.id)/sync" "POST"
+  $syncedCopy = Invoke-Json "$base/api/projects/$($smokeProject.id)/config/$($workerCopy.id)/sync" "POST"
   if ($syncedCopy.status -ne "synced") {
     throw "Project copy sync did not return synced status."
   }
@@ -145,7 +163,7 @@ try {
   if ($null -eq $workflowCopy) {
     throw "Could not find feature-development project workflow copy."
   }
-  $projectGraph = Invoke-Json "$base/api/projects/btd-game-server/config/$($workflowCopy.id)/graph"
+  $projectGraph = Invoke-Json "$base/api/projects/$($smokeProject.id)/config/$($workflowCopy.id)/graph"
   if ($projectGraph.nodes.Count -eq 0 -or $projectGraph.edges.Count -eq 0) {
     throw "Project workflow graph did not expose nodes and edges."
   }
@@ -169,6 +187,14 @@ finally {
     }
   }
   Stop-PortListeners $port
+  if ($null -ne $smokeProjectRoot -and (Test-Path -LiteralPath $smokeProjectRoot)) {
+    $resolvedTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+    $resolvedProject = [System.IO.Path]::GetFullPath($smokeProjectRoot)
+    if ($resolvedProject.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -and
+        (Split-Path -Leaf $resolvedProject).StartsWith("nexus-agents-smoke-project-")) {
+      Remove-Item -LiteralPath $resolvedProject -Recurse -Force
+    }
+  }
 }
 
 if ($smokeOk) {

@@ -59,7 +59,7 @@ func ScanBundle(projectRoot string) (Bundle, error) {
 			Links:        extractMarkdownLinks(body),
 			SizeBytes:    info.Size(),
 			ModifiedAt:   info.ModTime().Format(time.RFC3339),
-			Reserved:     entry.Name() == "index.md" || entry.Name() == "log.md",
+			Reserved:     isReservedKnowledgePath(rel),
 		})
 		return nil
 	})
@@ -69,6 +69,18 @@ func ScanBundle(projectRoot string) (Bundle, error) {
 	sort.SliceStable(docs, func(i, j int) bool { return docs[i].Path < docs[j].Path })
 	bundle.Documents = docs
 	return normalizeBundle(bundle), nil
+}
+
+func isReservedKnowledgePath(relative string) bool {
+	relative = filepath.ToSlash(filepath.Clean(relative))
+	name := filepath.Base(relative)
+	if name == "log.md" {
+		return true
+	}
+	if name != "index.md" {
+		return false
+	}
+	return !strings.Contains(relative, "/domains/")
 }
 
 func extractMarkdownLinks(body string) []DocLink {

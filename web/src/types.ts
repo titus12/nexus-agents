@@ -162,6 +162,9 @@ export type KnowledgeTokenBudget = {
 };
 
 export type KnowledgeContextItem = {
+  projectId?: string;
+  sourceId?: string;
+  revision?: string;
   path: string;
   title: string;
   type?: string;
@@ -179,6 +182,21 @@ export type KnowledgeContextItem = {
 export type KnowledgeRetrievalResult = {
   query: string;
   mode: string;
+  engine?: "gbrain" | "fts5" | string;
+  scope?: "project" | "group" | string;
+  projectIds?: string[];
+  normalizedQuery?: string;
+  sources?: Array<{
+    projectId: string;
+    sourceId: string;
+    path: string;
+    title?: string;
+    revision?: string;
+    score: number;
+    snippet?: string;
+  }>;
+  degraded?: boolean;
+  fallbackReason?: string;
   matchedDomain?: string;
   matchedAlias?: {
     alias?: string;
@@ -242,6 +260,18 @@ export type KnowledgeExportData = {
 export type ProjectInput = {
   name: string;
   path: string;
+  groupIds?: string[];
+};
+
+export type ProjectGroup = {
+  id: string;
+  name: string;
+  projectIds: string[];
+};
+
+export type ProjectGroupInput = {
+  name: string;
+  projectIds?: string[];
 };
 
 export type TemplateProjectType = "general" | "go" | "unity";
@@ -335,6 +365,7 @@ export type ProjectTemplateSyncResult = ProjectRescanResult & {
 export type BootstrapData = {
   templateLibrary: TemplateLibrary;
   projects: Project[];
+  projectGroups: ProjectGroup[];
   projectConfigSets: ProjectConfigSet;
 };
 
@@ -410,10 +441,10 @@ export type ModelRouteResolution = {
 };
 
 export type InfrastructureItem = {
-  id: "rtk" | "codegraph" | string;
+  id: "rtk" | "codegraph" | "openwiki" | "gbrain" | "repomix" | string;
   name: string;
-  kind: "token_proxy" | "code_context" | "context_pack" | string;
-  status: "ready" | "missing" | "unhealthy" | "unknown" | string;
+  kind: "token_proxy" | "code_context" | "knowledge_compiler" | "knowledge_graph" | "context_pack" | string;
+  status: "ready" | "missing" | "not_installed" | "unhealthy" | "unknown" | string;
   summary: string;
   description: string;
   githubUrl: string;
@@ -730,4 +761,307 @@ export type WorkflowRunFinishInput = {
   context?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
   evidence?: Record<string, unknown>;
+};
+
+export type KnowledgeScanRule = {
+  pattern: string;
+  action: "include" | "exclude";
+  category?: string;
+  priority?: string;
+  reason?: string;
+  confidence?: number;
+  hard?: boolean;
+};
+
+export type KnowledgeSyncProfile = {
+  version: number;
+  knowledge: {
+    root: string;
+    language: string;
+    updateMode: "proposal";
+    defaultBranch: string;
+  };
+  discovery: {
+    strategy: string;
+    generatedFromRevision: string;
+    generatedAt: string;
+    reviewed: boolean;
+    reviewedBy: string;
+  };
+  scan: {
+    source: "git-tracked";
+    rules: KnowledgeScanRule[];
+    limits: { maxFileSizeKB: number; maxFilesPerRun: number };
+  };
+  instructions: { requiredTopics: string[]; additional: string };
+  codeGraph: {
+    enabled: boolean;
+    impactDepth: number;
+    includeCallers: boolean;
+    includeCallees: boolean;
+    includeRelatedTests: boolean;
+  };
+  openWiki: { enabled: boolean; version: string };
+  knowledgeGraph: {
+    enabled: boolean;
+    provider: "gbrain" | string;
+    version: string;
+    brain: string;
+    sourceId: string;
+    engine: "pglite" | string;
+    transport: "stdio" | string;
+    sync: {
+      onProposalApplied: boolean;
+      committedChangesOnly: boolean;
+      retryMinutes: number;
+      maxRetries: number;
+    };
+    export: {
+      includeDomains: boolean;
+      includeFeatures: boolean;
+      includeCodeFacts: boolean;
+      includeExternalEvidence: boolean;
+    };
+    query: {
+      timeoutSeconds: number;
+      maxResults: number;
+      maxGraphDepth: number;
+      shadowEnabled: boolean;
+    };
+    synthesis: { enabled: boolean; automatic: boolean };
+    gaps: { enabled: boolean; createProposal: boolean };
+  };
+  schedule: { enabled: boolean; intervalMinutes: number; committedChangesOnly: boolean };
+  ownership: { owners: string[]; requireApproval: boolean };
+};
+
+export type KnowledgeInventory = {
+  revision: string;
+  branch: string;
+  trackedFiles: number;
+  files: Array<{ path: string; category: string; size?: number }>;
+  directoryStats: Array<{ path: string; fileCount: number; extensions: Record<string, number> }>;
+  manifests: string[];
+  readmes: string[];
+  existingKnowledge: string[];
+  extensions: Record<string, number>;
+  codeGraphSummary?: string;
+  truncated: boolean;
+};
+
+export type KnowledgeDiscoveryProposal = {
+  revision: string;
+  rules: KnowledgeScanRule[];
+  requiredTopics: string[];
+  uncertain: Array<{ path: string; reason: string; confidence: number }>;
+  warnings: string[];
+  aiRefined: boolean;
+  inventory: KnowledgeInventory;
+};
+
+export type KnowledgeDiscoveryResponse = {
+  proposal: KnowledgeDiscoveryProposal;
+  profile: KnowledgeSyncProfile;
+};
+
+export type KnowledgeSyncState = {
+  projectId: string;
+  projectRoot: string;
+  branch: string;
+  lastProcessedCommit: string;
+  lastKnowledgeHash: string;
+  lastCheckedAt: string;
+  lastSuccessfulAt: string;
+  status: string;
+  pendingProposalId?: string;
+  compilerVersion: string;
+  profileHash: string;
+  lastError?: string;
+};
+
+export type KnowledgeSyncRun = {
+  id: string;
+  projectId: string;
+  kind: string;
+  status: string;
+  branch: string;
+  baseRevision?: string;
+  targetRevision: string;
+  changeClass?: string;
+  proposalId?: string;
+  warnings: string[];
+  error?: string;
+  startedAt: string;
+  endedAt?: string;
+};
+
+export type KnowledgeProposalChange = {
+  path: string;
+  action: string;
+  before?: string;
+  after?: string;
+  managedBy?: string;
+  selected: boolean;
+};
+
+export type KnowledgeProposal = {
+  id: string;
+  projectId: string;
+  projectRoot: string;
+  branch: string;
+  baseRevision?: string;
+  targetRevision: string;
+  profileHash: string;
+  compilerVersion: string;
+  status: string;
+  changes: KnowledgeProposalChange[];
+  evidence: Array<{ kind: string; source: string; summary: string; paths: string[]; revision?: string }>;
+  validation: { valid: boolean; errors: string[]; warnings: string[] };
+  warnings: string[];
+  createdAt: string;
+  resolvedAt?: string;
+};
+
+export type KnowledgeSyncResult = {
+  state: KnowledgeSyncState;
+  run: KnowledgeSyncRun;
+  proposal?: KnowledgeProposal;
+  message: string;
+};
+
+export type KnowledgeSyncProfileResponse = {
+  exists: boolean;
+  profile: KnowledgeSyncProfile;
+};
+
+export type KnowledgeGraphSyncState = {
+  projectId: string;
+  projectRoot: string;
+  sourceId: string;
+  providerSourceId: string;
+  status: "disabled" | "uninitialized" | "pending" | "syncing" | "ready" | "degraded" | string;
+  branch?: string;
+  lastSyncedRevision?: string;
+  pendingRevision?: string;
+  lastSourceHash?: string;
+  documents: number;
+  documentHashes: Record<string, string>;
+  lastAttemptAt?: string;
+  lastSuccessfulAt?: string;
+  lastError?: string;
+};
+
+export type KnowledgeGraphSyncRun = {
+  id: string;
+  projectId: string;
+  sourceId: string;
+  providerSourceId: string;
+  status: string;
+  revision?: string;
+  sourceHash?: string;
+  documents: number;
+  created: number;
+  updated: number;
+  deleted: number;
+  unchanged: number;
+  attempt: number;
+  error?: string;
+  startedAt: string;
+  endedAt?: string;
+};
+
+export type KnowledgeGraphSyncResult = {
+  sourceId: string;
+  providerSourceId?: string;
+  documents: number;
+  created: number;
+  updated: number;
+  deleted: number;
+  unchanged: number;
+};
+
+export type KnowledgeGraphSyncResponse = {
+  result: KnowledgeGraphSyncResult;
+  state: KnowledgeGraphSyncState;
+};
+
+export type KnowledgeGraphSearchHit = {
+  id: string;
+  sourceId?: string;
+  path?: string;
+  title?: string;
+  snippet?: string;
+  score: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type KnowledgeGraphShadowBaseline = {
+  matchedProject: boolean;
+  matchedDomain?: string;
+  sourceIds?: string[];
+  paths: string[];
+  requiredPaths: string[];
+  scopedPaths?: string[];
+  scopedRequiredPaths?: string[];
+  missingPaths: string[];
+  latencyMs: number;
+  tokenCount: number;
+};
+
+export type KnowledgeGraphShadowRun = {
+  id: string;
+  projectId: string;
+  sourceId: string;
+  sourceIds?: string[];
+  providerSourceId: string;
+  scope?: "project" | "group" | "all" | string;
+  groupId?: string;
+  status: "running" | "ready" | "degraded" | string;
+  query: string;
+  normalizedQuery: string;
+  fts5: KnowledgeGraphShadowBaseline;
+  gbrain: {
+    matchedProject: boolean;
+    matchedDomain?: string;
+    paths: string[];
+    scopedPaths?: string[];
+    hits: KnowledgeGraphSearchHit[];
+    duplicatePaths: string[];
+    latencyMs: number;
+    timedOut: boolean;
+    processRestarts: number;
+    error?: string;
+  };
+  comparison: {
+    domainMatched: boolean;
+    pathOverlap: string[];
+    requiredMatchedPaths: string[];
+    missingExpectedPaths: string[];
+    duplicateDocuments: string[];
+    requiredDocumentPrecision: number;
+    expectedDocumentCoverage: number;
+  };
+  startedAt: string;
+  endedAt: string;
+};
+
+export type KnowledgeGraphShadowSummary = {
+  projectId: string;
+  runs: number;
+  succeeded: number;
+  degraded: number;
+  timeouts: number;
+  timeoutRate: number;
+  domainMatchRate: number;
+  averageRequiredPrecision: number;
+  averageExpectedCoverage: number;
+  duplicatePageRate: number;
+  fts5P95LatencyMs: number;
+  gbrainP95LatencyMs: number;
+  maxObservedRestartCount: number;
+};
+
+export type KnowledgeGraphShadowSearchResponse = {
+  retrieval: KnowledgeRetrievalResult;
+  shadow: KnowledgeGraphShadowRun;
 };

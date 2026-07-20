@@ -668,7 +668,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "skills", skills, []string{
 		"coding-rules",
 		"review-feedback", "testing",
-		"kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit",
+		"nexus-knowledge-retrieval", "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit",
 		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver",
 	})
 	for _, skill := range skills {
@@ -1333,6 +1333,51 @@ func TestProjectKnowledgeRetrieveEndpoint(t *testing.T) {
 	}
 }
 
+func TestProjectGroupEndpointsAndImportMembership(t *testing.T) {
+	root := t.TempDir()
+	store := catalog.NewStoreFromData(catalog.BootstrapData{
+		ProjectConfigSets: map[string][]catalog.ProjectCopy{},
+	}, nil, nil)
+	server := NewServerWithStore(store)
+
+	groupResponse := requestJSON(t, server, http.MethodPost, "/api/project-groups", `{"name":"Project A"}`)
+	if groupResponse.Code != http.StatusCreated {
+		t.Fatalf("create group status=%d body=%s", groupResponse.Code, groupResponse.Body.String())
+	}
+	var group catalog.ProjectGroup
+	decodeJSON(t, groupResponse, &group)
+	if group.ID == "" || group.Name != "Project A" {
+		t.Fatalf("group = %#v", group)
+	}
+
+	importBody, _ := json.Marshal(catalog.ProjectInput{Name: "A1", Path: root, GroupIDs: []string{group.ID}})
+	importResponse := requestJSON(t, server, http.MethodPost, "/api/projects/import", string(importBody))
+	if importResponse.Code != http.StatusCreated {
+		t.Fatalf("import status=%d body=%s", importResponse.Code, importResponse.Body.String())
+	}
+	var project catalog.Project
+	decodeJSON(t, importResponse, &project)
+
+	membershipResponse := requestJSON(t, server, http.MethodGet, "/api/projects/"+project.ID+"/groups", "")
+	if membershipResponse.Code != http.StatusOK {
+		t.Fatalf("membership status=%d body=%s", membershipResponse.Code, membershipResponse.Body.String())
+	}
+	var memberships []catalog.ProjectGroup
+	decodeJSON(t, membershipResponse, &memberships)
+	if len(memberships) != 1 || memberships[0].ID != group.ID {
+		t.Fatalf("memberships = %#v", memberships)
+	}
+
+	clearResponse := requestJSON(t, server, http.MethodPut, "/api/projects/"+project.ID+"/groups", `{"groupIds":[]}`)
+	if clearResponse.Code != http.StatusOK {
+		t.Fatalf("clear membership status=%d body=%s", clearResponse.Code, clearResponse.Body.String())
+	}
+	decodeJSON(t, clearResponse, &memberships)
+	if len(memberships) != 0 {
+		t.Fatalf("cleared memberships = %#v", memberships)
+	}
+}
+
 func httpOKFDoc(kind, title, resource, body string) string {
 	return "---\ntype: " + kind + "\ntitle: " + title + "\ndescription: Test.\nresource: " + resource + "\ntags: [test, ui]\ntimestamp: 2026-07-07T00:00:00+08:00\n---\n\n" + body
 }
@@ -1411,14 +1456,20 @@ func TestInfrastructureEndpoint(t *testing.T) {
 	}
 	getJSON(t, server, "/api/infrastructure", &items)
 
-	if len(items) != 2 {
-		t.Fatalf("expected exactly 2 infrastructure items, got %#v", items)
+	if len(items) != 4 {
+		t.Fatalf("expected exactly 4 infrastructure items, got %#v", items)
 	}
 	if items[0].ID != "rtk" || items[0].GitHubURL != "https://github.com/rtk-ai/rtk" {
 		t.Fatalf("expected first infrastructure item to be RTK with GitHub URL, got %#v", items[0])
 	}
 	if items[1].ID != "codegraph" || items[1].GitHubURL != "https://github.com/colbymchenry/codegraph" {
 		t.Fatalf("expected second infrastructure item to be Codegraph with GitHub URL, got %#v", items[1])
+	}
+	if items[2].ID != "openwiki" || items[2].InstallCommand != "npm install --global openwiki@0.2.0" {
+		t.Fatalf("expected pinned OpenWiki infrastructure metadata, got %#v", items[2])
+	}
+	if items[3].ID != "gbrain" || items[3].InstallCommand != "bun install --global github:garrytan/gbrain#f72de97943eb9dc1292a80f85d19db7e311855dc" {
+		t.Fatalf("expected pinned GBrain infrastructure metadata, got %#v", items[3])
 	}
 	for _, item := range items {
 		if item.Name == "" || item.Kind == "" || item.Status == "" || item.InstallCommand == "" || len(item.CommonCommands) == 0 {

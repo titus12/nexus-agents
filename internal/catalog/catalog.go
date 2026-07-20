@@ -15,6 +15,7 @@ import (
 type BootstrapData struct {
 	TemplateLibrary   TemplateLibrary          `json:"templateLibrary"`
 	Projects          []Project                `json:"projects"`
+	ProjectGroups     []ProjectGroup           `json:"projectGroups"`
 	ProjectConfigSets map[string][]ProjectCopy `json:"projectConfigSets"`
 }
 
@@ -75,8 +76,24 @@ type Project struct {
 }
 
 type ProjectInput struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	Name     string   `json:"name"`
+	Path     string   `json:"path"`
+	GroupIDs []string `json:"groupIds,omitempty"`
+}
+
+type ProjectGroup struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	ProjectIDs []string `json:"projectIds"`
+}
+
+type ProjectGroupInput struct {
+	Name       string   `json:"name"`
+	ProjectIDs []string `json:"projectIds,omitempty"`
+}
+
+type ProjectGroupMembershipInput struct {
+	GroupIDs []string `json:"groupIds"`
 }
 
 type ProjectRescanResult struct {
@@ -199,9 +216,10 @@ type Store struct {
 
 func NewStore() *Store {
 	data := TemplateBootstrapData()
-	restoredProjects, restoredConfigSets := restoreProjectsFromUserIndex(data.TemplateLibrary)
+	restoredProjects, restoredConfigSets, restoredGroups := restoreProjectsFromUserIndex(data.TemplateLibrary)
 	data.Projects = restoredProjects
 	data.ProjectConfigSets = restoredConfigSets
+	data.ProjectGroups = restoredGroups
 	return &Store{
 		data:           cloneBootstrap(data),
 		workflows:      cloneWorkflowSummaries(mockWorkflows()),
@@ -235,6 +253,12 @@ func (s *Store) Projects() []Project {
 	return cloneProjects(s.data.Projects)
 }
 
+func (s *Store) ProjectGroups() []ProjectGroup {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneProjectGroups(s.data.ProjectGroups)
+}
+
 func (s *Store) ProjectByID(projectID string) (Project, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -263,6 +287,11 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 			id = project.ID
 			name = project.Name
 			break
+		}
+	}
+	if input.GroupIDs != nil {
+		if err := validateProjectGroupIDs(input.GroupIDs, s.data.ProjectGroups); err != nil {
+			return Project{}, err
 		}
 	}
 
@@ -296,11 +325,25 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 		if s.data.Projects[index].ID == id {
 			s.data.Projects[index] = project
 			s.data.ProjectConfigSets[id] = copies
+			if input.GroupIDs != nil {
+				groups := groupsWithProjectMembership(s.data.ProjectGroups, id, input.GroupIDs)
+				if err := persistUserProjectGroups(groups); err != nil {
+					return Project{}, err
+				}
+				s.data.ProjectGroups = groups
+			}
 			return project, nil
 		}
 	}
 	s.data.Projects = append(s.data.Projects, project)
 	s.data.ProjectConfigSets[id] = copies
+	if input.GroupIDs != nil {
+		groups := groupsWithProjectMembership(s.data.ProjectGroups, id, input.GroupIDs)
+		if err := persistUserProjectGroups(groups); err != nil {
+			return Project{}, err
+		}
+		s.data.ProjectGroups = groups
+	}
 	return project, nil
 }
 
@@ -374,6 +417,10 @@ func (s *Store) DeleteProject(projectID string) (bool, error) {
 			}
 			s.data.Projects = append(s.data.Projects[:index], s.data.Projects[index+1:]...)
 			delete(s.data.ProjectConfigSets, projectID)
+			s.data.ProjectGroups = groupsWithProjectMembership(s.data.ProjectGroups, projectID, nil)
+			if err := persistUserProjectGroups(s.data.ProjectGroups); err != nil {
+				return true, err
+			}
 			return true, nil
 		}
 	}
@@ -1997,6 +2044,13 @@ func btdSkillTemplates() []TemplateItem {
 			updatedAt:        "2026-06-20 10:41",
 		},
 		{
+			id:               "nexus-knowledge-retrieval",
+			summary:          "从当前仓库路径自动解析 Nexus Project，并通过 GBrain 加载当前项目组的 Approved KnowledgeBase 上下文。",
+			content:          "开发前只提供查询内容；Skill 自动解析项目和项目组，调用既有 knowledge/retrieve 接口并输出 token-budgeted Context Pack。",
+			applicableAgents: []string{"sisyphus", "oracle", "librarian", "hephaestus", "quick", "worker", "reviewer-logic"},
+			updatedAt:        "2026-07-20 00:00",
+		},
+		{
 			id:               "kb-system-curator",
 			summary:          "将经过代码与知识检索验证的稳定系统知识，整理为需用户确认后才写入的 KnowledgeBase 更新。",
 			content:          "先检索、再窄范围探索和拆解；先给知识库入库计划，获得用户确认后才编辑 KnowledgeBase。",
@@ -2251,7 +2305,7 @@ func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "coding-rules", "testing":
 		return "templates/.claude/skills/go-" + id + "/SKILL.md"
-	case "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit", "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-ui-quick":
+	case "nexus-knowledge-retrieval", "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit", "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-ui-quick":
 		return "templates/.agents/skills/" + id + "/SKILL.md"
 	default:
 		return "templates/.claude/skills/" + id + "/SKILL.md"
@@ -2757,6 +2811,7 @@ func cloneBootstrap(data BootstrapData) BootstrapData {
 			Workflows: cloneTemplateItems(data.TemplateLibrary.Workflows),
 		},
 		Projects:          cloneProjects(data.Projects),
+		ProjectGroups:     cloneProjectGroups(data.ProjectGroups),
 		ProjectConfigSets: cloneProjectConfigSets(data.ProjectConfigSets),
 	}
 }
@@ -2802,6 +2857,15 @@ func publicProjectCopies(copies []ProjectCopy) []ProjectCopy {
 func cloneProjects(projects []Project) []Project {
 	cloned := make([]Project, len(projects))
 	copy(cloned, projects)
+	return cloned
+}
+
+func cloneProjectGroups(groups []ProjectGroup) []ProjectGroup {
+	cloned := make([]ProjectGroup, len(groups))
+	for index, group := range groups {
+		cloned[index] = group
+		cloned[index].ProjectIDs = append([]string(nil), group.ProjectIDs...)
+	}
 	return cloned
 }
 
