@@ -81,6 +81,21 @@ type GraphSearchResult struct {
 	Hits  []GraphSearchHit `json:"hits"`
 }
 
+type SearchDocument struct {
+	ProjectID        string         `json:"projectId"`
+	SourceID         string         `json:"sourceId"`
+	ProviderSourceID string         `json:"providerSourceId,omitempty"`
+	Revision         string         `json:"revision,omitempty"`
+	Slug             string         `json:"slug"`
+	CanonicalPath    string         `json:"canonicalPath"`
+	ExportPath       string         `json:"exportPath"`
+	Title            string         `json:"title,omitempty"`
+	Content          string         `json:"content"`
+	Snippet          string         `json:"snippet,omitempty"`
+	Score            float64        `json:"score"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+}
+
 type GraphTraversalQuery struct {
 	StartIDs      []string `json:"startIds"`
 	RelationTypes []string `json:"relationTypes,omitempty"`

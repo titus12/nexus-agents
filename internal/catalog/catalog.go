@@ -2044,6 +2044,13 @@ func btdSkillTemplates() []TemplateItem {
 			updatedAt:        "2026-06-20 10:41",
 		},
 		{
+			id:               "nexus-knowledge-retrieval",
+			summary:          "从当前仓库路径自动解析 Nexus Project，并通过 GBrain 加载当前项目组的 Approved KnowledgeBase 上下文。",
+			content:          "开发前只提供查询内容；Skill 自动解析项目和项目组，调用既有 knowledge/retrieve 接口并输出 token-budgeted Context Pack。",
+			applicableAgents: []string{"sisyphus", "oracle", "librarian", "hephaestus", "quick", "worker", "reviewer-logic"},
+			updatedAt:        "2026-07-20 00:00",
+		},
+		{
 			id:               "kb-system-curator",
 			summary:          "将经过代码与知识检索验证的稳定系统知识，整理为需用户确认后才写入的 KnowledgeBase 更新。",
 			content:          "先检索、再窄范围探索和拆解；先给知识库入库计划，获得用户确认后才编辑 KnowledgeBase。",
@@ -2298,7 +2305,7 @@ func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "coding-rules", "testing":
 		return "templates/.claude/skills/go-" + id + "/SKILL.md"
-	case "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit", "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-ui-quick":
+	case "nexus-knowledge-retrieval", "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit", "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-ui-quick":
 		return "templates/.agents/skills/" + id + "/SKILL.md"
 	default:
 		return "templates/.claude/skills/" + id + "/SKILL.md"

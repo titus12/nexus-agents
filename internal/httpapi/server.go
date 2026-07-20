@@ -503,11 +503,15 @@ func (s *Server) attachWorkflowKnowledgeRetrieval(input *workflowrunner.StartInp
 	if _, exists := input.Context["knowledgeRetrieval"]; exists {
 		return
 	}
-	projectRoot, ok := s.projectLocalPath(input.ProjectID)
-	if !ok {
-		return
-	}
-	result, err := knowledgebase.Retrieve(projectRoot, input.TaskTitle, knowledgebase.RetrieveOptions{Mode: knowledgebase.RetrieveModeContext, Limit: 8, MaxTokens: 6000})
+	result, err := s.findProjectKnowledge(
+		context.Background(),
+		input.ProjectID,
+		input.TaskTitle,
+		knowledgebase.RetrieveModeContext,
+		8,
+		6000,
+		"",
+	)
 	if err != nil {
 		input.Context["knowledgeRetrieval"] = map[string]any{"query": input.TaskTitle, "error": err.Error()}
 		return
@@ -518,6 +522,13 @@ func (s *Server) attachWorkflowKnowledgeRetrieval(input *workflowrunner.StartInp
 	}
 	input.Context["knowledgeRetrieval"] = map[string]any{
 		"query":                   result.Query,
+		"normalizedQuery":         result.NormalizedQuery,
+		"engine":                  result.Engine,
+		"scope":                   result.Scope,
+		"projectIds":              result.ProjectIDs,
+		"sources":                 result.Sources,
+		"degraded":                result.Degraded,
+		"fallbackReason":          result.FallbackReason,
 		"matchedDomain":           result.MatchedDomain,
 		"confidence":              result.Confidence,
 		"requiredPaths":           requiredPaths,
@@ -1412,22 +1423,18 @@ func (s *Server) handleProjectKnowledgePath(w http.ResponseWriter, r *http.Reque
 		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		maxTokens, _ := strconv.Atoi(r.URL.Query().Get("maxTokens"))
-		started := time.Now()
-		result, err := knowledgebase.Retrieve(projectRoot, r.URL.Query().Get("q"), knowledgebase.RetrieveOptions{
-			Mode:      r.URL.Query().Get("mode"),
-			Limit:     limit,
-			MaxTokens: maxTokens,
-		})
+		result, err := s.findProjectKnowledge(
+			r.Context(),
+			projectID,
+			r.URL.Query().Get("q"),
+			r.URL.Query().Get("mode"),
+			limit,
+			maxTokens,
+			r.URL.Query().Get("engine"),
+		)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if err := s.knowledgeSync.QueueKnowledgeGraphShadowSearch(
-			knowledgesync.ProjectRequest{ProjectID: projectID, ProjectRoot: projectRoot},
-			result,
-			time.Since(started),
-		); err != nil && !errors.Is(err, knowledgegraph.ErrProviderDisabled) && !errors.Is(err, knowledgesync.ErrProfileNotFound) {
-			log.Printf("[knowledge-graph] shadow-search queue project=%s status=skipped error=%q", projectID, err.Error())
 		}
 		writeJSON(w, http.StatusOK, result)
 	case "validate":
@@ -1673,6 +1680,47 @@ func (s *Server) shadowSearchProjects(projectID, requestedScope, groupID string)
 		return nil, "", "", fmt.Errorf("scope must be project, group, or all")
 	}
 	return orderScopedProjects(current, projects), scope, groupID, nil
+}
+
+func (s *Server) findProjectKnowledge(
+	ctx context.Context,
+	projectID string,
+	query string,
+	mode string,
+	limit int,
+	maxTokens int,
+	engine string,
+) (knowledgebase.RetrievalResult, error) {
+	projects, scope, _, err := s.shadowSearchProjects(projectID, "", "")
+	if err != nil {
+		return knowledgebase.RetrievalResult{}, err
+	}
+	requests := make([]knowledgesync.ProjectRequest, 0, len(projects))
+	for _, project := range projects {
+		root := strings.TrimSpace(project.LocalPath)
+		if root == "" {
+			root = strings.TrimSpace(project.Path)
+		}
+		if root == "" {
+			continue
+		}
+		requests = append(requests, knowledgesync.ProjectRequest{
+			ProjectID: project.ID, ProjectRoot: root,
+		})
+	}
+	if len(requests) == 0 {
+		return knowledgebase.RetrievalResult{}, fmt.Errorf("project %s has no searchable local path", projectID)
+	}
+	return s.knowledgeSync.FindKnowledge(
+		ctx,
+		requests[0],
+		requests,
+		query,
+		knowledgesync.FindOptions{
+			Mode: mode, Limit: limit, MaxTokens: maxTokens,
+			Engine: engine, Scope: scope,
+		},
+	)
 }
 
 func orderScopedProjects(current catalog.Project, projects []catalog.Project) []catalog.Project {

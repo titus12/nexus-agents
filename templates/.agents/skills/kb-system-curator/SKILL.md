@@ -55,7 +55,9 @@ OpenWiki is a compiler, not the source of truth. Current source and CodeGraph fa
 
 ### 1. Retrieve existing knowledge first
 
-Use the repository root folder name as the project id, query with the system/function name and clues, mode `context`, maxTokens `6000`.
+Prefer `$nexus-knowledge-retrieval` so the helper resolves the exact Nexus Project
+from the current repository path and Nexus infers its Project Group. Query with
+the system/function name and clues, mode `context`, maxTokens `6000`.
 
 Record:
 

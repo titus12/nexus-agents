@@ -304,6 +304,28 @@ try {
     throw "Project Group shadow verification failed: $($groupShadow | ConvertTo-Json -Depth 10 -Compress)."
   }
 
+  $retrieveQuery = [Uri]::EscapeDataString($cases[0].query)
+  $formalRetrieve = Invoke-JSON -Uri "$projectBase/retrieve?q=$retrieveQuery&mode=context&maxTokens=6000" -TimeoutSec 120
+  if ($formalRetrieve.engine -ne "gbrain" -or $formalRetrieve.scope -ne "group" -or
+      $formalRetrieve.degraded -or $formalRetrieve.projectIds.Count -ne 2 -or
+      $formalRetrieve.sources.Count -eq 0 -or
+      -not $formalRetrieve.loadedKnowledgeMarkdown.Contains("## Loaded Knowledge") -or
+      -not $formalRetrieve.loadedKnowledgeMarkdown.Contains("Revision:")) {
+    throw "Formal GBrain knowledge retrieve failed: $($formalRetrieve | ConvertTo-Json -Depth 10 -Compress)."
+  }
+
+  $skillScript = Join-Path $resolvedProjectRoot "templates\.agents\skills\nexus-knowledge-retrieval\find-knowledge.mjs"
+  $skillOutput = & node $skillScript --query $cases[0].query --endpoint $baseURL --cwd $resolvedProjectRoot 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "Codex knowledge retrieval skill failed: $($skillOutput -join [Environment]::NewLine)"
+  }
+  $skillText = $skillOutput -join [Environment]::NewLine
+  if (-not $skillText.Contains('"engine": "gbrain"') -or
+      -not $skillText.Contains('"scope": "group"') -or
+      -not $skillText.Contains("## Loaded Knowledge")) {
+    throw "Codex knowledge retrieval skill returned unexpected output: $skillText"
+  }
+
   $sequentialStarted = Get-Date
   for ($index = 0; $index -lt $SequentialQueries; $index++) {
     $case = $cases[$index % $cases.Count]
@@ -341,6 +363,23 @@ try {
       overlap = $groupShadow.comparison.pathOverlap.Count
       duplicates = $groupShadow.comparison.duplicateDocuments.Count
       expectedCoverage = $groupShadow.comparison.expectedDocumentCoverage
+    }
+    formalRetrieve = [ordered]@{
+      engine = $formalRetrieve.engine
+      scope = $formalRetrieve.scope
+      projectIds = $formalRetrieve.projectIds
+      normalizedQuery = $formalRetrieve.normalizedQuery
+      sources = $formalRetrieve.sources.Count
+      usedTokens = $formalRetrieve.tokenBudget.usedTokens
+      maxTokens = $formalRetrieve.tokenBudget.maxTokens
+      degraded = $formalRetrieve.degraded
+      contextContainsApprovedMarkdown = $formalRetrieve.loadedKnowledgeMarkdown.Contains("Revision:")
+    }
+    codexSkill = [ordered]@{
+      passed = $true
+      resolvedProjectFromCwd = $true
+      engine = "gbrain"
+      scope = "group"
     }
     queries = $queryResults
     sequential = [ordered]@{

@@ -6,7 +6,6 @@ import {
   applyTemplateInitialization,
   applyKnowledgeProposal,
   checkKnowledgeUpdates,
-  searchKnowledgeGraph,
   createTemplate,
   createTaskRun,
   createProjectWorkflow,
@@ -90,7 +89,6 @@ import type {
   KnowledgeMaintenanceReport,
   KnowledgeRenderedDocument,
   KnowledgeRetrievalResult,
-  KnowledgeGraphShadowRun,
   KnowledgeRenderNode,
   KnowledgeRenderTree,
   KnowledgeRoutePreview,
@@ -317,7 +315,6 @@ const knowledgeExport = ref<KnowledgeExportData | null>(null);
 const knowledgeDocument = ref<KnowledgeRenderedDocument | null>(null);
 const knowledgeRoute = ref<KnowledgeRoutePreview | null>(null);
 const knowledgeRetrieval = ref<KnowledgeRetrievalResult | null>(null);
-const knowledgeShadowRun = ref<KnowledgeGraphShadowRun | null>(null);
 const knowledgeRouteTask = ref("");
 const knowledgeSearchEngine = ref<"gbrain" | "fts5">("gbrain");
 const selectedKnowledgePath = ref("");
@@ -1769,9 +1766,9 @@ async function refreshKnowledgeExportForCurrentProject() {
   }
 }
 
-async function openKnowledgeDocument(path: string) {
+async function openKnowledgeDocument(path: string, projectId = "") {
   if (!currentProject.value) return;
-  knowledgeDocument.value = await fetchProjectKnowledgeExportDocument(currentProject.value.id, path);
+  knowledgeDocument.value = await fetchProjectKnowledgeExportDocument(projectId || currentProject.value.id, path);
   selectedKnowledgePath.value = path;
   activeKnowledgeView.value = "docs";
 }
@@ -1805,13 +1802,13 @@ async function searchKnowledgeForCurrentProject() {
   knowledgeBusy.value = true;
   knowledgeError.value = "";
   try {
-    const response = await searchKnowledgeGraph(
+    knowledgeRetrieval.value = await retrieveProjectKnowledge(
       currentProject.value.id,
       query,
-      [],
+      "context",
+      6000,
+      knowledgeSearchEngine.value,
     );
-    knowledgeShadowRun.value = response.shadow;
-    knowledgeRetrieval.value = knowledgeSearchEngine.value === "gbrain" ? null : response.retrieval;
     knowledgeRoute.value = null;
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : String(error);
@@ -3310,44 +3307,12 @@ onMounted(loadData);
                       </div>
                     </div>
                     <input v-model="knowledgeRouteTask" class="field-input" placeholder="例如：公会成员加入流程在哪里？" @keyup.enter="searchKnowledgeForCurrentProject" />
-                    <section v-if="knowledgeShadowRun && knowledgeSearchEngine === 'gbrain'" class="knowledge-shadow-panel">
-                      <div class="knowledge-sync-section-head">
-                        <div>
-                          <h3>GBrain Results</h3>
-                          <p class="muted">从当前检索范围内的 GBrain Sources 返回语义检索结果。</p>
-                        </div>
-                        <span class="chip chip-purple">{{ knowledgeShadowRun.gbrain.hits.length }} results</span>
-                      </div>
-                      <div class="knowledge-terms">
-                        <span class="chip chip-teal">scope {{ knowledgeShadowRun.scope || "project" }}</span>
-                        <span v-if="knowledgeShadowRun.groupId" class="chip chip-blue">group {{ knowledgeShadowRun.groupId }}</span>
-                        <span v-if="knowledgeShadowRun.gbrain.timedOut" class="chip chip-red">timeout</span>
-                      </div>
-                      <div v-if="knowledgeShadowRun.gbrain.hits.length === 0" class="empty-inline">No GBrain results.</div>
-                      <div v-for="hit in knowledgeShadowRun.gbrain.hits" :key="`${hit.sourceId || ''}:${hit.id}`" class="knowledge-match-card compact">
-                        <div><strong>{{ hit.title || hit.path || hit.id }}</strong> <span class="muted">score {{ hit.score.toFixed(3) }}</span></div>
-                        <div class="knowledge-terms">
-                          <span v-if="hit.sourceId" class="chip chip-purple">{{ hit.sourceId }}</span>
-                          <span v-if="hit.path" class="chip chip-gray">{{ hit.path }}</span>
-                        </div>
-                        <p v-if="hit.snippet" class="knowledge-snippet">{{ hit.snippet }}</p>
-                      </div>
-                      <p v-if="knowledgeShadowRun.gbrain.error" class="issue-error">{{ knowledgeShadowRun.gbrain.error }}</p>
-                    </section>
-                    <section v-if="knowledgeShadowRun && knowledgeSearchEngine === 'fts5' && knowledgeShadowRun.scope !== 'project'" class="knowledge-shadow-panel">
-                      <div class="knowledge-sync-section-head">
-                        <div>
-                          <h3>SQLite FTS5 Results</h3>
-                          <p class="muted">跨项目范围内命中的文档路径；FTS5 仅作为迁移期回退。</p>
-                        </div>
-                        <span class="chip chip-gray">{{ knowledgeShadowRun.fts5.paths.length }} documents</span>
-                      </div>
-                      <div class="knowledge-terms">
-                        <span v-for="path in knowledgeShadowRun.fts5.scopedPaths || knowledgeShadowRun.fts5.paths" :key="path" class="chip chip-gray">{{ path }}</span>
-                      </div>
-                    </section>
-                    <div v-if="knowledgeRetrieval && knowledgeSearchEngine !== 'gbrain'" class="knowledge-route-result">
+                    <div v-if="knowledgeRetrieval" class="knowledge-route-result">
                       <div class="kiso-route-grid">
+                        <div class="route-metric">
+                          <div class="route-metric-label">Engine / scope</div>
+                          <div class="route-value">{{ knowledgeRetrieval.engine || knowledgeSearchEngine }} / {{ knowledgeRetrieval.scope || "project" }}</div>
+                        </div>
                         <div class="route-metric">
                           <div class="route-metric-label">Matched domain</div>
                           <div class="route-value">{{ knowledgeRetrieval.matchedDomain || "project" }}</div>
@@ -3361,6 +3326,7 @@ onMounted(loadData);
                           <div class="route-value">{{ knowledgeRetrieval.tokenBudget.usedTokens }} / {{ knowledgeRetrieval.tokenBudget.maxTokens }}</div>
                         </div>
                       </div>
+                      <p v-if="knowledgeRetrieval.degraded" class="issue-error">GBrain degraded; using FTS5 fallback: {{ knowledgeRetrieval.fallbackReason || "unknown reason" }}</p>
                       <p v-if="knowledgeRetrieval.matchedAlias?.alias" class="route-alias-note">
                         Matched alias:
                         <code>{{ knowledgeRetrieval.matchedAlias.alias }}</code>
@@ -3375,9 +3341,14 @@ onMounted(loadData);
                       <section>
                         <h3>Required knowledge</h3>
                         <div v-if="knowledgeRetrieval.required.length === 0" class="empty-inline">No required sections matched.</div>
-                        <div v-for="item in knowledgeRetrieval.required" :key="`${item.path}-${item.startLine}`" class="knowledge-match-card">
-                          <button class="link-btn mono" type="button" @click="openKnowledgeDocument(item.path)">{{ item.path }}</button>
+                        <div v-for="item in knowledgeRetrieval.required" :key="`${item.sourceId || ''}:${item.path}-${item.startLine}`" class="knowledge-match-card">
+                          <button class="link-btn mono" type="button" @click="openKnowledgeDocument(item.path, item.projectId)">{{ item.path }}</button>
                           <div><strong>{{ item.heading || item.title }}</strong> <span class="muted">score {{ Math.round(item.score) }} · {{ item.tokens }} tokens</span></div>
+                          <div class="knowledge-terms">
+                            <span v-if="item.projectId" class="chip chip-purple">{{ item.projectId }}</span>
+                            <span v-if="item.sourceId" class="chip chip-gray">{{ item.sourceId }}</span>
+                            <span v-if="item.revision" class="chip chip-blue">{{ item.revision }}</span>
+                          </div>
                           <div class="knowledge-terms"><span v-for="reason in item.reasons" :key="reason" class="chip chip-blue">{{ reason }}</span></div>
                           <p v-if="item.snippet" class="knowledge-snippet" v-html="item.snippet"></p>
                         </div>

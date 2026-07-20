@@ -35,6 +35,11 @@ type SyncCoordinator interface {
 	Runs(projectID string) ([]SyncRun, error)
 }
 
+type SearchCoordinator interface {
+	Search(ctx context.Context, query GraphSearchQuery) (GraphSearchResult, error)
+	LoadSearchDocuments(projectIDs []string, hits []GraphSearchHit) ([]SearchDocument, error)
+}
+
 type ServiceOptions struct {
 	Provider        KnowledgeGraphProvider
 	Store           *GraphStateStore
@@ -134,6 +139,18 @@ func (s *Service) Stop(ctx context.Context) error {
 		return ctx.Err()
 	}
 	return s.provider.Stop(ctx)
+}
+
+func (s *Service) Search(ctx context.Context, query GraphSearchQuery) (GraphSearchResult, error) {
+	query.Query = strings.TrimSpace(query.Query)
+	if query.Query == "" {
+		return GraphSearchResult{}, fmt.Errorf("knowledge graph search query is empty")
+	}
+	query.SourceIDs = uniqueSortedPaths(query.SourceIDs)
+	if query.Limit <= 0 {
+		query.Limit = 20
+	}
+	return s.provider.Search(ctx, query)
 }
 
 func (s *Service) QueueSync(request SyncRequest) error {

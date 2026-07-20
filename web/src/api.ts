@@ -15,7 +15,6 @@ import type {
   KnowledgeGraphSyncRun,
   KnowledgeGraphSyncState,
   KnowledgeGraphShadowRun,
-  KnowledgeGraphShadowSearchResponse,
   KnowledgeGraphShadowSummary,
   KnowledgeMaintenanceReport,
   KnowledgeRenderedDocument,
@@ -209,8 +208,16 @@ export function previewProjectKnowledgeRoute(projectId: string, task: string): P
   return fetchJSON<KnowledgeRoutePreview>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/route?task=${encodeURIComponent(task)}`);
 }
 
-export function retrieveProjectKnowledge(projectId: string, query: string, mode = "routing", maxTokens = 6000): Promise<KnowledgeRetrievalResult> {
-  return fetchJSON<KnowledgeRetrievalResult>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/retrieve?q=${encodeURIComponent(query)}&mode=${encodeURIComponent(mode)}&maxTokens=${encodeURIComponent(String(maxTokens))}`);
+export function retrieveProjectKnowledge(
+  projectId: string,
+  query: string,
+  mode = "routing",
+  maxTokens = 6000,
+  engine = "",
+): Promise<KnowledgeRetrievalResult> {
+  const params = new URLSearchParams({ q: query, mode, maxTokens: String(maxTokens) });
+  if (engine) params.set("engine", engine);
+  return fetchJSON<KnowledgeRetrievalResult>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/retrieve?${params.toString()}`);
 }
 
 export function fetchProjectKnowledgeTree(projectId: string): Promise<KnowledgeRenderTree> {
@@ -287,17 +294,6 @@ export function syncKnowledgeGraph(projectId: string): Promise<KnowledgeGraphSyn
 export function rebuildKnowledgeGraph(projectId: string): Promise<KnowledgeGraphSyncResponse> {
   return fetchJSON<KnowledgeGraphSyncResponse>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/rebuild`, {
     method: "POST",
-  });
-}
-
-export function searchKnowledgeGraph(
-  projectId: string,
-  query: string,
-  expectedPaths: string[] = [],
-): Promise<KnowledgeGraphShadowSearchResponse> {
-  return fetchJSON<KnowledgeGraphShadowSearchResponse>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/graph/shadow-search`, {
-    method: "POST",
-    body: JSON.stringify({ query, mode: "routing", maxTokens: 6000, expectedPaths }),
   });
 }
 

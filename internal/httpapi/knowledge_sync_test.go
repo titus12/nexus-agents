@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"nexus-agents/internal/catalog"
+	"nexus-agents/internal/knowledgebase"
 	"nexus-agents/internal/knowledgegraph"
 	"nexus-agents/internal/knowledgesync"
 	"nexus-agents/internal/wikicompiler"
@@ -252,6 +254,114 @@ func TestProjectGroupShadowSearchUsesEachProjectSourceOnce(t *testing.T) {
 	}
 	if len(body.Shadow.Comparison.DuplicateDocuments) != 0 {
 		t.Fatalf("shared slug across sources was treated as duplicate: %#v", body.Shadow.Comparison)
+	}
+}
+
+func TestKnowledgeRetrieveUsesGBrainProjectGroupContextPackAndWorkflowContract(t *testing.T) {
+	rootA1 := t.TempDir()
+	rootA2 := t.TempDir()
+	exportBase := t.TempDir()
+	exportRoot := func(projectID string) string { return filepath.Join(exportBase, projectID) }
+	for _, item := range []struct {
+		id      string
+		root    string
+		content string
+	}{
+		{id: "a1", root: rootA1, content: "A1 owns the guild HTTP entrypoint."},
+		{id: "a2", root: rootA2, content: "A2 owns the guild member workflow."},
+	} {
+		writeHTTPTestFile(t, item.root, "KnowledgeBase/index.md", "# KnowledgeBase\n\n[Project](project/index.md)\n")
+		writeHTTPTestFile(t, item.root, "KnowledgeBase/log.md", "# Log\n\nInitial knowledge log entry.\n")
+		writeHTTPTestFile(t, item.root, "KnowledgeBase/project/index.md", "# "+strings.ToUpper(item.id)+"\n\n"+item.content+"\n")
+		if err := knowledgesync.SaveProfile(item.root, knowledgesync.DefaultProfile()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := knowledgegraph.ExportApprovedKnowledge(knowledgegraph.ExportRequest{
+			ProjectID: item.id, ProjectRoot: item.root,
+			SourceID: "project:" + item.id, ProviderSourceID: "project-" + item.id,
+			Revision: "rev-" + item.id, ExportRoot: exportRoot(item.id),
+			IncludeDomains: true, IncludeFeatures: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := catalog.NewStoreFromData(catalog.BootstrapData{
+		Projects: []catalog.Project{
+			{ID: "a1", Name: "A1", Path: rootA1, LocalPath: rootA1},
+			{ID: "a2", Name: "A2", Path: rootA2, LocalPath: rootA2},
+		},
+		ProjectGroups: []catalog.ProjectGroup{{
+			ID: "group-a", Name: "Project A", ProjectIDs: []string{"a1", "a2"},
+		}},
+		ProjectConfigSets: map[string][]catalog.ProjectCopy{"a1": {}, "a2": {}},
+	}, nil, nil)
+	provider := &knowledgegraph.FakeProvider{
+		HealthResult: knowledgegraph.GraphHealth{Provider: "gbrain", Status: knowledgegraph.GraphStatusReady},
+		SearchResult: knowledgegraph.GraphSearchResult{Hits: []knowledgegraph.GraphSearchHit{
+			{SourceID: "project:a1", Path: "project", Title: "A1", Score: 0.9},
+			{SourceID: "project:a2", Path: "project", Title: "A2", Score: 0.8},
+		}},
+	}
+	graph := knowledgegraph.NewService(knowledgegraph.ServiceOptions{
+		Provider: provider, ExportRoot: exportRoot,
+		Store: knowledgegraph.NewGraphStateStore(t.TempDir()), Logf: func(string, ...any) {},
+	})
+	service := knowledgesync.NewService(knowledgesync.ServiceOptions{
+		Store: NewKnowledgeTestStateStore(t), KnowledgeGraph: graph,
+	})
+	server := NewServerWithStoreAndKnowledgeSync(store, service)
+
+	response := requestJSON(
+		t,
+		server,
+		http.MethodGet,
+		"/api/projects/a1/knowledge/retrieve?q=guild%20workflow&mode=context&maxTokens=6000",
+		"",
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("retrieve status=%d body=%s", response.Code, response.Body.String())
+	}
+	var retrieval knowledgebase.RetrievalResult
+	if err := json.Unmarshal(response.Body.Bytes(), &retrieval); err != nil {
+		t.Fatal(err)
+	}
+	if retrieval.Engine != "gbrain" || retrieval.Scope != "group" || retrieval.Degraded ||
+		len(retrieval.ProjectIDs) != 2 || len(retrieval.Sources) != 2 {
+		t.Fatalf("retrieval = %#v", retrieval)
+	}
+	for _, expected := range []string{
+		"A1 owns the guild HTTP entrypoint.",
+		"A2 owns the guild member workflow.",
+	} {
+		if !strings.Contains(retrieval.LoadedKnowledgeMarkdown, expected) {
+			t.Fatalf("context missing %q:\n%s", expected, retrieval.LoadedKnowledgeMarkdown)
+		}
+	}
+
+	startRequest := httptest.NewRequest(http.MethodPost, "/api/workflow-runs/start", strings.NewReader(`{
+	  "projectId":"a1",
+	  "workflowType":"feature-development",
+	  "taskTitle":"guild workflow"
+	}`))
+	startRequest.Header.Set("Content-Type", "application/json")
+	startRequest.Header.Set("Session-Id", "sess-knowledge-find")
+	startResponse := httptest.NewRecorder()
+	server.ServeHTTP(startResponse, startRequest)
+	if startResponse.Code != http.StatusCreated {
+		t.Fatalf("workflow start=%d body=%s", startResponse.Code, startResponse.Body.String())
+	}
+	var run struct {
+		Context map[string]any `json:"context"`
+	}
+	if err := json.Unmarshal(startResponse.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	knowledge, ok := run.Context["knowledgeRetrieval"].(map[string]any)
+	if !ok || knowledge["engine"] != "gbrain" || knowledge["scope"] != "group" {
+		t.Fatalf("workflow knowledge = %#v", run.Context["knowledgeRetrieval"])
+	}
+	if len(provider.SearchQueries) != 2 {
+		t.Fatalf("search queries = %#v", provider.SearchQueries)
 	}
 }
 

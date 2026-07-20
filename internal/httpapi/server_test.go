@@ -668,7 +668,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 	assertTemplateIDs(t, "skills", skills, []string{
 		"coding-rules",
 		"review-feedback", "testing",
-		"kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit",
+		"nexus-knowledge-retrieval", "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit",
 		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver",
 	})
 	for _, skill := range skills {

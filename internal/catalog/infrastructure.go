@@ -413,6 +413,7 @@ type execCommandRunner struct{}
 
 func (execCommandRunner) Run(name string, args ...string) (string, error) {
 	command := exec.Command(name, args...)
+	configureHiddenCommand(command)
 	output, err := command.CombinedOutput()
 	return string(output), err
 }
@@ -420,6 +421,7 @@ func (execCommandRunner) Run(name string, args ...string) (string, error) {
 func (execCommandRunner) RunWithEnvironment(environment map[string]string, name string, args ...string) (string, error) {
 	command := exec.Command(name, args...)
 	command.Env = mergeEnvironment(os.Environ(), environment)
+	configureHiddenCommand(command)
 	output, err := command.CombinedOutput()
 	return string(output), err
 }

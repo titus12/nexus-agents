@@ -162,6 +162,9 @@ export type KnowledgeTokenBudget = {
 };
 
 export type KnowledgeContextItem = {
+  projectId?: string;
+  sourceId?: string;
+  revision?: string;
   path: string;
   title: string;
   type?: string;
@@ -179,6 +182,21 @@ export type KnowledgeContextItem = {
 export type KnowledgeRetrievalResult = {
   query: string;
   mode: string;
+  engine?: "gbrain" | "fts5" | string;
+  scope?: "project" | "group" | string;
+  projectIds?: string[];
+  normalizedQuery?: string;
+  sources?: Array<{
+    projectId: string;
+    sourceId: string;
+    path: string;
+    title?: string;
+    revision?: string;
+    score: number;
+    snippet?: string;
+  }>;
+  degraded?: boolean;
+  fallbackReason?: string;
   matchedDomain?: string;
   matchedAlias?: {
     alias?: string;

@@ -52,6 +52,12 @@ Read the authoritative source instead of copying its content into this file.
 ## Execution baseline
 
 - Clarify ambiguous requirements and high-risk actions before changing files or external state.
+- Before code exploration or implementation that depends on project behavior, run
+  `$nexus-knowledge-retrieval` with the task or question. Nexus resolves the
+  current Project and Project Group automatically; do not ask the user for
+  `projectId`, `groupId`, or `scope`.
+- Treat the returned Approved KnowledgeBase content as stable guidance, then use
+  CodeGraph or precise source inspection to verify live code facts.
 
 ## Test-Driven Change Baseline
 

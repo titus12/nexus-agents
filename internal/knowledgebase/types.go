@@ -149,6 +149,13 @@ type RetrieveOptions struct {
 type RetrievalResult struct {
 	Query                   string                 `json:"query"`
 	Mode                    string                 `json:"mode"`
+	Engine                  string                 `json:"engine,omitempty"`
+	Scope                   string                 `json:"scope,omitempty"`
+	ProjectIDs              []string               `json:"projectIds,omitempty"`
+	NormalizedQuery         string                 `json:"normalizedQuery,omitempty"`
+	Sources                 []KnowledgeSource      `json:"sources,omitempty"`
+	Degraded                bool                   `json:"degraded,omitempty"`
+	FallbackReason          string                 `json:"fallbackReason,omitempty"`
 	MatchedDomain           string                 `json:"matchedDomain,omitempty"`
 	MatchedAlias            MatchedAlias           `json:"matchedAlias,omitempty"`
 	Confidence              float64                `json:"confidence"`
@@ -163,6 +170,21 @@ type RetrievalResult struct {
 	QueryRewrite            QueryRewriteResult     `json:"queryRewrite,omitempty"`
 	TokenBudget             TokenBudget            `json:"tokenBudget"`
 	Reason                  string                 `json:"reason"`
+}
+
+type KnowledgeSource struct {
+	ProjectID string  `json:"projectId"`
+	SourceID  string  `json:"sourceId"`
+	Path      string  `json:"path"`
+	Title     string  `json:"title,omitempty"`
+	Revision  string  `json:"revision,omitempty"`
+	Score     float64 `json:"score"`
+	Snippet   string  `json:"snippet,omitempty"`
+}
+
+type ContextPackDocument struct {
+	KnowledgeSource
+	Content string `json:"-"`
 }
 
 type QueryRewriteOptions struct {
@@ -191,6 +213,9 @@ type QueryRewriteResult struct {
 }
 
 type KnowledgeContextItem struct {
+	ProjectID string   `json:"projectId,omitempty"`
+	SourceID  string   `json:"sourceId,omitempty"`
+	Revision  string   `json:"revision,omitempty"`
 	Path      string   `json:"path"`
 	Title     string   `json:"title"`
 	Type      string   `json:"type,omitempty"`
