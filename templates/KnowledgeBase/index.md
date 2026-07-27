@@ -1,6 +1,6 @@
 # Project KnowledgeBase
 
-When project-specific routing has been curated, read `project/routing.md` first and then load only the routed domain documents.
+For project-specific tasks, start with [project/index.md](project/index.md) and then load only the relevant Domain documents linked from that page.
 
 The portable framework is documented in [framework/index.md](./framework/index.md).
 

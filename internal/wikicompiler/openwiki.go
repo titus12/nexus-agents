@@ -124,19 +124,25 @@ func (o *OpenWiki) compile(ctx context.Context, input CompileInput, update bool)
 	}
 	runCtx, runCancel := context.WithTimeout(ctx, timeout)
 	defer runCancel()
-	result, runErr := o.Runner.Run(runCtx, workspace.RepositoryRoot, input.Environment, "openwiki", "code", "--update", "--print")
+	runMode := "--init"
+	if update {
+		runMode = "--update"
+	}
+	result, runErr := o.Runner.Run(runCtx, workspace.RepositoryRoot, input.Environment, "openwiki", "code", runMode, "--print")
 	runContextErr := runCtx.Err()
 	if runErr != nil {
 		if runContextErr == context.DeadlineExceeded {
 			return GeneratedBundle{}, fmt.Errorf("OpenWiki timed out after %s", timeout)
 		}
-		return GeneratedBundle{}, fmt.Errorf("OpenWiki failed: %w: %s", runErr, redactOutput(result.Stderr, input.Environment))
+		return GeneratedBundle{}, fmt.Errorf("OpenWiki failed: %w: %s", runErr, commandFailureOutput(result, input.Environment))
 	}
 	files, warnings, err := ReadAndNormalizeOpenWiki(workspace.RepositoryRoot, input.KnowledgeRoot)
 	if err != nil {
 		return GeneratedBundle{}, err
 	}
-	if thin := thinDomainPaths(files, input.KnowledgeRoot); len(thin) > 0 {
+	thin := thinDomainPaths(files, input.KnowledgeRoot)
+	aliasRepair := domainAliasRepairPaths(files, input.KnowledgeRoot)
+	if len(thin) > 0 || len(aliasRepair) > 0 {
 		repairResult, repairErr := o.Runner.Run(
 			runCtx,
 			workspace.RepositoryRoot,
@@ -145,13 +151,13 @@ func (o *OpenWiki) compile(ctx context.Context, input CompileInput, update bool)
 			"code",
 			"--update",
 			"--print",
-			domainRepairPrompt(thin),
+			domainRepairPrompt(thin, aliasRepair, input.Language),
 		)
 		if repairErr != nil {
 			if runCtx.Err() == context.DeadlineExceeded {
-				return GeneratedBundle{}, fmt.Errorf("OpenWiki timed out after %s while repairing thin Domain pages", timeout)
+				return GeneratedBundle{}, fmt.Errorf("OpenWiki timed out after %s while repairing Domain output", timeout)
 			}
-			return GeneratedBundle{}, fmt.Errorf("OpenWiki Domain repair failed: %w: %s", repairErr, redactOutput(repairResult.Stderr, input.Environment))
+			return GeneratedBundle{}, fmt.Errorf("OpenWiki Domain repair failed: %w: %s", repairErr, commandFailureOutput(repairResult, input.Environment))
 		}
 		repairedFiles, repairWarnings, repairReadErr := ReadAndNormalizeOpenWiki(workspace.RepositoryRoot, input.KnowledgeRoot)
 		if repairReadErr != nil {
@@ -160,9 +166,11 @@ func (o *OpenWiki) compile(ctx context.Context, input CompileInput, update bool)
 		if stillThin := thinDomainPaths(repairedFiles, input.KnowledgeRoot); len(stillThin) > 0 {
 			return GeneratedBundle{}, fmt.Errorf("OpenWiki produced thin Domain pages after one repair pass: %s", strings.Join(stillThin, ", "))
 		}
+		if stillMissingAliases := domainAliasRepairPaths(repairedFiles, input.KnowledgeRoot); len(stillMissingAliases) > 0 {
+			return GeneratedBundle{}, fmt.Errorf("OpenWiki produced Domain pages without bilingual routing aliases after one repair pass: %s", strings.Join(stillMissingAliases, ", "))
+		}
 		files = repairedFiles
-		warnings = append(warnings, "OpenWiki repaired thin Domain pages: "+strings.Join(thin, ", "))
-		warnings = append(warnings, repairWarnings...)
+		warnings = repairWarnings
 		result.Stdout = strings.TrimSpace(result.Stdout + "\n" + repairResult.Stdout)
 	}
 	paths := make([]string, 0, len(files))
@@ -192,13 +200,42 @@ func parseVersion(output string) string {
 }
 
 func redactOutput(output string, environment map[string]string) string {
-	for key, value := range environment {
-		upper := strings.ToUpper(key)
-		if value != "" && (strings.Contains(upper, "KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET")) {
-			output = strings.ReplaceAll(output, value, "[REDACTED]")
+	return bounded(redactSensitiveOutput(output, environment), 4096)
+}
+
+func redactSensitiveOutput(output string, environment map[string]string) string {
+	for _, entry := range os.Environ() {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			output = redactEnvironmentValue(output, key, value)
 		}
 	}
-	return bounded(output, 4096)
+	for key, value := range environment {
+		output = redactEnvironmentValue(output, key, value)
+	}
+	return strings.TrimSpace(output)
+}
+
+func redactEnvironmentValue(output, key, value string) string {
+	upper := strings.ToUpper(key)
+	if value != "" && (strings.Contains(upper, "KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET")) {
+		return strings.ReplaceAll(output, value, "[REDACTED]")
+	}
+	return output
+}
+
+func commandFailureOutput(result CommandResult, environment map[string]string) string {
+	var parts []string
+	if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
+		parts = append(parts, "stderr: "+boundedTail(redactSensitiveOutput(stderr, environment), 2048))
+	}
+	if stdout := strings.TrimSpace(result.Stdout); stdout != "" {
+		parts = append(parts, "stdout: "+boundedTail(redactSensitiveOutput(stdout, environment), 2048))
+	}
+	if len(parts) == 0 {
+		return "no command output"
+	}
+	return strings.Join(parts, "\n")
 }
 
 func bounded(value string, max int) string {
@@ -207,6 +244,14 @@ func bounded(value string, max int) string {
 		return value
 	}
 	return value[:max] + "…"
+}
+
+func boundedTail(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return "…" + value[len(value)-max:]
 }
 
 type limitedBuffer struct {

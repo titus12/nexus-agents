@@ -134,11 +134,17 @@ test("model proxy page exposes the embedded Codex router endpoints", () => {
 test("knowledge sync uses English navigation and dark, readable metadata cards", () => {
   assert.match(app, /activeKnowledgeView === 'sync'[^>]*>Sync<\/button>/);
   assert.doesNotMatch(app, /activeKnowledgeView === 'sync'[^>]*>同步<\/button>/);
+  assert.match(app, /knowledgeOperation === "initialize" \? "初始化中…" : "初始化 Proposal"/);
+  assert.match(app, /class="knowledge-operation-status" role="status" aria-live="polite"/);
+  assert.match(app, /run\.status === 'running' \? 'chip-running'/);
   assert.match(styles, /--panel-soft:\s*rgba\(255,\s*255,\s*255,\s*0\.045\)/);
   assert.match(styles, /\.knowledge-sync-facts\s*\{[^}]*repeat\(auto-fit,\s*minmax\(150px,\s*1fr\)\)/s);
   assert.match(styles, /\.knowledge-sync-facts\s*\{[^}]*width:\s*100%/s);
   assert.match(styles, /\.knowledge-sync-facts > div\s*\{[^}]*background:[\s\S]*var\(--bg-card\)/);
   assert.match(styles, /\.knowledge-sync-facts strong\s*\{[^}]*color:\s*var\(--text-primary\)/s);
+  assert.match(styles, /\.chip-running\s*\{[\s\S]*animation:\s*knowledge-running-glow/);
+  assert.match(styles, /@keyframes knowledge-running-pulse/);
+  assert.match(styles, /@keyframes knowledge-running-dot-step/);
   assert.doesNotMatch(styles, /\.knowledge-sync-facts > div\s*\{[^}]*#f8fafc/s);
 });
 

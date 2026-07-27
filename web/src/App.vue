@@ -321,6 +321,7 @@ const selectedKnowledgePath = ref("");
 const knowledgeSearch = ref("");
 const activeKnowledgeView = ref<"docs" | "sync" | "check" | "routing" | "maintenance" | "source">("docs");
 const knowledgeBusy = ref(false);
+const knowledgeOperation = ref<"adopt" | "enrich" | "initialize" | "check" | null>(null);
 const knowledgeError = ref("");
 const knowledgeSyncProfile = ref<KnowledgeSyncProfile | null>(null);
 const knowledgeSyncProfileExists = ref(false);
@@ -1666,8 +1667,25 @@ function parsedKnowledgeExternalReferences() {
     .map((url) => ({ url, kind: "feishu" }));
 }
 
+function knowledgeOperationLabel(operation = knowledgeOperation.value) {
+  switch (operation) {
+    case "adopt":
+      return "正在采用现有知识库";
+    case "enrich":
+      return "正在检查并补全知识库";
+    case "initialize":
+      return "正在生成初始化 Proposal";
+    case "check":
+      return "正在检查 Git 更新";
+    default:
+      return "";
+  }
+}
+
 async function runKnowledgeInitialization(mode = "initialize") {
   if (!currentProject.value) return;
+  const operation = mode === "adopt" || mode === "enrich" ? mode : "initialize";
+  knowledgeOperation.value = operation;
   knowledgeBusy.value = true;
   knowledgeError.value = "";
   try {
@@ -1684,12 +1702,14 @@ async function runKnowledgeInitialization(mode = "initialize") {
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : String(error);
   } finally {
+    knowledgeOperation.value = null;
     knowledgeBusy.value = false;
   }
 }
 
 async function checkKnowledgeUpdatesForCurrentProject() {
   if (!currentProject.value) return;
+  knowledgeOperation.value = "check";
   knowledgeBusy.value = true;
   knowledgeError.value = "";
   try {
@@ -1699,6 +1719,7 @@ async function checkKnowledgeUpdatesForCurrentProject() {
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : String(error);
   } finally {
+    knowledgeOperation.value = null;
     knowledgeBusy.value = false;
   }
 }
@@ -3162,7 +3183,15 @@ onMounted(loadData);
                         <h2>Knowledge Sync</h2>
                         <p class="muted">CodeGraph 提供代码事实，OpenWiki 在隔离快照中生成 Markdown，Nexus 校验后只产生待审核 Proposal。</p>
                       </div>
-                      <span class="chip chip-purple">{{ knowledgeSyncStatus?.status || "uninitialized" }}</span>
+                      <span
+                        class="chip"
+                        :class="knowledgeOperation ? 'chip-running' : 'chip-purple'"
+                        :aria-label="knowledgeOperation ? 'running' : undefined"
+                      >
+                        <span v-if="knowledgeOperation" class="knowledge-running-dot" aria-hidden="true"></span>
+                        {{ knowledgeOperation ? "running" : (knowledgeSyncStatus?.status || "uninitialized") }}
+                        <span v-if="knowledgeOperation" class="knowledge-running-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                      </span>
                     </div>
 
                     <div class="knowledge-sync-facts">
@@ -3211,16 +3240,41 @@ onMounted(loadData);
                           <p class="muted">飞书链接仅在本次初始化或补全中作为辅助依据，不保存到 Setting.yaml，也不会持续同步。</p>
                         </div>
                         <div class="knowledge-sync-actions">
-                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('adopt')">采用现有 KB</button>
-                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('enrich')">检查并补全</button>
-                          <button class="btn-primary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('initialize')">初始化 Proposal</button>
-                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="checkKnowledgeUpdatesForCurrentProject">检查 Git 更新</button>
+                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('adopt')">
+                            {{ knowledgeOperation === "adopt" ? "采用中…" : "采用现有 KB" }}
+                          </button>
+                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('enrich')">
+                            {{ knowledgeOperation === "enrich" ? "补全中…" : "检查并补全" }}
+                          </button>
+                          <button class="btn-primary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="runKnowledgeInitialization('initialize')">
+                            {{ knowledgeOperation === "initialize" ? "初始化中…" : "初始化 Proposal" }}
+                          </button>
+                          <button class="btn-secondary" type="button" :disabled="knowledgeBusy || !knowledgeSyncProfileExists" @click="checkKnowledgeUpdatesForCurrentProject">
+                            {{ knowledgeOperation === "check" ? "检查中…" : "检查 Git 更新" }}
+                          </button>
                         </div>
+                      </div>
+                      <div v-if="knowledgeOperation" class="knowledge-operation-status" role="status" aria-live="polite">
+                        <span class="chip chip-running" aria-label="running">
+                          <span class="knowledge-running-dot" aria-hidden="true"></span>
+                          running
+                          <span class="knowledge-running-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                        </span>
+                        <strong>{{ knowledgeOperationLabel() }}</strong>
+                        <small>任务可能需要一些时间，完成后页面会自动刷新 Proposal 和运行记录。</small>
                       </div>
                       <textarea v-model="knowledgeExternalReferences" class="field-input knowledge-external-input" rows="3" placeholder="可选：每行一个飞书文档 HTTPS 链接，仅用于本次初始化/补全"></textarea>
                       <div v-if="knowledgeSyncRuns.length" class="knowledge-run-list">
                         <div v-for="run in knowledgeSyncRuns.slice(0, 5)" :key="run.id" class="knowledge-run-row">
-                          <span class="chip" :class="run.status === 'succeeded' ? 'chip-green' : 'chip-red'">{{ run.status }}</span>
+                          <span
+                            class="chip"
+                            :class="run.status === 'succeeded' ? 'chip-green' : (run.status === 'running' ? 'chip-running' : 'chip-red')"
+                            :aria-label="run.status"
+                          >
+                            <span v-if="run.status === 'running'" class="knowledge-running-dot" aria-hidden="true"></span>
+                            {{ run.status }}
+                            <span v-if="run.status === 'running'" class="knowledge-running-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                          </span>
                           <strong>{{ run.kind }}</strong>
                           <code>{{ run.targetRevision?.slice(0, 12) }}</code>
                           <span>{{ run.changeClass || "-" }}</span>
