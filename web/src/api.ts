@@ -1,5 +1,6 @@
 import type {
   BootstrapData,
+  CodeGraphSetup,
   Evaluation,
   EvaluationReviewInput,
   EvaluationSummary,
@@ -71,7 +72,8 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    throw new Error(`${path} returned ${response.status}`);
+    const message = (await response.text()).trim();
+    throw new Error(message || `${path} returned ${response.status}`);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -350,6 +352,12 @@ export function importProject(input: ProjectInput): Promise<Project> {
   return fetchJSON<Project>("/api/projects/import", {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+export function ensureProjectCodeGraph(projectId: string): Promise<CodeGraphSetup> {
+  return fetchJSON<CodeGraphSetup>(`/api/projects/${encodeURIComponent(projectId)}/codegraph/ensure`, {
+    method: "POST",
   });
 }
 

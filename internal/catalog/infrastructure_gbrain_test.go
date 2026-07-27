@@ -12,6 +12,30 @@ type recordingEnvironmentRunner struct {
 	environment map[string]string
 }
 
+type codeGraphSetupRunner struct {
+	calls       []string
+	initialized bool
+}
+
+func (r *codeGraphSetupRunner) Run(name string, args ...string) (string, error) {
+	r.calls = append(r.calls, strings.Join(append([]string{name}, args...), " "))
+	if name != "codegraph" {
+		return "", fmt.Errorf("unexpected command %s", name)
+	}
+	switch args[0] {
+	case "status":
+		return fmt.Sprintf(`{"initialized":%t,"version":"1.0.1","projectPath":%q,"indexPath":%q}`,
+			r.initialized, args[1], filepath.Join(args[1], ".codegraph")), nil
+	case "init":
+		r.initialized = true
+		return "initialized", nil
+	case "sync":
+		return "synced", nil
+	default:
+		return "", fmt.Errorf("unexpected CodeGraph action %s", args[0])
+	}
+}
+
 func (r *recordingEnvironmentRunner) Run(name string, args ...string) (string, error) {
 	r.calls = append(r.calls, strings.Join(append([]string{name}, args...), " "))
 	switch name {
@@ -94,5 +118,39 @@ func TestManagedInstallEnvironmentReplacesExistingValues(t *testing.T) {
 	}
 	if strings.Count(joined, "BUN_INSTALL_BIN=") != 1 || strings.Count(joined, "BUN_INSTALL_GLOBAL_DIR=") != 1 {
 		t.Fatalf("managed values were duplicated:\n%s", joined)
+	}
+}
+
+func TestEnsureCodeGraphInitializesThenSynchronizesExistingIndex(t *testing.T) {
+	root := t.TempDir()
+	runner := &codeGraphSetupRunner{}
+	service := NewInfrastructureService(InfrastructureServiceOptions{Runner: runner})
+
+	first, err := service.EnsureCodeGraph(root)
+	if err != nil {
+		t.Fatalf("ensure CodeGraph first time: %v", err)
+	}
+	if !first.Initialized || first.Action != "init" || first.ProjectPath != root {
+		t.Fatalf("unexpected first CodeGraph setup: %#v", first)
+	}
+
+	second, err := service.EnsureCodeGraph(root)
+	if err != nil {
+		t.Fatalf("ensure CodeGraph second time: %v", err)
+	}
+	if !second.Initialized || second.Action != "sync" || second.ProjectPath != root {
+		t.Fatalf("unexpected second CodeGraph setup: %#v", second)
+	}
+
+	wantCalls := []string{
+		"codegraph status " + root + " --json",
+		"codegraph init " + root,
+		"codegraph status " + root + " --json",
+		"codegraph status " + root + " --json",
+		"codegraph sync " + root,
+		"codegraph status " + root + " --json",
+	}
+	if strings.Join(runner.calls, "\n") != strings.Join(wantCalls, "\n") {
+		t.Fatalf("CodeGraph calls = %#v, want %#v", runner.calls, wantCalls)
 	}
 }

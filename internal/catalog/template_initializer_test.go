@@ -67,6 +67,19 @@ func TestApplyTemplateInitializationCreatesOnlyMissingFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, ".claude", "agents", "go-debugger.md")); !os.IsNotExist(err) {
 		t.Fatalf("Go output must not be included for Unity profile, err=%v", err)
 	}
+	config, err := os.ReadFile(filepath.Join(target, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("read project Codex config: %v", err)
+	}
+	for _, expected := range []string{
+		"[mcp_servers.codegraph]",
+		`command = "codegraph"`,
+		`args = ["serve", "--mcp"]`,
+	} {
+		if !strings.Contains(string(config), expected) {
+			t.Fatalf("expected project Codex config to contain %q, got %s", expected, config)
+		}
+	}
 }
 
 func TestApplyTemplateInitializationCreatesMissingTargetDirectory(t *testing.T) {
@@ -146,6 +159,7 @@ func TestApplyTemplateInitializationMergesGitignoreAndKeepsProjectKnowledgeTrack
 	for _, expected := range []string{
 		"bin/",
 		"AGENTS.md",
+		".codegraph/",
 		"KnowledgeBase/*",
 		"!KnowledgeBase/project/",
 		"!KnowledgeBase/project/**",
@@ -163,6 +177,87 @@ func TestApplyTemplateInitializationMergesGitignoreAndKeepsProjectKnowledgeTrack
 		t.Fatalf("preview after .gitignore update: %v", err)
 	}
 	assertInitializationAction(t, preview, ".gitignore", "unchanged")
+}
+
+func TestApplyTemplateInitializationMergesManagedCodeGraphMCPConfig(t *testing.T) {
+	target := t.TempDir()
+	configPath := filepath.Join(target, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("create .codex directory: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("model = \"gpt-5.4\"\n"), 0o644); err != nil {
+		t.Fatalf("write existing project config: %v", err)
+	}
+
+	result, err := ApplyTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeGeneral,
+	})
+	if err != nil {
+		t.Fatalf("apply template initialization: %v", err)
+	}
+	assertInitializationAction(t, TemplateInitializationPreview{Writes: result.Writes}, ".codex/config.toml", "update")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read merged project config: %v", err)
+	}
+	text := string(data)
+	for _, expected := range []string{
+		`model = "gpt-5.4"`,
+		"# >>> Nexus CodeGraph MCP >>>",
+		"[mcp_servers.codegraph]",
+		`args = ["serve", "--mcp"]`,
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected project config to contain %q, got %s", expected, text)
+		}
+	}
+
+	preview, err := PreviewTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeGeneral,
+	})
+	if err != nil {
+		t.Fatalf("preview after CodeGraph MCP merge: %v", err)
+	}
+	assertInitializationAction(t, preview, ".codex/config.toml", "unchanged")
+}
+
+func TestPreviewTemplateInitializationDoesNotOverwriteCustomCodeGraphMCPConfig(t *testing.T) {
+	target := t.TempDir()
+	configPath := filepath.Join(target, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("create .codex directory: %v", err)
+	}
+	custom := `[mcp_servers.codegraph]
+command = "custom-codegraph"
+`
+	if err := os.WriteFile(configPath, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write custom project config: %v", err)
+	}
+
+	preview, err := PreviewTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeGeneral,
+	})
+	if err != nil {
+		t.Fatalf("preview template initialization: %v", err)
+	}
+	assertInitializationAction(t, preview, ".codex/config.toml", "conflict")
+
+	result, err := ApplyTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeGeneral,
+	})
+	if err != nil {
+		t.Fatalf("apply template initialization: %v", err)
+	}
+	assertInitializationAction(t, TemplateInitializationPreview{Writes: result.Writes}, ".codex/config.toml", "conflict")
+	data, err := os.ReadFile(configPath)
+	if err != nil || string(data) != custom {
+		t.Fatalf("custom project config should remain untouched, data=%q err=%v", data, err)
+	}
 }
 
 func assertInitializationAction(t *testing.T, preview TemplateInitializationPreview, relativePath string, action string) {

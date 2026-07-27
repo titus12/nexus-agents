@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -485,6 +486,55 @@ func TestProjectImportAndDeleteEndpoints(t *testing.T) {
 	missingResponse := requestJSON(t, server, http.MethodGet, "/api/projects/imported-game", "")
 	if missingResponse.Code != http.StatusNotFound {
 		t.Fatalf("expected deleted project to return 404, got %d", missingResponse.Code)
+	}
+}
+
+func TestProjectCodeGraphEnsureEndpoint(t *testing.T) {
+	root := t.TempDir()
+	store := catalog.NewStore()
+	project, err := store.ImportProject(catalog.ProjectInput{Name: "codegraph-project", Path: root})
+	if err != nil {
+		t.Fatalf("import project: %v", err)
+	}
+
+	initialized := false
+	var calls []string
+	infrastructure := catalog.NewInfrastructureService(catalog.InfrastructureServiceOptions{
+		Runner: catalog.InfrastructureCommandRunnerFunc(func(name string, args ...string) (string, error) {
+			calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+			if name != "codegraph" {
+				return "", fmt.Errorf("unexpected command %s", name)
+			}
+			switch args[0] {
+			case "status":
+				return fmt.Sprintf(`{"initialized":%t,"version":"1.0.1","projectPath":%q,"indexPath":%q}`,
+					initialized, args[1], filepath.Join(args[1], ".codegraph")), nil
+			case "init":
+				initialized = true
+				return "initialized", nil
+			default:
+				return "", fmt.Errorf("unexpected CodeGraph action %s", args[0])
+			}
+		}),
+	})
+	server := newServer(store, infrastructure, codexrouter.NewService(codexrouter.DefaultConfig()))
+
+	response := requestJSON(t, server, http.MethodPost, "/api/projects/"+project.ID+"/codegraph/ensure", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected CodeGraph ensure success, got %d: %s", response.Code, response.Body.String())
+	}
+	var setup catalog.CodeGraphSetup
+	decodeJSON(t, response, &setup)
+	if !setup.Initialized || setup.Action != "init" || setup.ProjectPath != root {
+		t.Fatalf("unexpected CodeGraph setup: %#v", setup)
+	}
+	wantCalls := []string{
+		"codegraph status " + root + " --json",
+		"codegraph init " + root,
+		"codegraph status " + root + " --json",
+	}
+	if strings.Join(calls, "\n") != strings.Join(wantCalls, "\n") {
+		t.Fatalf("CodeGraph calls = %#v, want %#v", calls, wantCalls)
 	}
 }
 

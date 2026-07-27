@@ -263,6 +263,14 @@ export type ProjectInput = {
   groupIds?: string[];
 };
 
+export type CodeGraphSetup = {
+  projectPath: string;
+  indexPath?: string;
+  version?: string;
+  initialized: boolean;
+  action: "init" | "sync" | string;
+};
+
 export type ProjectGroup = {
   id: string;
   name: string;
@@ -884,6 +892,9 @@ export type KnowledgeSyncRun = {
   projectId: string;
   kind: string;
   status: string;
+  stage?: string;
+  stageMessage?: string;
+  progress?: number;
   branch: string;
   baseRevision?: string;
   targetRevision: string;
@@ -892,6 +903,7 @@ export type KnowledgeSyncRun = {
   warnings: string[];
   error?: string;
   startedAt: string;
+  updatedAt?: string;
   endedAt?: string;
 };
 

@@ -79,6 +79,16 @@ func TestServiceInitializationIsProposalOnlyAndNoChangeCheckSkipsCompiler(t *tes
 	if result.Proposal == nil || compiler.initializeCalls != 1 {
 		t.Fatalf("result/compiler = %#v / %#v", result, compiler)
 	}
+	if result.Run.Stage != StageCompleted || result.Run.Progress != 100 || result.Run.UpdatedAt == "" {
+		t.Fatalf("run progress = %#v", result.Run)
+	}
+	runs, err := service.Runs("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Stage != StageCompleted || runs[0].Status != "succeeded" {
+		t.Fatalf("stored run progress = %#v", runs)
+	}
 	proposalPaths := map[string]bool{}
 	for _, change := range result.Proposal.Changes {
 		proposalPaths[change.Path] = true

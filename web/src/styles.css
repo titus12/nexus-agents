@@ -2353,7 +2353,7 @@ tr:last-child td { border-bottom: none; }
 
 .knowledge-operation-status {
   display: grid;
-  grid-template-columns: auto minmax(180px, auto) minmax(240px, 1fr);
+  grid-template-columns: auto minmax(220px, 1fr) minmax(160px, 300px);
   align-items: center;
   gap: 10px;
   padding: 11px 12px;
@@ -2365,6 +2365,38 @@ tr:last-child td { border-bottom: none; }
 
 .knowledge-operation-status small {
   color: var(--text-secondary);
+}
+
+.knowledge-operation-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.knowledge-operation-copy strong,
+.knowledge-operation-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-progress-track {
+  height: 9px;
+  overflow: hidden;
+  border: 1px solid rgba(196, 181, 253, 0.28);
+  border-radius: 999px;
+  background: rgba(15, 16, 24, 0.42);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+
+.knowledge-progress-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #7c74ff, #c4b5fd);
+  box-shadow: 0 0 12px rgba(196, 181, 253, 0.68);
+  transition: width 260ms ease;
 }
 
 .chip-running {
@@ -2452,7 +2484,7 @@ tr:last-child td { border-bottom: none; }
 .knowledge-policy-row,
 .knowledge-run-row {
   display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) minmax(90px, auto) minmax(180px, 1.4fr) auto;
+  grid-template-columns: auto minmax(110px, 0.8fr) minmax(180px, 1.4fr) minmax(90px, auto) auto;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -2569,7 +2601,7 @@ tr:last-child td { border-bottom: none; }
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .knowledge-operation-status small {
+  .knowledge-progress-track {
     grid-column: 1 / -1;
   }
 

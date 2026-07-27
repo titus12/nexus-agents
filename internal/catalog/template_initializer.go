@@ -112,6 +112,21 @@ func PreviewTemplateInitialization(input TemplateInitializationInput) (TemplateI
 		Reason:       "KnowledgeBase/project is never initialized or overwritten.",
 	})
 	preview.Summary.Protected++
+	codexConfigWrite, err := templateInitializationCodexConfigWrite(targetPath)
+	if err != nil {
+		return TemplateInitializationPreview{}, err
+	}
+	preview.Writes = append(preview.Writes, codexConfigWrite)
+	switch codexConfigWrite.Action {
+	case "create":
+		preview.Summary.Create++
+	case "update":
+		preview.Summary.Update++
+	case "unchanged":
+		preview.Summary.Unchanged++
+	case "conflict":
+		preview.Summary.Conflict++
+	}
 	gitignoreWrite, err := templateInitializationGitignoreWrite(targetPath)
 	if err != nil {
 		return TemplateInitializationPreview{}, err
@@ -149,15 +164,29 @@ func ApplyTemplateInitialization(input TemplateInitializationInput) (TemplateIni
 		case "protected", "unchanged", "conflict":
 			result.Writes = append(result.Writes, write)
 		case "update":
-			if write.RelativePath != ".gitignore" {
+			switch write.RelativePath {
+			case ".gitignore":
+				data, err := mergedTemplateInitializationGitignore(preview.TargetPath)
+				if err != nil {
+					return TemplateInitializationResult{}, err
+				}
+				if err := os.WriteFile(filepath.Join(preview.TargetPath, ".gitignore"), data, 0o644); err != nil {
+					return TemplateInitializationResult{}, fmt.Errorf("write .gitignore: %w", err)
+				}
+			case ".codex/config.toml":
+				data, err := mergedTemplateInitializationCodexConfig(preview.TargetPath)
+				if err != nil {
+					return TemplateInitializationResult{}, err
+				}
+				target := filepath.Join(preview.TargetPath, ".codex", "config.toml")
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					return TemplateInitializationResult{}, fmt.Errorf("create .codex directory: %w", err)
+				}
+				if err := os.WriteFile(target, data, 0o644); err != nil {
+					return TemplateInitializationResult{}, fmt.Errorf("write .codex/config.toml: %w", err)
+				}
+			default:
 				return TemplateInitializationResult{}, fmt.Errorf("unsupported initialization update %s", write.RelativePath)
-			}
-			data, err := mergedTemplateInitializationGitignore(preview.TargetPath)
-			if err != nil {
-				return TemplateInitializationResult{}, err
-			}
-			if err := os.WriteFile(filepath.Join(preview.TargetPath, ".gitignore"), data, 0o644); err != nil {
-				return TemplateInitializationResult{}, fmt.Errorf("write .gitignore: %w", err)
 			}
 			result.Writes = append(result.Writes, write)
 		case "create":
@@ -168,6 +197,21 @@ func ApplyTemplateInitialization(input TemplateInitializationInput) (TemplateIni
 				}
 				if err := os.WriteFile(filepath.Join(preview.TargetPath, ".gitignore"), data, 0o644); err != nil {
 					return TemplateInitializationResult{}, fmt.Errorf("write .gitignore: %w", err)
+				}
+				result.Writes = append(result.Writes, write)
+				continue
+			}
+			if write.RelativePath == ".codex/config.toml" {
+				data, err := mergedTemplateInitializationCodexConfig(preview.TargetPath)
+				if err != nil {
+					return TemplateInitializationResult{}, err
+				}
+				target := filepath.Join(preview.TargetPath, ".codex", "config.toml")
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					return TemplateInitializationResult{}, fmt.Errorf("create .codex directory: %w", err)
+				}
+				if err := os.WriteFile(target, data, 0o644); err != nil {
+					return TemplateInitializationResult{}, fmt.Errorf("write .codex/config.toml: %w", err)
 				}
 				result.Writes = append(result.Writes, write)
 				continue
@@ -223,6 +267,7 @@ AGENTS.md
 .claude/
 .codex/
 .agents/
+.codegraph/
 
 # Generated/shared KnowledgeBase configuration
 KnowledgeBase/*
@@ -230,6 +275,15 @@ KnowledgeBase/*
 !KnowledgeBase/project/
 !KnowledgeBase/project/**
 # <<< Nexus Agents AI configuration <<<
+`
+
+const nexusCodeGraphMCPBlock = `# >>> Nexus CodeGraph MCP >>>
+[mcp_servers.codegraph]
+command = "codegraph"
+args = ["serve", "--mcp"]
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+# <<< Nexus CodeGraph MCP <<<
 `
 
 func templateInitializationGitignoreWrite(targetRoot string) (TemplateInitializationWrite, error) {
@@ -287,6 +341,93 @@ func mergeTemplateInitializationGitignore(existing string) []byte {
 		return []byte(nexusGitignoreBlock)
 	}
 	return []byte(text + "\n\n" + nexusGitignoreBlock)
+}
+
+func templateInitializationCodexConfigWrite(targetRoot string) (TemplateInitializationWrite, error) {
+	target := filepath.Join(targetRoot, ".codex", "config.toml")
+	data, err := os.ReadFile(target)
+	if os.IsNotExist(err) {
+		return TemplateInitializationWrite{
+			RelativePath: ".codex/config.toml",
+			Action:       "create",
+			Reason:       "Creates the project-scoped CodeGraph MCP server configuration.",
+		}, nil
+	}
+	if err != nil {
+		return TemplateInitializationWrite{}, fmt.Errorf("read .codex/config.toml: %w", err)
+	}
+	if strings.Contains(string(data), "# >>> Nexus CodeGraph MCP >>>") {
+		if !strings.Contains(string(data), "# <<< Nexus CodeGraph MCP <<<") {
+			return TemplateInitializationWrite{
+				RelativePath: ".codex/config.toml",
+				Action:       "conflict",
+				Reason:       "The Nexus CodeGraph MCP block is incomplete; it will not be overwritten.",
+			}, nil
+		}
+		if string(data) == string(mergeTemplateInitializationCodexConfigText(string(data))) {
+			return TemplateInitializationWrite{
+				RelativePath: ".codex/config.toml",
+				Action:       "unchanged",
+				Reason:       "The managed CodeGraph MCP configuration is already current.",
+			}, nil
+		}
+		return TemplateInitializationWrite{
+			RelativePath: ".codex/config.toml",
+			Action:       "update",
+			Reason:       "Refreshes the managed CodeGraph MCP configuration without replacing other project settings.",
+		}, nil
+	}
+	if containsCodeGraphMCPTable(string(data)) {
+		return TemplateInitializationWrite{
+			RelativePath: ".codex/config.toml",
+			Action:       "conflict",
+			Reason:       "Project config already defines mcp_servers.codegraph outside the Nexus managed block; it will not be overwritten.",
+		}, nil
+	}
+	return TemplateInitializationWrite{
+		RelativePath: ".codex/config.toml",
+		Action:       "update",
+		Reason:       "Appends the managed CodeGraph MCP configuration without replacing other project settings.",
+	}, nil
+}
+
+func mergedTemplateInitializationCodexConfig(targetRoot string) ([]byte, error) {
+	target := filepath.Join(targetRoot, ".codex", "config.toml")
+	data, err := os.ReadFile(target)
+	if os.IsNotExist(err) {
+		return []byte(nexusCodeGraphMCPBlock), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read .codex/config.toml: %w", err)
+	}
+	return mergeTemplateInitializationCodexConfigText(string(data)), nil
+}
+
+func mergeTemplateInitializationCodexConfigText(existing string) []byte {
+	const begin = "# >>> Nexus CodeGraph MCP >>>"
+	const end = "# <<< Nexus CodeGraph MCP <<<"
+	text := strings.ReplaceAll(existing, "\r\n", "\n")
+	if start := strings.Index(text, begin); start >= 0 {
+		if finish := strings.Index(text[start:], end); finish >= 0 {
+			finish += start + len(end)
+			text = strings.TrimRight(text[:start]+text[finish:], "\n")
+		}
+	}
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return []byte(nexusCodeGraphMCPBlock)
+	}
+	return []byte(text + "\n\n" + nexusCodeGraphMCPBlock)
+}
+
+func containsCodeGraphMCPTable(config string) bool {
+	for _, line := range strings.Split(config, "\n") {
+		switch strings.TrimSpace(line) {
+		case "[mcp_servers.codegraph]", `[mcp_servers."codegraph"]`:
+			return true
+		}
+	}
+	return false
 }
 
 func validateTemplateInitializationInput(input TemplateInitializationInput) (string, string, error) {

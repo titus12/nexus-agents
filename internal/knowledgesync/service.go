@@ -123,6 +123,26 @@ func (s *Service) Runs(projectID string) ([]SyncRun, error) {
 	return s.store.ListRuns(projectID)
 }
 
+func (s *Service) recordRunStage(run *SyncRun, stage SyncStage, progress int) {
+	if run == nil {
+		return
+	}
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	run.Stage = stage
+	run.Progress = progress
+	run.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := s.store.SaveRun(*run); err != nil {
+		log.Printf("[knowledge-sync] run progress project=%s run=%s stage=%s status=save_failed error=%q", run.ProjectID, run.ID, stage, boundedText(err.Error(), 500))
+		return
+	}
+	log.Printf("[knowledge-sync] run progress project=%s run=%s kind=%s stage=%s progress=%d", run.ProjectID, run.ID, run.Kind, stage, progress)
+}
+
 func (s *Service) Proposals(projectID string) ([]KnowledgeProposal, error) {
 	return s.store.ListProposals(projectID)
 }
@@ -200,14 +220,53 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	if len(request.ExternalReferences) > MaxExternalReferences {
 		return SyncResult{}, fmt.Errorf("external references exceed %d", MaxExternalReferences)
 	}
+	started := time.Now()
+	run := SyncRun{
+		ID:        newRunID(request.ProjectID, map[bool]string{true: "enrich", false: "initialize"}[update]),
+		ProjectID: request.ProjectID,
+		Status:    "running", Stage: StagePreparing, Progress: 2,
+		StartedAt: started.Format(time.RFC3339), UpdatedAt: started.Format(time.RFC3339), Warnings: []string{},
+	}
+	if update {
+		run.Kind = "enrich"
+	} else {
+		run.Kind = "initialize"
+	}
+	state, _ := s.store.LoadState(request.ProjectID)
+	state.ProjectID = request.ProjectID
+	state.ProjectRoot = filepath.Clean(request.ProjectRoot)
+	state.LastCheckedAt = run.StartedAt
+	state.LastError = ""
+	state.Status = StatusChecking
+	_ = s.store.SaveState(state)
+	s.recordRunStage(&run, StagePreparing, 2)
+	defer func() {
+		if returnErr != nil {
+			run.Status = "failed"
+			run.Error = boundedText(returnErr.Error(), 2000)
+			run.EndedAt = time.Now().Format(time.RFC3339)
+			s.recordRunStage(&run, StageFailed, run.Progress)
+			state.Status = StatusFailed
+			state.LastError = run.Error
+			_ = s.store.SaveRun(run)
+			_ = s.store.SaveState(state)
+			log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=failed stage=%s duration_ms=%d error=%q", request.ProjectID, run.ID, run.Kind, run.Stage, time.Since(started).Milliseconds(), run.Error)
+		}
+	}()
+
+	s.recordRunStage(&run, StageLoadingProfile, 8)
 	profile, err := LoadProfile(request.ProjectRoot)
 	if err != nil {
 		return SyncResult{}, err
 	}
+	s.recordRunStage(&run, StageReadingGit, 15)
 	gitState, err := ReadGitState(ctx, s.git, request.ProjectRoot)
 	if err != nil {
 		return SyncResult{}, err
 	}
+	run.Branch = gitState.Branch
+	run.TargetRevision = gitState.Head
+	s.recordRunStage(&run, StageScanningRepository, 25)
 	inventory, err := BuildInventory(ctx, request.ProjectRoot, s.git, s.codeGraph, profile.Scan.Limits)
 	if err != nil {
 		return SyncResult{}, err
@@ -217,21 +276,11 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 		allPaths = append(allPaths, file.Path)
 	}
 	manifest := IncludedPaths(profile, allPaths)
-	started := time.Now()
-	run := SyncRun{
-		ID:        newRunID(request.ProjectID, map[bool]string{true: "enrich", false: "initialize"}[update]),
-		ProjectID: request.ProjectID, Branch: gitState.Branch, TargetRevision: gitState.Head,
-		Status: "running", StartedAt: started.Format(time.RFC3339), Warnings: []string{},
-	}
-	if update {
-		run.Kind = "enrich"
-	} else {
-		run.Kind = "initialize"
-	}
-	state, _ := s.store.LoadState(request.ProjectID)
+	s.recordRunStage(&run, StagePreparingKnowledge, 38)
 	var impact CodeGraphImpact
 	impactAvailable := false
 	if update && profile.CodeGraph.Enabled && s.codeGraph != nil && state.LastProcessedCommit != "" && state.LastProcessedCommit != gitState.Head {
+		s.recordRunStage(&run, StageAnalyzingCodeGraph, 45)
 		if changes, diffErr := DiffCommitted(ctx, s.git, request.ProjectRoot, state.LastProcessedCommit, gitState.Head); diffErr == nil {
 			changedPaths := make([]string, 0, len(changes))
 			for _, change := range changes {
@@ -252,22 +301,10 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	state.LastError = ""
 	state.Status = StatusChecking
 	_ = s.store.SaveState(state)
-	_ = s.store.SaveRun(run)
 	log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=started branch=%s revision=%s selected_files=%d", request.ProjectID, run.ID, run.Kind, gitState.Branch, gitState.Head, len(manifest))
-	defer func() {
-		if returnErr != nil {
-			run.Status = "failed"
-			run.Error = boundedText(returnErr.Error(), 2000)
-			run.EndedAt = time.Now().Format(time.RFC3339)
-			state.Status = StatusFailed
-			state.LastError = run.Error
-			_ = s.store.SaveRun(run)
-			_ = s.store.SaveState(state)
-			log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=failed duration_ms=%d error=%q", request.ProjectID, run.ID, run.Kind, time.Since(started).Milliseconds(), run.Error)
-		}
-	}()
 
 	externalRoot := s.store.projectPath(request.ProjectID, "runs", safeID(run.ID), "external")
+	s.recordRunStage(&run, StageFetchingExternalEvidence, 50)
 	snapshots, err := ProjectExternalReferences(ctx, externalRoot, request.ExternalReferences, s.external)
 	if err != nil && len(request.ExternalReferences) > 0 {
 		return SyncResult{}, err
@@ -283,6 +320,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 			Title: snapshot.Title, SourceURL: snapshot.SourceURL, LocalPath: snapshot.LocalPath, Revision: snapshot.Revision,
 		})
 	}
+	s.recordRunStage(&run, StagePreparingKnowledge, 58)
 	compileInput := wikicompiler.CompileInput{
 		ProjectID: request.ProjectID, RunID: run.ID, ProjectRoot: request.ProjectRoot,
 		Revision: gitState.Head, DataRoot: s.store.Root, KnowledgeRoot: profile.Knowledge.Root,
@@ -297,6 +335,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 		}
 	}
 	var generated wikicompiler.GeneratedBundle
+	s.recordRunStage(&run, StageCompilingOpenWiki, 65)
 	if update {
 		generated, err = s.compiler.Update(ctx, compileInput)
 	} else {
@@ -305,6 +344,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	if err != nil {
 		return SyncResult{}, err
 	}
+	s.recordRunStage(&run, StageValidatingProposal, 85)
 	if err := ensureKnowledgeScaffold(request.ProjectRoot, generated.Files); err != nil {
 		return SyncResult{}, err
 	}
@@ -334,6 +374,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	for _, snapshot := range snapshots {
 		evidence = append(evidence, ProposalEvidence{Kind: "external", Source: snapshot.SourceURL, Summary: "Initialization-only auxiliary evidence: " + snapshot.Title, Revision: snapshot.Revision})
 	}
+	s.recordRunStage(&run, StageGeneratingProposal, 94)
 	proposal, err := BuildProposal(
 		request.ProjectID, request.ProjectRoot, gitState.Branch, state.LastProcessedCommit, gitState.Head,
 		profileHash, generated.Version, generated.Files, evidence, validation,
@@ -351,6 +392,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	run.ProposalID = proposal.ID
 	run.Warnings = proposal.Warnings
 	run.EndedAt = now
+	s.recordRunStage(&run, StageCompleted, 100)
 	state.Status = StatusProposalPending
 	state.PendingProposalID = proposal.ID
 	state.CompilerVersion = generated.Version

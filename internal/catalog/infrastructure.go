@@ -41,6 +41,14 @@ type InfrastructureItem struct {
 	Output         string   `json:"output,omitempty"`
 }
 
+type CodeGraphSetup struct {
+	ProjectPath string `json:"projectPath"`
+	IndexPath   string `json:"indexPath,omitempty"`
+	Version     string `json:"version,omitempty"`
+	Initialized bool   `json:"initialized"`
+	Action      string `json:"action"`
+}
+
 type InfrastructureServiceOptions struct {
 	Runner     InfrastructureCommandRunner
 	RTKUpdater InfrastructureUpdater
@@ -76,6 +84,7 @@ type InfrastructureService struct {
 	rtkUpdater        InfrastructureUpdater
 	toolRoot          string
 	mu                sync.Mutex
+	codeGraphMu       sync.Mutex
 	installedOptional map[string]bool
 }
 
@@ -98,6 +107,83 @@ func NewInfrastructureService(options InfrastructureServiceOptions) *Infrastruct
 		toolRoot:          toolRoot,
 		installedOptional: map[string]bool{},
 	}
+}
+
+type codeGraphStatus struct {
+	Initialized bool   `json:"initialized"`
+	Version     string `json:"version"`
+	ProjectPath string `json:"projectPath"`
+	IndexPath   string `json:"indexPath"`
+}
+
+func (s *InfrastructureService) EnsureCodeGraph(projectRoot string) (CodeGraphSetup, error) {
+	absolutePath, err := filepath.Abs(strings.TrimSpace(projectRoot))
+	if err != nil {
+		return CodeGraphSetup{}, fmt.Errorf("resolve CodeGraph project path: %w", err)
+	}
+	stat, err := os.Stat(absolutePath)
+	if err != nil {
+		return CodeGraphSetup{}, fmt.Errorf("stat CodeGraph project path: %w", err)
+	}
+	if !stat.IsDir() {
+		return CodeGraphSetup{}, fmt.Errorf("CodeGraph project path %s is not a directory", absolutePath)
+	}
+
+	s.codeGraphMu.Lock()
+	defer s.codeGraphMu.Unlock()
+
+	status, err := s.codeGraphStatus(absolutePath)
+	if err != nil {
+		return CodeGraphSetup{}, err
+	}
+	action := "sync"
+	if !status.Initialized {
+		action = "init"
+	}
+	if _, err := s.runner.Run("codegraph", action, absolutePath); err != nil {
+		return CodeGraphSetup{
+			ProjectPath: absolutePath,
+			IndexPath:   status.IndexPath,
+			Version:     status.Version,
+			Initialized: status.Initialized,
+			Action:      action,
+		}, fmt.Errorf("CodeGraph %s %s: %w", action, absolutePath, err)
+	}
+
+	status, err = s.codeGraphStatus(absolutePath)
+	if err != nil {
+		return CodeGraphSetup{}, err
+	}
+	if !status.Initialized {
+		return CodeGraphSetup{
+			ProjectPath: absolutePath,
+			IndexPath:   status.IndexPath,
+			Version:     status.Version,
+			Action:      action,
+		}, fmt.Errorf("CodeGraph remains uninitialized after %s", action)
+	}
+	if status.ProjectPath == "" {
+		status.ProjectPath = absolutePath
+	}
+	return CodeGraphSetup{
+		ProjectPath: status.ProjectPath,
+		IndexPath:   status.IndexPath,
+		Version:     status.Version,
+		Initialized: true,
+		Action:      action,
+	}, nil
+}
+
+func (s *InfrastructureService) codeGraphStatus(projectRoot string) (codeGraphStatus, error) {
+	output, err := s.runner.Run("codegraph", "status", projectRoot, "--json")
+	if err != nil {
+		return codeGraphStatus{}, fmt.Errorf("CodeGraph status %s: %w", projectRoot, err)
+	}
+	var status codeGraphStatus
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &status); err != nil {
+		return codeGraphStatus{}, fmt.Errorf("decode CodeGraph status: %w", err)
+	}
+	return status, nil
 }
 
 func (s *InfrastructureService) Items() []InfrastructureItem {

@@ -23,6 +23,23 @@ const (
 	StatusFailed          SyncStatus = "failed"
 )
 
+type SyncStage string
+
+const (
+	StagePreparing                SyncStage = "preparing"
+	StageLoadingProfile           SyncStage = "loading_profile"
+	StageReadingGit               SyncStage = "reading_git"
+	StageScanningRepository       SyncStage = "scanning_repository"
+	StageAnalyzingCodeGraph       SyncStage = "analyzing_codegraph"
+	StageFetchingExternalEvidence SyncStage = "fetching_external_evidence"
+	StagePreparingKnowledge       SyncStage = "preparing_knowledge"
+	StageCompilingOpenWiki        SyncStage = "compiling_openwiki"
+	StageValidatingProposal       SyncStage = "validating_proposal"
+	StageGeneratingProposal       SyncStage = "generating_proposal"
+	StageCompleted                SyncStage = "completed"
+	StageFailed                   SyncStage = "failed"
+)
+
 type KnowledgeSyncState struct {
 	ProjectID           string     `json:"projectId"`
 	ProjectRoot         string     `json:"projectRoot"`
@@ -43,6 +60,9 @@ type SyncRun struct {
 	ProjectID      string          `json:"projectId"`
 	Kind           string          `json:"kind"`
 	Status         string          `json:"status"`
+	Stage          SyncStage       `json:"stage,omitempty"`
+	StageMessage   string          `json:"stageMessage,omitempty"`
+	Progress       int             `json:"progress,omitempty"`
 	Branch         string          `json:"branch"`
 	BaseRevision   string          `json:"baseRevision,omitempty"`
 	TargetRevision string          `json:"targetRevision"`
@@ -51,6 +71,7 @@ type SyncRun struct {
 	Warnings       []string        `json:"warnings"`
 	Error          string          `json:"error,omitempty"`
 	StartedAt      string          `json:"startedAt"`
+	UpdatedAt      string          `json:"updatedAt,omitempty"`
 	EndedAt        string          `json:"endedAt,omitempty"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"`
 }

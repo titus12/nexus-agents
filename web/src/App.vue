@@ -49,6 +49,7 @@ import {
   importProject,
   initializeKnowledgePreview,
   discoverKnowledgePolicy,
+  ensureProjectCodeGraph,
   rebuildLearningCaseIndex,
   resolveModelRoute,
   reviewEvaluationProposal,
@@ -328,6 +329,9 @@ const knowledgeSyncProfileExists = ref(false);
 const knowledgeSyncStatus = ref<KnowledgeSyncState | null>(null);
 const knowledgeDiscovery = ref<KnowledgeDiscoveryResponse | null>(null);
 const knowledgeSyncRuns = ref<KnowledgeSyncRun[]>([]);
+const knowledgeProgressRun = ref<KnowledgeSyncRun | null>(null);
+const knowledgeOperationStartedAt = ref(0);
+const knowledgeOperationElapsedSeconds = ref(0);
 const knowledgeProposals = ref<KnowledgeProposal[]>([]);
 const selectedKnowledgeProposal = ref<KnowledgeProposal | null>(null);
 const selectedKnowledgeProposalPaths = ref<string[]>([]);
@@ -1682,19 +1686,70 @@ function knowledgeOperationLabel(operation = knowledgeOperation.value) {
   }
 }
 
+function knowledgeStageLabel(stage?: string) {
+  const labels: Record<string, string> = {
+    preparing: "正在准备任务",
+    loading_profile: "正在读取 KnowledgeBase/Setting.yaml",
+    reading_git: "正在读取 Git 提交信息",
+    scanning_repository: "正在扫描项目文件",
+    analyzing_codegraph: "正在分析 CodeGraph 影响",
+    fetching_external_evidence: "正在抓取外部参考资料",
+    preparing_knowledge: "正在准备知识库输入",
+    compiling_openwiki: "正在编译 OpenWiki",
+    validating_proposal: "正在校验生成内容",
+    generating_proposal: "正在生成 Proposal",
+    completed: "Proposal 已生成",
+    failed: "任务失败",
+  };
+  return labels[stage ?? ""] ?? "正在等待服务响应";
+}
+
+function knowledgeProgressLabel() {
+  const run = knowledgeProgressRun.value;
+  if (!run) return "正在提交初始化任务";
+  const progress = typeof run.progress === "number" ? ` (${run.progress}%)` : "";
+  return `${knowledgeStageLabel(run.stage)}${progress}`;
+}
+
+function formatKnowledgeOperationElapsed() {
+  const total = Math.max(0, knowledgeOperationElapsedSeconds.value);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
+}
+
+async function pollKnowledgeProgress(projectId: string) {
+  while (knowledgeOperation.value && currentProject.value?.id === projectId) {
+    try {
+      const runs = await fetchKnowledgeSyncRuns(projectId);
+      knowledgeSyncRuns.value = runs;
+      knowledgeProgressRun.value = runs.find((run) => run.status === "running") ?? knowledgeProgressRun.value;
+    } catch {
+      // The primary request will surface any actionable failure. Keep the progress panel visible while it runs.
+    }
+    knowledgeOperationElapsedSeconds.value = Math.floor((Date.now() - knowledgeOperationStartedAt.value) / 1000);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
+  }
+}
+
 async function runKnowledgeInitialization(mode = "initialize") {
   if (!currentProject.value) return;
+  const projectId = currentProject.value.id;
   const operation = mode === "adopt" || mode === "enrich" ? mode : "initialize";
   knowledgeOperation.value = operation;
   knowledgeBusy.value = true;
   knowledgeError.value = "";
+  knowledgeProgressRun.value = null;
+  knowledgeOperationStartedAt.value = Date.now();
+  knowledgeOperationElapsedSeconds.value = 0;
+  const progressPolling = pollKnowledgeProgress(projectId);
   try {
-    const result = await initializeKnowledgePreview(currentProject.value.id, {
+    const result = await initializeKnowledgePreview(projectId, {
       mode,
       externalReferences: mode === "adopt" ? [] : parsedKnowledgeExternalReferences(),
     });
     showToast(result.message);
-    await loadKnowledgeSync(currentProject.value.id);
+    await loadKnowledgeSync(projectId);
     if (result.proposal) {
       selectedKnowledgeProposal.value = result.proposal;
       selectedKnowledgeProposalPaths.value = result.proposal.changes.map((change) => change.path);
@@ -1703,6 +1758,8 @@ async function runKnowledgeInitialization(mode = "initialize") {
     knowledgeError.value = error instanceof Error ? error.message : String(error);
   } finally {
     knowledgeOperation.value = null;
+    await progressPolling;
+    knowledgeProgressRun.value = null;
     knowledgeBusy.value = false;
   }
 }
@@ -2270,17 +2327,37 @@ async function previewTemplateInitializer() {
 }
 
 async function applyTemplateInitializer() {
-  const planId = templateInitializerPreview.value?.planId;
-  if (!planId) return;
   templateInitializerBusy.value = true;
   templateInitializerError.value = "";
+  templateInitializerResult.value = null;
+  let importedProject: Project | null = null;
   try {
-    templateInitializerResult.value = await applyTemplateInitialization(planId);
+    let preview = templateInitializerPreview.value;
+    if (!preview) {
+      preview = await previewTemplateInitialization(templateInitializerForm.value);
+      templateInitializerPreview.value = preview;
+    }
+
+    const result = await applyTemplateInitialization(preview.planId);
+    templateInitializerResult.value = result;
     templateInitializerPreview.value = null;
-    showToast(`已创建 ${templateInitializerResult.value.summary.create} 个文件，并更新 ${templateInitializerResult.value.summary.update} 个忽略规则。`);
+    showToast("正在导入新项目...");
+    importedProject = await importProject({
+      name: baseNameFromPath(result.targetPath),
+      path: result.targetPath,
+    });
+    showToast("正在初始化项目 CodeGraph...");
+    await ensureProjectCodeGraph(importedProject.id);
+    await finishProjectImport(importedProject);
     showTemplateInitializerModal.value = false;
+    showToast(`已创建 ${result.summary.create} 个文件，并自动导入项目：${importedProject.name}。`);
   } catch (err) {
-    templateInitializerError.value = errorMessage(err);
+    const message = errorMessage(err);
+    templateInitializerError.value = importedProject
+      ? `AI 配置和项目导入已完成，但 CodeGraph 初始化失败：${message}`
+      : templateInitializerResult.value
+        ? `AI 配置已创建，但自动导入项目失败：${message}`
+        : message;
   } finally {
     templateInitializerBusy.value = false;
   }
@@ -2348,16 +2425,20 @@ function baseNameFromPath(path: string): string {
 
 async function importProjectAction() {
   const project = await importProject({ ...importForm.value, groupIds: [...importGroupIds.value] });
-  const rescanned = await rescanProject(project.id);
-  await refreshBootstrap();
-  projects.value = upsertProject(projects.value, rescanned.project);
-  projectConfigSets.value = { ...projectConfigSets.value, [project.id]: rescanned.copies };
-  selectedProjectId.value = project.id;
-  projectGroupMembershipIds.value = projectGroups.value.filter((group) => group.projectIds.includes(project.id)).map((group) => group.id);
-  activePage.value = "project-detail";
+  await finishProjectImport(project);
   showImportModal.value = false;
   importGroupIds.value = [];
   showToast(`已导入项目：${project.name}`);
+}
+
+async function finishProjectImport(project: Project) {
+  const copies = await fetchProjectConfig(project.id);
+  await refreshBootstrap();
+  projects.value = upsertProject(projects.value, project);
+  projectConfigSets.value = { ...projectConfigSets.value, [project.id]: copies };
+  selectedProjectId.value = project.id;
+  projectGroupMembershipIds.value = projectGroups.value.filter((group) => group.projectIds.includes(project.id)).map((group) => group.id);
+  activePage.value = "project-detail";
 }
 
 async function saveCurrentProjectGroups() {
@@ -3260,8 +3341,13 @@ onMounted(loadData);
                           running
                           <span class="knowledge-running-dots" aria-hidden="true"><i></i><i></i><i></i></span>
                         </span>
-                        <strong>{{ knowledgeOperationLabel() }}</strong>
-                        <small>任务可能需要一些时间，完成后页面会自动刷新 Proposal 和运行记录。</small>
+                        <div class="knowledge-operation-copy">
+                          <strong>{{ knowledgeProgressLabel() }}</strong>
+                          <small>{{ knowledgeOperationLabel() }} · 已耗时 {{ formatKnowledgeOperationElapsed() }}</small>
+                        </div>
+                        <div class="knowledge-progress-track" aria-label="Knowledge proposal generation progress">
+                          <span :style="{ width: `${knowledgeProgressRun?.progress ?? 0}%` }"></span>
+                        </div>
                       </div>
                       <textarea v-model="knowledgeExternalReferences" class="field-input knowledge-external-input" rows="3" placeholder="可选：每行一个飞书文档 HTTPS 链接，仅用于本次初始化/补全"></textarea>
                       <div v-if="knowledgeSyncRuns.length" class="knowledge-run-list">
@@ -3276,8 +3362,8 @@ onMounted(loadData);
                             <span v-if="run.status === 'running'" class="knowledge-running-dots" aria-hidden="true"><i></i><i></i><i></i></span>
                           </span>
                           <strong>{{ run.kind }}</strong>
+                          <span>{{ knowledgeStageLabel(run.stage) }}{{ typeof run.progress === "number" ? ` ${run.progress}%` : "" }}</span>
                           <code>{{ run.targetRevision?.slice(0, 12) }}</code>
-                          <span>{{ run.changeClass || "-" }}</span>
                           <small>{{ formatShortDate(run.startedAt) }}</small>
                         </div>
                       </div>
@@ -3941,7 +4027,7 @@ requires_openai_auth = true</pre>
         <div class="modal-header">
           <div>
             <div class="panel-title">快速配置新项目</div>
-            <div class="drawer-subtitle">先预览，再只创建缺失的 AI 配置文件；不会覆盖冲突文件或 KnowledgeBase/project。</div>
+            <div class="drawer-subtitle">可先预览；点击应用会自动创建缺失的 AI 配置、导入 Projects，并初始化项目级 CodeGraph MCP 配置和索引。</div>
           </div>
           <button class="icon-btn" type="button" @click="showTemplateInitializerModal = false">×</button>
         </div>
@@ -3974,13 +4060,15 @@ requires_openai_auth = true</pre>
             </div>
           </div>
           <div v-if="templateInitializerResult" class="notice success">
-            已创建 {{ templateInitializerResult.summary.create }} 个文件，并更新 {{ templateInitializerResult.summary.update }} 个忽略规则。冲突文件保持不变；如需纳入 Projects，请前往 Projects 手动导入该目录。
+            已创建 {{ templateInitializerResult.summary.create }} 个文件，并更新 {{ templateInitializerResult.summary.update }} 个忽略规则。
+            <span v-if="templateInitializerError">自动导入或 CodeGraph 初始化未完成，请根据上方错误信息处理。</span>
+            <span v-else>项目正在导入并初始化 CodeGraph。</span>
           </div>
         </div>
         <div class="modal-footer">
           <button class="btn-secondary" type="button" @click="showTemplateInitializerModal = false">关闭</button>
           <button class="btn-secondary" type="button" :disabled="templateInitializerBusy" @click="previewTemplateInitializer">{{ templateInitializerBusy ? '处理中...' : '预览' }}</button>
-          <button class="btn-primary" type="button" :disabled="templateInitializerBusy || !templateInitializerPreview" @click="applyTemplateInitializer">应用创建项</button>
+          <button class="btn-primary" type="button" :disabled="templateInitializerBusy || !templateInitializerForm.targetPath.trim()" @click="applyTemplateInitializer">{{ templateInitializerBusy ? '正在创建并导入...' : '应用创建并导入' }}</button>
         </div>
       </section>
     </div>

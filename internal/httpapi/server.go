@@ -1175,6 +1175,24 @@ func (s *Server) handleProjectPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 3 && parts[1] == "codegraph" && parts[2] == "ensure" {
+		if !allowMethods(w, r, http.MethodPost) {
+			return
+		}
+		projectRoot, ok := s.projectLocalPath(projectID)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		setup, err := s.infrastructure.EnsureCodeGraph(projectRoot)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, http.StatusOK, setup)
+		return
+	}
+
 	if len(parts) >= 2 && parts[1] == "knowledge" {
 		s.handleProjectKnowledgePath(w, r, projectID, parts[2:])
 		return
