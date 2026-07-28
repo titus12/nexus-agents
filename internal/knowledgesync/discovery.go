@@ -169,7 +169,28 @@ func DiscoverPolicy(ctx context.Context, projectRoot string, runner GitRunner, c
 		fallback.Warnings = append(fallback.Warnings, "AI refinement violated scan-policy safety rules: "+err.Error())
 		return fallback, nil
 	}
+	proposal.Rules = mergeDiscoveryRules(fallback.Rules, proposal.Rules)
 	return proposal, nil
+}
+
+func mergeDiscoveryRules(baseline []ScanRule, refined []ScanRule) []ScanRule {
+	merged := append([]ScanRule(nil), refined...)
+	seen := make(map[string]bool, len(refined))
+	for _, rule := range refined {
+		seen[rule.Action+"\x00"+rule.Pattern] = true
+	}
+	for _, rule := range baseline {
+		if rule.Action != "include" {
+			continue
+		}
+		key := rule.Action + "\x00" + rule.Pattern
+		if seen[key] {
+			continue
+		}
+		merged = append(merged, rule)
+		seen[key] = true
+	}
+	return merged
 }
 
 func deterministicPolicy(inventory RepositoryInventory) ScanPolicyProposal {

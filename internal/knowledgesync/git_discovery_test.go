@@ -2,6 +2,7 @@ package knowledgesync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +93,67 @@ func TestDeterministicPolicyIncludesRootFilesAndDirectoryDescendants(t *testing.
 	if _, ok := rules["internal/**"]; !ok {
 		t.Fatalf("expected recursive directory rule, got %#v", proposal.Rules)
 	}
+}
+
+func TestDiscoverPolicyRetainsDeterministicCoverageAfterAIRefinement(t *testing.T) {
+	root := initTestRepository(t)
+	writeRepoFile(t, root, "application.go", "package sandwich\n")
+	writeRepoFile(t, root, "pkg/actor/runtime.go", "package actor\n")
+	writeRepoFile(t, root, "pkg/actor/gen/generated.go", "package gen\n")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "initial")
+
+	client := staticDiscoveryClient{response: []byte(`{
+		"revision":"ignored",
+		"rules":[
+			{"pattern":"*.go","action":"include","category":"code","priority":"high","reason":"Go source","confidence":0.9},
+			{"pattern":"**/gen/**","action":"exclude","category":"generated_artifact","priority":"high","reason":"Generated code","confidence":0.95}
+		],
+		"requiredTopics":["runtime"],
+		"uncertain":[],
+		"warnings":[]
+	}`)}
+
+	proposal, err := DiscoverPolicy(context.Background(), root, ExecGitRunner{}, client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proposal.AIRefined {
+		t.Fatalf("expected AI-refined proposal, got %#v", proposal)
+	}
+	profile := ProfileFromDiscovery(proposal, "reviewer")
+	candidates := []string{"application.go", "pkg/actor/runtime.go", "pkg/actor/gen/generated.go"}
+	included := IncludedPaths(profile, candidates)
+	if !containsDiscoveryPath(included, "application.go") || !containsDiscoveryPath(included, "pkg/actor/runtime.go") {
+		t.Fatalf("AI refinement narrowed deterministic source coverage: %#v", included)
+	}
+	if containsDiscoveryPath(included, "pkg/actor/gen/generated.go") {
+		t.Fatalf("AI explicit generated-code exclusion was not preserved: %#v", included)
+	}
+}
+
+type staticDiscoveryClient struct {
+	response []byte
+	err      error
+}
+
+func (c staticDiscoveryClient) ProposeScanPolicy(context.Context, RepositoryInventory) ([]byte, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if len(c.response) == 0 {
+		return nil, errors.New("missing discovery response")
+	}
+	return c.response, nil
+}
+
+func containsDiscoveryPath(paths []string, target string) bool {
+	for _, path := range paths {
+		if path == target {
+			return true
+		}
+	}
+	return false
 }
 
 func initTestRepository(t *testing.T) string {

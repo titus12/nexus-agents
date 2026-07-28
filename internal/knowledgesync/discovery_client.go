@@ -44,6 +44,7 @@ func (c *HTTPDiscoveryClient) ProposeScanPolicy(ctx context.Context, inventory R
 		"Return JSON only with this exact top-level shape:",
 		`{"revision":"...","rules":[{"pattern":"...","action":"include|exclude","category":"...","priority":"...","reason":"...","confidence":0.0}],"requiredTopics":["..."],"uncertain":[{"path":"...","reason":"...","confidence":0.0}],"warnings":["..."]}`,
 		"Use only project-relative slash-normalized patterns. Never include secrets, dependencies, build output, binaries, or generated artifacts.",
+		"Pattern semantics: `*` does not cross `/`; `*.go` matches only root-level Go files. Use `**/*.go` for recursive extension matching, `directory/**` for a directory tree, and an exact file path for a root file.",
 		"Prefer Git-tracked source, API/schema contracts, manifests, repository docs, tests that explain behavior, and existing approved knowledge.",
 		"Repository inventory:",
 		string(inventoryJSON),
