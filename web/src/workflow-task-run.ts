@@ -70,6 +70,9 @@ function inferWorkflowType(options: WorkflowRunSubmitOptions): string {
     .map((item) => slugify(String(item)));
 
   for (const candidate of candidates) {
+    if (candidate.includes("dotnet-feature-development")) return "dotnet-feature-development";
+    if (candidate.includes("dotnet-bugfix")) return "dotnet-bugfix";
+    if (candidate.includes("dotnet-code-review")) return "dotnet-code-review";
     if (candidate.includes("unity-ui-feature-development") || candidate.includes("ui-feature-development")) return "ui-feature-development";
     if (candidate.includes("unity-logic-modification") || candidate.includes("logic-modification")) return "logic-modification";
     if (candidate.includes("unity-bug-investigation") || candidate.includes("bug-investigation")) return "bug-investigation";
@@ -103,12 +106,26 @@ function inferPrimaryAgent(options: WorkflowRunSubmitOptions, workflowType: stri
   if (workflowType.startsWith("ui-")) return "unity-ui-developer";
   if (workflowType === "logic-modification") return "unity-logic-developer";
   if (workflowType === "bug-investigation") return "unity-debugger";
+  if (workflowType === "dotnet-feature-development") return "dotnet-developer";
+  if (workflowType === "dotnet-bugfix") return "dotnet-debugger";
+  if (workflowType === "dotnet-code-review") return "dotnet-reviewer";
   if (workflowType === "bugfix") return "debugger";
   return "workflow-runner";
 }
 
 function inferRules(workflowType: string): string[] {
   switch (workflowType) {
+    case "dotnet-feature-development":
+      return [
+        "dotnet-00-routing",
+        "dotnet-01-project-model",
+        "dotnet-02-runtime-safety",
+        "dotnet-03-library-compatibility",
+      ];
+    case "dotnet-bugfix":
+      return ["dotnet-00-routing", "dotnet-01-project-model", "dotnet-02-runtime-safety"];
+    case "dotnet-code-review":
+      return ["dotnet-00-routing", "dotnet-03-library-compatibility"];
     case "bug-investigation":
       return ["unity-00-routing", "unity-id-bugfix-safety"];
     case "logic-modification":
@@ -124,6 +141,12 @@ function inferRules(workflowType: string): string[] {
 
 function inferSkills(workflowType: string): string[] {
   switch (workflowType) {
+    case "dotnet-feature-development":
+      return ["wf-dotnet-feature", "dotnet-development", "dotnet-testing"];
+    case "dotnet-bugfix":
+      return ["wf-dotnet-bugfix", "dotnet-development", "dotnet-testing"];
+    case "dotnet-code-review":
+      return ["wf-dotnet-review", "dotnet-dependency-safety"];
     case "bug-investigation":
       return ["wf-unity-bugfix", "unity-testing"];
     case "logic-modification":
@@ -167,7 +190,23 @@ function buildEvidence(options: WorkflowRunSubmitOptions, workflowType: string):
     contextMissing: false,
   };
 
-  if (workflowType === "bug-investigation") {
+  if (workflowType === "dotnet-feature-development") {
+    defaultEvidence.build = { passed: false, status: "not_provided" };
+    defaultEvidence.tests = { status: "not_provided" };
+    defaultEvidence.sdkPolicy = "respect repository global.json and target framework";
+    defaultEvidence.tags = ["dotnet", "feature", "workflow-runner"];
+  } else if (workflowType === "dotnet-bugfix") {
+    defaultEvidence.reproduction = { steps: [], reproduced: false, fixedOnSamePath: false };
+    defaultEvidence.rootCause = "workflow runner submission";
+    defaultEvidence.build = { passed: false, status: "not_provided" };
+    defaultEvidence.tests = { status: "not_provided" };
+    defaultEvidence.tags = ["dotnet", "bugfix", "workflow-runner"];
+  } else if (workflowType === "dotnet-code-review") {
+    defaultEvidence.apiCompatibility = "not provided";
+    defaultEvidence.runtimeSafety = "not provided";
+    defaultEvidence.dependencyImpact = "not provided";
+    defaultEvidence.tags = ["dotnet", "review", "workflow-runner"];
+  } else if (workflowType === "bug-investigation") {
     defaultEvidence.reproduction = { steps: [], reproduced: false, fixedOnSamePath: false };
     defaultEvidence.rootCause = "workflow runner submission";
     defaultEvidence.compile = { passed: true };

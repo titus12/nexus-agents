@@ -82,6 +82,62 @@ func TestApplyTemplateInitializationCreatesOnlyMissingFiles(t *testing.T) {
 	}
 }
 
+func TestApplyTemplateInitializationCreatesDotNetProfile(t *testing.T) {
+	target := t.TempDir()
+
+	result, err := ApplyTemplateInitialization(TemplateInitializationInput{
+		TargetPath:  target,
+		ProjectType: TemplateProjectTypeDotNet,
+	})
+	if err != nil {
+		t.Fatalf("apply .NET template initialization: %v", err)
+	}
+	if result.ProjectType != TemplateProjectTypeDotNet {
+		t.Fatalf("expected .NET project type, got %#v", result)
+	}
+	for _, relative := range []string{
+		".claude/agents/dotnet-developer.md",
+		".claude/rules/dotnet-00-routing.md",
+		".claude/skills/dotnet-development/SKILL.md",
+		".agents/skills/wf-dotnet-feature/SKILL.md",
+		".claude/commands/wf-dotnet-feature.md",
+		".claude/workflows/dotnet-feature-development.md",
+		".codex/agents/dotnet-developer.toml",
+	} {
+		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(relative))); err != nil {
+			t.Fatalf("expected .NET template output %s: %v", relative, err)
+		}
+	}
+	for _, relative := range []string{
+		".claude/agents/go-debugger.md",
+		".claude/agents/unity-debugger.md",
+		".claude/workflows/go-feature-development.md",
+		".claude/workflows/wf-unity-bugfix.md",
+	} {
+		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(relative))); !os.IsNotExist(err) {
+			t.Fatalf("unexpected non-.NET template output %s, err=%v", relative, err)
+		}
+	}
+	config, err := os.ReadFile(filepath.Join(target, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("read project Codex config: %v", err)
+	}
+	for _, expected := range []string{
+		"[mcp_servers.codegraph]",
+		`command = "codegraph"`,
+		`args = ["serve", "--mcp"]`,
+	} {
+		if !strings.Contains(string(config), expected) {
+			t.Fatalf("expected project Codex config to contain %q, got %s", expected, config)
+		}
+	}
+	for _, forbidden := range []string{"model_provider", "model_catalog_json", "nexus-codex"} {
+		if strings.Contains(string(config), forbidden) {
+			t.Fatalf("project Codex config must not override global routing with %q: %s", forbidden, config)
+		}
+	}
+}
+
 func TestApplyTemplateInitializationCreatesMissingTargetDirectory(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "new-project")
 	result, err := ApplyTemplateInitialization(TemplateInitializationInput{
@@ -104,6 +160,7 @@ func TestInitializeProjectTemplatesIncludesTestDrivenChangePolicy(t *testing.T) 
 		TemplateProjectTypeGeneral,
 		TemplateProjectTypeGo,
 		TemplateProjectTypeUnity,
+		TemplateProjectTypeDotNet,
 	} {
 		t.Run(projectType, func(t *testing.T) {
 			target := t.TempDir()

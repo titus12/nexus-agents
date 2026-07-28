@@ -37,3 +37,47 @@ test("buildWorkflowRunDraft infers Go bugfix payload", () => {
   assert.equal(draft.payload.context.agent, "debugger");
   assert.deepEqual(draft.payload.context.skills, ["wf-go-bugfix"]);
 });
+
+test("buildWorkflowRunDraft infers .NET feature payload", () => {
+  const draft = buildWorkflowRunDraft({
+    projectId: "dotnet-worker",
+    workflowTemplateId: "dotnet-feature-development",
+    workflowName: ".NET Feature Development",
+  });
+
+  assert.equal(draft.workflowType, "dotnet-feature-development");
+  assert.equal(draft.payload.context.agent, "dotnet-developer");
+  assert.deepEqual(draft.payload.context.rules, [
+    "dotnet-00-routing",
+    "dotnet-01-project-model",
+    "dotnet-02-runtime-safety",
+    "dotnet-03-library-compatibility",
+  ]);
+  assert.deepEqual(draft.payload.context.skills, [
+    "wf-dotnet-feature",
+    "dotnet-development",
+    "dotnet-testing",
+  ]);
+  assert.deepEqual(draft.payload.context.tools, ["workflow-graph"]);
+  assert.deepEqual(draft.payload.evidence.tags, ["dotnet", "feature", "workflow-runner"]);
+  assert.deepEqual(draft.payload.evidence.build, {
+    passed: false,
+    status: "not_provided",
+  });
+});
+
+test("buildWorkflowRunDraft infers .NET bugfix and review owners", () => {
+  const bugfix = buildWorkflowRunDraft({ workflowTemplateId: "dotnet-bugfix" });
+  const review = buildWorkflowRunDraft({ workflowTemplateId: "dotnet-code-review" });
+
+  assert.equal(bugfix.workflowType, "dotnet-bugfix");
+  assert.equal(bugfix.payload.context.agent, "dotnet-debugger");
+  assert.deepEqual(bugfix.payload.context.skills, [
+    "wf-dotnet-bugfix",
+    "dotnet-development",
+    "dotnet-testing",
+  ]);
+  assert.equal(review.workflowType, "dotnet-code-review");
+  assert.equal(review.payload.context.agent, "dotnet-reviewer");
+  assert.deepEqual(review.payload.context.skills, ["wf-dotnet-review", "dotnet-dependency-safety"]);
+});

@@ -282,7 +282,7 @@ export type ProjectGroupInput = {
   projectIds?: string[];
 };
 
-export type TemplateProjectType = "general" | "go" | "unity";
+export type TemplateProjectType = "general" | "go" | "unity" | "dotnet";
 
 export type TemplateInitializationInput = {
   targetPath: string;

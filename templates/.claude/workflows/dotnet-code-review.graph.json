@@ -1,0 +1,15 @@
+{
+  "id": "dotnet-code-review",
+  "name": ".NET Code Review",
+  "nodes": [
+    {
+      "id": "dotnet-reviewer",
+      "type": "agent",
+      "category": "review",
+      "label": "Review .NET change",
+      "agent": "dotnet-reviewer",
+      "detail": "Assess API, runtime, dependency, and verification risks without editing."
+    }
+  ],
+  "edges": []
+}

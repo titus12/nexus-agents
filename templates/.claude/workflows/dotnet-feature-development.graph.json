@@ -1,0 +1,15 @@
+{
+  "id": "dotnet-feature-development",
+  "name": ".NET Feature Development",
+  "nodes": [
+    {
+      "id": "dotnet-developer",
+      "type": "agent",
+      "category": "execution",
+      "label": "Implement .NET change",
+      "agent": "dotnet-developer",
+      "detail": "Inspect project conventions, implement the smallest compatible change, and record validation."
+    }
+  ],
+  "edges": []
+}

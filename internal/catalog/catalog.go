@@ -667,6 +667,12 @@ func workflowSkillTemplateID(workflowID string) (string, bool) {
 		return "wf-unity-ui-feature", true
 	case "ui-quick":
 		return "wf-unity-ui-quick", true
+	case "dotnet-feature-development":
+		return "wf-dotnet-feature", true
+	case "dotnet-bugfix":
+		return "wf-dotnet-bugfix", true
+	case "dotnet-code-review":
+		return "wf-dotnet-review", true
 	default:
 		return "", false
 	}
@@ -1749,6 +1755,39 @@ func btdAgentTemplates() []TemplateItem {
 			updatedAt: "2026-06-23 15:42",
 		},
 		{
+			id:        "dotnet-developer",
+			summary:   ".NET class-library and hosted-service implementation role for focused compatible changes with build and test evidence.",
+			model:     "gpt-5.4",
+			effort:    "high",
+			skills:    []string{"dotnet-development", "dotnet-testing", "dotnet-dependency-safety"},
+			tools:     []string{"shell", "apply_patch", "rg", "git"},
+			mcp:       []string{"codegraph"},
+			content:   "Inspect existing SDK and project conventions, implement the smallest compatible change, and report actual build and test evidence.",
+			updatedAt: "2026-07-28 12:00",
+		},
+		{
+			id:        "dotnet-debugger",
+			summary:   ".NET debugger for build, test, runtime, configuration, concurrency, and cancellation failures.",
+			model:     "gpt-5.4",
+			effort:    "high",
+			skills:    []string{"dotnet-development", "dotnet-testing"},
+			tools:     []string{"shell", "apply_patch", "rg", "git"},
+			mcp:       []string{"codegraph"},
+			content:   "Reproduce first, collect root-cause evidence, make the smallest compatible correction, and verify the regression path.",
+			updatedAt: "2026-07-28 12:00",
+		},
+		{
+			id:        "dotnet-reviewer",
+			summary:   ".NET reviewer for public API, runtime safety, dependency impact, and verification risk.",
+			model:     "gpt-5.4",
+			effort:    "high",
+			skills:    []string{"dotnet-testing", "dotnet-dependency-safety", "review-feedback"},
+			tools:     []string{"rg", "git"},
+			mcp:       []string{"codegraph"},
+			content:   "Review read-only by default; check API compatibility, runtime safety, dependency impact, and validation evidence.",
+			updatedAt: "2026-07-28 12:00",
+		},
+		{
 			id:        "unity-debugger",
 			summary:   "Unity failure reproduction and root-cause analysis role for Console, tests, scenes, objects, and asset evidence.",
 			model:     "gpt-5.4",
@@ -1863,7 +1902,7 @@ func btdAgentTemplates() []TemplateItem {
 			ModelTier:       spec.model,
 			RulesCount:      5,
 			SkillsCount:     len(spec.skills),
-			RelatedRules:    []string{"00-routing", "01-communication", "02-safety", "03-project-model", "04-task-decomposition"},
+			RelatedRules:    agentRelatedRules(spec.id),
 			RelatedSkills:   append([]string(nil), spec.skills...),
 			Tools:           append([]string(nil), spec.tools...),
 			MCP:             append([]string(nil), spec.mcp...),
@@ -1874,6 +1913,18 @@ func btdAgentTemplates() []TemplateItem {
 		})
 	}
 	return items
+}
+
+func agentRelatedRules(id string) []string {
+	if strings.HasPrefix(id, "dotnet-") {
+		return []string{
+			"dotnet-00-routing",
+			"dotnet-01-project-model",
+			"dotnet-02-runtime-safety",
+			"dotnet-03-library-compatibility",
+		}
+	}
+	return []string{"00-routing", "01-communication", "02-safety", "03-project-model", "04-task-decomposition"}
 }
 
 func agentTemplateSourcePaths(id string) []string {
@@ -1987,6 +2038,30 @@ func btdRuleTemplates() []TemplateItem {
 			summary:   "Unity UI safety rule for UIArchitect, UGUI, TMP, input locks, adaptation, and interaction risks.",
 			content:   "Reuse existing UI patterns and verify open, close, repeat open, input-lock release, Safe Area, anchors, overflow, and list bounds.",
 			updatedAt: "2026-06-23 19:44",
+		},
+		{
+			id:        "dotnet-00-routing",
+			summary:   ".NET workflow routing rule for class-library and hosted-service feature, bugfix, and review work.",
+			content:   ".NET work enters through $wf-dotnet-feature, $wf-dotnet-bugfix, and $wf-dotnet-review.",
+			updatedAt: "2026-07-28 12:00",
+		},
+		{
+			id:        "dotnet-01-project-model",
+			summary:   ".NET project model rule for SDK, solution/project files, build properties, package management, analyzers, tests, and CI.",
+			content:   "Inspect global.json, solution/project files, Directory.Build.*, Directory.Packages.*, analyzers, tests, and CI before changing conventions.",
+			updatedAt: "2026-07-28 12:00",
+		},
+		{
+			id:        "dotnet-02-runtime-safety",
+			summary:   ".NET runtime safety rule for cancellation, host lifecycle, disposal, timeout/retry, logging, and configuration.",
+			content:   "Preserve cancellation, hosted-service lifecycle, resource disposal, retry/timeout behavior, structured logs, and secret-safe configuration.",
+			updatedAt: "2026-07-28 12:00",
+		},
+		{
+			id:        "dotnet-03-library-compatibility",
+			summary:   ".NET class-library compatibility rule for public APIs, nullability, exceptions, packages, and versioning.",
+			content:   "Identify public API, nullable, exception, package, and versioning impact before making a compatibility-affecting change.",
+			updatedAt: "2026-07-28 12:00",
 		},
 	}
 
@@ -2133,6 +2208,48 @@ func btdSkillTemplates() []TemplateItem {
 			content:          "Invoke with $wf-go-review to load templates/.claude/workflows/go-code-review.md and follow the Go review workflow.",
 			applicableAgents: []string{"sisyphus", "reviewer-logic", "reviewer-perf", "reviewer-security"},
 			updatedAt:        "2026-06-22 16:30",
+		},
+		{
+			id:               "dotnet-development",
+			summary:          ".NET development guidance for class libraries and hosted/background services.",
+			content:          "Inspect repository SDK and project conventions, preserve runtime safety, and avoid changing SDK or project files without approval.",
+			applicableAgents: []string{"dotnet-developer", "dotnet-debugger"},
+			updatedAt:        "2026-07-28 12:00",
+		},
+		{
+			id:               "dotnet-testing",
+			summary:          ".NET restore, build, and test verification guidance.",
+			content:          "Discover the narrowest valid solution/project command and report only commands that actually ran.",
+			applicableAgents: []string{"dotnet-developer", "dotnet-debugger", "dotnet-reviewer"},
+			updatedAt:        "2026-07-28 12:00",
+		},
+		{
+			id:               "dotnet-dependency-safety",
+			summary:          ".NET NuGet dependency and centralized package-management safety guidance.",
+			content:          "Inspect package management, lock-file policy, compatibility, vulnerability, and licensing requirements before dependency changes.",
+			applicableAgents: []string{"dotnet-developer", "dotnet-reviewer"},
+			updatedAt:        "2026-07-28 12:00",
+		},
+		{
+			id:               "wf-dotnet-feature",
+			summary:          "Codex skill entry for the .NET feature workflow.",
+			content:          "Invoke with $wf-dotnet-feature to load templates/.claude/workflows/dotnet-feature-development.md and follow the .NET feature workflow.",
+			applicableAgents: []string{"dotnet-developer"},
+			updatedAt:        "2026-07-28 12:00",
+		},
+		{
+			id:               "wf-dotnet-bugfix",
+			summary:          "Codex skill entry for the .NET bugfix workflow.",
+			content:          "Invoke with $wf-dotnet-bugfix to load templates/.claude/workflows/dotnet-bugfix.md and follow the .NET root-cause bugfix workflow.",
+			applicableAgents: []string{"dotnet-debugger"},
+			updatedAt:        "2026-07-28 12:00",
+		},
+		{
+			id:               "wf-dotnet-review",
+			summary:          "Codex skill entry for the .NET code-review workflow.",
+			content:          "Invoke with $wf-dotnet-review to load templates/.claude/workflows/dotnet-code-review.md and follow the .NET review workflow.",
+			applicableAgents: []string{"dotnet-reviewer"},
+			updatedAt:        "2026-07-28 12:00",
 		},
 		{
 			id:               "unity-mcp-skill",
@@ -2305,7 +2422,7 @@ func btdSkillTemplatePath(id string) string {
 	switch id {
 	case "coding-rules", "testing":
 		return "templates/.claude/skills/go-" + id + "/SKILL.md"
-	case "nexus-knowledge-retrieval", "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit", "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-ui-quick":
+	case "nexus-knowledge-retrieval", "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit", "wf-go-feat", "wf-go-bugfix", "wf-go-review", "wf-design", "wf-research", "wf-commit", "wf-lark", "wf-subagents", "wf-unity-bugfix", "wf-unity-logic-mod", "wf-unity-ui-feature", "wf-unity-ui-quick", "wf-dotnet-feature", "wf-dotnet-bugfix", "wf-dotnet-review":
 		return "templates/.agents/skills/" + id + "/SKILL.md"
 	default:
 		return "templates/.claude/skills/" + id + "/SKILL.md"
@@ -2339,8 +2456,15 @@ func workflowTemplateSourcePaths(id string) []string {
 	routing := "templates/.claude/rules/go-00-routing.md"
 	if isUnityWorkflowID(id) {
 		routing = "templates/.claude/rules/unity-00-routing.md"
+	} else if isDotNetWorkflowID(id) {
+		routing = "templates/.claude/rules/dotnet-00-routing.md"
 	}
 	paths := []string{btdWorkflowTemplatePath(id), btdWorkflowGraphTemplatePath(id), routing}
+	if isDotNetWorkflowID(id) {
+		if skillID, ok := workflowSkillTemplateID(id); ok {
+			paths = append(paths, btdSkillTemplatePath(skillID))
+		}
+	}
 	if id == "feature-development" || id == "bugfix" || id == "code-review" {
 		paths = append(paths, "templates/.claude/rules/go-04-task-decomposition.md")
 	}
@@ -2350,6 +2474,15 @@ func workflowTemplateSourcePaths(id string) []string {
 func isUnityWorkflowID(id string) bool {
 	switch id {
 	case "bug-investigation", "logic-modification", "ui-feature-development", "ui-quick":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDotNetWorkflowID(id string) bool {
+	switch id {
+	case "dotnet-feature-development", "dotnet-bugfix", "dotnet-code-review":
 		return true
 	default:
 		return false
@@ -2368,6 +2501,12 @@ func btdWorkflowTemplatePath(id string) string {
 		return "templates/.claude/workflows/wf-unity-ui-feature.md"
 	case "ui-quick":
 		return "templates/.claude/workflows/unity-ui-quick.md"
+	case "dotnet-feature-development":
+		return "templates/.claude/workflows/dotnet-feature-development.md"
+	case "dotnet-bugfix":
+		return "templates/.claude/workflows/dotnet-bugfix.md"
+	case "dotnet-code-review":
+		return "templates/.claude/workflows/dotnet-code-review.md"
 	default:
 		return "templates/.claude/workflows/" + id + ".md"
 	}
@@ -2478,6 +2617,39 @@ func btdWorkflowSpecs() []btdWorkflowSpec {
 			tags:      []string{"routing", "subagent", "parallel", "delegation"},
 			status:    "ready",
 			updatedAt: "2026-06-22 15:11",
+		},
+		{
+			id:        "dotnet-feature-development",
+			name:      "$wf-dotnet-feature .NET Feature Development",
+			trigger:   "$wf-dotnet-feature",
+			owner:     "dotnet-developer",
+			summary:   "Develop a focused .NET class-library or hosted-service capability while preserving project conventions and runtime safety.",
+			content:   "Inspect the SDK/project model and call paths, implement the smallest compatible change, verify build/tests, and submit actual Task Run evidence.",
+			tags:      []string{"dotnet", "feature", "library", "hosted-service"},
+			status:    "ready",
+			updatedAt: "2026-07-28 12:00",
+		},
+		{
+			id:        "dotnet-bugfix",
+			name:      "$wf-dotnet-bugfix .NET Bugfix",
+			trigger:   "$wf-dotnet-bugfix",
+			owner:     "dotnet-debugger",
+			summary:   "Reproduce, diagnose, minimally fix, and regress a .NET build, test, runtime, configuration, concurrency, or cancellation defect.",
+			content:   "Reproduce first, collect root-cause evidence, make the smallest compatible correction, verify the regression path, and submit actual Task Run evidence.",
+			tags:      []string{"dotnet", "bugfix", "root-cause", "runtime-safety"},
+			status:    "ready",
+			updatedAt: "2026-07-28 12:00",
+		},
+		{
+			id:        "dotnet-code-review",
+			name:      "$wf-dotnet-review .NET Code Review",
+			trigger:   "$wf-dotnet-review",
+			owner:     "dotnet-reviewer",
+			summary:   "Review a .NET class-library or hosted-service change for API, runtime, dependency, and verification risk.",
+			content:   "Review read-only by default; report API compatibility, runtime safety, dependency, and validation findings with actual evidence.",
+			tags:      []string{"dotnet", "review", "compatibility", "runtime-safety"},
+			status:    "ready",
+			updatedAt: "2026-07-28 12:00",
 		},
 		{
 			id:        "bug-investigation",

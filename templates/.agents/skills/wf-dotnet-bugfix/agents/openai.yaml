@@ -1,0 +1,9 @@
+interface:
+  display_name: "WF .NET Bugfix"
+  short_description: "Run the .NET root-cause bugfix workflow."
+  default_prompt: "$wf-dotnet-bugfix Diagnose and fix a .NET defect."
+workflow_run_header_protocol:
+  required_headers:
+    - X-Nexus-Workflow-Run-Id
+    - X-Nexus-Workflow-Role
+  notes: "Keep one Nexus workflow run ID for the workflow and update only the active role header."

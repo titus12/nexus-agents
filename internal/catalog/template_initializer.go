@@ -13,6 +13,7 @@ const (
 	TemplateProjectTypeGeneral = "general"
 	TemplateProjectTypeGo      = "go"
 	TemplateProjectTypeUnity   = "unity"
+	TemplateProjectTypeDotNet  = "dotnet"
 )
 
 type TemplateInitializationInput struct {
@@ -448,7 +449,7 @@ func validateTemplateInitializationInput(input TemplateInitializationInput) (str
 	}
 	projectType := strings.ToLower(strings.TrimSpace(input.ProjectType))
 	switch projectType {
-	case TemplateProjectTypeGeneral, TemplateProjectTypeGo, TemplateProjectTypeUnity:
+	case TemplateProjectTypeGeneral, TemplateProjectTypeGo, TemplateProjectTypeUnity, TemplateProjectTypeDotNet:
 		return absolutePath, projectType, nil
 	default:
 		return "", "", fmt.Errorf("unsupported project type %q", input.ProjectType)
@@ -514,6 +515,15 @@ func includeTemplateInitializationPath(relativePath string, projectType string) 
 			strings.HasPrefix(relativePath, ".claude/commands/wf-unity-") ||
 			strings.HasPrefix(relativePath, ".claude/workflows/wf-unity-") ||
 			strings.HasPrefix(relativePath, ".claude/workflows/unity-ui-quick.")
+	case TemplateProjectTypeDotNet:
+		return strings.HasPrefix(relativePath, ".claude/agents/dotnet-") ||
+			strings.HasPrefix(relativePath, ".codex/agents/dotnet-") ||
+			strings.HasPrefix(relativePath, ".claude/rules/dotnet-") ||
+			strings.HasPrefix(relativePath, ".claude/skills/dotnet-") ||
+			strings.HasPrefix(relativePath, ".claude/skills/review-feedback/") ||
+			strings.HasPrefix(relativePath, ".agents/skills/wf-dotnet-") ||
+			strings.HasPrefix(relativePath, ".claude/commands/wf-dotnet-") ||
+			strings.HasPrefix(relativePath, ".claude/workflows/dotnet-")
 	default:
 		return false
 	}

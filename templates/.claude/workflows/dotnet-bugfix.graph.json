@@ -1,0 +1,15 @@
+{
+  "id": "dotnet-bugfix",
+  "name": ".NET Bugfix",
+  "nodes": [
+    {
+      "id": "dotnet-debugger",
+      "type": "agent",
+      "category": "execution",
+      "label": "Diagnose and fix .NET defect",
+      "agent": "dotnet-debugger",
+      "detail": "Reproduce first, identify root cause, make the smallest compatible fix, and record regression evidence."
+    }
+  ],
+  "edges": []
+}

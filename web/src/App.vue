@@ -4043,6 +4043,7 @@ requires_openai_auth = true</pre>
               <option value="general">通用</option>
               <option value="go">Go</option>
               <option value="unity">Unity</option>
+              <option value="dotnet">.NET</option>
             </select>
           </label>
           <div v-if="templateInitializerError" class="notice danger">{{ templateInitializerError }}</div>

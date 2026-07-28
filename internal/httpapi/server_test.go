@@ -611,7 +611,7 @@ func TestTemplateInitializationPreviewAndApplyEndpoints(t *testing.T) {
 	server := NewServerWithStore(catalog.NewStore())
 
 	var preview catalog.TemplateInitializationPreview
-	response := requestJSON(t, server, http.MethodPost, "/api/templates/initialize/preview", `{"targetPath":"`+strings.ReplaceAll(target, `\`, `\\`)+`","projectType":"go"}`)
+	response := requestJSON(t, server, http.MethodPost, "/api/templates/initialize/preview", `{"targetPath":"`+strings.ReplaceAll(target, `\`, `\\`)+`","projectType":"dotnet"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected initialization preview, got %d: %s", response.Code, response.Body.String())
 	}
@@ -620,6 +620,9 @@ func TestTemplateInitializationPreviewAndApplyEndpoints(t *testing.T) {
 	}
 	if preview.PlanID == "" || preview.Summary.Create == 0 {
 		t.Fatalf("unexpected initialization preview: %#v", preview)
+	}
+	if preview.ProjectType != catalog.TemplateProjectTypeDotNet {
+		t.Fatalf("expected .NET preview, got %#v", preview)
 	}
 
 	var result catalog.TemplateInitializationResult
@@ -660,10 +663,11 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		"workflow-evaluator", "learning-curator", "model-arbiter",
 		"unity-debugger", "unity-bugfix-developer", "unity-bugfix-reviewer", "unity-logic-developer", "unity-logic-reviewer", "unity-ui-developer",
 		"unity-asset-safety-evaluator", "unity-regression-evaluator", "unity-workflow-evaluator",
+		"dotnet-developer", "dotnet-debugger", "dotnet-reviewer",
 	})
 	for _, agent := range agents {
 		displayName := "go-" + agent.ID
-		if strings.HasPrefix(agent.ID, "unity-") {
+		if strings.HasPrefix(agent.ID, "unity-") || strings.HasPrefix(agent.ID, "dotnet-") {
 			displayName = agent.ID
 		}
 		if agent.Name != displayName || agent.Slug != displayName {
@@ -692,6 +696,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		"00-routing", "01-communication", "02-safety", "03-project-model", "04-task-decomposition", "knowledge-retrieval", "project-agents",
 		"uiarchitect-asset-safety", "uiarchitect-editor-runtime-boundary", "uiarchitect-generated-safety", "uiarchitect-portability",
 		"unity-00-routing", "unity-01-project-model", "unity-id-bugfix-safety", "unity-id-logic-mod-safety", "unity-id-ui-safety",
+		"dotnet-00-routing", "dotnet-01-project-model", "dotnet-02-runtime-safety", "dotnet-03-library-compatibility",
 	})
 	for _, rule := range rules {
 		displayName := strings.TrimSuffix(filepath.Base(rule.SourcePaths[0]), ".md")
@@ -720,6 +725,7 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		"review-feedback", "testing",
 		"nexus-knowledge-retrieval", "kb-system-curator", "kb-maintenance", "nexus-evaluation-review", "nexus-taskrun-submit",
 		"unity-mcp-skill", "unity-testing", "unity-asset-safety", "unity-debugger", "unity-bugfix-developer", "unity-bugfix-review", "unity-logic-developer", "unity-logic-review", "unity-ui-developer", "unity-ui-resolver",
+		"dotnet-development", "dotnet-testing", "dotnet-dependency-safety",
 	})
 	for _, skill := range skills {
 		if strings.HasPrefix(skill.SourcePaths[0], "templates/.claude/skills/go-") {
@@ -746,12 +752,18 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		"feature-development", "bugfix", "code-review", "design",
 		"research", "commit-gate", "lark-integration", "subagent-driven-development",
 		"bug-investigation", "logic-modification", "ui-feature-development", "ui-quick",
+		"dotnet-feature-development", "dotnet-bugfix", "dotnet-code-review",
 	})
 	unityWorkflowIDs := map[string]bool{
 		"bug-investigation":      true,
 		"logic-modification":     true,
 		"ui-feature-development": true,
 		"ui-quick":               true,
+	}
+	dotNetWorkflowIDs := map[string]bool{
+		"dotnet-feature-development": true,
+		"dotnet-bugfix":              true,
+		"dotnet-code-review":         true,
 	}
 	for _, workflow := range workflows {
 		if strings.HasPrefix(workflow.Entry, "templates/.claude/workflows/go-") {
@@ -766,6 +778,8 @@ func TestBtdGameServerTemplateInventory(t *testing.T) {
 		routingPath := "templates/.claude/rules/go-00-routing.md"
 		if unityWorkflowIDs[workflow.ID] {
 			routingPath = "templates/.claude/rules/unity-00-routing.md"
+		} else if dotNetWorkflowIDs[workflow.ID] {
+			routingPath = "templates/.claude/rules/dotnet-00-routing.md"
 		}
 		if workflow.Source != "Expanded workflow markdown" || workflow.Content == "" || !containsString(workflow.SourcePaths, routingPath) {
 			t.Fatalf("expected btd workflow content and routing lineage, got %#v", workflow)
