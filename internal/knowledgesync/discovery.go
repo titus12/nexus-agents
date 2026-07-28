@@ -174,10 +174,26 @@ func DiscoverPolicy(ctx context.Context, projectRoot string, runner GitRunner, c
 
 func deterministicPolicy(inventory RepositoryInventory) ScanPolicyProposal {
 	directories := map[string]int{}
+	rootFiles := map[string]bool{}
+	specialFiles := map[string]bool{}
+	for _, manifest := range inventory.Manifests {
+		specialFiles[manifest] = true
+	}
+	for _, readme := range inventory.Readmes {
+		specialFiles[readme] = true
+	}
 	for _, file := range inventory.Files {
-		top := strings.Split(file.Path, "/")[0]
+		relative := normalizeRelativePath(file.Path)
+		if relative == "" {
+			continue
+		}
+		top := strings.Split(relative, "/")[0]
 		if !IsHardExcluded(top) && top != "KnowledgeBase" {
-			directories[top]++
+			if strings.Contains(relative, "/") {
+				directories[top]++
+			} else {
+				rootFiles[relative] = true
+			}
 		}
 	}
 	var rules []ScanRule
@@ -190,6 +206,19 @@ func deterministicPolicy(inventory RepositoryInventory) ScanPolicyProposal {
 			reason = "Repository-owned documentation."
 		}
 		rules = append(rules, ScanRule{Pattern: directory + "/**", Action: "include", Category: category, Priority: "normal", Reason: reason, Confidence: 0.75})
+	}
+	for _, file := range sortedMapKeys(rootFiles) {
+		if specialFiles[file] {
+			continue
+		}
+		category := "code"
+		reason := "Git-tracked repository content discovered by Nexus."
+		lower := strings.ToLower(file)
+		if lower == "readme.md" || strings.Contains(lower, "doc") || strings.HasPrefix(lower, "change") {
+			category = "docs"
+			reason = "Repository-owned documentation."
+		}
+		rules = append(rules, ScanRule{Pattern: file, Action: "include", Category: category, Priority: "normal", Reason: reason, Confidence: 0.75})
 	}
 	for _, manifest := range inventory.Manifests {
 		rules = append(rules, ScanRule{Pattern: manifest, Action: "include", Category: "manifest", Priority: "high", Reason: "Project manifest or contract.", Confidence: 0.95})

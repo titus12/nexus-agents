@@ -53,6 +53,47 @@ func TestDiscoveryFallsBackWithoutAI(t *testing.T) {
 	}
 }
 
+func TestDeterministicPolicyIncludesRootFilesAndDirectoryDescendants(t *testing.T) {
+	inventory := RepositoryInventory{
+		Files: []InventoryFile{
+			{Path: "application.go", Category: "code"},
+			{Path: "application_test.go", Category: "test"},
+			{Path: "internal/http/router.go", Category: "code"},
+		},
+		Manifests: []string{"go.mod"},
+		Readmes:   []string{"README.md"},
+	}
+	proposal := deterministicPolicy(inventory)
+	profile := DefaultProfile()
+	profile.Scan.Rules = proposal.Rules
+
+	candidates := []string{
+		"application.go",
+		"application_test.go",
+		"internal/http/router.go",
+		"go.mod",
+		"README.md",
+	}
+	included := IncludedPaths(profile, candidates)
+	if len(included) != len(candidates) {
+		t.Fatalf("included paths = %#v, want %#v", included, candidates)
+	}
+
+	rules := map[string]ScanRule{}
+	for _, rule := range proposal.Rules {
+		rules[rule.Pattern] = rule
+	}
+	if _, ok := rules["application.go"]; !ok {
+		t.Fatalf("expected exact root-file rule, got %#v", proposal.Rules)
+	}
+	if _, ok := rules["application.go/**"]; ok {
+		t.Fatalf("root files must not use recursive directory rule: %#v", proposal.Rules)
+	}
+	if _, ok := rules["internal/**"]; !ok {
+		t.Fatalf("expected recursive directory rule, got %#v", proposal.Rules)
+	}
+}
+
 func initTestRepository(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
