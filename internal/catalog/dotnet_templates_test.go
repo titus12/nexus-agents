@@ -10,12 +10,13 @@ import (
 func TestDotNetWorkflowTemplatesExistAndUseTaskRunProtocol(t *testing.T) {
 	root := filepath.Join("..", "..")
 	workflows := []struct {
-		id    string
-		owner string
+		id      string
+		owner   string
+		skillID string
 	}{
-		{id: "dotnet-feature-development", owner: "dotnet-developer"},
-		{id: "dotnet-bugfix", owner: "dotnet-debugger"},
-		{id: "dotnet-code-review", owner: "dotnet-reviewer"},
+		{id: "dotnet-feature-development", owner: "dotnet-developer", skillID: "wf-dotnet-feature"},
+		{id: "dotnet-bugfix", owner: "dotnet-debugger", skillID: "wf-dotnet-bugfix"},
+		{id: "dotnet-code-review", owner: "dotnet-reviewer", skillID: "wf-dotnet-review"},
 	}
 
 	for _, workflow := range workflows {
@@ -35,9 +36,27 @@ func TestDotNetWorkflowTemplatesExistAndUseTaskRunProtocol(t *testing.T) {
 			"dotnet-00-routing.md",
 			workflow.id,
 			"nexus-taskrun-submit",
+			"## Mandatory Task Run submission gate",
+			"does not submit",
+			"Task Run ID",
 		} {
 			if !strings.Contains(string(markdown), needle) {
 				t.Fatalf("expected %s to contain %q", markdownPath, needle)
+			}
+		}
+
+		skillPath := filepath.Join(root, "templates", ".agents", "skills", workflow.skillID, "SKILL.md")
+		skill, err := os.ReadFile(skillPath)
+		if err != nil {
+			t.Fatalf("read .NET workflow skill %s: %v", skillPath, err)
+		}
+		for _, needle := range []string{
+			"## Mandatory Task Run submission",
+			"does not submit",
+			"Task Run ID",
+		} {
+			if !strings.Contains(string(skill), needle) {
+				t.Fatalf("expected %s to contain %q", skillPath, needle)
 			}
 		}
 

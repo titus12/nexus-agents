@@ -28,11 +28,16 @@ node .agents/skills/nexus-taskrun-submit/taskrun.mjs start --projectId <projectI
 
 ## Task Run completion
 
-Use `$nexus-taskrun-submit` once:
+## Mandatory Task Run submission gate
+
+The start command creates a local payload only; it does not submit anything to
+Nexus. Before the final response, update that payload with actual findings,
+validation gaps, risks, and final status. Use `$nexus-taskrun-submit` once:
 
 ```text
 node .agents/skills/nexus-taskrun-submit/taskrun.mjs submit --payloadFile .nexus/task-run-dotnet-code-review.json --contextFile .nexus/workflow-context-dotnet-code-review.json
 ```
 
-Record actual review evidence and final status. Do not claim planned validation
-passed.
+Do not report success or completion until this command returns a Nexus Task Run ID.
+If it fails, retain the payload and report the exact submission error as a
+blocked or partial result. Do not claim planned validation passed.

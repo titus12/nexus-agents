@@ -36,11 +36,17 @@ Stop and report the exact error if the payload does not contain `sessionId` and
 
 ## Task Run completion
 
+## Mandatory Task Run submission gate
+
+The start command creates a local payload only; it does not submit anything to
+Nexus. Before the final response, update that payload with actual changed
+files, validation commands/results, unverified paths, risks, and final status.
 Complete the same payload once with `$nexus-taskrun-submit`:
 
 ```text
 node .agents/skills/nexus-taskrun-submit/taskrun.mjs submit --payloadFile .nexus/task-run-dotnet-feature-development.json --contextFile .nexus/workflow-context-dotnet-feature-development.json
 ```
 
-Report changed files, actual validation, unverified paths, risks, and final
-status. Do not claim planned validation passed.
+Do not report success or completion until this command returns a Nexus Task Run ID.
+If it fails, retain the payload and report the exact submission error as a
+blocked or partial result. Do not claim planned validation passed.
