@@ -7,6 +7,20 @@ directly or through an explicitly selected `wf-*` workflow. It defines the
 minimum test-design decision before production implementation. Language and
 framework skills may add commands and examples, but must not weaken this rule.
 
+## Minimal Change Principle
+
+For every code-changing task:
+
+1. Change only the code, tests, and configuration necessary for the confirmed
+   objective.
+2. Do not bundle unrelated refactors, formatting churn, public-API changes,
+   dependency changes, or cross-module cleanup.
+3. If the necessary scope expands, state the added impact, reason, validation
+   plan, and required approval before proceeding.
+4. Reuse established project patterns and dependencies. Do not introduce a
+   public API, configuration item, or third-party dependency unless the task
+   explicitly requires it.
+
 ## Change classification
 
 Classify the change before editing production code:

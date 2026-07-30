@@ -311,6 +311,7 @@ func TestGBrainHelperProcess(t *testing.T) {
 			toolName, _ := params["name"].(string)
 			arguments, _ := params["arguments"].(map[string]any)
 			appendHelperRecord("tool " + toolName + " source=" + os.Getenv("GBRAIN_SOURCE") + " slug=" + fmt.Sprint(arguments["slug"]))
+			waitForHelperSearchRelease(toolName)
 			payload := helperToolResult(toolName, arguments)
 			encoded, _ := json.Marshal(payload)
 			result = map[string]any{
@@ -327,6 +328,27 @@ func TestGBrainHelperProcess(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func waitForHelperSearchRelease(toolName string) {
+	if toolName != "search" {
+		return
+	}
+	startedPath := os.Getenv("NEXUS_GBRAIN_HELPER_SEARCH_STARTED")
+	releasePath := os.Getenv("NEXUS_GBRAIN_HELPER_SEARCH_RELEASE")
+	if startedPath == "" || releasePath == "" {
+		return
+	}
+	if err := os.WriteFile(startedPath, []byte("started\n"), 0o644); err != nil {
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(releasePath); err == nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func helperToolResult(name string, arguments map[string]any) any {

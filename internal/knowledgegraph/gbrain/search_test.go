@@ -2,10 +2,12 @@ package gbrain
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"nexus-agents/internal/knowledgegraph"
 )
@@ -40,6 +42,69 @@ func TestProviderSearchUsesScopedGBrainSource(t *testing.T) {
 	if !strings.Contains(string(data), "tool search source=project-sample") {
 		t.Fatalf("search did not use scoped source:\n%s", data)
 	}
+}
+
+func TestProviderSearchReturnsWhenDeadlineExpiresWaitingForAnotherSearch(t *testing.T) {
+	options := helperProcessOptions(t, false)
+	startedPath := filepath.Join(options.HomeDir, "search-started")
+	releasePath := filepath.Join(options.HomeDir, "search-release")
+	options.Environment["NEXUS_GBRAIN_HELPER_SEARCH_STARTED"] = startedPath
+	options.Environment["NEXUS_GBRAIN_HELPER_SEARCH_RELEASE"] = releasePath
+	provider := NewProvider(options)
+	if err := provider.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = os.WriteFile(releasePath, []byte("release\n"), 0o644)
+		_ = provider.Stop(context.Background())
+	}()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := provider.Search(context.Background(), knowledgegraph.GraphSearchQuery{
+			Query: "first query", SourceIDs: []string{"project:sample"},
+		})
+		firstDone <- err
+	}()
+	waitForFile(t, startedPath)
+
+	deadlineContext, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := provider.Search(deadlineContext, knowledgegraph.GraphSearchQuery{
+			Query: "second query", SourceIDs: []string{"project:sample"},
+		})
+		secondDone <- err
+	}()
+
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("second search error = %v, want context deadline exceeded", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("second search did not return after its deadline")
+	}
+
+	if err := os.WriteFile(releasePath, []byte("release\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }
 
 func TestProviderSearchUsesRRFForMultipleSources(t *testing.T) {

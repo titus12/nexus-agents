@@ -18,8 +18,10 @@ type sourceListResult struct {
 }
 
 func (p *Provider) SyncSource(ctx context.Context, source knowledgegraph.GraphSource) (knowledgegraph.GraphSyncResult, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if err := p.acquireOperation(ctx); err != nil {
+		return knowledgegraph.GraphSyncResult{}, err
+	}
+	defer p.releaseOperation()
 
 	if strings.TrimSpace(source.ID) == "" {
 		return knowledgegraph.GraphSyncResult{}, fmt.Errorf("GBrain source id is empty")
@@ -91,8 +93,10 @@ func (p *Provider) SyncSource(ctx context.Context, source knowledgegraph.GraphSo
 }
 
 func (p *Provider) RemoveSource(ctx context.Context, sourceID string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if err := p.acquireOperation(ctx); err != nil {
+		return err
+	}
+	defer p.releaseOperation()
 	providerSourceID := knowledgegraph.StableProviderSourceID(sourceID)
 	client, err := p.process.Client()
 	if err != nil {

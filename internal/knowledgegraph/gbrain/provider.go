@@ -5,18 +5,20 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 
 	"nexus-agents/internal/knowledgegraph"
 )
 
 type Provider struct {
-	process *ProcessManager
-	mu      sync.Mutex
+	process    *ProcessManager
+	searchGate chan struct{}
 }
 
 func NewProvider(options ProcessOptions) *Provider {
-	return &Provider{process: NewProcessManager(options)}
+	return &Provider{
+		process:    NewProcessManager(options),
+		searchGate: make(chan struct{}, 1),
+	}
 }
 
 func (p *Provider) Start(ctx context.Context) error {
@@ -46,9 +48,6 @@ type searchResult struct {
 }
 
 func (p *Provider) Search(ctx context.Context, query knowledgegraph.GraphSearchQuery) (knowledgegraph.GraphSearchResult, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	query.Query = strings.TrimSpace(query.Query)
 	if query.Query == "" {
 		return knowledgegraph.GraphSearchResult{}, fmt.Errorf("GBrain search query is empty")
@@ -56,6 +55,11 @@ func (p *Provider) Search(ctx context.Context, query knowledgegraph.GraphSearchQ
 	if query.Limit <= 0 {
 		query.Limit = 20
 	}
+
+	if err := p.acquireOperation(ctx); err != nil {
+		return knowledgegraph.GraphSearchResult{}, err
+	}
+	defer p.releaseOperation()
 
 	sourceIDs := uniqueSourceIDs(query.SourceIDs)
 	if len(sourceIDs) == 0 {
@@ -129,6 +133,19 @@ func (p *Provider) Search(ctx context.Context, query knowledgegraph.GraphSearchQ
 		hits = hits[:query.Limit]
 	}
 	return knowledgegraph.GraphSearchResult{Query: query.Query, Hits: hits}, nil
+}
+
+func (p *Provider) acquireOperation(ctx context.Context) error {
+	select {
+	case p.searchGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *Provider) releaseOperation() {
+	<-p.searchGate
 }
 
 func uniqueSourceIDs(values []string) []string {
