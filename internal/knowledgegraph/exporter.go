@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"nexus-agents/internal/knowledgebase"
@@ -137,6 +138,7 @@ func ExportApprovedKnowledge(request ExportRequest) (SourceExport, error) {
 	for _, document := range documents {
 		canonicalPath := filepath.ToSlash(filepath.Clean(document.Path))
 		content := normalizeMarkdown(document.Raw)
+		content = projectGBrainAliases(content, document.Frontmatter)
 		if len([]byte(content)) > maxExportDocumentBytes {
 			return SourceExport{}, fmt.Errorf("approved knowledge document exceeds 1 MiB: %s", canonicalPath)
 		}
@@ -332,6 +334,76 @@ func normalizeMarkdown(value string) string {
 	value = strings.ReplaceAll(value, "\r", "\n")
 	value = strings.TrimRight(value, "\n") + "\n"
 	return value
+}
+
+// projectGBrainAliases bridges Nexus's nested OKF routing aliases to the
+// top-level aliases field consumed by GBrain's page-alias index. The source
+// KnowledgeBase remains unchanged; this only enriches the derived export.
+func projectGBrainAliases(content string, frontmatter knowledgebase.Frontmatter) string {
+	aliases := make([]string, 0,
+		len(frontmatter.Routing.Aliases.Values)+
+			len(frontmatter.Routing.Aliases.ZH)+
+			len(frontmatter.Routing.Aliases.EN)+
+			len(frontmatter.Routing.Aliases.Pairs)*2,
+	)
+	seen := map[string]bool{}
+	appendAlias := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		aliases = append(aliases, value)
+	}
+	for _, value := range frontmatter.Routing.Aliases.Values {
+		appendAlias(value)
+	}
+	for _, value := range frontmatter.Routing.Aliases.ZH {
+		appendAlias(value)
+	}
+	for _, value := range frontmatter.Routing.Aliases.EN {
+		appendAlias(value)
+	}
+	for _, pair := range frontmatter.Routing.Aliases.Pairs {
+		appendAlias(pair.ZH)
+		appendAlias(pair.EN)
+	}
+	if len(aliases) == 0 {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
+		return content
+	}
+	end := -1
+	for index := 1; index < len(lines); index++ {
+		if strings.TrimSpace(lines[index]) == "---" {
+			end = index
+			break
+		}
+	}
+	if end < 0 {
+		return content
+	}
+	for _, line := range lines[1:end] {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "aliases:") {
+			return content
+		}
+	}
+	quoted := make([]string, 0, len(aliases))
+	for _, alias := range aliases {
+		quoted = append(quoted, strconv.Quote(alias))
+	}
+	lines = append(lines[:end], append([]string{"aliases: [" + strings.Join(quoted, ", ") + "]"}, lines[end:]...)...)
+	return strings.Join(lines, "\n")
 }
 
 func containsLikelySecret(value string) bool {

@@ -36,7 +36,11 @@ func (s *Store) SyncProjectTemplates(projectID string) (ProjectTemplateSyncResul
 	if err != nil {
 		return ProjectTemplateSyncResult{}, true, err
 	}
-	counts, err := synchronizeTemplateTree(templateRoot, projectRoot)
+	counts, err := synchronizeTemplateTree(
+		templateRoot,
+		projectRoot,
+		normalizeStoredTemplateProjectType(project.ProjectType),
+	)
 	if err != nil {
 		return ProjectTemplateSyncResult{}, true, err
 	}
@@ -93,7 +97,12 @@ func nexusTemplatesRoot() (string, error) {
 	}
 }
 
-func synchronizeTemplateTree(templateRoot string, projectRoot string) (templateSyncCounts, error) {
+func synchronizeTemplateTree(templateRoot string, projectRoot string, projectTypes ...string) (templateSyncCounts, error) {
+	projectType := TemplateProjectTypeGeneral
+	if len(projectTypes) > 0 {
+		projectType = normalizeStoredTemplateProjectType(projectTypes[0])
+	}
+
 	var counts templateSyncCounts
 	err := filepath.WalkDir(templateRoot, func(templatePath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -111,6 +120,11 @@ func synchronizeTemplateTree(templateRoot string, projectRoot string) (templateS
 			return err
 		}
 		relativePath = filepath.Clean(relativePath)
+		if isProjectTypeSpecificTemplatePath(filepath.ToSlash(relativePath)) &&
+			!projectTypeSpecificTemplatePath(filepath.ToSlash(relativePath), projectType) {
+			counts.skipped++
+			return nil
+		}
 		if isProtectedProjectKnowledgePath(relativePath) {
 			counts.skipped++
 			return nil

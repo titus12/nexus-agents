@@ -15,6 +15,7 @@ type UserProjectRecord struct {
 	ProjectName   string `json:"projectName"`
 	Path          string `json:"path"`
 	RepoKey       string `json:"repoKey"`
+	ProjectType   string `json:"projectType,omitempty"`
 	ImportedAt    string `json:"importedAt"`
 	LastScannedAt string `json:"lastScannedAt"`
 }
@@ -202,6 +203,7 @@ func restoreProjectsFromUserIndex(library TemplateLibrary) ([]Project, map[strin
 			ID:            record.ProjectID,
 			Name:          record.ProjectName,
 			Path:          localPath,
+			ProjectType:   normalizeStoredTemplateProjectType(record.ProjectType),
 			Status:        "draft",
 			UpdatedAt:     latestProjectConfigStamp(localPath),
 			ConfigSummary: summarizeProjectCopies(copies),

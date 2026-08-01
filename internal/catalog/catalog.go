@@ -65,6 +65,7 @@ type Project struct {
 	ID                 string                `json:"id"`
 	Name               string                `json:"name"`
 	Path               string                `json:"path"`
+	ProjectType        string                `json:"projectType"`
 	Status             string                `json:"status"`
 	UpdatedAt          string                `json:"updatedAt"`
 	ConfigSummary      ConfigSummary         `json:"configSummary"`
@@ -76,9 +77,10 @@ type Project struct {
 }
 
 type ProjectInput struct {
-	Name     string   `json:"name"`
-	Path     string   `json:"path"`
-	GroupIDs []string `json:"groupIds,omitempty"`
+	Name        string   `json:"name"`
+	Path        string   `json:"path"`
+	ProjectType string   `json:"projectType,omitempty"`
+	GroupIDs    []string `json:"groupIds,omitempty"`
 }
 
 type ProjectGroup struct {
@@ -282,12 +284,22 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 		return Project{}, err
 	}
 	id := s.uniqueProjectIDLocked(slugify(name))
+	projectType := strings.ToLower(strings.TrimSpace(input.ProjectType))
 	for _, project := range s.data.Projects {
 		if project.RepoKey != "" && project.RepoKey == repoKey {
 			id = project.ID
 			name = project.Name
+			if projectType == "" {
+				projectType = project.ProjectType
+			}
 			break
 		}
+	}
+	if projectType == "" {
+		projectType = TemplateProjectTypeGeneral
+	}
+	if !isSupportedTemplateProjectType(projectType) {
+		return Project{}, fmt.Errorf("unsupported project type %q", input.ProjectType)
 	}
 	if input.GroupIDs != nil {
 		if err := validateProjectGroupIDs(input.GroupIDs, s.data.ProjectGroups); err != nil {
@@ -300,6 +312,7 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 		ProjectName:   name,
 		Path:          localPath,
 		RepoKey:       repoKey,
+		ProjectType:   projectType,
 		ImportedAt:    time.Now().Format(time.RFC3339),
 		LastScannedAt: time.Now().Format(time.RFC3339),
 	}); err != nil {
@@ -314,6 +327,7 @@ func (s *Store) ImportProject(input ProjectInput) (Project, error) {
 		ID:               id,
 		Name:             name,
 		Path:             localPath,
+		ProjectType:      projectType,
 		Status:           "draft",
 		UpdatedAt:        nowStamp(),
 		ConfigSummary:    summarizeProjectCopies(copies),
@@ -382,6 +396,7 @@ func (s *Store) RescanProject(projectID string) (Project, []ProjectCopy, bool, e
 		ProjectName:   project.Name,
 		Path:          localPath,
 		RepoKey:       repoKey,
+		ProjectType:   normalizeStoredTemplateProjectType(project.ProjectType),
 		LastScannedAt: time.Now().Format(time.RFC3339),
 	}); err != nil {
 		return Project{}, nil, true, err
@@ -390,6 +405,7 @@ func (s *Store) RescanProject(projectID string) (Project, []ProjectCopy, bool, e
 	project.Path = localPath
 	project.LocalPath = localPath
 	project.RepoKey = repoKey
+	project.ProjectType = normalizeStoredTemplateProjectType(project.ProjectType)
 	project.ConfigSummary = summarizeProjectCopies(copies)
 	project.KnowledgeSummary = ScanProjectKnowledgeSummary(localPath)
 	project.UpdatedAt = latestProjectConfigStamp(localPath)

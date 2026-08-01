@@ -16,6 +16,23 @@ const (
 	TemplateProjectTypeDotNet  = "dotnet"
 )
 
+func isSupportedTemplateProjectType(projectType string) bool {
+	switch strings.ToLower(strings.TrimSpace(projectType)) {
+	case TemplateProjectTypeGeneral, TemplateProjectTypeGo, TemplateProjectTypeUnity, TemplateProjectTypeDotNet:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeStoredTemplateProjectType(projectType string) string {
+	projectType = strings.ToLower(strings.TrimSpace(projectType))
+	if !isSupportedTemplateProjectType(projectType) {
+		return TemplateProjectTypeGeneral
+	}
+	return projectType
+}
+
 type TemplateInitializationInput struct {
 	TargetPath  string `json:"targetPath"`
 	ProjectType string `json:"projectType"`
@@ -494,6 +511,16 @@ func includeTemplateInitializationPath(relativePath string, projectType string) 
 	if isSharedWorkflowInitializationPath(relativePath) {
 		return true
 	}
+	return projectTypeSpecificTemplatePath(relativePath, projectType)
+}
+
+func isProjectTypeSpecificTemplatePath(relativePath string) bool {
+	return projectTypeSpecificTemplatePath(relativePath, TemplateProjectTypeGo) ||
+		projectTypeSpecificTemplatePath(relativePath, TemplateProjectTypeUnity) ||
+		projectTypeSpecificTemplatePath(relativePath, TemplateProjectTypeDotNet)
+}
+
+func projectTypeSpecificTemplatePath(relativePath string, projectType string) bool {
 	switch projectType {
 	case TemplateProjectTypeGo:
 		return strings.HasPrefix(relativePath, ".claude/agents/go-") ||

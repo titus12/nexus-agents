@@ -68,6 +68,7 @@ export type Project = {
   id: string;
   name: string;
   path: string;
+  projectType: TemplateProjectType;
   status: "ready" | "draft" | string;
   updatedAt: string;
   configSummary: ConfigSummary;
@@ -260,6 +261,7 @@ export type KnowledgeExportData = {
 export type ProjectInput = {
   name: string;
   path: string;
+  projectType: TemplateProjectType;
   groupIds?: string[];
 };
 

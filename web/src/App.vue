@@ -51,6 +51,7 @@ import {
   discoverKnowledgePolicy,
   ensureProjectCodeGraph,
   rebuildLearningCaseIndex,
+  rebuildKnowledgeGraph,
   resolveModelRoute,
   reviewEvaluationProposal,
   rejectKnowledgeProposal,
@@ -267,6 +268,9 @@ const error = ref("");
 const toast = ref("");
 const drawerMode = ref<DrawerMode>(null);
 const showImportModal = ref(false);
+const importBusy = ref(false);
+const importError = ref("");
+const importProgress = ref({ stage: "", percent: 0, indeterminate: false });
 const showTemplateInitializerModal = ref(false);
 const templateInitializerBusy = ref(false);
 const templateInitializerError = ref("");
@@ -332,6 +336,7 @@ const knowledgeSyncRuns = ref<KnowledgeSyncRun[]>([]);
 const knowledgeProgressRun = ref<KnowledgeSyncRun | null>(null);
 const knowledgeOperationStartedAt = ref(0);
 const knowledgeOperationElapsedSeconds = ref(0);
+const knowledgeGraphRebuildInProgress = ref(false);
 const knowledgeProposals = ref<KnowledgeProposal[]>([]);
 const selectedKnowledgeProposal = ref<KnowledgeProposal | null>(null);
 const selectedKnowledgeProposalPaths = ref<string[]>([]);
@@ -365,6 +370,7 @@ const nodeDragState = ref<{
 const importForm = ref<ProjectInput>({
   name: "",
   path: "",
+  projectType: "general",
 });
 const importGroupIds = ref<string[]>([]);
 const projectGroupMembershipIds = ref<string[]>([]);
@@ -1672,6 +1678,9 @@ function parsedKnowledgeExternalReferences() {
 }
 
 function knowledgeOperationLabel(operation = knowledgeOperation.value) {
+  if (knowledgeGraphRebuildInProgress.value) {
+    return "正在将已有 Knowledge Rebuild Index 同步到 GBrain";
+  }
   switch (operation) {
     case "adopt":
       return "正在采用现有知识库";
@@ -1705,10 +1714,17 @@ function knowledgeStageLabel(stage?: string) {
 }
 
 function knowledgeProgressLabel() {
+  if (knowledgeGraphRebuildInProgress.value) {
+    return "正在幂等导出并索引 GBrain";
+  }
   const run = knowledgeProgressRun.value;
   if (!run) return "正在提交初始化任务";
   const progress = typeof run.progress === "number" ? ` (${run.progress}%)` : "";
   return `${knowledgeStageLabel(run.stage)}${progress}`;
+}
+
+function knowledgeProgressIsIndeterminate() {
+  return knowledgeGraphRebuildInProgress.value || !knowledgeProgressRun.value;
 }
 
 function formatKnowledgeOperationElapsed() {
@@ -1740,6 +1756,7 @@ async function runKnowledgeInitialization(mode = "initialize") {
   knowledgeBusy.value = true;
   knowledgeError.value = "";
   knowledgeProgressRun.value = null;
+  knowledgeGraphRebuildInProgress.value = false;
   knowledgeOperationStartedAt.value = Date.now();
   knowledgeOperationElapsedSeconds.value = 0;
   const progressPolling = pollKnowledgeProgress(projectId);
@@ -1754,9 +1771,32 @@ async function runKnowledgeInitialization(mode = "initialize") {
       selectedKnowledgeProposal.value = result.proposal;
       selectedKnowledgeProposalPaths.value = result.proposal.changes.map((change) => change.path);
     }
+    if (mode === "enrich") {
+      // Check and enrich only creates a pending Proposal. Keep that review gate
+      // intact, and independently rebuild the already-approved project index.
+      // GBrain uses stable source/page IDs, so repeating this operation is an
+      // idempotent upsert rather than creating duplicate knowledge pages.
+      const exported = await fetchProjectKnowledgeExport(projectId);
+      knowledgeExport.value = exported;
+      const hasApprovedProjectKnowledge = flattenKnowledgeNodes(exported.tree.nodes).some(
+        (node) => node.kind === "document" && node.path.startsWith("KnowledgeBase/project/"),
+      );
+      if (hasApprovedProjectKnowledge) {
+        knowledgeGraphRebuildInProgress.value = true;
+        try {
+          await rebuildKnowledgeGraph(projectId);
+          showToast("检查并补全完成；已有 Approved Knowledge Rebuild Index 已幂等同步到 GBrain。");
+        } finally {
+          knowledgeGraphRebuildInProgress.value = false;
+        }
+      } else {
+        showToast("检查并补全完成；当前没有可导入 GBrain 的 Approved Knowledge Rebuild Index。");
+      }
+    }
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : String(error);
   } finally {
+    knowledgeGraphRebuildInProgress.value = false;
     knowledgeOperation.value = null;
     await progressPolling;
     knowledgeProgressRun.value = null;
@@ -2345,6 +2385,7 @@ async function applyTemplateInitializer() {
     importedProject = await importProject({
       name: baseNameFromPath(result.targetPath),
       path: result.targetPath,
+      projectType: result.projectType,
     });
     showToast("正在初始化项目 CodeGraph...");
     await ensureProjectCodeGraph(importedProject.id);
@@ -2410,6 +2451,13 @@ function useBrowsedDirectory() {
 
 function openImportProjectModal() {
   importGroupIds.value = [];
+  importError.value = "";
+  importProgress.value = { stage: "", percent: 0, indeterminate: false };
+  importForm.value = {
+    name: "",
+    path: "",
+    projectType: "general",
+  };
   showImportModal.value = true;
 }
 
@@ -2423,12 +2471,92 @@ function baseNameFromPath(path: string): string {
   return normalized.split(/[\\\/]/).pop() || "imported-project";
 }
 
+function setImportProgress(stage: string, percent: number, indeterminate = false) {
+  importProgress.value = {
+    stage,
+    percent: Math.max(0, Math.min(100, percent)),
+    indeterminate,
+  };
+}
+
 async function importProjectAction() {
-  const project = await importProject({ ...importForm.value, groupIds: [...importGroupIds.value] });
-  await finishProjectImport(project);
-  showImportModal.value = false;
-  importGroupIds.value = [];
-  showToast(`已导入项目：${project.name}`);
+  if (importBusy.value) return;
+  importBusy.value = true;
+  importError.value = "";
+  setImportProgress("正在导入项目", 8);
+  let project: Project | null = null;
+  try {
+    project = await importProject({ ...importForm.value, groupIds: [...importGroupIds.value] });
+    showToast("正在同步项目 AI 配置并初始化 CodeGraph...");
+
+    setImportProgress("正在检查项目 AI 配置", 16);
+    const initializationPreview = await previewTemplateInitialization({
+      targetPath: project.localPath || project.path,
+      projectType: project.projectType,
+    });
+    if (!initializationPreview.planId) {
+      throw new Error("项目 AI 配置初始化计划无效");
+    }
+    // Apply is intentionally run even when the preview is all unchanged/conflict:
+    // the backend rechecks every target and keeps the operation idempotent.
+    setImportProgress("正在写入 AI 配置和 CodeGraph MCP 配置", 28);
+    const initializationResult = await applyTemplateInitialization(initializationPreview.planId);
+    setImportProgress("正在初始化 CodeGraph 索引", 46);
+    const codeGraphSetup = await ensureProjectCodeGraph(project.id);
+    // Import scans the project before initialization. Rescan so the newly
+    // materialized AI files are reflected in the project and config copies.
+    setImportProgress("正在刷新项目配置", 62);
+    project = (await rescanProject(project.id)).project;
+    setImportProgress("正在准备 GBrain 知识导出", 70);
+    const knowledgeBootstrap = await bootstrapImportedProjectKnowledge(project);
+
+    setImportProgress("正在完成项目导入", 96);
+    await finishProjectImport(project);
+    showImportModal.value = false;
+    importGroupIds.value = [];
+    setImportProgress("导入完成", 100);
+    showToast(
+      `已导入项目：${project.name}；AI 配置 ${initializationResult.summary.create + initializationResult.summary.update} 项，CodeGraph ${codeGraphSetup.action}${knowledgeBootstrap ? "，GBrain 已重建" : ""}`,
+    );
+  } catch (err) {
+    if (project) {
+      // The project record is already persisted by /api/projects/import. Keep it
+      // visible even if a local template or CodeGraph dependency is unavailable.
+      try {
+        project = (await rescanProject(project.id)).project;
+      } catch {
+        // Keep the original imported project when the post-import rescan fails.
+      }
+      try {
+        await finishProjectImport(project);
+      } catch {
+        // Preserve the original setup error for the user.
+      }
+      importError.value = `项目已导入，但 AI 配置、CodeGraph 或 GBrain 初始化失败：${errorMessage(err)}`;
+    } else {
+      importError.value = errorMessage(err);
+    }
+  } finally {
+    importBusy.value = false;
+  }
+}
+
+async function bootstrapImportedProjectKnowledge(project: Project): Promise<boolean> {
+  if (!project.knowledgeSummary?.exists) {
+    return false;
+  }
+  setImportProgress("正在采用现有 KnowledgeBase", 76);
+  const profileResponse = await fetchKnowledgeSyncProfile(project.id);
+  if (!profileResponse.exists) {
+    return false;
+  }
+  await initializeKnowledgePreview(project.id, { mode: "adopt", externalReferences: [] });
+  // Graph rebuild is synchronous; keep an animated bar visible so a large
+  // export never looks like a frozen import modal.
+  setImportProgress("正在导出并索引 GBrain 知识文档", 84, true);
+  await rebuildKnowledgeGraph(project.id);
+  setImportProgress("GBrain 知识导出完成", 94);
+  return true;
 }
 
 async function finishProjectImport(project: Project) {
@@ -3149,6 +3277,7 @@ onMounted(loadData);
             <section class="panel panel-pad local-import-panel">
               <div class="detail-list">
                 <div><span>local path</span><strong class="mono">{{ currentProject.localPath || currentProject.path }}</strong></div>
+                <div><span>project type</span><strong>{{ currentProject.projectType || 'general' }}</strong></div>
                 <div><span>repo key</span><strong class="mono">{{ currentProject.repoKey || '-' }}</strong></div>
                 <div><span>local config</span><strong class="mono">{{ currentProject.localConfigPath || '.nexus' }}</strong></div>
                 <div><span>git ignore</span><strong>{{ currentProject.localConfigIgnored ? 'ignored' : 'not ignored' }}</strong></div>
@@ -3345,8 +3474,11 @@ onMounted(loadData);
                           <strong>{{ knowledgeProgressLabel() }}</strong>
                           <small>{{ knowledgeOperationLabel() }} · 已耗时 {{ formatKnowledgeOperationElapsed() }}</small>
                         </div>
-                        <div class="knowledge-progress-track" aria-label="Knowledge proposal generation progress">
-                          <span :style="{ width: `${knowledgeProgressRun?.progress ?? 0}%` }"></span>
+                        <div class="knowledge-progress-track" aria-label="Knowledge operation progress">
+                          <span
+                            :class="{ 'knowledge-progress-indeterminate': knowledgeProgressIsIndeterminate() }"
+                            :style="knowledgeProgressIsIndeterminate() ? undefined : { width: `${knowledgeProgressRun?.progress ?? 0}%` }"
+                          ></span>
                         </div>
                       </div>
                       <textarea v-model="knowledgeExternalReferences" class="field-input knowledge-external-input" rows="3" placeholder="可选：每行一个飞书文档 HTTPS 链接，仅用于本次初始化/补全"></textarea>
@@ -4076,7 +4208,7 @@ requires_openai_auth = true</pre>
 
     <div v-if="showImportModal" class="modal-backdrop" @click.self="showImportModal = false">
       <section class="modal">
-        <div class="modal-header"><div><div class="panel-title">导入已有项目</div><div class="drawer-subtitle">V1 会扫描项目下的 .claude / .codex 配置。</div></div><button class="icon-btn" type="button" @click="showImportModal = false">×</button></div>
+        <div class="modal-header"><div><div class="panel-title">导入已有项目</div><div class="drawer-subtitle">导入时会按项目类型补齐缺失的 AI 配置、CodeGraph MCP 配置和 .codegraph 索引，并保持幂等。</div></div><button class="icon-btn" type="button" @click="showImportModal = false">×</button></div>
         <div class="modal-body">
           <label class="field-label">项目名称<input v-model="importForm.name" class="field-input" /></label>
           <label class="field-label">项目路径
@@ -4084,6 +4216,14 @@ requires_openai_auth = true</pre>
               <input v-model="importForm.path" class="field-input mono" />
               <button class="btn-secondary" type="button" @click="chooseProjectDirectory()">选择目录</button>
             </div>
+          </label>
+          <label class="field-label">项目类型
+            <select v-model="importForm.projectType" class="field-input">
+              <option value="general">通用</option>
+              <option value="go">Go</option>
+              <option value="unity">Unity</option>
+              <option value="dotnet">.NET</option>
+            </select>
           </label>
           <div class="project-group-picker">
             <div class="field-label">项目组 <span class="muted">可选；只能选择 Nexus 中已经维护的项目组</span></div>
@@ -4097,11 +4237,36 @@ requires_openai_auth = true</pre>
           <div class="scan-preview">
             <span class="chip chip-green">.claude</span>
             <span class="chip chip-green">.codex</span>
-            <span class="chip chip-green">.mcp.json</span>
+            <span class="chip chip-green">.codex/config.toml</span>
+            <span class="chip chip-green">.codegraph/</span>
             <span class="chip chip-orange">.agents</span>
           </div>
+          <div v-if="importBusy" class="knowledge-operation-status import-progress-status" role="status" aria-live="polite">
+            <span class="chip chip-running">
+              <span class="knowledge-running-dot" aria-hidden="true"></span>
+              running
+            </span>
+            <div class="knowledge-operation-copy">
+              <strong>{{ importProgress.stage || "正在处理项目" }}</strong>
+              <small>导入进度 {{ importProgress.percent }}%</small>
+            </div>
+            <div
+              class="knowledge-progress-track"
+              role="progressbar"
+              :aria-valuemin="0"
+              :aria-valuemax="100"
+              :aria-valuenow="importProgress.indeterminate ? undefined : importProgress.percent"
+              :aria-label="importProgress.stage || 'Project import progress'"
+            >
+              <span
+                :class="{ 'knowledge-progress-indeterminate': importProgress.indeterminate }"
+                :style="importProgress.indeterminate ? undefined : { width: `${importProgress.percent}%` }"
+              ></span>
+            </div>
+          </div>
+          <div v-if="importError" class="notice danger">{{ importError }}</div>
         </div>
-        <div class="modal-footer"><button class="btn-secondary" type="button" @click="showImportModal = false">取消</button><button class="btn-primary" type="button" @click="importProjectAction">导入</button></div>
+        <div class="modal-footer"><button class="btn-secondary" type="button" :disabled="importBusy" @click="showImportModal = false">取消</button><button class="btn-primary" type="button" :disabled="importBusy || !importForm.path.trim()" @click="importProjectAction">{{ importBusy ? '正在同步配置...' : '导入并初始化' }}</button></div>
       </section>
     </div>
 

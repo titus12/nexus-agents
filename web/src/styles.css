@@ -2399,6 +2399,21 @@ tr:last-child td { border-bottom: none; }
   transition: width 260ms ease;
 }
 
+.import-progress-status {
+  margin-top: 12px;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(180px, 1fr);
+}
+
+.knowledge-progress-track span.knowledge-progress-indeterminate {
+  width: 38%;
+  animation: import-progress-slide 1.35s ease-in-out infinite;
+}
+
+@keyframes import-progress-slide {
+  0% { transform: translateX(-125%); }
+  100% { transform: translateX(315%); }
+}
+
 .chip-running {
   color: #c4b5fd;
   background: rgba(124, 116, 255, 0.18);

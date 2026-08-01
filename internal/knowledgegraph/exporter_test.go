@@ -86,6 +86,67 @@ func TestStableProviderSourceIDMeetsGBrainConstraints(t *testing.T) {
 	}
 }
 
+func TestExportApprovedKnowledgeProjectsRoutingAliasesForGBrain(t *testing.T) {
+	projectRoot := t.TempDir()
+	domainPath := filepath.Join(projectRoot, "KnowledgeBase", "project", "domains", "distributed-runtime", "index.md")
+	if err := os.MkdirAll(filepath.Dir(domainPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "KnowledgeBase", "index.md"), []byte("# KnowledgeBase\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "KnowledgeBase", "log.md"), []byte("# Log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "KnowledgeBase", "project", "index.md"), []byte("# Project\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	domain := `---
+type: Domain
+title: 分布式运行时
+description: Runtime coordination.
+resource: KnowledgeBase/project/domains/distributed-runtime/index.md
+tags: [domain, runtime]
+timestamp: 2026-08-01T00:00:00+08:00
+routing:
+  aliases:
+    zh: [分布式运行时]
+    en: [distributed runtime]
+---
+# 分布式运行时
+
+Remote actor runtime coordination.
+`
+	if err := os.WriteFile(domainPath, []byte(domain), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exportRoot := filepath.Join(t.TempDir(), "gbrain")
+	if _, err := ExportApprovedKnowledge(ExportRequest{
+		ProjectID:        "sample",
+		ProjectRoot:      projectRoot,
+		SourceID:         "project:sample",
+		ProviderSourceID: "project-sample",
+		Branch:           "main",
+		Revision:         "abc123",
+		ExportRoot:       exportRoot,
+		IncludeDomains:   true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(exportRoot, "domains", "distributed-runtime.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `aliases: ["分布式运行时", "distributed runtime"]`) {
+		t.Fatalf("expected GBrain-compatible top-level aliases, got:\n%s", text)
+	}
+	if strings.Count(text, "aliases:") != 2 {
+		t.Fatalf("expected one top-level and one nested alias block, got:\n%s", text)
+	}
+}
+
 func readExportFiles(t *testing.T, root string) map[string]string {
 	t.Helper()
 	files := map[string]string{}
