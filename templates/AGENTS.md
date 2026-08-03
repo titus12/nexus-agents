@@ -8,9 +8,10 @@ This file is the project-level entry point for AI-assisted work. Keep it short, 
 |---|---|---|
 | Claude Code | `.claude/` | Claude agents, rules, skills, commands, and workflows. |
 | Codex | `.codex/` and `.agents/skills/` | Codex role definitions and explicit workflow-skill entries. |
+| Opencode | `AGENTS.md`, `.claude/skills/`, `.agents/skills/`, and `.opencode/` | Native `AGENTS.md` rules, skill discovery, and tool-specific commands/agents. |
 
 - Do not maintain duplicate `AGENTS.md` copies under tool-specific directories.
-- Do not mix role definitions between `.claude/agents/` and `.codex/agents/`.
+- Do not mix role definitions between `.claude/agents/`, `.codex/agents/`, and `.opencode/agents/`.
 
 ## Source of truth
 
@@ -21,7 +22,8 @@ This file is the project-level entry point for AI-assisted work. Keep it short, 
 | Codex workflow entries | `.agents/skills/wf-*/` |
 | Workflow bodies | `.claude/workflows/` |
 | Shared rules | `.claude/rules/` |
-| Task-specific skills | `.claude/skills/` and installed Codex skills |
+| Task-specific skills | `.claude/skills/` and `.agents/skills/` |
+| Opencode commands and agents | `.opencode/commands/` and `.opencode/agents/` |
 
 Read the authoritative source instead of copying its content into this file.
 
@@ -40,6 +42,20 @@ Read the authoritative source instead of copying its content into this file.
 - Do not duplicate role prompts, model choices, or long workflow instructions here.
 - Use subagents, parallel execution, or delegation only when the user explicitly requests it.
 - Keep model-routing and provider configuration outside project-local role documentation unless the project explicitly owns that configuration.
+
+## Opencode conventions
+
+- Opencode loads `AGENTS.md` as its project entry point and natively discovers
+  skills from `.claude/skills/` and `.agents/skills/`; do not create per-tool
+  skill copies.
+- Opencode does not auto-load `.claude/rules/` or `.claude/commands/`. Mount
+  shared rules through `opencode.json` `instructions` (e.g. glob
+  `.claude/rules/*.md`) and place Opencode-specific commands and agents under
+  `.opencode/commands/` and `.opencode/agents/`.
+- Invoke skills via Opencode's `skill` tool by name (e.g.
+  `nexus-knowledge-retrieval`), not the `$name` Codex trigger.
+- Apply the same explicit-only selection rule to `wf-*` workflows; offer them
+  but do not run them unless the user requests it.
 
 ## Template synchronization
 
