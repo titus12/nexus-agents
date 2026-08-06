@@ -44,6 +44,9 @@ func (s *Store) SyncProjectTemplates(projectID string) (ProjectTemplateSyncResul
 	if err != nil {
 		return ProjectTemplateSyncResult{}, true, err
 	}
+	if err := synchronizeTemplateGitignore(projectRoot); err != nil {
+		return ProjectTemplateSyncResult{}, true, err
+	}
 
 	rescanned, copies, ok, err := s.RescanProject(projectID)
 	if err != nil {
@@ -157,6 +160,24 @@ func synchronizeTemplateTree(templateRoot string, projectRoot string, projectTyp
 		return nil
 	})
 	return counts, err
+}
+
+func synchronizeTemplateGitignore(projectRoot string) error {
+	write, err := templateInitializationGitignoreWrite(projectRoot)
+	if err != nil {
+		return err
+	}
+	if write.Action == "unchanged" {
+		return nil
+	}
+	data, err := mergedTemplateInitializationGitignore(projectRoot)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, ".gitignore"), data, 0o644); err != nil {
+		return fmt.Errorf("write .gitignore: %w", err)
+	}
+	return nil
 }
 
 func isProtectedProjectKnowledgePath(relativePath string) bool {

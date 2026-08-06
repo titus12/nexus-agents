@@ -285,6 +285,8 @@ AGENTS.md
 .claude/
 .codex/
 .agents/
+.opencode/
+opencode.json
 .codegraph/
 
 # Generated/shared KnowledgeBase configuration
@@ -500,12 +502,14 @@ func initializationSourceFiles(templateRoot string, projectType string) ([]strin
 
 func includeTemplateInitializationPath(relativePath string, projectType string) bool {
 	if relativePath == "AGENTS.md" ||
+		relativePath == "opencode.json" ||
 		strings.HasPrefix(relativePath, "KnowledgeBase/") ||
 		strings.HasPrefix(relativePath, ".agents/skills/kb-") ||
 		strings.HasPrefix(relativePath, ".agents/skills/nexus-") ||
 		strings.HasPrefix(relativePath, ".claude/rules/01-communication.md") ||
 		strings.HasPrefix(relativePath, ".claude/rules/test-driven-change.md") ||
-		strings.HasPrefix(relativePath, ".claude/rules/knowledge-retrieval.md") {
+		strings.HasPrefix(relativePath, ".claude/rules/knowledge-retrieval.md") ||
+		strings.HasPrefix(relativePath, ".opencode/commands/") {
 		return true
 	}
 	if isSharedWorkflowInitializationPath(relativePath) {
@@ -525,6 +529,7 @@ func projectTypeSpecificTemplatePath(relativePath string, projectType string) bo
 	case TemplateProjectTypeGo:
 		return strings.HasPrefix(relativePath, ".claude/agents/go-") ||
 			strings.HasPrefix(relativePath, ".codex/agents/go-") ||
+			strings.HasPrefix(relativePath, ".opencode/agents/go-") ||
 			strings.HasPrefix(relativePath, ".claude/rules/go-") ||
 			strings.HasPrefix(relativePath, ".claude/skills/go-") ||
 			strings.HasPrefix(relativePath, ".claude/skills/review-feedback/") ||
@@ -534,6 +539,7 @@ func projectTypeSpecificTemplatePath(relativePath string, projectType string) bo
 	case TemplateProjectTypeUnity:
 		return strings.HasPrefix(relativePath, ".claude/agents/unity-") ||
 			strings.HasPrefix(relativePath, ".codex/agents/unity-") ||
+			strings.HasPrefix(relativePath, ".opencode/agents/unity-") ||
 			strings.HasPrefix(relativePath, ".claude/rules/unity-") ||
 			strings.HasPrefix(relativePath, ".claude/rules/uiarchitect/") ||
 			strings.HasPrefix(relativePath, ".claude/skills/unity-") ||
@@ -545,6 +551,7 @@ func projectTypeSpecificTemplatePath(relativePath string, projectType string) bo
 	case TemplateProjectTypeDotNet:
 		return strings.HasPrefix(relativePath, ".claude/agents/dotnet-") ||
 			strings.HasPrefix(relativePath, ".codex/agents/dotnet-") ||
+			strings.HasPrefix(relativePath, ".opencode/agents/dotnet-") ||
 			strings.HasPrefix(relativePath, ".claude/rules/dotnet-") ||
 			strings.HasPrefix(relativePath, ".claude/skills/dotnet-") ||
 			strings.HasPrefix(relativePath, ".claude/skills/review-feedback/") ||

@@ -103,6 +103,9 @@ func TestApplyTemplateInitializationCreatesDotNetProfile(t *testing.T) {
 		".claude/commands/wf-dotnet-feature.md",
 		".claude/workflows/dotnet-feature-development.md",
 		".codex/agents/dotnet-developer.toml",
+		"opencode.json",
+		".opencode/agents/dotnet-developer.md",
+		".opencode/commands/wf-dotnet-feature.md",
 	} {
 		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(relative))); err != nil {
 			t.Fatalf("expected .NET template output %s: %v", relative, err)
@@ -217,6 +220,8 @@ func TestApplyTemplateInitializationMergesGitignoreAndKeepsProjectKnowledgeTrack
 		"bin/",
 		"AGENTS.md",
 		".codegraph/",
+		".opencode/",
+		"opencode.json",
 		"KnowledgeBase/*",
 		"!KnowledgeBase/project/",
 		"!KnowledgeBase/project/**",

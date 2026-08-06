@@ -521,6 +521,7 @@ func TestStoreSyncProjectTemplatesOverwritesCreatesAndSkipsKnowledge(t *testing.
 	writeTestFile(t, projectRoot, ".claude/rules/01-communication.md", "project communication")
 	writeTestFile(t, projectRoot, "KnowledgeBase/project/keep.md", "project knowledge")
 	writeTestFile(t, projectRoot, ".claude/rules/project-only.md", "project only")
+	writeTestFile(t, projectRoot, ".gitignore", "bin/\n")
 	t.Setenv("NEXUS_TEMPLATES_ROOT", filepath.Join(nexusRoot, "templates"))
 
 	store := NewStoreFromData(BootstrapData{
@@ -561,6 +562,21 @@ func TestStoreSyncProjectTemplatesOverwritesCreatesAndSkipsKnowledge(t *testing.
 	assertTestFileContent(t, projectRoot, ".agents/skills/testing/SKILL.md", "template testing skill")
 	assertTestFileContent(t, projectRoot, "KnowledgeBase/project/keep.md", "project knowledge")
 	assertTestFileContent(t, projectRoot, ".claude/rules/project-only.md", "project only")
+	gitignore, err := os.ReadFile(filepath.Join(projectRoot, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read synchronized .gitignore: %v", err)
+	}
+	for _, expected := range []string{
+		"bin/",
+		"# >>> Nexus Agents AI configuration >>>",
+		".opencode/",
+		"opencode.json",
+		"# <<< Nexus Agents AI configuration <<<",
+	} {
+		if !strings.Contains(string(gitignore), expected) {
+			t.Fatalf("expected synchronized .gitignore to contain %q, got %s", expected, gitignore)
+		}
+	}
 	if result.Project.ConfigSummary.Rules != 2 || result.Project.ConfigSummary.Skills != 1 {
 		t.Fatalf("expected post-sync project rescan summary, got %#v", result.Project.ConfigSummary)
 	}
