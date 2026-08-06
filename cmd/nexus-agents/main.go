@@ -44,7 +44,7 @@ func main() {
 	defer cleanup()
 
 	router := codexrouter.NewService(codexrouter.DefaultConfig())
-	writeCatalogFile(router)
+	// writeCatalogFile(router) // disabled: no longer rewrite ~/.codex/nexus-model-catalog.json (Codex runs direct)
 
 	store := catalog.NewStore()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
