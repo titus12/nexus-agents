@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"nexus-agents/internal/knowledgegraph"
 	"nexus-agents/internal/wikicompiler"
@@ -145,5 +146,96 @@ func TestProposalApplyDoesNotFailWhenGraphQueueFails(t *testing.T) {
 	}
 	if applied.Proposal == nil || applied.Proposal.Status != ProposalApplied {
 		t.Fatalf("applied = %#v", applied)
+	}
+}
+
+func TestCheckUpdatesAutomaticallyGeneratesProposalWhenGitBaselineIsMissing(t *testing.T) {
+	project := initTestRepository(t)
+	writeRepoFile(t, project, "Server/Program.cs", "class Program {}\n")
+	runGit(t, project, "add", ".")
+	runGit(t, project, "commit", "-m", "initial")
+	if err := SaveProfile(project, DefaultProfile()); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ServiceOptions{
+		Store: NewStateStore(t.TempDir()), Compiler: &fakeCompiler{},
+	})
+
+	result, err := service.CheckUpdates(context.Background(), ProjectRequest{
+		ProjectID: "p1", ProjectRoot: project,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Proposal == nil || result.Run.Kind != "enrich" {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Message != "Committed changes were detected; a review proposal was generated automatically." {
+		t.Fatalf("message = %q", result.Message)
+	}
+	runs, err := service.Runs("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundMissingBase bool
+	for _, run := range runs {
+		if run.Kind == "check" && run.ReasonCode == "git_base_missing" {
+			foundMissingBase = true
+			break
+		}
+	}
+	if !foundMissingBase {
+		t.Fatalf("runs = %#v", runs)
+	}
+}
+
+func TestCheckUpdatesReplacesInvalidPendingProposal(t *testing.T) {
+	project := initTestRepository(t)
+	writeRepoFile(t, project, "Server/Program.cs", "class Program {}\n")
+	runGit(t, project, "add", ".")
+	runGit(t, project, "commit", "-m", "initial")
+	if err := SaveProfile(project, DefaultProfile()); err != nil {
+		t.Fatal(err)
+	}
+	gitState, err := ReadGitState(context.Background(), ExecGitRunner{}, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStateStore(t.TempDir())
+	invalid := KnowledgeProposal{
+		ID: "invalid-pending", ProjectID: "p1", ProjectRoot: project,
+		Branch: gitState.Branch, TargetRevision: gitState.Head, Status: ProposalPending,
+		Validation: ProposalValidation{Valid: false, Errors: []string{"broken link"}},
+		CreatedAt:  time.Now().Add(-time.Minute).Format(time.RFC3339),
+	}
+	if err := store.SaveProposal(invalid); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveState(KnowledgeSyncState{
+		ProjectID: "p1", ProjectRoot: project, Branch: gitState.Branch,
+		LastProcessedCommit: gitState.Head, PendingProposalID: invalid.ID,
+		Status: StatusProposalPending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ServiceOptions{
+		Store: store, Compiler: &fakeCompiler{},
+	})
+
+	result, err := service.CheckUpdates(context.Background(), ProjectRequest{
+		ProjectID: "p1", ProjectRoot: project,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Proposal == nil || result.Run.Kind != "enrich" {
+		t.Fatalf("result = %#v", result)
+	}
+	reloaded, err := store.LoadProposal("p1", invalid.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Status != ProposalInvalid {
+		t.Fatalf("invalid proposal status = %s", reloaded.Status)
 	}
 }

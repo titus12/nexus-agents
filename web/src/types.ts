@@ -901,6 +901,9 @@ export type KnowledgeSyncRun = {
   baseRevision?: string;
   targetRevision: string;
   changeClass?: string;
+  reasonCode?: string;
+  reason?: string;
+  nextAction?: string;
   proposalId?: string;
   warnings: string[];
   error?: string;

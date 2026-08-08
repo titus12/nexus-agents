@@ -17,7 +17,7 @@
                       "type":  "condition",
                       "category":  "condition",
                       "label":  "workflow skill",
-                      "agent":  "sisyphus",
+                      "agent":  "workflow-resolver",
                       "detail":  "The wf-* skill points to this workflow file as the source of truth.",
                       "x":  300,
                       "y":  210
@@ -26,8 +26,8 @@
                       "id":  "owner",
                       "type":  "agent",
                       "category":  "action",
-                      "label":  "gatekeeper",
-                      "agent":  "gatekeeper",
+                      "label":  "evaluator",
+                      "agent":  "workflow-evaluator",
                       "detail":  "Inspect diff and risks before committing.",
                       "x":  560,
                       "y":  210
@@ -57,7 +57,7 @@
                       "type":  "output",
                       "category":  "data",
                       "label":  "deliver",
-                      "agent":  "gatekeeper",
+                      "agent":  "workflow-evaluator",
                       "detail":  "Return result, evidence, and next action.",
                       "x":  1340,
                       "y":  210

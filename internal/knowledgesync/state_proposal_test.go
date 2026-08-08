@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStateAndProposalSurviveStoreRecreation(t *testing.T) {
@@ -20,6 +21,44 @@ func TestStateAndProposalSurviveStoreRecreation(t *testing.T) {
 	}
 	if reloaded.PendingProposalID != "p1" {
 		t.Fatalf("state = %#v", reloaded)
+	}
+}
+
+func TestKnowledgeRecordsRetainOnlyTheTenMostRecentRunsAndProposals(t *testing.T) {
+	store := NewStateStore(t.TempDir())
+	projectRoot := t.TempDir()
+	base := time.Now().Add(-12 * time.Minute)
+	for index := 0; index < 12; index++ {
+		timestamp := base.Add(time.Duration(index) * time.Minute).Format(time.RFC3339)
+		if err := store.SaveRun(SyncRun{
+			ID:        "run-" + time.Now().Format("150405.000000000") + "-" + string(rune('a'+index)),
+			ProjectID: "project", Kind: "check", Status: "succeeded",
+			StartedAt: timestamp, EndedAt: timestamp, Warnings: []string{},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		proposal := KnowledgeProposal{
+			ID:        "proposal-" + string(rune('a'+index)),
+			ProjectID: "project", ProjectRoot: projectRoot, TargetRevision: "rev",
+			Status: ProposalRejected, CreatedAt: timestamp,
+		}
+		if err := store.SaveProposal(proposal); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, err := store.ListRuns("project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != maxRetainedKnowledgeRecords {
+		t.Fatalf("runs retained = %d, want %d", len(runs), maxRetainedKnowledgeRecords)
+	}
+	proposals, err := store.ListProposals("project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != maxRetainedKnowledgeRecords {
+		t.Fatalf("proposals retained = %d, want %d", len(proposals), maxRetainedKnowledgeRecords)
 	}
 }
 

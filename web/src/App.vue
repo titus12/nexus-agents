@@ -326,7 +326,7 @@ const selectedKnowledgePath = ref("");
 const knowledgeSearch = ref("");
 const activeKnowledgeView = ref<"docs" | "sync" | "check" | "routing" | "maintenance" | "source">("docs");
 const knowledgeBusy = ref(false);
-const knowledgeOperation = ref<"adopt" | "enrich" | "initialize" | "check" | null>(null);
+const knowledgeOperation = ref<"adopt" | "enrich" | "initialize" | "check" | "auto-enrich" | null>(null);
 const knowledgeError = ref("");
 const knowledgeSyncProfile = ref<KnowledgeSyncProfile | null>(null);
 const knowledgeSyncProfileExists = ref(false);
@@ -1690,6 +1690,8 @@ function knowledgeOperationLabel(operation = knowledgeOperation.value) {
       return "正在生成初始化 Proposal";
     case "check":
       return "正在检查 Git 更新";
+    case "auto-enrich":
+      return "正在检查提交并生成待审核 Proposal";
     default:
       return "";
   }
@@ -1806,17 +1808,28 @@ async function runKnowledgeInitialization(mode = "initialize") {
 
 async function checkKnowledgeUpdatesForCurrentProject() {
   if (!currentProject.value) return;
-  knowledgeOperation.value = "check";
+  const projectId = currentProject.value.id;
+  knowledgeOperation.value = "auto-enrich";
   knowledgeBusy.value = true;
   knowledgeError.value = "";
+  knowledgeProgressRun.value = null;
+  knowledgeOperationStartedAt.value = Date.now();
+  knowledgeOperationElapsedSeconds.value = 0;
+  const progressPolling = pollKnowledgeProgress(projectId);
   try {
-    const result = await checkKnowledgeUpdates(currentProject.value.id);
+    const result = await checkKnowledgeUpdates(projectId);
     showToast(result.message);
-    await loadKnowledgeSync(currentProject.value.id);
+    await loadKnowledgeSync(projectId);
+    if (result.proposal) {
+      selectedKnowledgeProposal.value = result.proposal;
+      selectedKnowledgeProposalPaths.value = result.proposal.changes.map((change) => change.path);
+    }
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : String(error);
   } finally {
     knowledgeOperation.value = null;
+    await progressPolling;
+    knowledgeProgressRun.value = null;
     knowledgeBusy.value = false;
   }
 }
@@ -3483,7 +3496,7 @@ onMounted(loadData);
                       </div>
                       <textarea v-model="knowledgeExternalReferences" class="field-input knowledge-external-input" rows="3" placeholder="可选：每行一个飞书文档 HTTPS 链接，仅用于本次初始化/补全"></textarea>
                       <div v-if="knowledgeSyncRuns.length" class="knowledge-run-list">
-                        <div v-for="run in knowledgeSyncRuns.slice(0, 5)" :key="run.id" class="knowledge-run-row">
+                        <div v-for="run in knowledgeSyncRuns.slice(0, 10)" :key="run.id" class="knowledge-run-row">
                           <span
                             class="chip"
                             :class="run.status === 'succeeded' ? 'chip-green' : (run.status === 'running' ? 'chip-running' : 'chip-red')"
@@ -3496,6 +3509,7 @@ onMounted(loadData);
                           <strong>{{ run.kind }}</strong>
                           <span>{{ knowledgeStageLabel(run.stage) }}{{ typeof run.progress === "number" ? ` ${run.progress}%` : "" }}</span>
                           <code>{{ run.targetRevision?.slice(0, 12) }}</code>
+                          <small v-if="run.reason">{{ run.reason }}</small>
                           <small>{{ formatShortDate(run.startedAt) }}</small>
                         </div>
                       </div>

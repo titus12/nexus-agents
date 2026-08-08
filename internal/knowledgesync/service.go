@@ -391,6 +391,9 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	run.Status = "succeeded"
 	run.ProposalID = proposal.ID
 	run.Warnings = proposal.Warnings
+	run.ReasonCode = "proposal_generated"
+	run.Reason = "A reviewable Knowledge Proposal was generated without modifying project files."
+	run.NextAction = "review_proposal"
 	run.EndedAt = now
 	s.recordRunStage(&run, StageCompleted, 100)
 	state.Status = StatusProposalPending
@@ -414,17 +417,33 @@ func (s *Service) CheckUpdates(ctx context.Context, request ProjectRequest) (Syn
 	if err != nil {
 		return SyncResult{}, err
 	}
-	defer release()
-	if err := validateProjectRequest(request); err != nil {
+	result, autoEnrich, err := s.checkUpdatesLocked(ctx, request)
+	release()
+	if err != nil {
 		return SyncResult{}, err
+	}
+	if !autoEnrich {
+		return result, nil
+	}
+	enriched, err := s.CheckAndEnrich(ctx, InitializeRequest{ProjectRequest: request})
+	if err != nil {
+		return enriched, err
+	}
+	enriched.Message = "Committed changes were detected; a review proposal was generated automatically."
+	return enriched, nil
+}
+
+func (s *Service) checkUpdatesLocked(ctx context.Context, request ProjectRequest) (SyncResult, bool, error) {
+	if err := validateProjectRequest(request); err != nil {
+		return SyncResult{}, false, err
 	}
 	state, err := s.store.LoadState(request.ProjectID)
 	if err != nil {
-		return SyncResult{}, err
+		return SyncResult{}, false, err
 	}
 	gitState, err := ReadGitState(ctx, s.git, request.ProjectRoot)
 	if err != nil {
-		return SyncResult{}, err
+		return SyncResult{}, false, err
 	}
 	now := time.Now().Format(time.RFC3339)
 	run := SyncRun{
@@ -433,39 +452,88 @@ func (s *Service) CheckUpdates(ctx context.Context, request ProjectRequest) (Syn
 		Status: "succeeded", StartedAt: now, EndedAt: now, Warnings: []string{},
 	}
 	if state.PendingProposalID != "" {
-		state.Status = StatusProposalPending
+		pending, loadErr := s.store.LoadProposal(request.ProjectID, state.PendingProposalID)
+		if loadErr == nil && pending.Status == ProposalPending &&
+			pending.Validation.Valid && len(pending.Validation.Errors) == 0 &&
+			pending.TargetRevision == gitState.Head {
+			state.Status = StatusProposalPending
+			state.LastCheckedAt = now
+			run.ReasonCode = "pending_proposal_valid"
+			run.Reason = "A valid Proposal already targets the current HEAD."
+			run.NextAction = "review_proposal"
+			_ = s.store.SaveState(state)
+			_ = s.store.SaveRun(run)
+			return SyncResult{State: state, Run: run, Message: "A valid knowledge Proposal is already pending for the current HEAD; review it before generating another one."}, false, nil
+		}
+		if loadErr == nil && pending.Status == ProposalPending {
+			pending.ResolvedAt = now
+			if !pending.Validation.Valid || len(pending.Validation.Errors) > 0 {
+				pending.Status = ProposalInvalid
+				run.ReasonCode = "pending_proposal_invalid"
+				run.Reason = fmt.Sprintf("Pending Proposal %s failed validation and no longer blocks regeneration.", pending.ID)
+			} else {
+				pending.Status = ProposalStale
+				run.ReasonCode = "pending_proposal_stale"
+				run.Reason = fmt.Sprintf("Pending Proposal %s targets an older HEAD and was marked stale.", pending.ID)
+			}
+			_ = s.store.SaveProposal(pending)
+		} else {
+			run.ReasonCode = "pending_proposal_missing"
+			run.Reason = "The state pointed to a missing or already-resolved Proposal; regeneration is allowed."
+		}
+		state.PendingProposalID = ""
+		state.Status = StatusReady
 		state.LastCheckedAt = now
 		_ = s.store.SaveState(state)
-		_ = s.store.SaveRun(run)
-		return SyncResult{State: state, Run: run, Message: "A knowledge Proposal is already pending; scheduled regeneration was skipped."}, nil
 	}
-	if state.LastProcessedCommit == gitState.Head && state.PendingProposalID == "" {
+	pendingWasResolved := run.ReasonCode == "pending_proposal_invalid" ||
+		run.ReasonCode == "pending_proposal_stale" ||
+		run.ReasonCode == "pending_proposal_missing"
+	if state.LastProcessedCommit == gitState.Head && !pendingWasResolved {
 		state.Status = StatusUpToDate
 		state.LastCheckedAt = now
+		run.ReasonCode = "head_unchanged"
+		run.Reason = "HEAD is unchanged and there is no active Proposal."
+		run.NextAction = "none"
 		_ = s.store.SaveState(state)
 		_ = s.store.SaveRun(run)
-		return SyncResult{State: state, Run: run, Message: "HEAD is unchanged; OpenWiki and model calls were skipped."}, nil
+		return SyncResult{State: state, Run: run, Message: "HEAD is unchanged; OpenWiki and model calls were skipped."}, false, nil
 	}
 	changes, diffErr := DiffCommitted(ctx, s.git, request.ProjectRoot, state.LastProcessedCommit, gitState.Head)
 	if diffErr != nil && !errors.Is(diffErr, ErrGitBaseMissing) {
-		return SyncResult{}, diffErr
+		return SyncResult{}, false, diffErr
 	}
 	if errors.Is(diffErr, ErrGitBaseMissing) {
 		run.ChangeClass = ChangeHighRisk
-		run.Warnings = append(run.Warnings, "The previous base revision is unavailable; use Check and enrich for a full comparison proposal.")
+		run.ReasonCode = "git_base_missing"
+		run.Reason = "The previous processed revision is unavailable; a full enrichment proposal will be generated."
+		run.NextAction = "generate_full_proposal"
+		run.Warnings = append(run.Warnings, "The previous base revision is unavailable; a full comparison proposal will be generated.")
 		state.Status = StatusUpdateAvailable
 		state.LastCheckedAt = now
 		_ = s.store.SaveRun(run)
 		_ = s.store.SaveState(state)
-		return SyncResult{State: state, Run: run, Message: "Git history changed; a full enrichment proposal is required."}, nil
+		return SyncResult{State: state, Run: run, Message: "Git history changed; a full enrichment proposal will be generated automatically."}, true, nil
 	}
 	classified := ClassifyChanges(changes)
 	run.ChangeClass = classified.Class
+	if pendingWasResolved && len(changes) == 0 {
+		state.Status = StatusUpdateAvailable
+		state.LastCheckedAt = now
+		run.ReasonCode = "pending_proposal_regeneration"
+		if run.Reason == "" {
+			run.Reason = "The previous Proposal was resolved without changing the current HEAD; regeneration is required."
+		}
+		run.NextAction = "generate_proposal"
+		_ = s.store.SaveRun(run)
+		_ = s.store.SaveState(state)
+		return SyncResult{State: state, Run: run, Message: "The previous Proposal was invalid or stale; a replacement review proposal will be generated automatically."}, true, nil
+	}
 	switch classified.Class {
 	case ChangeKnowledgeOnly:
 		report, err := knowledgebase.Validate(request.ProjectRoot)
 		if err != nil {
-			return SyncResult{}, err
+			return SyncResult{}, false, err
 		}
 		_ = s.export(request.ProjectID, request.ProjectRoot)
 		state.LastProcessedCommit = gitState.Head
@@ -473,24 +541,36 @@ func (s *Service) CheckUpdates(ctx context.Context, request ProjectRequest) (Syn
 		state.LastKnowledgeHash, _ = knowledgeHash(request.ProjectRoot)
 		state.Status = StatusUpToDate
 		run.Warnings = validationWarnings(report)
+		run.ReasonCode = "knowledge_only_change"
+		run.Reason = "Only approved KnowledgeBase files changed."
+		run.NextAction = "gbrain_sync"
 		run.MessageFallback()
 		_ = s.store.SaveRun(run)
 		_ = s.store.SaveState(state)
 		s.queueKnowledgeGraphFromProject(request, gitState.Branch, gitState.Head)
-		return SyncResult{State: state, Run: run, Message: "Only approved KB files changed; validation and export were refreshed without OpenWiki."}, nil
+		return SyncResult{State: state, Run: run, Message: "Only approved KB files changed; validation and export were refreshed without OpenWiki."}, false, nil
 	case ChangeTestsOnly, ChangeGenerated:
 		state.LastProcessedCommit = gitState.Head
 		state.LastSuccessfulAt = now
 		state.Status = StatusUpToDate
+		run.ReasonCode = map[ChangeClass]string{
+			ChangeTestsOnly: "tests_only_change",
+			ChangeGenerated: "generated_only_change",
+		}[classified.Class]
+		run.Reason = "No stable knowledge impact was detected."
+		run.NextAction = "none"
 		_ = s.store.SaveRun(run)
 		_ = s.store.SaveState(state)
-		return SyncResult{State: state, Run: run, Message: "No stable knowledge impact was detected; OpenWiki was skipped."}, nil
+		return SyncResult{State: state, Run: run, Message: "No stable knowledge impact was detected; OpenWiki was skipped."}, false, nil
 	default:
 		state.Status = StatusUpdateAvailable
 		state.LastCheckedAt = now
+		run.ReasonCode = "stable_change_detected"
+		run.Reason = fmt.Sprintf("Committed changes were classified as %s.", classified.Class)
+		run.NextAction = "generate_proposal"
 		_ = s.store.SaveRun(run)
 		_ = s.store.SaveState(state)
-		return SyncResult{State: state, Run: run, Message: "Relevant committed changes detected; run Check and enrich to generate a proposal."}, nil
+		return SyncResult{State: state, Run: run, Message: "Relevant committed changes detected; a review proposal will be generated automatically."}, true, nil
 	}
 }
 

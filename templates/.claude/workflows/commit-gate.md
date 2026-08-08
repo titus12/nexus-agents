@@ -1,6 +1,6 @@
 # commit-gate
 
-Source: .claude/rules/go-00-routing.md
+Source: `.claude/rules/01-communication.md`, `.claude/rules/test-driven-change.md`
 
 Entry skill: $wf-commit
 
@@ -16,7 +16,7 @@ Codex execution notes:
 
 Workflow:
 
-1. Use go-gatekeeper to inspect the current diff.
+1. Inspect the current diff and classify changes (behavioral, defect, contract, non-behavioral).
 2. Produce a risk list.
 3. Ask for confirmation on high-risk items.
 4. Run the verification gate below.
@@ -27,9 +27,9 @@ Workflow:
 Before commit / PR / handoff:
 
 - [ ] Inspect git diff and list changed files.
-- [ ] Run go build -tags actor_id_uint64 ./cmd/server/ for code changes.
+- [ ] Run the project's build command for code changes (e.g. `dotnet build`, `go build`, or Unity compile check).
 - [ ] Run targeted tests for changed logic or bug fixes.
-- [ ] Run go vet for broad or risky changes when practical.
+- [ ] Run linter or static analysis when available and practical.
 - [ ] Confirm generated files are either intentionally regenerated or untouched.
 - [ ] Document any skipped verification with the exact reason.
 - [ ] Final response reports evidence, not assumptions.
@@ -117,4 +117,3 @@ Payload shape:
 ```
 
 Nexus will evaluate pending task runs asynchronously, produce attribution statistics for workflow / agent / model / rules / skills / context / tools, and index high-value learning cases with chromem-go for future retrieval.
-
