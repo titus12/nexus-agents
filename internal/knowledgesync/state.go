@@ -67,6 +67,9 @@ type SyncRun struct {
 	BaseRevision   string          `json:"baseRevision,omitempty"`
 	TargetRevision string          `json:"targetRevision"`
 	ChangeClass    ChangeClass     `json:"changeClass,omitempty"`
+	ReasonCode     string          `json:"reasonCode,omitempty"`
+	Reason         string          `json:"reason,omitempty"`
+	NextAction     string          `json:"nextAction,omitempty"`
 	ProposalID     string          `json:"proposalId,omitempty"`
 	Warnings       []string        `json:"warnings"`
 	Error          string          `json:"error,omitempty"`
@@ -75,6 +78,8 @@ type SyncRun struct {
 	EndedAt        string          `json:"endedAt,omitempty"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"`
 }
+
+const maxRetainedKnowledgeRecords = 10
 
 type StateStore struct {
 	Root string
@@ -117,7 +122,12 @@ func (s *StateStore) SaveRun(run SyncRun) error {
 	if run.Warnings == nil {
 		run.Warnings = []string{}
 	}
-	return atomicWriteJSON(s.projectPath(run.ProjectID, "runs", safeID(run.ID)+".json"), run)
+	target := s.projectPath(run.ProjectID, "runs", safeID(run.ID)+".json")
+	if err := atomicWriteJSON(target, run); err != nil {
+		return err
+	}
+	trimKnowledgeRuns(filepath.Dir(target), maxRetainedKnowledgeRecords)
+	return nil
 }
 
 func (s *StateStore) ListRuns(projectID string) ([]SyncRun, error) {
@@ -140,7 +150,63 @@ func (s *StateStore) ListRuns(projectID string) ([]SyncRun, error) {
 		}
 	}
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt > runs[j].StartedAt })
+	if len(runs) > maxRetainedKnowledgeRecords {
+		trimKnowledgeRuns(dir, maxRetainedKnowledgeRecords)
+		runs = runs[:maxRetainedKnowledgeRecords]
+	}
 	return runs, nil
+}
+
+func trimKnowledgeRuns(directory string, limit int) {
+	if limit <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return
+	}
+	type record struct {
+		path      string
+		startedAt time.Time
+		modTime   time.Time
+	}
+	records := make([]record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		var run SyncRun
+		if readErr := readJSONFile(filepath.Join(directory, entry.Name()), &run); readErr != nil {
+			continue
+		}
+		startedAt, parseErr := time.Parse(time.RFC3339, run.StartedAt)
+		if parseErr != nil {
+			startedAt = info.ModTime()
+		}
+		records = append(records, record{
+			path: filepath.Join(directory, entry.Name()), startedAt: startedAt, modTime: info.ModTime(),
+		})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].startedAt.Equal(records[j].startedAt) {
+			return records[i].modTime.After(records[j].modTime)
+		}
+		return records[i].startedAt.After(records[j].startedAt)
+	})
+	for _, stale := range records[minimumInt(limit, len(records)):] {
+		_ = os.Remove(stale.path)
+	}
+}
+
+func minimumInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func (s *StateStore) projectPath(projectID string, parts ...string) string {

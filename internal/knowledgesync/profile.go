@@ -194,7 +194,7 @@ func DefaultProfile() Profile {
 			},
 			Gaps: KnowledgeGraphGapSettings{CreateProposal: true},
 		},
-		Schedule:  ScheduleSettings{IntervalMinutes: 30, CommittedChangesOnly: true},
+		Schedule:  ScheduleSettings{Enabled: true, IntervalMinutes: 30, CommittedChangesOnly: true},
 		Ownership: OwnershipSettings{Owners: []string{}, RequireApproval: true},
 	}
 }

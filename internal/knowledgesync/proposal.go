@@ -22,6 +22,7 @@ const (
 	ProposalApplied      ProposalStatus = "applied"
 	ProposalRejected     ProposalStatus = "rejected"
 	ProposalStale        ProposalStatus = "stale"
+	ProposalInvalid      ProposalStatus = "invalid"
 	maxProposalFiles                    = 1000
 	maxProposalBytes                    = 8 * 1024 * 1024
 	maxProposalFileBytes                = 1024 * 1024
@@ -231,7 +232,12 @@ func (s *StateStore) SaveProposal(proposal KnowledgeProposal) error {
 	if strings.TrimSpace(proposal.ID) == "" {
 		return fmt.Errorf("proposal id is empty")
 	}
-	return atomicWriteJSON(s.projectPath(proposal.ProjectID, "proposals", safeID(proposal.ID)+".json"), proposal)
+	target := s.projectPath(proposal.ProjectID, "proposals", safeID(proposal.ID)+".json")
+	if err := atomicWriteJSON(target, proposal); err != nil {
+		return err
+	}
+	trimKnowledgeProposals(filepath.Dir(target), maxRetainedKnowledgeRecords)
+	return nil
 }
 
 func (s *StateStore) LoadProposal(projectID, proposalID string) (KnowledgeProposal, error) {
@@ -260,7 +266,56 @@ func (s *StateStore) ListProposals(projectID string) ([]KnowledgeProposal, error
 		}
 	}
 	sort.Slice(proposals, func(i, j int) bool { return proposals[i].CreatedAt > proposals[j].CreatedAt })
+	if len(proposals) > maxRetainedKnowledgeRecords {
+		trimKnowledgeProposals(dir, maxRetainedKnowledgeRecords)
+		proposals = proposals[:maxRetainedKnowledgeRecords]
+	}
 	return proposals, nil
+}
+
+func trimKnowledgeProposals(directory string, limit int) {
+	if limit <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return
+	}
+	type record struct {
+		path      string
+		createdAt time.Time
+		modTime   time.Time
+	}
+	records := make([]record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		var proposal KnowledgeProposal
+		if readErr := readJSONFile(filepath.Join(directory, entry.Name()), &proposal); readErr != nil {
+			continue
+		}
+		createdAt, parseErr := time.Parse(time.RFC3339, proposal.CreatedAt)
+		if parseErr != nil {
+			createdAt = info.ModTime()
+		}
+		records = append(records, record{
+			path: filepath.Join(directory, entry.Name()), createdAt: createdAt, modTime: info.ModTime(),
+		})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].createdAt.Equal(records[j].createdAt) {
+			return records[i].modTime.After(records[j].modTime)
+		}
+		return records[i].createdAt.After(records[j].createdAt)
+	})
+	for _, stale := range records[minimumInt(limit, len(records)):] {
+		_ = os.Remove(stale.path)
+	}
 }
 
 func ApplyProposal(ctx context.Context, runner GitRunner, store *StateStore, projectRoot string, proposal KnowledgeProposal, input ApplyProposalInput) (KnowledgeProposal, error) {

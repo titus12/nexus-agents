@@ -58,3 +58,16 @@ test("check and enrich also idempotently rebuilds the existing approved Knowledg
     "the approved index should be rebuilt only after the enrich proposal has been generated",
   );
 });
+
+test("checking Git updates runs the automatic proposal flow and exposes recent-run reasons", () => {
+  const start = app.indexOf("async function checkKnowledgeUpdatesForCurrentProject");
+  const end = app.indexOf("function selectKnowledgeProposal", start);
+  const checkFlow = app.slice(start, end);
+  assert.notEqual(start, -1, "check updates flow should exist");
+  assert.notEqual(end, -1, "proposal selection should follow check updates");
+  assert.match(checkFlow, /knowledgeOperation\.value = "auto-enrich"/);
+  assert.match(checkFlow, /checkKnowledgeUpdates/);
+  assert.match(checkFlow, /result\.proposal/);
+  assert.match(app, /knowledgeSyncRuns\.slice\(0, 10\)/);
+  assert.match(app, /run\.reason/);
+});
