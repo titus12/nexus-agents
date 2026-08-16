@@ -202,6 +202,7 @@ type FrozenPlan struct {
 	EvidenceSnapshotIDs []ID      `json:"evidence_snapshot_ids"`
 	SkillLockHash       string    `json:"skill_lock_hash"`
 	FrozenAt            time.Time `json:"frozen_at"`
+	frozen              bool
 }
 
 type ReviewAmendment struct {
