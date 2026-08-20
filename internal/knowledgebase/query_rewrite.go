@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -62,6 +63,23 @@ func rewriteKnowledgeQuery(query string, options QueryRewriteOptions) QueryRewri
 	}
 	rewritten.Used = true
 	return rewritten
+}
+
+func logQueryRewriteResult(result QueryRewriteResult) {
+	if !result.Triggered {
+		return
+	}
+	status := "success"
+	errCode := ""
+	if result.Error != "" {
+		status = "failed"
+		errCode = result.Error
+	} else if !result.Used {
+		status = "noop"
+		errCode = "no_keywords"
+	}
+	log.Printf("[knowledge] STRUCTURED: {\"event\":\"knowledge_query_rewrite\",\"original_query\":%q,\"english_query\":%q,\"keywords\":%q,\"model\":%q,\"status\":%q,\"error_code\":%q,\"used\":%t}",
+		result.OriginalQuery, result.EnglishQuery, strings.Join(result.Keywords, ","), result.Model, status, errCode, result.Used)
 }
 
 func normalizeQueryRewriteOptions(options QueryRewriteOptions) QueryRewriteOptions {

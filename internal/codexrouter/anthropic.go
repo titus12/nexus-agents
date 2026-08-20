@@ -116,6 +116,38 @@ func (s *Service) proxyAnthropicMessages(w http.ResponseWriter, r *http.Request,
 	log.Printf("[codex] -> route=%s upstream_status=%d duration_ms=%d usage_input=%s output=%s total_tokens=%d",
 		route.ID, response.StatusCode, time.Since(t0).Milliseconds(), usage.inputTokens(), usage.outputTokens(), usage.totalTokenCount())
 
+	// Structured log for provider call result
+	workflowRunID, workflowRole := s.workflowContext(r)
+	sessionID := sessionIDFromRequest(r)
+	anthropicErrorCode := ""
+	anthropicErrorType := ""
+	anthropicCode := response.StatusCode
+	if anthropicCode >= 400 {
+		anthropicErrorCode = fmt.Sprintf("http_%d", anthropicCode)
+		switch anthropicCode {
+		case 401:
+			anthropicErrorType = "auth_error"
+			anthropicErrorCode = "api_key_rejected"
+		case 403:
+			anthropicErrorType = "auth_error"
+			anthropicErrorCode = "forbidden"
+		case 429:
+			anthropicErrorType = "rate_limited"
+			anthropicErrorCode = "rate_limit_exceeded"
+		default:
+			if anthropicCode >= 500 {
+				anthropicErrorType = "upstream_error"
+				anthropicErrorCode = "provider_unavailable"
+			} else {
+				anthropicErrorType = "request_error"
+			}
+		}
+	}
+	log.Printf("[codex] STRUCTURED: {\"event\":\"agent_provider_result\",\"session_id\":%q,\"workflow_run\":%q,\"role\":%q,\"route\":%q,\"model\":%q,\"provider\":%q,\"auth_mode\":%q,\"upstream_status\":%d,\"error_code\":%q,\"error_type\":%q,\"duration_ms\":%d}",
+		stringOr(sessionID, "-"), stringOr(workflowRunID, "-"), stringOr(workflowRole, "unknown"),
+		route.ID, route.Model, route.Provider, route.AuthMode,
+		anthropicCode, anthropicErrorCode, anthropicErrorType, time.Since(t0).Milliseconds())
+
 	if converted.wantsStream {
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")

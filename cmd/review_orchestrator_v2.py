@@ -11,6 +11,9 @@ import subprocess
 import sys
 import time
 import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,6 +41,12 @@ CONFIG: Dict[str, Any] = {
     "feishu_base_url": os.environ.get("FEISHU_BASE_URL", "https://open.feishu.cn").rstrip("/"),
     "feishu_app_id": os.environ.get("FEISHU_GATE_APP_ID", ""),
     "feishu_app_secret": os.environ.get("FEISHU_GATE_APP_SECRET", ""),
+    "feishu_analyst_app_id": os.environ.get("FEISHU_ANALYST_APP_ID", ""),
+    "feishu_analyst_app_secret": os.environ.get("FEISHU_ANALYST_APP_SECRET", ""),
+    "feishu_solver_app_id": os.environ.get("FEISHU_SOLVER_APP_ID", ""),
+    "feishu_solver_app_secret": os.environ.get("FEISHU_SOLVER_APP_SECRET", ""),
+    "feishu_critic_app_id": os.environ.get("FEISHU_CRITIC_APP_ID", ""),
+    "feishu_critic_app_secret": os.environ.get("FEISHU_CRITIC_APP_SECRET", ""),
     "human_gate_chat_id": os.environ.get("HUMAN_GATE_CHAT_ID", ""),
     "project_root": os.environ.get("PROJECT_ROOT", ""),
 }
@@ -324,15 +333,90 @@ class TaskStore:
 
 
 class FeishuClient:
-    def configured(self) -> bool:
-        return bool(CONFIG["feishu_app_id"] and CONFIG["feishu_app_secret"] and CONFIG["human_gate_chat_id"])
+    def __init__(self) -> None:
+        self.base_url = CONFIG["feishu_base_url"]
+        self._tenant_tokens: Dict[str, Tuple[str, float]] = {}
+
+    def _credentials(self, role: str = "") -> Tuple[str, str]:
+        role = role if role in ("analyst", "solver", "critic") else "default"
+        if role != "default":
+            app_id = CONFIG.get("feishu_%s_app_id" % role) or CONFIG["feishu_app_id"]
+            app_secret = CONFIG.get("feishu_%s_app_secret" % role) or CONFIG["feishu_app_secret"]
+            return str(app_id), str(app_secret)
+        return str(CONFIG["feishu_app_id"]), str(CONFIG["feishu_app_secret"])
+
+    def configured(self, role: str = "") -> bool:
+        app_id, app_secret = self._credentials(role)
+        return bool(app_id and app_secret and CONFIG["human_gate_chat_id"])
 
     def send_text(self, text: str, role: str = "") -> Optional[str]:
         logger.info("Feishu[%s]: %s", role or "orchestrator", text[:500].replace("\n", " | "))
-        return None
+        if not self.configured(role):
+            return None
+        result = self._request(
+            "POST",
+            self.base_url + "/open-apis/im/v1/messages?" +
+            urllib.parse.urlencode({"receive_id_type": "chat_id"}),
+            {
+                "receive_id": CONFIG["human_gate_chat_id"],
+                "msg_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+            },
+            token=self.tenant_token(role),
+        )
+        if result.get("code") not in (0, "0"):
+            raise RuntimeError("Feishu send failed: %s" % result.get("msg"))
+        return str(result.get("data", {}).get("message_id") or "")
 
-    def list_messages(self, limit: int = 50) -> List[Dict[str, Any]]:
-        return []
+    def list_messages(self, limit: int = 50, role: str = "critic") -> List[Dict[str, Any]]:
+        if not self.configured(role):
+            return []
+        result = self._request(
+            "GET",
+            self.base_url + "/open-apis/im/v1/messages?" + urllib.parse.urlencode({
+                "container_id_type": "chat",
+                "container_id": CONFIG["human_gate_chat_id"],
+                "sort_type": "ByCreateTimeDesc",
+                "page_size": min(limit, 50),
+            }),
+            token=self.tenant_token(role),
+        )
+        if result.get("code") not in (0, "0"):
+            raise RuntimeError("Feishu list messages failed: %s" % result.get("msg"))
+        items = result.get("data", {}).get("items", [])
+        return items if isinstance(items, list) else []
+
+    def tenant_token(self, role: str = "") -> str:
+        cache_key = role if role in ("analyst", "solver", "critic") else "default"
+        cached = self._tenant_tokens.get(cache_key)
+        if cached and time.time() < cached[1] - 60:
+            return cached[0]
+        app_id, app_secret = self._credentials(role)
+        result = self._request(
+            "POST",
+            self.base_url + "/open-apis/auth/v3/tenant_access_token/internal",
+            {"app_id": app_id, "app_secret": app_secret},
+        )
+        if result.get("code") not in (0, "0"):
+            raise RuntimeError("Feishu token failed: %s" % result.get("msg"))
+        token = str(result.get("tenant_access_token") or "")
+        expires_at = time.time() + int(result.get("expire", 7200))
+        self._tenant_tokens[cache_key] = (token, expires_at)
+        return token
+
+    def _request(self, method: str, url: str, payload: Optional[Dict[str, Any]] = None,
+                 token: Optional[str] = None) -> Dict[str, Any]:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError("Feishu HTTP %d: %s" % (error.code, detail))
 
 
 def _format_human_gate_question(value: Any, limit: int = 200) -> str:
@@ -381,14 +465,17 @@ def handle_human_gate(store: TaskStore, feishu: FeishuClient, issue_id: str,
                     body = str(comment.get("content") or comment.get("body") or "")
                     if decision_id not in body:
                         continue
-                    choice = re.search(r"\b([A-Za-z])\b", body[body.index(decision_id) + len(decision_id):])
-                    if choice and choice.group(1).upper() in option_ids:
-                        selected = choice.group(1).upper()
+                    reply_text = body[body.index(decision_id) + len(decision_id):].strip()
+                    choice = re.search(r"\b([A-Za-z])\b", reply_text)
+                    selected = choice.group(1).upper() if choice and choice.group(1).upper() in option_ids else "TEXT"
+                    if reply_text:
                         decision.update({"status": "accepted", "selected": selected,
+                                         "reply_text": reply_text,
                                          "consumed_message_id": comment.get("id"), "selected_at": _now_iso()})
                         store.save_decision(decision)
-                        store.save_state({"active_decision_id": None})
-                        return selected
+                        store.save_state({"active_decision_id": None, "last_human_reply": reply_text,
+                                          "last_human_decision": selected})
+                        return reply_text
             except Exception as error:
                 logger.warning("HUMAN_GATE issue poll error: %s", error)
         try:
@@ -397,14 +484,17 @@ def handle_human_gate(store: TaskStore, feishu: FeishuClient, issue_id: str,
                 content = body.get("content", "") if isinstance(body, dict) else ""
                 if decision_id not in str(content):
                     continue
-                match = re.search(r"\b([A-Za-z])\b", str(content))
-                if match and match.group(1).upper() in option_ids:
-                    selected = match.group(1).upper()
+                reply_text = str(content).strip()
+                match = re.search(r"\b([A-Za-z])\b", reply_text)
+                selected = match.group(1).upper() if match and match.group(1).upper() in option_ids else "TEXT"
+                if reply_text:
                     decision.update({"status": "accepted", "selected": selected,
+                                     "reply_text": reply_text,
                                      "consumed_message_id": message.get("message_id"), "selected_at": _now_iso()})
                     store.save_decision(decision)
-                    store.save_state({"active_decision_id": None})
-                    return selected
+                    store.save_state({"active_decision_id": None, "last_human_reply": reply_text,
+                                      "last_human_decision": selected})
+                    return reply_text
         except Exception as error:
             logger.debug("HUMAN_GATE Feishu poll error: %s", error)
         time.sleep(max(1, int(os.environ.get("HUMAN_GATE_POLL_SEC", "8"))))
@@ -448,9 +538,35 @@ class OrchestratorV2:
 
     def _notify(self, text: str, role: str = "") -> None:
         try:
-            self.feishu.send_text(text, role=role)
+            message_id = self.feishu.send_text(text, role=role)
+            if message_id:
+                logger.debug("Feishu notification sent: role=%s message_id=%s", role, message_id)
         except Exception as error:
-            logger.debug("Feishu notify failed: %s", error)
+            logger.warning("Feishu notify failed: role=%s error=%s", role, error)
+
+    def _notify_agent_start(self, role: str, phase: str,
+                            context: Optional[Dict[str, Any]] = None) -> None:
+        context = context or {}
+        prefix = "【%s】🔍 开始工作" % self._role(role)
+        lines = [prefix, "阶段：%s" % self._phase(phase), "目标：%s" % self._clip_text(self.raw_request, 240)]
+        if phase == "zhongshu" and role == "analyst":
+            lines += ["本轮重点：核对需求、代码/文档证据、前端入口和现有方案覆盖情况。",
+                      "交付目标：形成 EvidencePacket 和 CandidateGroups。"]
+        elif phase == "zhongshu" and role == "solver":
+            lines += ["本轮重点：先拆分任务，再按目标、范围和依赖组织正式组。",
+                      "交付目标：形成可审查的 ZhongshuPlan，确保每个组都有非空任务。"]
+        elif phase == "zhongshu" and role == "critic":
+            lines += ["本轮重点：审查需求覆盖、证据充分性、组/任务结构、依赖和可验证性。",
+                      "交付目标：给出通过、修订或人工决策结论。"]
+        elif phase == "menxia":
+            group = context.get("Group", {}) if isinstance(context, dict) else {}
+            item = context.get("Item", {}) if isinstance(context, dict) else {}
+            if isinstance(group, dict):
+                lines.append("当前组：%s" % self._clip_text(group.get("title") or group.get("group_id"), 160))
+            if isinstance(item, dict):
+                lines += ["当前任务：%s" % self._clip_text(item.get("title") or item.get("item_id"), 160),
+                          "任务目标：%s" % self._clip_text(item.get("objective") or "未提供", 220)]
+        self._notify("\n".join(lines) + "\n" + self._task_ref(), role=role)
 
     @staticmethod
     def _solver_plan_payload(payload: Any) -> Dict[str, Any]:
@@ -494,25 +610,43 @@ class OrchestratorV2:
             count = sum(len(g.get("items", [])) for g in groups if isinstance(g, dict) and isinstance(g.get("items"), list))
             direction = plan.get("selected_direction", {})
             direction = direction.get("option_id") if isinstance(direction, dict) else direction
-            lines += ["", "本轮方案内容：", "• 先拆 item，再按目标和依赖组织 group",
+            lines += ["", "本轮方案内容：", "• 先拆任务，再按目标和依赖组织组",
                       "• 方案方向：%s" % self._clip_text(direction or plan.get("objective") or "未声明"),
-                      "• 方案结构：%d 个 group，%d 个 item" % (len(groups), count)]
+                      "• 方案结构：%d 个组，%d 个任务" % (len(groups), count)]
             for index, group in enumerate(groups[:4], 1):
                 if not isinstance(group, dict):
                     continue
-                lines += ["", "Group %d：%s" % (index, self._clip_text(group.get("title") or group.get("group_id"), 120)),
+                lines += ["", "第 %d 组：%s" % (index, self._clip_text(group.get("title") or group.get("group_id"), 120)),
                           "目标：%s" % self._clip_text(group.get("objective") or "未提供", 180)]
                 items = group.get("items") if isinstance(group.get("items"), list) else []
                 for item in items[:4]:
                     if isinstance(item, dict):
                         lines.append("  • %s" % self._clip_text(item.get("title") or item.get("item_id"), 130))
+                        lines.append("    目标：%s" % self._clip_text(item.get("objective") or "未提供", 180))
+                        evidence = item.get("evidence_basis") or []
+                        outputs = item.get("expected_outputs") or []
+                        dependencies = item.get("dependencies") or []
+                        if evidence:
+                            lines.append("    证据：%s" % self._clip_text(", ".join(map(str, evidence[:4])), 140))
+                        if outputs:
+                            lines.append("    产出：%s" % self._clip_text("; ".join(map(str, outputs[:2])), 180))
+                        if dependencies:
+                            lines.append("    依赖：%s" % self._clip_text(", ".join(map(str, dependencies[:4])), 140))
+                        if item.get("risk_level"):
+                            lines.append("    风险：%s" % self._clip_text(item.get("risk_level"), 80))
+            scope = plan.get("scope")
+            if isinstance(scope, dict):
+                in_scope = scope.get("in_scope") or []
+                out_scope = scope.get("out_of_scope") or []
+                lines += ["", "范围边界：", "• 纳入：%s" % self._clip_text("; ".join(map(str, in_scope[:3])), 240),
+                          "• 排除：%s" % self._clip_text("; ".join(map(str, out_scope[:3])), 240)]
             lines.append("交付物：ZhongshuPlan，完整字段已保存到 artifact")
         else:
             findings = payload.get("findings", []) if isinstance(payload, dict) else []
             questions = payload.get("questions_for_user", []) if isinstance(payload, dict) else []
             blockers = [f for f in findings if isinstance(f, dict) and f.get("severity") in ("P0", "P1")
                         and f.get("status") in ("open", "needs_human")]
-            lines += ["", "本轮审查内容：", "• 检查需求覆盖、证据、group/item、依赖和可验证性",
+            lines += ["", "本轮审查内容：", "• 检查需求覆盖、证据、组/任务、依赖和可验证性",
                       "• 结论：%d 个发现，其中 %d 个 P0/P1 阻塞问题" % (len(findings), len(blockers))]
             for finding in findings[:4]:
                 if isinstance(finding, dict):
@@ -561,9 +695,13 @@ class OrchestratorV2:
     def _dispatch_and_wait(self, workflow_state: str, phase: str, role: str,
                            extra_context: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Any], Optional[str]]:
         agent_id = CONFIG.get("agent_" + role, "")
+        context = dict(extra_context or {})
+        if self._state.get("last_human_reply"):
+            context["HumanDecisionReply"] = self._state["last_human_reply"]
         prompt = "你当前作为 review-%s，phase=%s。\n任务：%s\n\n上下文：\n%s" % (
-            role, phase.upper(), self.raw_request, _json_dump(extra_context or {}, 12000))
+            role, phase.upper(), self.raw_request, _json_dump(context, 12000))
         sent_at = _now_iso()
+        self._notify_agent_start(role, phase, extra_context)
         self._state = self.store.save_state({
             "workflow_state": workflow_state, "last_sent_at": sent_at,
             "last_agent_role": role, "last_workflow_state": workflow_state,
@@ -577,7 +715,29 @@ class OrchestratorV2:
                 except Exception as error:
                     logger.warning("agent assignment failed: %s", error)
         deadline = time.time() + CONFIG["phase_timeout"]
+        wait_started = time.time()
+        heartbeat_interval = max(30, int(os.environ.get("AGENT_HEARTBEAT_NOTIFY_SEC", "120")))
+        last_heartbeat = wait_started
         while time.time() < deadline:
+            now = time.time()
+            if now - last_heartbeat >= heartbeat_interval:
+                elapsed = int(now - wait_started)
+                self._notify(
+                    "【%s】⏳ 仍在工作中\n"
+                    "阶段：%s\n"
+                    "已用时：%s\n"
+                    "当前目标：%s\n"
+                    "状态：已派发任务，正在等待 Agent 返回结构化结果。\n"
+                    "下一步：收到有效回复后进入后续审查阶段。\n%s" % (
+                        self._role(role),
+                        self._phase(phase),
+                        self._fmt_elapsed(elapsed),
+                        self._clip_text(self.raw_request, 220),
+                        self._task_ref(),
+                    ),
+                    role=role,
+                )
+                last_heartbeat = now
             comments = cli_comment_list(self.issue_id, since=sent_at) if self.issue_id else []
             comment = find_latest_agent_comment(comments, agent_id, sent_at, role)
             if comment:
@@ -601,11 +761,36 @@ class OrchestratorV2:
         rounds = int(self._state.get("zhongshu_revision_round", 0))
         while rounds <= CONFIG["zhongshu_max_rounds"]:
             if state == "ZHONGSHU_ANALYST":
-                analyst, action = self._dispatch_and_wait(state, "zhongshu", "analyst")
+                analyst, action = self._dispatch_and_wait(
+                    state, "zhongshu", "analyst",
+                    {"HumanDecisionReply": self._state.get("last_human_reply")}
+                    if self._state.get("last_human_reply") else None,
+                )
                 if analyst is None:
                     return False
                 self.store.save_artifact("EvidencePacket", analyst, role="review-analyst")
-                state = "ZHONGSHU_SOLVER" if action == "READY_FOR_SOLVER" else state
+                questions = analyst.get("questions_for_user", []) if isinstance(analyst, dict) else []
+                if action == "HUMAN_GATE" or (action == "BLOCKED" and questions):
+                    gate = analyst.get("human_gate", {}) if isinstance(analyst, dict) else {}
+                    if not isinstance(gate, dict):
+                        gate = {}
+                    gate.setdefault("question", "分析师需要你补充信息后才能继续方案审查。")
+                    gate.setdefault("options", [
+                        {"id": "A", "label": "补充信息并继续"},
+                        {"id": "B", "label": "停止当前任务"},
+                    ])
+                    gate["questions_for_user"] = questions
+                    reply = handle_human_gate(self.store, self.feishu, self.issue_id, gate,
+                                              "zhongshu", analyst, "analyst")
+                    if not reply:
+                        self.store.save_state({"workflow_state": "WAITING_HUMAN"})
+                        return False
+                    state = "ZHONGSHU_ANALYST"
+                elif action == "BLOCKED":
+                    self.store.save_state({"workflow_state": "BLOCKED"})
+                    return False
+                else:
+                    state = "ZHONGSHU_SOLVER" if action == "READY_FOR_SOLVER" else state
             elif state == "ZHONGSHU_SOLVER":
                 solver, action = self._dispatch_and_wait(state, "zhongshu", "solver", {"EvidencePacket": analyst})
                 if solver is None:
@@ -670,10 +855,29 @@ class OrchestratorV2:
                 return False
             self.store.save_state({"workflow_state": "MENXIA_GROUP_START", "active_group_id": group_id,
                                    "active_item_id": None})
+            self._notify(
+                "【审查员】📦 开始审议组\n组：%s\n组目标：%s\n任务数：%d\n%s" % (
+                    self._clip_text(group.get("title") or group_id, 180),
+                    self._clip_text(group.get("objective") or "未提供", 240),
+                    len(items),
+                    self._task_ref(),
+                ),
+                role="critic",
+            )
             for item in items:
                 if not isinstance(item, dict):
                     return False
                 item_id = item.get("item_id")
+                self._notify(
+                    "【审查员】🧾 开始审议任务\n所属组：%s\n任务：%s\n目标：%s\n范围：%s\n%s" % (
+                        self._clip_text(group.get("title") or group_id, 160),
+                        self._clip_text(item.get("title") or item_id, 180),
+                        self._clip_text(item.get("objective") or "未提供", 240),
+                        self._clip_text(item.get("scope") or "未提供", 240),
+                        self._task_ref(),
+                    ),
+                    role="critic",
+                )
                 self.store.save_state({"workflow_state": "MENXIA_ITEM_ANALYST",
                                        "active_group_id": group_id, "active_item_id": item_id})
                 evidence, action = self._dispatch_and_wait(
@@ -737,6 +941,10 @@ def main() -> None:
     parser.add_argument("--new")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--project")
+    parser.add_argument("--project-type", default="unknown",
+                        choices=("go", "dotnet", "unity", "multi_project", "unknown"))
+    parser.add_argument("--task-type", default="review",
+                        choices=("review", "bugfix", "feature", "refactor", "test", "unknown"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.dry_run:
@@ -759,7 +967,13 @@ def main() -> None:
             issue_id = cli_issue_create("Review: " + raw_request[:60], raw_request, args.project or CONFIG["project_id"])
     if not raw_request and issue_id:
         raw_request = cli_issue_get(issue_id).get("description", "")
-    OrchestratorV2(task_id, issue_id, raw_request).run()
+    OrchestratorV2(
+        task_id,
+        issue_id,
+        raw_request,
+        project_type=args.project_type,
+        task_type=args.task_type,
+    ).run()
 
 
 if __name__ == "__main__":

@@ -557,7 +557,13 @@ func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request
 	t0 := time.Now()
 	response, err := s.client.Do(upstream)
 	if err != nil {
+		workflowRunID, workflowRole := s.workflowContext(r)
+		errorType := classifyUpstreamError(err)
 		log.Printf("[codex] -> route=%s upstream_error=%v", route.ID, err)
+		log.Printf("[codex] STRUCTURED: {\"event\":\"agent_provider_result\",\"session_id\":%q,\"workflow_run\":%q,\"role\":%q,\"route\":%q,\"model\":%q,\"provider\":%q,\"auth_mode\":%q,\"upstream_status\":502,\"error_code\":%q,\"error_type\":%q,\"duration_ms\":%d}",
+			stringOr(sessionIDFromRequest(r), "-"), stringOr(workflowRunID, "-"), stringOr(workflowRole, "unknown"),
+			route.ID, route.Model, route.Provider, route.AuthMode,
+			errorType, errorType, time.Since(t0).Milliseconds())
 		if recErr := s.recordRouteEvent(r, request, route, reqStats, http.StatusBadGateway, time.Since(t0).Milliseconds(), 0); recErr != nil {
 			log.Printf("[codex] route_event_record_error route=%s err=%v", route.ID, recErr)
 		}
@@ -582,6 +588,37 @@ func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request
 	workflowRunID, workflowRole := s.workflowContext(r)
 	log.Printf("[codex] -> session_id=%s workflow_run=%s role=%s route=%s status=%d duration_ms=%d usage_input=%s cached=%s output=%s total_tokens=%d tool_calls=%d",
 		stringOr(strings.TrimSpace(r.Header.Get("Session-Id")), "-"), stringOr(workflowRunID, "-"), stringOr(workflowRole, "unknown"), route.ID, response.StatusCode, time.Since(t0).Milliseconds(), usage.inputTokens(), usage.cachedTokens(), usage.outputTokens(), usage.totalTokenCount(), usage.toolCallCount())
+
+	// Structured log for provider call result
+	sessionID := strings.TrimSpace(r.Header.Get("Session-Id"))
+	structuredErrorCode := ""
+	structuredErrorType := ""
+	code := response.StatusCode
+	if code >= 400 {
+		structuredErrorCode = fmt.Sprintf("http_%d", code)
+		switch code {
+		case 401:
+			structuredErrorType = "auth_error"
+			structuredErrorCode = "api_key_rejected"
+		case 403:
+			structuredErrorType = "auth_error"
+			structuredErrorCode = "forbidden"
+		case 429:
+			structuredErrorType = "rate_limited"
+			structuredErrorCode = "rate_limit_exceeded"
+		default:
+			if code >= 500 {
+				structuredErrorType = "upstream_error"
+				structuredErrorCode = "provider_unavailable"
+			} else {
+				structuredErrorType = "request_error"
+			}
+		}
+	}
+	log.Printf("[codex] STRUCTURED: {\"event\":\"agent_provider_result\",\"session_id\":%q,\"workflow_run\":%q,\"role\":%q,\"route\":%q,\"model\":%q,\"provider\":%q,\"auth_mode\":%q,\"upstream_status\":%d,\"error_code\":%q,\"error_type\":%q,\"duration_ms\":%d,\"tool_calls\":%d}",
+		stringOr(sessionID, "-"), stringOr(workflowRunID, "-"), stringOr(workflowRole, "unknown"),
+		route.ID, route.Model, route.Provider, route.AuthMode,
+		code, structuredErrorCode, structuredErrorType, time.Since(t0).Milliseconds(), usage.toolCallCount())
 }
 
 // flushWriter copies response chunks and flushes after each write for SSE clients.
@@ -702,6 +739,38 @@ func (s *Service) proxyChatCompletions(w http.ResponseWriter, r *http.Request, r
 		historyMessages = append(historyMessages, assistantHistoryMessageFromChat(chat))
 		s.history.record(respID, historyMessages)
 	}
+
+	// Structured log for provider call result
+	workflowRunID, workflowRole := s.workflowContext(r)
+	sessionID := sessionIDFromRequest(r)
+	errorCode := ""
+	errorType := ""
+	code := response.StatusCode
+	if code >= 400 {
+		errorCode = fmt.Sprintf("http_%d", code)
+		switch code {
+		case 401:
+			errorType = "auth_error"
+			errorCode = "api_key_rejected"
+		case 403:
+			errorType = "auth_error"
+			errorCode = "forbidden"
+		case 429:
+			errorType = "rate_limited"
+			errorCode = "rate_limit_exceeded"
+		default:
+			if code >= 500 {
+				errorType = "upstream_error"
+				errorCode = "provider_unavailable"
+			} else {
+				errorType = "request_error"
+			}
+		}
+	}
+	log.Printf("[codex] STRUCTURED: {\"event\":\"agent_provider_result\",\"session_id\":%q,\"workflow_run\":%q,\"role\":%q,\"route\":%q,\"model\":%q,\"provider\":%q,\"auth_mode\":%q,\"upstream_status\":%d,\"error_code\":%q,\"error_type\":%q,\"duration_ms\":%d}",
+		stringOr(sessionID, "-"), stringOr(workflowRunID, "-"), stringOr(workflowRole, "unknown"),
+		route.ID, route.Model, route.Provider, route.AuthMode,
+		code, errorCode, errorType, time.Since(t0).Milliseconds())
 
 	if converted.wantsStream {
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -1228,6 +1297,27 @@ func getenvDefault(name string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func classifyUpstreamError(err error) string {
+	if err == nil {
+		return ""
+	}
+	errStr := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline"):
+		return "network_timeout"
+	case strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") || strings.Contains(errStr, "dns"):
+		return "network_unreachable"
+	case strings.Contains(errStr, "connection reset") || strings.Contains(errStr, "broken pipe") || strings.Contains(errStr, "eof"):
+		return "network_reset"
+	case strings.Contains(errStr, "tls") || strings.Contains(errStr, "certificate"):
+		return "tls_error"
+	case strings.Contains(errStr, "canceled") || strings.Contains(errStr, "cancelled"):
+		return "request_canceled"
+	default:
+		return "upstream_error"
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

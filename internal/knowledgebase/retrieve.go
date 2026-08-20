@@ -49,6 +49,7 @@ func Retrieve(projectRoot string, query string, options RetrieveOptions) (Retrie
 		sectionsByPath[section.Path] = append(sectionsByPath[section.Path], section)
 	}
 	queryRewrite := rewriteKnowledgeQuery(query, options.QueryRewrite)
+	logQueryRewriteResult(queryRewrite)
 	terms := expandQueryTerms(query)
 	if queryRewrite.Used {
 		terms = mergeQueryTerms(terms, termsFromQueryRewrite(queryRewrite))
@@ -189,6 +190,27 @@ func logRetrievalResult(result RetrievalResult) {
 		strings.Join(result.MissingFiles, ", "),
 		result.Reason,
 	)
+	// Structured log
+	requiredCount := len(result.Required)
+	optionalCount := len(result.Optional)
+	relatedCount := len(result.Related)
+	missingCount := len(result.MissingFiles)
+	usedTokens := result.TokenBudget.UsedTokens
+	maxTokens := result.TokenBudget.MaxTokens
+	rewriteStatus := "not_triggered"
+	if result.QueryRewrite.Triggered {
+		if result.QueryRewrite.Error != "" {
+			rewriteStatus = "error"
+		} else if result.QueryRewrite.Used {
+			rewriteStatus = "used"
+		} else {
+			rewriteStatus = "noop"
+		}
+	}
+	log.Printf("[knowledge] STRUCTURED: {\"event\":\"knowledge_retrieve\",\"query\":%q,\"mode\":%q,\"matched_domain\":%q,\"confidence\":%.2f,\"terms_count\":%d,\"required_count\":%d,\"optional_count\":%d,\"related_count\":%d,\"missing_count\":%d,\"used_tokens\":%d,\"max_tokens\":%d,\"rewrite_status\":%q,\"rewrite_model\":%q}",
+		result.Query, result.Mode, result.MatchedDomain, result.Confidence,
+		len(result.Terms), requiredCount, optionalCount, relatedCount, missingCount,
+		usedTokens, maxTokens, rewriteStatus, result.QueryRewrite.Model)
 }
 
 func logContextItems(items []KnowledgeContextItem, limit int) string {
