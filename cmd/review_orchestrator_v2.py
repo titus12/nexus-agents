@@ -455,7 +455,10 @@ def handle_human_gate(store: TaskStore, feishu: FeishuClient, issue_id: str,
         lines.append("  • %s" % _format_human_gate_question(question))
     lines += ["", *("%s. %s" % pair for pair in options), "",
               "回复本消息：输入选项字母，或回复：%s <选项>" % decision_id]
-    feishu.send_text("\n".join(lines), role=role)
+    gate_message_id = feishu.send_text("\n".join(lines), role=role)
+    if gate_message_id:
+        decision["gate_message_id"] = gate_message_id
+        store.save_decision(decision)
     deadline = time.time() + int(gate_request.get("timeout_sec", CONFIG["human_gate_timeout"]))
     option_ids = [item_id for item_id, _ in options]
     while time.time() < deadline:
@@ -480,11 +483,31 @@ def handle_human_gate(store: TaskStore, feishu: FeishuClient, issue_id: str,
                 logger.warning("HUMAN_GATE issue poll error: %s", error)
         try:
             for message in feishu.list_messages(50):
+                sender = message.get("sender", {})
+                if not isinstance(sender, dict) or sender.get("sender_type") != "user":
+                    continue
+                sender_id = str(sender.get("id") or "")
+                root_id = str(message.get("root_id") or "")
+                parent_id = str(message.get("parent_id") or "")
+                is_thread_reply = bool(gate_message_id and
+                                       gate_message_id in (root_id, parent_id))
+                configured_user = str(CONFIG.get("human_gate_user_open_id") or "")
+                if configured_user and sender_id != configured_user and not is_thread_reply:
+                    continue
+                if gate_message_id and not is_thread_reply:
+                    continue
                 body = message.get("body", {})
                 content = body.get("content", "") if isinstance(body, dict) else ""
-                if decision_id not in str(content):
+                try:
+                    content_obj = json.loads(content) if isinstance(content, str) else content
+                except (TypeError, json.JSONDecodeError):
+                    content_obj = content
+                if isinstance(content_obj, dict):
+                    reply_text = str(content_obj.get("text") or content_obj.get("content") or "").strip()
+                else:
+                    reply_text = str(content_obj or "").strip()
+                if not reply_text:
                     continue
-                reply_text = str(content).strip()
                 match = re.search(r"\b([A-Za-z])\b", reply_text)
                 selected = match.group(1).upper() if match and match.group(1).upper() in option_ids else "TEXT"
                 if reply_text:
@@ -804,9 +827,24 @@ class OrchestratorV2:
                     return False
                 self.store.save_artifact("ZhongshuCriticFindings", critic, role="review-critic")
                 if action == "HUMAN_GATE":
-                    handle_human_gate(self.store, self.feishu, self.issue_id, critic.get("human_gate", critic),
-                                      "zhongshu", critic, "critic")
-                    return False
+                    gate = critic.get("human_gate", {}) if isinstance(critic, dict) else {}
+                    if not isinstance(gate, dict):
+                        gate = {}
+                    gate.setdefault("question", "审查员发现以下事项需要你确认，请回复具体意见后继续。")
+                    gate.setdefault("options", [
+                        {"id": "A", "label": "确认并继续"},
+                        {"id": "B", "label": "停止当前任务"},
+                    ])
+                    questions = critic.get("questions_for_user", []) if isinstance(critic, dict) else []
+                    gate["questions_for_user"] = questions
+                    reply = handle_human_gate(self.store, self.feishu, self.issue_id, gate,
+                                              "zhongshu", critic, "critic")
+                    if not reply:
+                        self.store.save_state({"workflow_state": "WAITING_HUMAN"})
+                        return False
+                    state = "ZHONGSHU_CRITIC"
+                    self.store.save_state({"workflow_state": state})
+                    continue
                 if action == "APPROVE_FREEZE":
                     state = "ZHONGSHU_FREEZE_CHECK"
                 elif action in ("REQUEST_ANALYST_EVIDENCE",):
