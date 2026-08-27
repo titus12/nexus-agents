@@ -10,6 +10,39 @@ ROLE_NAMES = {
     "review-critic": "审查员",
 }
 
+ACTION_LABELS = {
+    "FEASIBLE": "方案已提出",
+    "EVIDENCE_SUFFICIENT": "证据审查通过",
+    "APPROVE_ITEM": "方案审查通过",
+    "REQUEST_SOLVER_REVISION": "需要规划师修订",
+    "REVISE_ITEM": "当前条目需要修订",
+    "HUMAN_GATE": "需要人工决策",
+    "APPROVE_GROUP": "当前组审查通过",
+    "DONE": "任务已完成",
+}
+
+PRESENTATION_EVENTS = {
+    "STATE_ENTER",
+    "AGENT_REPLY_ACCEPTED",
+    "AGENT_REPLY_REJECTED",
+    "AGENT_REPLY_CONTRACT_REJECTED",
+    "LOCAL_VALIDATION_PASSED",
+    "HUMAN_DECISION_RECEIVED",
+}
+
+HIDDEN_EVENTS = {
+    "HEARTBEAT",
+    "POLL_START",
+    "POLL_END",
+    "DISPATCH_START",
+    "DISPATCH_END",
+}
+
+
+def should_emit_notification(event_name: str) -> bool:
+    """Return whether an event contains developer-facing information."""
+    return event_name in PRESENTATION_EVENTS
+
 
 def build_agent_notification(
     role: str,
@@ -19,141 +52,277 @@ def build_agent_notification(
     payload: dict[str, Any] | None = None,
     limit: int = 1400,
 ) -> str:
+    """Render one concise Feishu-facing task discussion update."""
     if payload is None:
         if event_name == "STATE_ENTER":
             request_payload = getattr(ctx, "request_payload", {})
-            payload = request_payload.get("notification_payload", {}) if isinstance(request_payload, dict) else {}
+            payload = (
+                request_payload.get("notification_payload", {})
+                if isinstance(request_payload, dict)
+                else {}
+            )
         else:
             payload = getattr(ctx, "last_agent_payload", {}) or {}
-    display_role = ROLE_NAMES.get(role, role)
-    group_id = getattr(ctx, "active_group_id", None) or "未进入具体组"
-    item_id = getattr(ctx, "active_item_id", None) or "未进入具体任务"
-    lines = [f"【{display_role}】"]
-    status_text = {
-        "STATE_ENTER": "我开始处理",
-        "HEARTBEAT": "我仍在等待 Agent 回复",
-        "AGENT_TIMEOUT": "等待 Agent 回复已超时",
-        "RESUME": "我正在恢复之前的工作",
-    }.get(event_name, "我已完成")
-    lines.append(f"{status_text} {state} 阶段。")
 
-    raw_request = getattr(ctx, "raw_request", "")
-    if raw_request:
-        lines.append(f"本轮目标：{_brief(raw_request, 260)}")
-    lines.append(f"当前组：{group_id}；当前任务：{item_id}。")
+    display_role = ROLE_NAMES.get(role, role)
     if event_name == "HEARTBEAT":
         elapsed = payload.get("elapsed_seconds")
-        agent_id = payload.get("expected_agent_id")
-        lines.append(f"当前等待：{role} 返回结构化结果；已等待约 {elapsed} 秒。")
-        if agent_id:
-            lines.append(f"目标 Agent：{agent_id}。")
+        wait_for = payload.get("expected_agent_id") or role
+        return _bounded(
+            "\n".join(
+                [
+                    f"【{display_role}｜处理中】",
+                    "总体方案仍在等待 Agent 返回结构化结果。",
+                    f"已等待：{_fmt_elapsed(elapsed)}",
+                    f"等待角色：{wait_for}",
+                ]
+            ),
+            limit,
+        )
+    if not should_emit_notification(event_name):
+        return ""
 
-    request_payload = getattr(ctx, "request_payload", {})
-    active_group = request_payload.get("active_group") if isinstance(request_payload, dict) else None
-    active_item = request_payload.get("active_item") if isinstance(request_payload, dict) else None
-    if isinstance(active_group, dict):
-        title = active_group.get("title") or active_group.get("group_id") or group_id
-        objective = active_group.get("objective") or active_group.get("goal")
-        lines.append(f"组内容：{_brief(title, 140)}。")
-        if objective:
-            lines.append(f"组目标：{_brief(objective, 220)}。")
-    if isinstance(active_item, dict):
-        title = active_item.get("title") or active_item.get("item_id") or item_id
-        objective = active_item.get("objective") or active_item.get("goal")
-        lines.append(f"任务内容：{_brief(title, 160)}。")
-        if objective:
-            lines.append(f"任务目标：{_brief(objective, 240)}。")
+    lines = [f"【{display_role}｜{_state_label(state, event_name, payload)}】"]
+    lines.extend(_context_lines(ctx))
 
-    if role == "review-analyst":
-        lines.extend(_analyst_lines(payload, ctx))
+    if state == "DONE" or payload.get("action") == "DONE":
+        lines.extend(_render_final_delivery(payload, ctx))
+    elif state == "MENXIA_GROUP_GATE" or payload.get("action") == "APPROVE_GROUP":
+        lines.extend(_render_group_summary(payload, ctx))
     elif role == "review-solver":
-        lines.extend(_solver_lines(payload, ctx))
+        lines.extend(_render_solver(payload, ctx))
+    elif role == "review-analyst":
+        lines.extend(_render_analyst(payload, ctx))
     elif role == "review-critic":
-        lines.extend(_critic_lines(payload, ctx))
+        lines.extend(_render_critic(payload, ctx))
     else:
-        lines.append(f"处理事件：{event_name}。")
+        lines.append("当前任务已收到更新。")
 
-    text = "\n".join(lines)
-    return text if len(text) <= limit else text[: limit - 20].rstrip() + "\n（内容已压缩）"
+    text = "\n".join(line for line in lines if line)
+    return _bounded(text, limit)
 
 
-def _analyst_lines(payload: dict[str, Any], ctx: Any) -> list[str]:
+def _state_label(state: str, event_name: str, payload: dict[str, Any]) -> str:
+    action = payload.get("action")
+    if event_name == "STATE_ENTER":
+        return "开始处理"
+    if event_name == "LOCAL_VALIDATION_PASSED":
+        return "本地校验通过"
+    if event_name == "HUMAN_DECISION_RECEIVED":
+        return "人工决策已收到"
+    return ACTION_LABELS.get(action, "处理结果")
+
+
+def _context_lines(ctx: Any) -> list[str]:
     lines: list[str] = []
-    if getattr(ctx, "current_phase", "") == "MENXIA":
-        implementation = getattr(ctx, "request_payload", {}).get("implementation_proposal", {})
-        if implementation:
-            lines.append(f"审查对象：{_brief(implementation, 240)}")
-        lines.append("正向检查：实现是否正确、是否能复用现有能力、数据流是否完整、测试是否可验证。")
-    evidence = payload.get("evidence") or payload.get("evidence_packet")
-    tasks = payload.get("items") or payload.get("tasks")
-    groups = payload.get("groups") or payload.get("candidate_groups")
-    if evidence:
-        lines.append(f"我核对了证据：{_brief(evidence)}")
-    if isinstance(tasks, list):
-        lines.append(f"我拆分出 {len(tasks)} 个任务。")
-    if isinstance(groups, list):
-        lines.append(f"我建议按 {len(groups)} 个组组织后续工作。")
-    if payload.get("action"):
-        lines.append(f"我的结论是：{payload['action']}。")
-    return lines or ["本轮重点是核对需求覆盖、证据完整性和任务拆分。"]
+    raw_request = getattr(ctx, "raw_request", "")
+    if raw_request:
+        lines.append(f"本轮目标：{_brief(raw_request, 220)}")
+    phase = getattr(ctx, "current_phase", "")
+    if phase:
+        lines.append(f"阶段：{_phase_label(phase)}")
+    group_id = getattr(ctx, "active_group_id", None)
+    item_id = getattr(ctx, "active_item_id", None)
+    if group_id:
+        lines.append(f"当前组：{group_id}")
+    if item_id:
+        lines.append(f"当前 item：{item_id}")
+    request_payload = getattr(ctx, "request_payload", {})
+    if isinstance(request_payload, dict):
+        active_group = request_payload.get("active_group")
+        active_item = request_payload.get("active_item")
+        if isinstance(active_group, dict) and active_group.get("title"):
+            lines.append(f"组内容：{_brief(active_group['title'], 160)}")
+        if isinstance(active_group, dict) and active_group.get("objective"):
+            lines.append(f"组目标：{_brief(active_group['objective'], 200)}")
+        if isinstance(active_item, dict) and active_item.get("title"):
+            lines.append(f"任务内容：{_brief(active_item['title'], 180)}")
+        if isinstance(active_item, dict) and active_item.get("objective"):
+            lines.append(f"任务目标：{_brief(active_item['objective'], 220)}")
+    return lines
 
 
-def _solver_lines(payload: dict[str, Any], ctx: Any) -> list[str]:
-    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else payload
+def _render_solver(payload: dict[str, Any], ctx: Any) -> list[str]:
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
     groups = plan.get("groups") or plan.get("formal_groups")
-    lines: list[str] = []
+    implementation = payload.get("implementation_proposal") or payload.get("implementation")
+    if not isinstance(implementation, dict):
+        implementation = {}
+    lines = ["", "执行方案："]
     if isinstance(groups, list):
         item_count = sum(
             len(group.get("items", []))
             for group in groups
             if isinstance(group, dict) and isinstance(group.get("items"), list)
         )
-        lines.append(f"我形成了 {len(groups)} 个组、{item_count} 个任务的方案。")
-        for group in groups[:3]:
-            if isinstance(group, dict):
-                title = group.get("title") or group.get("group_id") or "未命名组"
-                objective = group.get("objective") or "未说明目标"
-                lines.append(f"组「{title}」：目标是{_brief(objective, 120)}。")
-    if getattr(ctx, "current_phase", "") == "MENXIA":
-        proposal = payload.get("implementation_proposal") if isinstance(payload, dict) else None
-        if isinstance(proposal, dict):
-            lines.append(f"本任务实现方案：{_brief(proposal, 360)}")
-        lines.append("交付内容：代码修改范围、接口调用、数据流、测试和回滚方案。")
-    if payload.get("action"):
-        lines.append(f"方案状态：{payload['action']}。")
-    return lines or ["我正在整理任务边界、依赖关系和可执行的实现方案。"]
+        lines.append(f"方案范围：{len(groups)} 个组，{item_count} 个条目")
+        for group in groups[:2]:
+            if not isinstance(group, dict):
+                continue
+            title = group.get("title") or group.get("group_id")
+            objective = group.get("objective") or group.get("goal")
+            if title:
+                lines.append(f"- {_brief(title, 140)}")
+            if objective:
+                lines.append(f"  目标：{_brief(objective, 180)}")
+    _append_field(lines, "目标", implementation.get("objective") or implementation.get("goal"), 220)
+    _append_field(
+        lines,
+        "涉及位置",
+        implementation.get("affected_modules") or implementation.get("files"),
+        220,
+    )
+    _append_field(
+        lines,
+        "执行步骤",
+        implementation.get("steps")
+        or implementation.get("control_flow")
+        or implementation.get("data_flow"),
+        260,
+    )
+    _append_field(
+        lines,
+        "验证方式",
+        implementation.get("verification")
+        or implementation.get("tests")
+        or implementation.get("validation"),
+        220,
+    )
+    _append_field(lines, "回滚方式", implementation.get("rollback"), 180)
+    action = payload.get("action")
+    if action and action not in {"FEASIBLE", "READY_FOR_CRITIC"}:
+        lines.append(f"结果：{_action_label(action)}")
+    return lines if len(lines) > 1 else ["", "规划师正在整理当前条目的执行方案。"]
 
 
-def _critic_lines(payload: dict[str, Any], ctx: Any) -> list[str]:
-    findings = payload.get("findings")
-    lines: list[str] = []
+def _render_analyst(payload: dict[str, Any], ctx: Any) -> list[str]:
+    lines = ["", "证据审查："]
     if getattr(ctx, "current_phase", "") == "MENXIA":
         implementation = getattr(ctx, "request_payload", {}).get("implementation_proposal", {})
-        analyst_review = getattr(ctx, "request_payload", {}).get("analyst_review", {})
         if implementation:
-            lines.append(f"反向审查对象：{_brief(implementation, 260)}")
-        if analyst_review:
-            lines.append(f"已参考分析师正向审查：{_brief(analyst_review, 220)}")
-        lines.append("反向检查：修改范围、兼容性、性能、安全、回滚和测试遗漏。")
-    if isinstance(findings, list):
-        counts: dict[str, int] = {}
-        for finding in findings:
-            if isinstance(finding, dict):
-                severity = str(finding.get("severity") or "未分级")
-                counts[severity] = counts.get(severity, 0) + 1
-        if counts:
-            lines.append("我发现的问题：" + "、".join(
-                f"{key} {value} 个" for key, value in counts.items()
-            ) + "。")
-        for finding in findings[:3]:
-            if isinstance(finding, dict):
-                title = finding.get("title") or finding.get("summary") or finding.get("finding_id")
-                if title:
-                    lines.append(f"重点关注：{_brief(title, 140)}。")
+            lines.append(f"审查对象：{_brief(implementation, 240)}")
+        lines.append("正向检查：实现边界、现有能力复用、数据流和验证方式。")
+    action = payload.get("action")
+    assessment = payload.get("assessment")
+    verdict = assessment or action
+    if verdict:
+        lines.append(f"结论：{_action_label(verdict)}")
+    _append_field(lines, "已确认", payload.get("confirmed_facts") or payload.get("evidence"), 300)
+    _append_field(
+        lines,
+        "证据缺口",
+        payload.get("missing_evidence") or payload.get("unknowns"),
+        260,
+    )
+    _append_field(
+        lines,
+        "后续要求",
+        payload.get("questions_for_solver") or payload.get("follow_up"),
+        260,
+    )
+    return lines if len(lines) > 2 else ["", "分析师正在核验当前条目的证据。"]
+
+
+def _render_critic(payload: dict[str, Any], ctx: Any) -> list[str]:
+    lines = ["", "方案审查："]
     action = payload.get("action")
     if action:
-        lines.append(f"审查结论：{action}。")
-    return lines or ["我正在从覆盖性、可行性和风险边界三个角度审查当前方案。"]
+        lines.append(f"结论：{_action_label(action)}")
+    findings = payload.get("findings")
+    if isinstance(findings, list) and findings:
+        lines.append("关键问题：")
+        for finding in findings[:3]:
+            if not isinstance(finding, dict):
+                continue
+            title = finding.get("title") or finding.get("claim") or finding.get("finding_id")
+            required = finding.get("required_change") or finding.get("next_action")
+            if title:
+                lines.append(f"- {_brief(title, 160)}")
+            if required:
+                lines.append(f"  要求：{_brief(required, 200)}")
+    _append_field(lines, "要求修改", payload.get("required_changes"), 300)
+    if len(lines) == 1:
+        lines.append("审查员正在检查当前方案的边界、风险和可验证性。")
+    return lines
+
+
+def _render_group_summary(payload: dict[str, Any], ctx: Any) -> list[str]:
+    lines = ["", "组级结果："]
+    action = payload.get("action")
+    if action:
+        lines.append(f"结论：{_action_label(action)}")
+    _append_field(lines, "已完成条目", payload.get("completed_item_count"), 80)
+    _append_field(lines, "修订次数", payload.get("revision_count"), 80)
+    _append_field(lines, "人工决策", payload.get("human_gate_count"), 80)
+    _append_field(
+        lines,
+        "一致性",
+        payload.get("group_consistency") or payload.get("consistency"),
+        220,
+    )
+    return lines
+
+
+def _render_final_delivery(payload: dict[str, Any], ctx: Any) -> list[str]:
+    delivery = payload.get("final_delivery") if isinstance(payload.get("final_delivery"), dict) else payload
+    lines = ["", "最终交付："]
+    _append_field(lines, "最终方案", delivery.get("items") or delivery.get("groups") or delivery.get("plan"), 420)
+    _append_field(lines, "审查结果", delivery.get("review_results") or delivery.get("outcomes"), 220)
+    _append_field(lines, "修订情况", delivery.get("revisions"), 180)
+    _append_field(lines, "剩余风险", delivery.get("remaining_risks") or delivery.get("risks"), 260)
+    lines.append("说明：方案通过不代表代码已实现或测试已执行。")
+    return lines
+
+
+def _append_field(lines: list[str], label: str, value: Any, limit: int) -> None:
+    if value is None or value == "" or value == [] or value == {}:
+        return
+    if isinstance(value, list):
+        values = [_brief(item, limit) for item in value[:4]]
+        text = "；".join(values)
+    elif isinstance(value, dict):
+        preferred = (
+            value.get("summary")
+            or value.get("description")
+            or value.get("status")
+            or value.get("objective")
+        )
+        text = _brief(preferred if preferred is not None else _compact_dict(value), limit)
+    else:
+        text = _brief(value, limit)
+    lines.append(f"{label}：{text}")
+
+
+def _action_label(action: Any) -> str:
+    return ACTION_LABELS.get(str(action), "待确认结果")
+
+
+def _phase_label(phase: str) -> str:
+    return {"ZHONGSHU": "中书省", "MENXIA": "门下省"}.get(phase, phase)
+
+
+def _fmt_elapsed(seconds: Any) -> str:
+    try:
+        value = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return "未知时长"
+    minutes, remaining = divmod(value, 60)
+    if minutes and remaining:
+        return f"{minutes} 分 {remaining} 秒"
+    if minutes:
+        return f"{minutes} 分钟"
+    return f"{remaining} 秒"
+
+
+def _compact_dict(value: dict[str, Any]) -> str:
+    parts = []
+    for key, item in value.items():
+        if item in (None, "", [], {}):
+            continue
+        parts.append(f"{key}={_brief(item, 80)}")
+        if len(parts) >= 3:
+            break
+    return "；".join(parts)
 
 
 def _brief(value: Any, limit: int = 180) -> str:
@@ -161,3 +330,9 @@ def _brief(value: Any, limit: int = 180) -> str:
         value = json.dumps(value, ensure_ascii=False)
     text = str(value).replace("\r", " ").replace("\n", " ").strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _bounded(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 9].rstrip() + "\n（内容已压缩）"

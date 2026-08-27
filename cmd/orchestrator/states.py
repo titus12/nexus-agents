@@ -13,7 +13,7 @@ from .models import AgentRequest, DeliveryReceipt, HumanGate
 from .models import AgentBinding, ExternalMessage
 from .transitions import TransitionPolicy
 from .validators import RejectedReply, validate_agent_reply
-from .notifications import build_agent_notification
+from .notifications import build_agent_notification, should_emit_notification
 
 
 logger = logging.getLogger("review_orchestrator_fsm")
@@ -66,14 +66,15 @@ class BaseState:
             if ctx.dispatch_status == "none":
                 ctx.dispatch_status = "pending"
             notify = getattr(self.feishu, "notify", None)
-            self._notify_once(
-                ctx,
-                f"{ctx.task_id}:{ctx.sequence}:{self.name}:enter",
-                notify,
-                build_agent_notification(ctx.current_role, self.name, "STATE_ENTER", ctx),
-                ctx.current_role.split("-")[-1],
-                "STATE_ENTER",
-            )
+            if should_emit_notification("STATE_ENTER"):
+                self._notify_once(
+                    ctx,
+                    f"{ctx.task_id}:{ctx.sequence}:{self.name}:enter",
+                    notify,
+                    build_agent_notification(ctx.current_role, self.name, "STATE_ENTER", ctx),
+                    ctx.current_role.split("-")[-1],
+                    "STATE_ENTER",
+                )
 
     def dispatch_pending(self, ctx: StateContext) -> None:
         self._dispatch_once(ctx)
@@ -162,10 +163,16 @@ class BaseState:
 
     def notify_heartbeat(self, ctx: StateContext, elapsed_seconds: int) -> None:
         notify = getattr(self.feishu, "notify", None)
-        if not notify or not ctx.current_role:
-            return
         ctx.updated_at = self._now()
         ctx.heartbeat_count += 1
+        logger.info(
+            "FEISHU_NOTIFY_SUPPRESSED task_id=%s state=%s role=%s event=HEARTBEAT",
+            ctx.task_id,
+            self.name,
+            ctx.current_role,
+        )
+        if not notify or not ctx.current_role or not should_emit_notification("HEARTBEAT"):
+            return
         ctx.last_heartbeat_epoch = self.clock.now().timestamp()
         text = build_agent_notification(
             ctx.current_role,
@@ -192,7 +199,7 @@ class BaseState:
         if event.name in {"AGENT_REPLY_ACCEPTED", "LOCAL_VALIDATION_PASSED"}:
             ctx.last_artifact_id = f"artifact-{ctx.sequence + 1:06d}"
         notify = getattr(self.feishu, "notify", None)
-        if event.name != "NOOP" and ctx.current_role:
+        if event.name != "NOOP" and ctx.current_role and should_emit_notification(event.name):
             self._notify_once(
                 ctx,
                 f"{ctx.task_id}:{ctx.sequence + 1}:{self.name}:exit:{event.name}",
@@ -1021,6 +1028,32 @@ class BlockedState(TerminalState):
 
 class DoneState(TerminalState):
     name = "DONE"
+
+    def enter(self, ctx: StateContext) -> None:
+        super().enter(ctx)
+        notify = getattr(self.feishu, "notify", None)
+        if not notify:
+            return
+        payload = dict(getattr(ctx, "last_agent_payload", {}) or {})
+        request_payload = getattr(ctx, "request_payload", {})
+        if isinstance(request_payload, dict):
+            final_delivery = request_payload.get("final_delivery")
+            if isinstance(final_delivery, dict):
+                payload["final_delivery"] = final_delivery
+        self._notify_once(
+            ctx,
+            f"{ctx.task_id}:{ctx.sequence}:DONE:enter",
+            notify,
+            build_agent_notification(
+                "review-critic",
+                "DONE",
+                "AGENT_REPLY_ACCEPTED",
+                ctx,
+                payload,
+            ),
+            "critic",
+            "DONE",
+        )
 
 
 class CancelledState(TerminalState):
