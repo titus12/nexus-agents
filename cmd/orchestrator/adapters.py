@@ -93,15 +93,61 @@ class MulticaCliAdapter:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.last_issue_id = ""
         self.cli_timeout_seconds = float(os.environ.get("MULTICA_CLI_TIMEOUT_SEC", "30"))
+        self.cli_read_timeout_seconds = float(
+            os.environ.get("MULTICA_CLI_READ_TIMEOUT_SEC", "60")
+        )
+        self.cli_read_retries = max(
+            0,
+            int(os.environ.get("MULTICA_CLI_READ_RETRIES", "1")),
+        )
+
+    @staticmethod
+    def _is_read_command(args: tuple[str, ...]) -> bool:
+        return (
+            len(args) >= 2
+            and args[:2] == ("issue", "get")
+        ) or (
+            len(args) >= 3
+            and args[:3] == ("issue", "comment", "list")
+        ) or (
+            len(args) >= 2
+            and args[:2] == ("issue", "runs")
+        )
+
+    def _run_with_read_retry(self, *args: str) -> object:
+        attempts = self.cli_read_retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._run(*args)
+            except RuntimeError as error:
+                is_timeout = str(error).startswith("multica CLI timed out")
+                if not is_timeout or attempt >= attempts:
+                    raise
+                backoff_seconds = 2
+                logger.warning(
+                    "MULTICA_CLI_RETRY operation=read attempt=%s next_attempt=%s "
+                    "backoff_seconds=%s reason=timeout",
+                    attempt,
+                    attempt + 1,
+                    backoff_seconds,
+                )
+                time.sleep(backoff_seconds)
+        raise AssertionError("unreachable")
 
     def _run(self, *args: str) -> object:
         command = ["multica", *args]
         started = time.monotonic()
         command_text = subprocess.list2cmdline(command)
+        timeout_seconds = (
+            self.cli_read_timeout_seconds
+            if self._is_read_command(args)
+            else self.cli_timeout_seconds
+        )
         logger.info(
-            "MULTICA_CLI_START command=%s timeout_seconds=%s",
+            "MULTICA_CLI_START command=%s timeout_seconds=%s operation=%s",
             command_text,
-            self.cli_timeout_seconds,
+            timeout_seconds,
+            "read" if self._is_read_command(args) else "write",
         )
         try:
             result = subprocess.run(
@@ -109,18 +155,19 @@ class MulticaCliAdapter:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
-                timeout=self.cli_timeout_seconds,
+                timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as error:
             duration_ms = int((time.monotonic() - started) * 1000)
             logger.error(
-                "MULTICA_CLI_TIMEOUT command=%s duration_ms=%s timeout_seconds=%s",
+                "MULTICA_CLI_TIMEOUT command=%s duration_ms=%s timeout_seconds=%s operation=%s",
                 command_text,
                 duration_ms,
-                self.cli_timeout_seconds,
+                timeout_seconds,
+                "read" if self._is_read_command(args) else "write",
             )
             raise RuntimeError(
-                f"multica CLI timed out after {self.cli_timeout_seconds}s: {command_text}"
+                f"multica CLI timed out after {timeout_seconds}s: {command_text}"
             ) from error
         duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(
@@ -173,6 +220,8 @@ class MulticaCliAdapter:
                 "role": request.role,
                 "phase": request.phase,
                 "idempotency_key": request.idempotency_key,
+                "reply_correlation_id": request.request_id,
+                "reply_mode": "REPLY_TO_TRIGGER_COMMENT",
             },
         }, ensure_ascii=False, indent=2)
         path = self.log_dir / f"dispatch_{request.request_id.replace(':', '_')}.json"
@@ -189,57 +238,142 @@ class MulticaCliAdapter:
 
     def poll(self, request: AgentRequest) -> list[ExternalMessage]:
         self.last_issue_id = request.issue_id or request.task_id
-        value = self._run("issue", "comment", "list", request.issue_id or request.task_id, "--recent", "50", "--output", "json")
-        comments = value if isinstance(value, list) else value.get("comments", value.get("items", [])) if isinstance(value, dict) else []
-        result: list[ExternalMessage] = []
-        supplemental_reports: list[str] = []
-        stats = {
-            "author_mismatch": 0,
-            "dispatch_comment": 0,
-            "stale": 0,
-            "unstructured": 0,
-            "request_mismatch": 0,
-        }
-        ordered_comments = sorted(
-            [comment for comment in comments if isinstance(comment, dict)],
-            key=lambda item: str(item.get("created_at") or ""),
+        issue_id = request.issue_id or request.task_id
+
+        def comments_from(value: object) -> list[dict]:
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                nested = value.get("comments", value.get("items", []))
+                return [item for item in nested if isinstance(item, dict)]
+            return []
+
+        def parse_comments(
+            comments: list[dict],
+            allowed_ids: set[str] | None = None,
+        ) -> tuple[list[ExternalMessage], list[str], dict[str, int], int]:
+            result: list[ExternalMessage] = []
+            supplemental_reports: list[str] = []
+            stats = {
+                "author_mismatch": 0,
+                "dispatch_comment": 0,
+                "stale": 0,
+                "unstructured": 0,
+                "request_mismatch": 0,
+                "uncorrelated": 0,
+            }
+            ordered_comments = sorted(
+                comments,
+                key=lambda item: str(item.get("created_at") or ""),
+            )
+            for comment in ordered_comments:
+                comment_id = str(comment.get("id") or "")
+                if allowed_ids is not None and comment_id not in allowed_ids:
+                    stats["uncorrelated"] += 1
+                    continue
+                body = str(comment.get("content") or comment.get("body") or "")
+                payload = _extract_json(body)
+                author_id = str(
+                    comment.get("author_id")
+                    or comment.get("creator_id")
+                    or comment.get("user_id")
+                    or ""
+                )
+                if author_id != request.agent_id:
+                    stats["author_mismatch"] += 1
+                    continue
+                if comment_id and comment_id == request.dispatch_external_message_id:
+                    stats["dispatch_comment"] += 1
+                    continue
+                created_at = str(comment.get("created_at") or "")
+                if request.sent_after and created_at and created_at <= request.sent_after:
+                    stats["stale"] += 1
+                    continue
+                if not isinstance(payload, dict) or not payload.get("action"):
+                    stats["unstructured"] += 1
+                    if body.strip():
+                        supplemental_reports.append(body)
+                    continue
+                if payload.get("request_id") and payload.get("request_id") != request.request_id:
+                    stats["request_mismatch"] += 1
+                    continue
+                payload.setdefault("task_id", request.task_id)
+                payload.setdefault("request_id", request.request_id)
+                payload.setdefault("role", request.role)
+                payload.setdefault("phase", request.phase)
+                result.append(ExternalMessage(author_id, payload, comment_id, body))
+            return result, supplemental_reports, stats, len(ordered_comments)
+
+        thread_args = ["issue", "comment", "list", issue_id]
+        if request.dispatch_external_message_id:
+            thread_args += ["--thread", request.dispatch_external_message_id, "--tail", "30"]
+            if request.sent_after:
+                thread_args += ["--since", request.sent_after]
+        else:
+            thread_args += ["--recent", "50"]
+        thread_args += ["--output", "json"]
+        value = self._run_with_read_retry(*thread_args)
+        result, supplemental_reports, stats, comments_total = parse_comments(
+            comments_from(value)
         )
-        for comment in ordered_comments:
-            body = str(comment.get("content") or comment.get("body") or "")
-            payload = _extract_json(body)
-            author_id = str(comment.get("author_id") or comment.get("creator_id") or comment.get("user_id") or "")
-            comment_id = str(comment.get("id") or "")
-            if author_id != request.agent_id:
-                stats["author_mismatch"] += 1
-                continue
-            if comment_id and comment_id == request.dispatch_external_message_id:
-                stats["dispatch_comment"] += 1
-                continue
-            created_at = str(comment.get("created_at") or "")
-            if request.sent_after and created_at and created_at <= request.sent_after:
-                stats["stale"] += 1
-                continue
-            if not isinstance(payload, dict) or not payload.get("action"):
-                stats["unstructured"] += 1
-                if body.strip():
-                    supplemental_reports.append(body)
-                continue
-            if payload.get("request_id") and payload.get("request_id") != request.request_id:
-                stats["request_mismatch"] += 1
-                continue
-            payload.setdefault("task_id", request.task_id)
-            payload.setdefault("request_id", request.request_id)
-            payload.setdefault("role", request.role)
-            payload.setdefault("phase", request.phase)
-            if supplemental_reports:
-                payload["supplemental_reports"] = list(supplemental_reports)
-            result.append(ExternalMessage(author_id, payload, comment_id, body))
+        recovery_ids: set[str] = set()
+
+        if not result and request.dispatch_external_message_id:
+            recovery_ids = self._find_correlated_delivery_ids(request)
+            if recovery_ids:
+                logger.info(
+                    "REPLY_CORRELATION_MATCH issue_id=%s task_id=%s request_id=%s "
+                    "trigger_comment_id=%s delivered_comment_ids=%s",
+                    issue_id,
+                    request.task_id,
+                    request.request_id,
+                    request.dispatch_external_message_id,
+                    sorted(recovery_ids),
+                )
+                root_value = self._run_with_read_retry(
+                    "issue", "comment", "list", issue_id,
+                    "--recent", "100", "--output", "json",
+                )
+                root_result, root_supplemental, root_stats, root_total = parse_comments(
+                    comments_from(root_value), recovery_ids
+                )
+                comments_total += root_total
+                result = root_result
+                supplemental_reports.extend(root_supplemental)
+                for key, value_count in root_stats.items():
+                    stats[key] += value_count
+                if result:
+                    logger.warning(
+                        "REPLY_ROOT_RECOVERED_BY_EXECUTION issue_id=%s task_id=%s "
+                        "request_id=%s trigger_comment_id=%s recovered_ids=%s",
+                        issue_id,
+                        request.task_id,
+                        request.request_id,
+                        request.dispatch_external_message_id,
+                        [message.external_id for message in result],
+                    )
+            else:
+                logger.info(
+                    "REPLY_CORRELATION_PENDING issue_id=%s task_id=%s request_id=%s "
+                    "trigger_comment_id=%s",
+                    issue_id,
+                    request.task_id,
+                    request.request_id,
+                    request.dispatch_external_message_id,
+                )
+
+        if supplemental_reports:
+            for message in result:
+                message.payload["supplemental_reports"] = list(supplemental_reports)
         logger.info(
-            "MULTICA_POLL_RESULT issue_id=%s task_id=%s request_id=%s comments_total=%s valid_replies=%s supplemental_reports=%s author_mismatch=%s dispatch_comment=%s stale=%s unstructured=%s request_mismatch=%s",
-            request.issue_id or request.task_id,
+            "MULTICA_POLL_RESULT issue_id=%s task_id=%s request_id=%s comments_total=%s "
+            "valid_replies=%s supplemental_reports=%s author_mismatch=%s "
+            "dispatch_comment=%s stale=%s unstructured=%s request_mismatch=%s "
+            "correlation_ids=%s",
+            issue_id,
             request.task_id,
             request.request_id,
-            len(ordered_comments),
+            comments_total,
             len(result),
             len(supplemental_reports),
             stats["author_mismatch"],
@@ -247,15 +381,60 @@ class MulticaCliAdapter:
             stats["stale"],
             stats["unstructured"],
             stats["request_mismatch"],
+            sorted(recovery_ids),
         )
         return result
+
+    def _find_correlated_delivery_ids(self, request: AgentRequest) -> set[str]:
+        issue_id = request.issue_id or request.task_id
+        try:
+            value = self._run_with_read_retry(
+                "issue", "runs", issue_id, "--output", "json"
+            )
+        except Exception as error:
+            logger.warning(
+                "REPLY_CORRELATION_LOOKUP_FAILED issue_id=%s task_id=%s "
+                "request_id=%s error=%s",
+                issue_id,
+                request.task_id,
+                request.request_id,
+                str(error)[:300],
+            )
+            return set()
+        runs = value if isinstance(value, list) else (
+            value.get("runs", value.get("items", []))
+            if isinstance(value, dict)
+            else []
+        )
+        matches = [
+            run for run in runs
+            if isinstance(run, dict)
+            and str(run.get("trigger_comment_id") or "")
+            == request.dispatch_external_message_id
+        ]
+        if not matches:
+            logger.info(
+                "REPLY_CORRELATION_MISS issue_id=%s task_id=%s request_id=%s "
+                "trigger_comment_id=%s",
+                issue_id,
+                request.task_id,
+                request.request_id,
+                request.dispatch_external_message_id,
+            )
+            return set()
+        matches.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
+        run = matches[0]
+        if str(run.get("status") or "") != "completed":
+            return set()
+        delivered = run.get("delivered_comment_ids") or []
+        return {str(comment_id) for comment_id in delivered if comment_id}
 
     def find_existing_request(self, idempotency_key: str, issue_id: str = "") -> DispatchReceipt | None:
         try:
             issue_id = issue_id or self.last_issue_id
             if not issue_id:
                 return None
-            value = self._run("issue", "comment", "list", issue_id, "--recent", "100", "--output", "json")
+            value = self._run_with_read_retry("issue", "comment", "list", issue_id, "--recent", "100", "--output", "json")
         except Exception:
             return None
         comments = value if isinstance(value, list) else value.get("comments", value.get("items", [])) if isinstance(value, dict) else []
@@ -307,7 +486,7 @@ class MulticaCliAdapter:
         return str(issue_id)
 
     def get_issue(self, issue_id: str) -> dict:
-        value = self._run("issue", "get", issue_id, "--output", "json")
+        value = self._run_with_read_retry("issue", "get", issue_id, "--output", "json")
         return value if isinstance(value, dict) else {}
 
 
@@ -357,6 +536,95 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "plan only; do not modify files or implement code. Reuse upstream "
             "evidence, stop repeated searching when evidence is sufficient, "
             "and always finish with exactly one structured JSON response."
+        )
+    elif request.phase == "ZHONGSHU" and request.role == "review-critic":
+        optional.extend([
+            "context_summary",
+            "requirement_coverage",
+            "evidence_alignment",
+            "architecture_review",
+            "reuse_review",
+            "grouping_review",
+            "dependency_review",
+            "risk_signals",
+            "findings",
+            "next_actions",
+            "remaining_blockers",
+            "questions_for_solver",
+            "questions_for_analyst",
+            "questions_for_user",
+        ])
+        allowed_actions = [
+            "APPROVE_FREEZE",
+            "REQUEST_ANALYST_EVIDENCE",
+            "REQUEST_SOLVER_REVISION",
+            "REQUEST_REGROUP",
+            "HUMAN_GATE",
+            "BLOCKED",
+        ]
+        instruction = (
+            "You are the Zhongshu plan Critic. Return one structured JSON "
+            "object with the allowed action and evidence-backed findings; do "
+            "not modify files or output final approval beyond the action."
+        )
+    elif request.phase == "MENXIA" and request.role == "review-analyst":
+        optional.extend([
+            "assessment",
+            "requirement_trace",
+            "confirmed_facts",
+            "evidence",
+            "current_behavior",
+            "existing_capabilities",
+            "dependencies_verified",
+            "missing_evidence",
+            "conflicts",
+            "unknowns",
+            "questions_for_solver",
+            "questions_for_user",
+        ])
+        allowed_actions = [
+            "EVIDENCE_SUFFICIENT",
+            "NEEDS_MORE_EVIDENCE",
+            "REQUEST_SOLVER_REVISION",
+            "HUMAN_GATE",
+            "BLOCKED",
+        ]
+        instruction = (
+            "You are the Menxia item evidence Analyst. Return one structured "
+            "JSON object with the allowed action and ItemEvidenceAudit fields."
+        )
+    elif request.phase == "MENXIA" and request.role == "review-critic":
+        optional.extend([
+            "item_reasonableness",
+            "requirement_review",
+            "evidence_review",
+            "feasibility_review",
+            "architecture_reuse_review",
+            "performance_resource_review",
+            "compatibility_review",
+            "testability_rollback_review",
+            "findings",
+            "required_changes",
+            "verification_plan",
+            "rollback_plan",
+            "remaining_risks",
+            "questions_for_user",
+        ])
+        allowed_actions = [
+            "APPROVE_ITEM",
+            "REVISE_ITEM",
+            "SPLIT_ITEM",
+            "MERGE_ITEM",
+            "REMOVE_ITEM",
+            "REQUEST_SOLVER_REVISION",
+            "APPROVE_GROUP",
+            "APPROVE_FREEZE",
+            "HUMAN_GATE",
+            "BLOCKED",
+        ]
+        instruction = (
+            "You are the Menxia item Critic. Return one structured JSON "
+            "object with action, evidence-backed findings, and review fields."
         )
     elif request.phase == "MENXIA" and request.role == "review-solver":
         optional.extend([
@@ -427,21 +695,51 @@ class FeishuHttpAdapter:
         return self.send_text(gate.prompt, "gate")
 
     def send_text(self, text: str, role: str = "gate") -> DeliveryReceipt:
-        if not self.chat_id:
-            return DeliveryReceipt("issue_fallback", delivered=False)
-        value = self._request(
-            "POST",
-            self.base_url + "/open-apis/im/v1/messages?" + urllib.parse.urlencode({"receive_id_type": "chat_id"}),
-            {
-                "receive_id": self.chat_id,
-                "msg_type": "text",
-                "content": json.dumps({"text": text}, ensure_ascii=False),
-            },
-            self._token(role),
+        logger.info(
+            "FEISHU_HTTP_SEND_START role=%s text_chars=%s chat_configured=%s",
+            role,
+            len(text),
+            bool(self.chat_id),
         )
+        if not self.chat_id:
+            logger.warning(
+                "FEISHU_HTTP_SEND_FAILED role=%s reason=missing_chat_id",
+                role,
+            )
+            return DeliveryReceipt("issue_fallback", delivered=False)
+        try:
+            value = self._request(
+                "POST",
+                self.base_url + "/open-apis/im/v1/messages?" + urllib.parse.urlencode({"receive_id_type": "chat_id"}),
+                {
+                    "receive_id": self.chat_id,
+                    "msg_type": "text",
+                    "content": json.dumps({"text": text}, ensure_ascii=False),
+                },
+                self._token(role),
+            )
+        except Exception as error:
+            logger.exception(
+                "FEISHU_HTTP_SEND_FAILED role=%s error_type=%s",
+                role,
+                type(error).__name__,
+            )
+            raise
         if value.get("code") not in (0, "0"):
+            logger.warning(
+                "FEISHU_HTTP_SEND_FAILED role=%s reason=api_error code=%s",
+                role,
+                value.get("code"),
+            )
             return DeliveryReceipt("feishu", delivered=False)
-        return DeliveryReceipt("feishu", str(value.get("data", {}).get("message_id") or ""), True)
+        message_id = str(value.get("data", {}).get("message_id") or "")
+        logger.info(
+            "FEISHU_HTTP_SEND_SUCCESS role=%s message_id=%s delivered=%s",
+            role,
+            message_id,
+            bool(message_id),
+        )
+        return DeliveryReceipt("feishu", message_id, bool(message_id))
 
     def notify(self, text: str, role: str = "gate") -> str:
         receipt = self.send_text(text, role)

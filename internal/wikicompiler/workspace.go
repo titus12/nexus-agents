@@ -17,6 +17,7 @@ type WorkspaceInput struct {
 	RunID       string
 	ProjectRoot string
 	Revision    string
+	Manifest    []string
 }
 
 type Workspace struct {
@@ -50,7 +51,12 @@ func (m *WorkspaceManager) Prepare(ctx context.Context, input WorkspaceInput) (W
 	if revision == "" {
 		revision = "HEAD"
 	}
-	command := exec.CommandContext(ctx, "git", "-C", input.ProjectRoot, "archive", "--format=tar", "-o", archivePath, revision)
+	args := []string{"-C", input.ProjectRoot, "archive", "--format=tar", "-o", archivePath, revision}
+	if len(input.Manifest) > 0 {
+		args = append(args, "--")
+		args = append(args, input.Manifest...)
+	}
+	command := exec.CommandContext(ctx, "git", args...)
 	if output, err := command.CombinedOutput(); err != nil {
 		return Workspace{}, fmt.Errorf("create isolated Git snapshot: %w: %s", err, bounded(string(output), 4096))
 	}

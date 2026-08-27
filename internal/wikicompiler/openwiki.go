@@ -91,7 +91,7 @@ func (o *OpenWiki) compile(ctx context.Context, input CompileInput, update bool)
 
 	workspace, err := o.Workspaces.Prepare(ctx, WorkspaceInput{
 		DataRoot: input.DataRoot, ProjectID: input.ProjectID, RunID: input.RunID,
-		ProjectRoot: input.ProjectRoot, Revision: input.Revision,
+		ProjectRoot: input.ProjectRoot, Revision: input.Revision, Manifest: input.ScanManifest,
 	})
 	if err != nil {
 		return GeneratedBundle{}, err

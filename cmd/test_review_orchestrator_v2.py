@@ -8,7 +8,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from orchestrator.adapters import FakeFeishuAdapter, FakeMulticaAdapter, _extract_json
+from orchestrator.adapters import (
+    FakeFeishuAdapter,
+    FakeMulticaAdapter,
+    MulticaCliAdapter,
+    _extract_json,
+)
 from orchestrator.app import OrchestratorApp, build_context
 from orchestrator.context import StateContext
 from orchestrator.events import Event
@@ -24,7 +29,6 @@ from orchestrator.state_machine import StateMachine
 from orchestrator.states import HumanGateState, build_state_registry
 from orchestrator.transitions import TransitionPolicy
 from orchestrator.validators import RejectedReply, ValidReply, validate_agent_reply
-
 
 class ReplyHandlingTests(unittest.TestCase):
     def test_freeze_check_reads_nested_solver_plan_groups(self):

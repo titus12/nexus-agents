@@ -72,6 +72,7 @@ class BaseState:
                 notify,
                 build_agent_notification(ctx.current_role, self.name, "STATE_ENTER", ctx),
                 ctx.current_role.split("-")[-1],
+                "STATE_ENTER",
             )
 
     def dispatch_pending(self, ctx: StateContext) -> None:
@@ -128,7 +129,7 @@ class BaseState:
                 "resume_state": self.name,
                 "max_retries": ctx.max_reply_retries,
             })
-        contract_error = _validate_state_payload(self.name, result.payload)
+        contract_error = _validate_state_payload(self.name, result.payload, ctx)
         if contract_error:
             logger.warning(
                 "AGENT_REPLY_CONTRACT_REJECTED task_id=%s state=%s request_id=%s external_id=%s reason=%s",
@@ -183,6 +184,7 @@ class BaseState:
             notify,
             text,
             ctx.current_role.split("-")[-1],
+            "HEARTBEAT",
         )
 
     def exit(self, ctx: StateContext, event: Event) -> None:
@@ -203,6 +205,7 @@ class BaseState:
                     event.payload if event.name == "AGENT_REPLY_ACCEPTED" else None,
                 ),
                 ctx.current_role.split("-")[-1] if ctx.current_role else "gate",
+                event.name,
             )
         ctx.active_request_id = ""
         ctx.dispatch_status = "none"
@@ -217,13 +220,62 @@ class BaseState:
         notify: Any,
         text: str,
         role: str,
+        event_name: str,
     ) -> None:
         if not notify or key in ctx.sent_notification_keys:
             return
+        logger.info(
+            "FEISHU_NOTIFY_START task_id=%s sequence=%s state=%s role=%s event=%s "
+            "notification_key=%s text_chars=%s",
+            ctx.task_id,
+            ctx.sequence,
+            ctx.workflow_state or "",
+            role,
+            event_name,
+            key,
+            len(text),
+        )
+        # Preserve the existing idempotency behavior: a notification key is
+        # consumed before the external call, so a repeated state entry cannot
+        # duplicate a notification even if the external adapter fails.
         ctx.sent_notification_keys.append(key)
         try:
-            notify(text, role)
+            message_id = notify(text, role)
+            if message_id:
+                logger.info(
+                    "FEISHU_NOTIFY_SUCCESS task_id=%s sequence=%s state=%s role=%s "
+                    "event=%s notification_key=%s message_id=%s",
+                    ctx.task_id,
+                    ctx.sequence,
+                    ctx.workflow_state or "",
+                    role,
+                    event_name,
+                    key,
+                    message_id,
+                )
+            else:
+                logger.warning(
+                    "FEISHU_NOTIFY_FAILED task_id=%s sequence=%s state=%s role=%s "
+                    "event=%s notification_key=%s reason=empty_message_id",
+                    ctx.task_id,
+                    ctx.sequence,
+                    ctx.workflow_state or "",
+                    role,
+                    event_name,
+                    key,
+                )
         except Exception as error:
+            logger.exception(
+                "FEISHU_NOTIFY_FAILED task_id=%s sequence=%s state=%s role=%s "
+                "event=%s notification_key=%s error_type=%s",
+                ctx.task_id,
+                ctx.sequence,
+                ctx.workflow_state or "",
+                role,
+                event_name,
+                key,
+                type(error).__name__,
+            )
             ctx.last_error = {
                 "code": "FEISHU_NOTIFY_FAILED",
                 "message": str(error),
@@ -239,7 +291,10 @@ class BaseState:
         if self.name == "ZHONGSHU_ANALYST":
             prompt = _zhongshu_analyst_prompt(ctx)
         elif self.name == "ZHONGSHU_SOLVER":
-            prompt = _zhongshu_solver_prompt(ctx)
+            if _is_multica_resume(ctx):
+                prompt = _zhongshu_solver_resume_prompt(ctx)
+            else:
+                prompt = _zhongshu_solver_prompt(ctx)
         elif ctx.current_phase == "MENXIA":
             prompt = json.dumps({
                 "task": ctx.raw_request,
@@ -440,7 +495,7 @@ def _zhongshu_analyst_prompt(ctx: StateContext) -> str:
         "response_contract": {
             "action": "READY_FOR_SOLVER",
             "notification": "面向人的分析摘要",
-            "plan": "必须严格匹配 required_plan_schema；不得把 plan 字段放到顶层",
+            "plan": "Plan object must match required_plan_schema; never flatten plan fields to the top level",
         },
     }
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -515,9 +570,88 @@ def _validate_analyst_plan(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _validate_state_payload(state: str, payload: dict[str, Any]) -> str:
+def _validate_state_payload(
+    state: str,
+    payload: dict[str, Any],
+    ctx: StateContext | None = None,
+) -> str:
     if state == "ZHONGSHU_ANALYST":
         return _validate_analyst_plan(payload)
+    if state == "ZHONGSHU_SOLVER":
+        analyst_plan = (
+            ctx.request_payload.get("analyst_plan")
+            if ctx is not None
+            else None
+        )
+        return _validate_solver_plan(payload, analyst_plan)
+    return ""
+
+
+def _validate_solver_plan(
+    payload: dict[str, Any],
+    analyst_plan: dict[str, Any] | None = None,
+) -> str:
+    if payload.get("action") != "READY_FOR_CRITIC":
+        return ""
+    plan = payload.get("plan")
+    if not isinstance(plan, dict):
+        return "SOLVER_PLAN_MISSING"
+    requirements = plan.get("requirements")
+    if not isinstance(requirements, list) or not requirements:
+        return "SOLVER_REQUIREMENTS_MISSING"
+    requirement_ids = [
+        str(item.get("requirement_id") or "")
+        for item in requirements
+        if isinstance(item, dict)
+    ]
+    if len(requirement_ids) != len(requirements) or any(
+        not requirement_id for requirement_id in requirement_ids
+    ):
+        return "SOLVER_REQUIREMENTS_INVALID"
+    if len(set(requirement_ids)) != len(requirement_ids):
+        return "SOLVER_REQUIREMENTS_DUPLICATE"
+    if isinstance(analyst_plan, dict):
+        analyst_requirements = analyst_plan.get("requirements")
+        if isinstance(analyst_requirements, list):
+            expected_ids = {
+                str(item.get("requirement_id") or "")
+                for item in analyst_requirements
+                if isinstance(item, dict) and item.get("requirement_id")
+            }
+            if set(requirement_ids) != expected_ids:
+                return "SOLVER_REQUIREMENTS_INCOMPLETE"
+    formal_items = plan.get("items")
+    if not isinstance(formal_items, list) or not formal_items:
+        return "SOLVER_ITEMS_MISSING"
+    formal_item_ids = [
+        str(item.get("item_id") or "")
+        for item in formal_items
+        if isinstance(item, dict)
+    ]
+    if len(formal_item_ids) != len(formal_items) or any(
+        not item_id for item_id in formal_item_ids
+    ):
+        return "SOLVER_ITEMS_INVALID"
+    if len(set(formal_item_ids)) != len(formal_item_ids):
+        return "SOLVER_ITEMS_DUPLICATE"
+    groups = plan.get("groups")
+    if not isinstance(groups, list) or not groups:
+        return "SOLVER_GROUPS_MISSING"
+    nested_item_ids: list[str] = []
+    for index, group in enumerate(groups):
+        if not isinstance(group, dict):
+            return f"SOLVER_GROUP_INVALID:{index}"
+        items = group.get("items")
+        if not isinstance(items, list) or not items:
+            return f"SOLVER_GROUP_ITEMS_MISSING:{index}"
+        for item_index, item in enumerate(items):
+            if not isinstance(item, dict) or not item.get("item_id"):
+                return f"SOLVER_GROUP_ITEM_INVALID:{index}:{item_index}"
+            nested_item_ids.append(str(item["item_id"]))
+    if len(set(nested_item_ids)) != len(nested_item_ids):
+        return "SOLVER_GROUP_ITEMS_DUPLICATE"
+    if set(nested_item_ids) != set(formal_item_ids):
+        return "SOLVER_ITEMS_INDEX_MISMATCH"
     return ""
 
 
@@ -536,12 +670,13 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
         "upstream": {
             "analyst_plan": analyst_plan,
             "critic_review": ctx.request_payload.get("zhongshu_critic_review"),
-            "critic_findings": list(ctx.findings),
-            "previous_plan": ctx.request_payload.get("candidate_plan"),
+            "previous_plan": _compact_solver_previous_plan(ctx.request_payload.get("candidate_plan")),
             "human_decision": ctx.request_payload.get("human_decision"),
         },
         "working_rules": [
             "完整复用 analyst_plan，不得遗漏 requirements、scope、unknowns 或 risks。",
+            "READY_FOR_CRITIC requires every plan.groups entry to contain a non-empty items list with item_id",
+            "Formal items and group item references must be consistent; never submit empty groups from previous_plan",
             "允许按证据需要使用只读工具，不设置固定工具调用次数。",
             "不得使用 write、edit、apply_patch 或其他修改文件的工具。",
             "不得修改业务代码、设计文件、文档或配置；本阶段只输出方案。",
@@ -551,10 +686,11 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
         ],
         "required_plan_content": {
             "requirements": "从 analyst_plan.requirements 正式化，不得丢失",
+            "items": "在 plan.items 提供完整、唯一的正式 item 集合",
             "options": "结合 candidate_directions、alternatives 和 comparison",
             "recommendation": "结合 selected_direction 和 recommendation",
-            "groups": "正式 groups，必须引用正式 items",
-            "items": "由 candidate_items 正式化，每项包含验收标准",
+            "groups": "Each formal group must contain a non-empty items list with unique item_id references",
+            "group_items": "Formalize candidate_items in groups[*].items and make them match plan.items by item_id; never return an empty list",
             "dependencies": "保留并校验 analyst_plan.dependencies",
             "scope": "保留 in_scope、out_of_scope 和 protected_paths",
             "assumptions": "显式保留并审查",
@@ -566,7 +702,7 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
             "success": {
                 "action": "READY_FOR_CRITIC",
                 "notification": "面向人的方案摘要",
-                "plan": "完整正式方案",
+                "plan": "Complete formal plan; requires plan.requirements, non-empty plan.items, and non-empty plan.groups[*].items with matching item_id values",
             },
             "human_gate": {
                 "action": "HUMAN_GATE",
@@ -580,6 +716,87 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
                 "action": "BLOCKED",
                 "notification": "说明阻塞证据和解除条件",
             },
+        },
+    }
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+
+def _compact_solver_previous_plan(value: Any) -> dict[str, Any] | None:
+    """Keep only revision-relevant structure from the prior Solver plan."""
+    if not isinstance(value, dict):
+        return None
+    plan = value.get("plan") if isinstance(value.get("plan"), dict) else value
+
+    def pick(source: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+        return {key: source[key] for key in keys if key in source}
+
+    groups: list[dict[str, Any]] = []
+    for group in plan.get("groups", []):
+        if not isinstance(group, dict):
+            continue
+        compact_group = pick(
+            group,
+            ("group_id", "title", "objective", "requirements",
+             "dependencies", "risk_level", "order", "parallelizable"),
+        )
+        compact_group["items"] = []
+        for item in group.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            compact_group["items"].append(
+                pick(item, ("item_id", "title", "objective", "dependencies"))
+            )
+        groups.append(compact_group)
+
+    items: list[dict[str, Any]] = []
+    for item in plan.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            pick(item, ("item_id", "title", "objective", "dependencies"))
+        )
+
+    compact = pick(
+        plan,
+        ("plan_id", "version", "phase", "selected_direction",
+         "dependencies", "scope", "risk_signals", "plan_status"),
+    )
+    compact["groups"] = groups
+    compact["items"] = items
+    compact["revision_note"] = (
+        "Compact prior-plan index only. Rebuild missing group items from "
+        "authoritative analyst_plan; never submit empty groups."
+    )
+    return compact
+
+
+def _is_multica_resume(ctx: StateContext) -> bool:
+    last_error = ctx.last_error if isinstance(ctx.last_error, dict) else {}
+    return str(last_error.get("code", "")) == "MULTICA_ERROR"
+
+
+def _zhongshu_solver_resume_prompt(ctx: StateContext) -> str:
+    """Resume a completed/partially completed Solver without replaying the full plan.
+
+    The previous Solver session already has the full Analyst plan. Replaying it
+    on every external retry can make the Multica comment large enough to exceed
+    the Windows process command-line limit before OpenCode starts.
+    """
+    last_error = ctx.last_error if isinstance(ctx.last_error, dict) else {}
+    value = {
+        "task": ctx.raw_request,
+        "role": "ZHONGSHU_SOLVER",
+        "mode": "PLAN_ONLY_READ_ONLY_RESUME",
+        "resume_reason": str(last_error.get("message", "previous Multica poll/dispatch failed"))[:500],
+        "instruction": (
+            "Resume the previous Solver turn. Reuse the Analyst plan and prior "
+            "tool results already present in this issue/session. Return exactly "
+            "one structured JSON response; do not repeat the full upstream plan."
+        ),
+        "response_contract": {
+            "allowed_actions": ["READY_FOR_CRITIC", "HUMAN_GATE", "BLOCKED"],
+            "required": ["action"],
         },
     }
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))

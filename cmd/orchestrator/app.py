@@ -205,13 +205,18 @@ class OrchestratorApp:
                      "MENXIA_ITEM_SOLVER", "MENXIA_ITEM_ANALYST", "MENXIA_ITEM_CRITIC",
                      "MENXIA_GROUP_GATE"}:
             if self.ctx.dispatch_status == "error":
+                error_reason = (
+                    self.ctx.last_error.get("message", "dispatch failed")
+                    if isinstance(self.ctx.last_error, dict)
+                    else str(self.ctx.last_error or "dispatch failed")
+                )
                 return Event(
                     "MULTICA_ERROR",
                     {
                         "resume_state": state,
                         "max_retries": self.ctx.max_external_retries,
+                        "reason": error_reason,
                     },
-                    reason=str(self.ctx.last_error or "dispatch failed"),
                 )
             elapsed_seconds = self._state_elapsed_seconds()
             if elapsed_seconds >= self.timeout_seconds:
@@ -229,8 +234,10 @@ class OrchestratorApp:
                 )
                 return Event(
                     "AGENT_TIMEOUT",
-                    {"request_id": self.ctx.active_request_id},
-                    reason="agent timeout",
+                    {
+                        "request_id": self.ctx.active_request_id,
+                        "reason": "agent timeout",
+                    },
                 )
             logger.info(
                 "POLL_START task_id=%s state=%s role=%s request_id=%s elapsed_seconds=%.3f timeout_seconds=%s",
