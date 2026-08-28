@@ -251,6 +251,7 @@ class MulticaCliAdapter:
         def parse_comments(
             comments: list[dict],
             allowed_ids: set[str] | None = None,
+            allow_request_fallback: bool = False,
         ) -> tuple[list[ExternalMessage], list[str], dict[str, int], int]:
             result: list[ExternalMessage] = []
             supplemental_reports: list[str] = []
@@ -294,11 +295,22 @@ class MulticaCliAdapter:
                     if body.strip():
                         supplemental_reports.append(body)
                     continue
-                if payload.get("request_id") and payload.get("request_id") != request.request_id:
-                    stats["request_mismatch"] += 1
-                    continue
-                payload.setdefault("task_id", request.task_id)
-                payload.setdefault("request_id", request.request_id)
+                payload_request_id = payload.get("request_id")
+                if payload_request_id and payload_request_id != request.request_id:
+                    if not allow_request_fallback:
+                        stats["request_mismatch"] += 1
+                        continue
+                    payload["source_request_id"] = payload_request_id
+                    payload["correlation_method"] = "issue+agent+unique_recent_reply"
+                    payload["correlation_confidence"] = "medium"
+                payload_task_id = payload.get("task_id")
+                if payload_task_id and payload_task_id != request.task_id:
+                    if not allow_request_fallback:
+                        stats["request_mismatch"] += 1
+                        continue
+                    payload["source_task_id"] = payload_task_id
+                payload["task_id"] = request.task_id
+                payload["request_id"] = request.request_id
                 payload.setdefault("role", request.role)
                 payload.setdefault("phase", request.phase)
                 result.append(ExternalMessage(author_id, payload, comment_id, body))
@@ -317,6 +329,50 @@ class MulticaCliAdapter:
             comments_from(value)
         )
         recovery_ids: set[str] = set()
+
+        if (
+            not result
+            and request.dispatch_external_message_id
+            and (
+                stats["author_mismatch"]
+                or stats["unstructured"]
+                or stats["request_mismatch"]
+            )
+        ):
+            root_value = self._run_with_read_retry(
+                "issue", "comment", "list", issue_id,
+                "--recent", "100", "--output", "json",
+            )
+            root_comments = comments_from(root_value)
+            root_result, root_supplemental, root_stats, root_total = parse_comments(
+                root_comments,
+                allow_request_fallback=True,
+            )
+            candidate_count = len(root_result)
+            if candidate_count == 1:
+                result = root_result
+                supplemental_reports.extend(root_supplemental)
+                for key, value_count in root_stats.items():
+                    stats[key] += value_count
+                comments_total += root_total
+                logger.warning(
+                    "REPLY_CORRELATION_FALLBACK_ACCEPTED issue_id=%s task_id=%s "
+                    "request_id=%s matched_by=issue+agent+unique_recent_reply "
+                    "external_id=%s",
+                    issue_id,
+                    request.task_id,
+                    request.request_id,
+                    result[0].external_id,
+                )
+            elif root_supplemental:
+                logger.info(
+                    "REPLY_SUPPLEMENTAL_ONLY issue_id=%s task_id=%s request_id=%s "
+                    "reports=%s reason=unstructured_or_ambiguous",
+                    issue_id,
+                    request.task_id,
+                    request.request_id,
+                    len(root_supplemental),
+                )
 
         if not result and request.dispatch_external_message_id:
             recovery_ids = self._find_correlated_delivery_ids(request)

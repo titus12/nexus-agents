@@ -28,10 +28,10 @@ PRESENTATION_EVENTS = {
     "AGENT_REPLY_CONTRACT_REJECTED",
     "LOCAL_VALIDATION_PASSED",
     "HUMAN_DECISION_RECEIVED",
+    "HEARTBEAT",
 }
 
 HIDDEN_EVENTS = {
-    "HEARTBEAT",
     "POLL_START",
     "POLL_END",
     "DISPATCH_START",
@@ -68,17 +68,26 @@ def build_agent_notification(
     if event_name == "HEARTBEAT":
         elapsed = payload.get("elapsed_seconds")
         wait_for = payload.get("expected_agent_id") or role
-        return _bounded(
-            "\n".join(
-                [
-                    f"【{display_role}｜处理中】",
-                    "总体方案仍在等待 Agent 返回结构化结果。",
-                    f"已等待：{_fmt_elapsed(elapsed)}",
-                    f"等待角色：{wait_for}",
-                ]
-            ),
-            limit,
+        status_by_state = {
+            "ZHONGSHU_ANALYST": "分析师正在整理证据和任务边界。",
+            "ZHONGSHU_SOLVER": "规划师正在整理执行方案。",
+            "ZHONGSHU_CRITIC": "审查员正在检查方案质量。",
+            "MENXIA_ITEM_SOLVER": "规划师正在细化当前 item 的执行方案。",
+            "MENXIA_ITEM_ANALYST": "分析师正在核验当前 item 的证据。",
+            "MENXIA_ITEM_CRITIC": "审查员正在检查当前 item 的风险和可验证性。",
+            "MENXIA_GROUP_GATE": "审查员正在汇总当前组的审查结果。",
+        }
+        lines = [f"【{display_role}｜任务仍在运行】"]
+        lines.extend(_context_lines(ctx))
+        lines.extend(
+            [
+                "",
+                f"状态：{status_by_state.get(state, '正在等待 Agent 返回结构化结果。')}",
+                f"已等待：{_fmt_elapsed(elapsed)}",
+                f"等待角色：{wait_for}",
+            ]
         )
+        return _bounded("\n".join(lines), limit)
     if not should_emit_notification(event_name):
         return ""
 

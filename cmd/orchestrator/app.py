@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import FeishuHttpAdapter, MulticaCliAdapter, SystemClock
+from .feishu_command_parser import normalize_task_request
 from .context import StateContext
 from .events import Event
 from .locks import TaskLock, TaskLockError
@@ -655,7 +656,10 @@ def main(argv: list[str] | None = None) -> int:
         ctx = store.load()
     else:
         task_id = f"task-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
-        raw_request = args.new or ""
+        try:
+            raw_request = normalize_task_request(args.new or "")
+        except ValueError as error:
+            parser.error(str(error))
         issue_id = args.issue or multica.create_issue(
             "Review: " + raw_request[:60],
             raw_request,
