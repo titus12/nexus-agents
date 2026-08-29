@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import uuid
 import json
 import logging
+import copy
 from typing import Any
 
 from .adapters import Clock, FeishuAdapter, MulticaAdapter, SystemClock
@@ -124,13 +125,25 @@ class BaseState:
                 result.reason,
             )
             ctx.last_error = {"code": "AGENT_REPLY_REJECTED", "reason": result.reason, "external_id": result.external_id}
+            ctx.request_payload["last_rejected_reply"] = copy.deepcopy(result.payload)
             ctx.reply_retry_count += 1
             return Event("AGENT_REPLY_REJECTED", {
                 "reason": result.reason,
                 "resume_state": self.name,
                 "max_retries": ctx.max_reply_retries,
             })
-        contract_error = _validate_state_payload(self.name, result.payload, ctx)
+        validated_payload = result.payload
+        if self.name == "ZHONGSHU_SOLVER":
+            validated_payload, normalization_notes = _normalize_solver_payload(result.payload)
+            if normalization_notes:
+                logger.info(
+                    "AGENT_REPLY_NORMALIZED task_id=%s state=%s request_id=%s changes=%s",
+                    ctx.task_id,
+                    self.name,
+                    ctx.active_request_id,
+                    "|".join(normalization_notes),
+                )
+        contract_error = _validate_state_payload(self.name, validated_payload, ctx)
         if contract_error:
             logger.warning(
                 "AGENT_REPLY_CONTRACT_REJECTED task_id=%s state=%s request_id=%s external_id=%s reason=%s",
@@ -145,6 +158,7 @@ class BaseState:
                 "reason": contract_error,
                 "external_id": message.external_id,
             }
+            ctx.request_payload["last_rejected_reply"] = copy.deepcopy(validated_payload)
             ctx.reply_retry_count += 1
             return Event("AGENT_REPLY_REJECTED", {
                 "reason": contract_error,
@@ -157,9 +171,9 @@ class BaseState:
             self.name,
             ctx.active_request_id,
             message.external_id,
-            result.payload.get("action"),
+            validated_payload.get("action"),
         )
-        return Event("AGENT_REPLY_ACCEPTED", result.payload)
+        return Event("AGENT_REPLY_ACCEPTED", validated_payload)
 
     def notify_heartbeat(self, ctx: StateContext, elapsed_seconds: int) -> None:
         notify = getattr(self.feishu, "notify", None)
@@ -315,6 +329,7 @@ class BaseState:
                 "human_decision": human_decision,
                 "instruction": "Apply the user's human-gate decision to the existing issue history and produce the next structured protocol response.",
             }, ensure_ascii=False)
+        prompt = _attach_repair_feedback(prompt, ctx)
         return AgentRequest(
             task_id=ctx.task_id,
             request_id=ctx.active_request_id,
@@ -414,6 +429,38 @@ ANALYST_PLAN_REQUIRED_FIELDS = {
 }
 
 
+def _attach_repair_feedback(prompt: str, ctx: StateContext) -> str:
+    last_error = ctx.last_error if isinstance(ctx.last_error, dict) else {}
+    code = str(last_error.get("code", ""))
+    reason = str(last_error.get("reason") or last_error.get("message") or "")
+    repairable = code == "AGENT_REPLY_CONTRACT_REJECTED" or (
+        code == "AGENT_REPLY_REJECTED"
+        and reason == "INVALID_ACTION"
+    )
+    if not repairable:
+        return prompt
+    feedback = {
+        "validation_error": reason[:500],
+        "original_reply": copy.deepcopy(
+            ctx.request_payload.get("last_rejected_reply")
+        ),
+        "instruction": (
+            "This is a bounded structure-repair turn. Preserve confirmed facts, "
+            "requirements, items, evidence, scope, and decisions. Only repair "
+            "the reported protocol error; do not restart investigation, invent "
+            "facts, or change the workflow decision. Return one complete JSON."
+        ),
+    }
+    try:
+        value = json.loads(prompt)
+    except (TypeError, json.JSONDecodeError):
+        value = {"task": ctx.raw_request}
+    if not isinstance(value, dict):
+        value = {"task": ctx.raw_request}
+    value["repair_feedback"] = feedback
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def _zhongshu_analyst_prompt(ctx: StateContext) -> str:
     value = {
         "task": ctx.raw_request,
@@ -505,6 +552,31 @@ def _zhongshu_analyst_prompt(ctx: StateContext) -> str:
             "plan": "Plan object must match required_plan_schema; never flatten plan fields to the top level",
         },
     }
+    critic_review = ctx.request_payload.get("zhongshu_critic_review")
+    if (
+        isinstance(critic_review, dict)
+        and critic_review.get("action") == "REQUEST_ANALYST_EVIDENCE"
+    ):
+        value["critic_feedback"] = {
+            "action": "REQUEST_ANALYST_EVIDENCE",
+            "findings": copy.deepcopy(critic_review.get("findings") or []),
+            "missing_evidence": copy.deepcopy(
+                critic_review.get("missing_evidence")
+                or critic_review.get("questions_for_analyst")
+                or []
+            ),
+            "questions_for_analyst": copy.deepcopy(
+                critic_review.get("questions_for_analyst") or []
+            ),
+            "remaining_blockers": copy.deepcopy(
+                critic_review.get("remaining_blockers") or []
+            ),
+        }
+        value["repair_instruction"] = (
+            "只针对 Critic 指定的证据缺口补证，不重新开始无关分析；"
+            "逐条回应 questions_for_analyst，保留原有有效事实，"
+            "无法确认的内容标记为 unknown。"
+        )
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -662,6 +734,59 @@ def _validate_solver_plan(
     return ""
 
 
+def _normalize_solver_payload(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    '''Normalize deterministic Solver group references before strict validation.'''
+    normalized = copy.deepcopy(payload)
+    if normalized.get("action") != "READY_FOR_CRITIC":
+        return normalized, []
+    plan = normalized.get("plan")
+    if not isinstance(plan, dict):
+        return normalized, []
+    formal_items = plan.get("items")
+    if not isinstance(formal_items, list):
+        return normalized, []
+    item_by_id = {
+        str(item.get("item_id")): item
+        for item in formal_items
+        if isinstance(item, dict) and item.get("item_id")
+    }
+    groups = plan.get("groups")
+    if not isinstance(groups, list):
+        return normalized, []
+
+    notes: list[str] = []
+    for group_index, group in enumerate(groups):
+        if not isinstance(group, dict):
+            continue
+        references = None
+        source_name = ""
+        if isinstance(group.get("item_ids"), list):
+            references = group.get("item_ids")
+            source_name = "item_ids"
+        elif (
+            isinstance(group.get("items"), list)
+            and group.get("items")
+            and all(isinstance(item, str) for item in group.get("items", []))
+        ):
+            references = group.get("items")
+            source_name = "items"
+        if references is None:
+            continue
+        resolved = [
+            copy.deepcopy(item_by_id[str(item_id)])
+            for item_id in references
+            if str(item_id) in item_by_id
+        ]
+        if len(resolved) != len(references):
+            continue
+        group["items"] = resolved
+        group.pop("item_ids", None)
+        notes.append(f"groups[{group_index}].{source_name}->items")
+    return normalized, notes
+
+
 def _zhongshu_solver_prompt(ctx: StateContext) -> str:
     analyst_plan = ctx.request_payload.get("analyst_plan")
     if not isinstance(analyst_plan, dict):
@@ -682,8 +807,8 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
         },
         "working_rules": [
             "完整复用 analyst_plan，不得遗漏 requirements、scope、unknowns 或 risks。",
-            "READY_FOR_CRITIC requires every plan.groups entry to contain a non-empty items list with item_id",
-            "Formal items and group item references must be consistent; never submit empty groups from previous_plan",
+            "READY_FOR_CRITIC requires every plan.groups entry to contain a non-empty item_ids list",
+            "Formal groups must reference plan.items only through item_ids; never submit empty groups or unknown item_ids",
             "允许按证据需要使用只读工具，不设置固定工具调用次数。",
             "不得使用 write、edit、apply_patch 或其他修改文件的工具。",
             "不得修改业务代码、设计文件、文档或配置；本阶段只输出方案。",
@@ -696,8 +821,8 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
             "items": "在 plan.items 提供完整、唯一的正式 item 集合",
             "options": "结合 candidate_directions、alternatives 和 comparison",
             "recommendation": "结合 selected_direction 和 recommendation",
-            "groups": "Each formal group must contain a non-empty items list with unique item_id references",
-            "group_items": "Formalize candidate_items in groups[*].items and make them match plan.items by item_id; never return an empty list",
+            "groups": "Each formal group must contain a non-empty item_ids list with unique references to plan.items",
+            "group_items": "Use groups[*].item_ids as references to the complete objects in plan.items; match plan.items by item_id; do not copy item objects into groups and do not return strings outside item_ids",
             "dependencies": "保留并校验 analyst_plan.dependencies",
             "scope": "保留 in_scope、out_of_scope 和 protected_paths",
             "assumptions": "显式保留并审查",
@@ -705,11 +830,26 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
             "risk_signals": "吸收 analyst_plan.risks 和风险信号",
             "candidate_verification_questions": "转为 Critic 可执行的问题",
         },
+        "output_example": {
+            "action": "READY_FOR_CRITIC",
+            "plan": {
+                "items": [{
+                    "item_id": "item-000001",
+                    "title": "string",
+                    "objective": "string"
+                }],
+                "groups": [{
+                    "group_id": "group-000001",
+                    "title": "string",
+                    "item_ids": ["item-000001"]
+                }]
+            }
+        },
         "response_contract": {
             "success": {
                 "action": "READY_FOR_CRITIC",
                 "notification": "面向人的方案摘要",
-                "plan": "Complete formal plan; requires plan.requirements, non-empty plan.items, and non-empty plan.groups[*].items with matching item_id values",
+                "plan": "Complete formal plan; requires plan.requirements, non-empty plan.items, and non-empty plan.groups[*].item_ids referencing every plan.items item exactly once",
             },
             "human_gate": {
                 "action": "HUMAN_GATE",
@@ -725,6 +865,15 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
             },
         },
     }
+    last_error = ctx.last_error if isinstance(ctx.last_error, dict) else {}
+    if str(last_error.get("code", "")) == "AGENT_REPLY_CONTRACT_REJECTED":
+        value["repair_feedback"] = {
+            "validation_error": str(last_error.get("reason", ""))[:300],
+            "instruction": (
+                "This is a structure repair turn. Preserve all facts and items; "
+                "only correct the reported contract error and return one complete JSON response."
+            ),
+        }
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -1026,6 +1175,40 @@ class BlockedState(TerminalState):
     name = "BLOCKED"
 
 
+def _build_final_delivery(ctx: StateContext) -> dict[str, Any]:
+    request_payload = getattr(ctx, "request_payload", {})
+    plan = (
+        request_payload.get("candidate_plan")
+        if isinstance(request_payload, dict)
+        else None
+    )
+    plan = plan if isinstance(plan, dict) else {}
+    groups = plan.get("groups") or plan.get("formal_groups") or []
+    items = plan.get("items") or []
+    findings = getattr(ctx, "findings", [])
+    active_findings = [
+        finding for finding in findings
+        if isinstance(finding, dict)
+        and str(finding.get("status", "")).upper()
+        not in {"RESOLVED", "WONT_FIX", "DEFERRED"}
+    ]
+    deferred_findings = [
+        finding for finding in findings
+        if isinstance(finding, dict)
+        and str(finding.get("status", "")).upper() in {"DEFERRED", "WONT_FIX"}
+    ]
+    return {
+        "groups": copy.deepcopy(groups),
+        "items": copy.deepcopy(items),
+        "review_results": {
+            "status": "APPROVED",
+            "active_finding_count": len(active_findings),
+            "deferred_finding_count": len(deferred_findings),
+        },
+        "remaining_risks": copy.deepcopy(deferred_findings),
+    }
+
+
 class DoneState(TerminalState):
     name = "DONE"
 
@@ -1038,8 +1221,10 @@ class DoneState(TerminalState):
         request_payload = getattr(ctx, "request_payload", {})
         if isinstance(request_payload, dict):
             final_delivery = request_payload.get("final_delivery")
-            if isinstance(final_delivery, dict):
-                payload["final_delivery"] = final_delivery
+            if not isinstance(final_delivery, dict):
+                final_delivery = _build_final_delivery(ctx)
+                request_payload["final_delivery"] = final_delivery
+            payload["final_delivery"] = final_delivery
         self._notify_once(
             ctx,
             f"{ctx.task_id}:{ctx.sequence}:DONE:enter",

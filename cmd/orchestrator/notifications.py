@@ -159,21 +159,32 @@ def _render_solver(payload: dict[str, Any], ctx: Any) -> list[str]:
         implementation = {}
     lines = ["", "执行方案："]
     if isinstance(groups, list):
+        item_by_id = {
+            str(item.get("item_id")): item
+            for item in plan.get("items", [])
+            if isinstance(item, dict) and item.get("item_id")
+        }
+        rendered_groups = [
+            group for group in groups
+            if isinstance(group, dict)
+        ]
         item_count = sum(
-            len(group.get("items", []))
-            for group in groups
-            if isinstance(group, dict) and isinstance(group.get("items"), list)
+            len(_notification_group_items(group, item_by_id))
+            for group in rendered_groups
         )
-        lines.append(f"方案范围：{len(groups)} 个组，{item_count} 个条目")
-        for group in groups[:2]:
-            if not isinstance(group, dict):
-                continue
+        lines.append(f"方案范围：{len(rendered_groups)} 个组，{item_count} 个条目")
+        for group_index, group in enumerate(rendered_groups):
             title = group.get("title") or group.get("group_id")
             objective = group.get("objective") or group.get("goal")
             if title:
-                lines.append(f"- {_brief(title, 140)}")
+                lines.append(f"{group_index + 1}. {_brief(title, 140)}")
             if objective:
-                lines.append(f"  目标：{_brief(objective, 180)}")
+                lines.append(f"   目标：{_brief(objective, 180)}")
+            for item in _notification_group_items(group, item_by_id):
+                item_id = str(item.get("item_id") or "")
+                item_title = item.get("title") or item.get("objective") or item_id
+                if item_id and item_title:
+                    lines.append(f"   - {item_id}：{_brief(item_title, 180)}")
     _append_field(lines, "目标", implementation.get("objective") or implementation.get("goal"), 220)
     _append_field(
         lines,
@@ -202,6 +213,30 @@ def _render_solver(payload: dict[str, Any], ctx: Any) -> list[str]:
     if action and action not in {"FEASIBLE", "READY_FOR_CRITIC"}:
         lines.append(f"结果：{_action_label(action)}")
     return lines if len(lines) > 1 else ["", "规划师正在整理当前条目的执行方案。"]
+
+
+def _notification_group_items(
+    group: dict[str, Any],
+    item_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    items = group.get("items")
+    if isinstance(items, list):
+        if all(isinstance(item, dict) for item in items):
+            return [item for item in items if item.get("item_id")]
+        if all(isinstance(item, str) for item in items):
+            return [
+                item_by_id[item]
+                for item in items
+                if item in item_by_id
+            ]
+    item_ids = group.get("item_ids")
+    if isinstance(item_ids, list):
+        return [
+            item_by_id[str(item_id)]
+            for item_id in item_ids
+            if str(item_id) in item_by_id
+        ]
+    return []
 
 
 def _render_analyst(payload: dict[str, Any], ctx: Any) -> list[str]:
@@ -239,20 +274,64 @@ def _render_critic(payload: dict[str, Any], ctx: Any) -> list[str]:
         lines.append(f"结论：{_action_label(action)}")
     findings = payload.get("findings")
     if isinstance(findings, list) and findings:
-        lines.append("关键问题：")
-        for finding in findings[:3]:
+        severity_counts: dict[str, int] = {}
+        for finding in findings:
             if not isinstance(finding, dict):
                 continue
+            severity = _finding_severity(finding)
+            if severity:
+                severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        if severity_counts:
+            summary = "，".join(
+                f"{severity}×{severity_counts[severity]}"
+                for severity in ("P0", "P1", "P2", "P3")
+                if severity in severity_counts
+            )
+            lines.append(f"问题等级：{summary}")
+        lines.append("关键问题：")
+        for finding in findings[:4]:
+            if not isinstance(finding, dict):
+                continue
+            severity = _finding_severity(finding)
+            status = _finding_status(finding)
             title = finding.get("title") or finding.get("claim") or finding.get("finding_id")
-            required = finding.get("required_change") or finding.get("next_action")
+            required = (
+                finding.get("required_change")
+                or finding.get("required_action")
+                or finding.get("next_action")
+            )
+            prefix = "、".join(value for value in (severity, status) if value)
             if title:
-                lines.append(f"- {_brief(title, 160)}")
+                lines.append(
+                    f"- [{prefix}] {_brief(title, 180)}"
+                    if prefix
+                    else f"- {_brief(title, 180)}"
+                )
             if required:
-                lines.append(f"  要求：{_brief(required, 200)}")
+                lines.append(f"  要求：{_brief(required, 220)}")
     _append_field(lines, "要求修改", payload.get("required_changes"), 300)
     if len(lines) == 1:
         lines.append("审查员正在检查当前方案的边界、风险和可验证性。")
     return lines
+
+
+def _finding_severity(finding: dict[str, Any]) -> str:
+    value = str(finding.get("severity") or finding.get("priority") or "").upper()
+    return value if value in {"P0", "P1", "P2", "P3"} else ""
+
+
+def _finding_status(finding: dict[str, Any]) -> str:
+    status = str(finding.get("status") or "").upper()
+    if status in {"DEFERRED", "FOLLOW_UP", "ACCEPTED_RISK"}:
+        return "非阻塞·已延期"
+    if status in {"RESOLVED", "WONT_FIX"}:
+        return "已处理"
+    if status in {"OPEN", "ASSIGNED_TO_ANALYST", "ASSIGNED_TO_SOLVER", "IN_REVIEW", "REOPENED"}:
+        severity = _finding_severity(finding)
+        return "阻塞" if severity in {"P0", "P1"} else "待处理"
+    if finding.get("blocking") is True:
+        return "阻塞"
+    return ""
 
 
 def _render_group_summary(payload: dict[str, Any], ctx: Any) -> list[str]:
@@ -263,6 +342,36 @@ def _render_group_summary(payload: dict[str, Any], ctx: Any) -> list[str]:
     _append_field(lines, "已完成条目", payload.get("completed_item_count"), 80)
     _append_field(lines, "修订次数", payload.get("revision_count"), 80)
     _append_field(lines, "人工决策", payload.get("human_gate_count"), 80)
+    findings = payload.get("findings")
+    if isinstance(findings, list) and findings:
+        severity_counts: dict[str, int] = {}
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            severity = _finding_severity(finding)
+            if severity:
+                severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        if severity_counts:
+            summary = "，".join(
+                f"{severity}×{severity_counts[severity]}"
+                for severity in ("P0", "P1", "P2", "P3")
+                if severity in severity_counts
+            )
+            lines.append(f"问题等级：{summary}")
+        for finding in findings[:3]:
+            if not isinstance(finding, dict):
+                continue
+            severity = _finding_severity(finding)
+            status = _finding_status(finding)
+            title = finding.get("title") or finding.get("claim") or finding.get("finding_id")
+            if not title:
+                continue
+            prefix = "、".join(value for value in (severity, status) if value)
+            lines.append(
+                f"关键问题：[{prefix}] {_brief(title, 180)}"
+                if prefix
+                else f"关键问题：{_brief(title, 180)}"
+            )
     _append_field(
         lines,
         "一致性",
@@ -273,9 +382,33 @@ def _render_group_summary(payload: dict[str, Any], ctx: Any) -> list[str]:
 
 
 def _render_final_delivery(payload: dict[str, Any], ctx: Any) -> list[str]:
-    delivery = payload.get("final_delivery") if isinstance(payload.get("final_delivery"), dict) else payload
-    lines = ["", "最终交付："]
-    _append_field(lines, "最终方案", delivery.get("items") or delivery.get("groups") or delivery.get("plan"), 420)
+    delivery = (
+        payload.get("final_delivery")
+        if isinstance(payload.get("final_delivery"), dict)
+        else payload
+    )
+    lines = ["", "最终交付方案："]
+    groups = delivery.get("groups")
+    if isinstance(groups, list) and groups:
+        item_by_id = {
+            str(item.get("item_id")): item
+            for item in delivery.get("items", [])
+            if isinstance(item, dict) and item.get("item_id")
+        }
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                continue
+            title = group.get("title") or group.get("group_id")
+            if title:
+                lines.append(f"{group_index + 1}. {_brief(title, 180)}")
+            group_items = _notification_group_items(group, item_by_id)
+            for item in group_items:
+                item_id = str(item.get("item_id") or "")
+                item_title = item.get("title") or item.get("objective") or item_id
+                if item_id and item_title:
+                    lines.append(f"   - {item_id}：{_brief(item_title, 180)}")
+    else:
+        _append_field(lines, "方案", delivery.get("items") or delivery.get("plan"), 420)
     _append_field(lines, "审查结果", delivery.get("review_results") or delivery.get("outcomes"), 220)
     _append_field(lines, "修订情况", delivery.get("revisions"), 180)
     _append_field(lines, "剩余风险", delivery.get("remaining_risks") or delivery.get("risks"), 260)
