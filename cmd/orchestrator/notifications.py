@@ -108,7 +108,55 @@ def build_agent_notification(
         lines.append("当前任务已收到更新。")
 
     text = "\n".join(line for line in lines if line)
-    return _bounded(text, limit)
+    if state == "DONE":
+        render_limit = limit
+    elif state == "MENXIA_ITEM_ANALYST" and event_name == "AGENT_REPLY_ACCEPTED":
+        render_limit = 2200
+    else:
+        render_limit = limit
+    return _bounded(text, render_limit)
+
+
+def build_agent_notification_parts(
+    role: str,
+    state: str,
+    event_name: str,
+    ctx: Any,
+    payload: dict[str, Any] | None = None,
+    limit: int = 2600,
+) -> list[str]:
+    """Render DONE as bounded Feishu messages without dropping delivery fields."""
+    if state != "DONE":
+        text = build_agent_notification(role, state, event_name, ctx, payload, limit)
+        return [text] if text else []
+    full_text = build_agent_notification(
+        role,
+        state,
+        event_name,
+        ctx,
+        payload,
+        limit=100000,
+    )
+    if len(full_text) <= limit:
+        return [full_text]
+    lines = full_text.splitlines()
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in lines:
+        extra = len(line) + (1 if current else 0)
+        if current and current_length + extra > limit:
+            chunks.append("\n".join(current))
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += len(line) + (1 if len(current) > 1 else 0)
+    if current:
+        chunks.append("\n".join(current))
+    if len(chunks) > 1:
+        for index in range(1, len(chunks)):
+            chunks[index] = "【任务已完成｜最终交付方案（续）】\n" + chunks[index]
+    return chunks
 
 
 def _state_label(state: str, event_name: str, payload: dict[str, Any]) -> str:
@@ -240,31 +288,82 @@ def _notification_group_items(
 
 
 def _render_analyst(payload: dict[str, Any], ctx: Any) -> list[str]:
-    lines = ["", "证据审查："]
+    lines = ["", "\u8bc1\u636e\u5ba1\u67e5："]
     if getattr(ctx, "current_phase", "") == "MENXIA":
         implementation = getattr(ctx, "request_payload", {}).get("implementation_proposal", {})
-        if implementation:
-            lines.append(f"审查对象：{_brief(implementation, 240)}")
-        lines.append("正向检查：实现边界、现有能力复用、数据流和验证方式。")
+        if isinstance(implementation, dict) and implementation.get("objective"):
+            lines.append(f"\u5ba1\u67e5\u5bf9\u8c61：{_brief(implementation.get('objective'), 220)}")
+        lines.append("\u68c0\u67e5\u91cd\u70b9：\u5b9e\u73b0\u8fb9\u754c、\u73b0\u6709\u80fd\u529b\u590d\u7528、\u6570\u636e\u6d41和\u9a8c\u8bc1\u65b9\u5f0f。")
     action = payload.get("action")
     assessment = payload.get("assessment")
     verdict = assessment or action
     if verdict:
-        lines.append(f"结论：{_action_label(verdict)}")
-    _append_field(lines, "已确认", payload.get("confirmed_facts") or payload.get("evidence"), 300)
-    _append_field(
-        lines,
-        "证据缺口",
-        payload.get("missing_evidence") or payload.get("unknowns"),
-        260,
-    )
-    _append_field(
-        lines,
-        "后续要求",
-        payload.get("questions_for_solver") or payload.get("follow_up"),
-        260,
-    )
-    return lines if len(lines) > 2 else ["", "分析师正在核验当前条目的证据。"]
+        lines.append(f"\u7ed3\u8bba：{_action_label(verdict)}")
+
+    facts = payload.get("confirmed_facts") or payload.get("evidence")
+    _append_analyst_entries(lines, "\u5df2\u786e\u8ba4", facts, 4, 190)
+
+    gaps = payload.get("missing_evidence") or payload.get("unknowns")
+    _append_analyst_entries(lines, "\u8bc1\u636e\u7f3a\u53e3 / \u672a\u77e5", gaps, 3, 190)
+
+    trace = payload.get("requirement_trace")
+    _append_analyst_trace(lines, trace)
+
+    questions = payload.get("questions_for_solver") or payload.get("follow_up")
+    _append_analyst_entries(lines, "\u540e\u7eed\u8981\u6c42", questions, 3, 190)
+    _append_analyst_entries(lines, "\u9700\u8981\u7528\u6237\u786e\u8ba4", payload.get("questions_for_user"), 2, 180)
+    return lines if len(lines) > 2 else ["", "\u5206\u6790\u5e08\u6b63\u5728\u6838\u9a8c\u5f53\u524d\u6761\u76ee\u7684\u8bc1\u636e。"]
+
+
+def _append_analyst_trace(lines: list[str], value: Any) -> None:
+    if not isinstance(value, dict):
+        return
+    status = value.get("status")
+    covered = value.get("covered") or []
+    partial = value.get("partial") or []
+    missing = value.get("missing") or []
+    parts = []
+    if status:
+        parts.append(f"status={status}")
+    if covered:
+        parts.append(f"covered={','.join(str(item) for item in covered[:8])}")
+    if partial:
+        parts.append(f"partial={','.join(str(item) for item in partial[:8])}")
+    if missing:
+        parts.append(f"missing={','.join(str(item) for item in missing[:8])}")
+    if parts:
+        lines.append(f"\u9700\u6c42\u8986\u76d6\uff1a{'; '.join(parts)}")
+
+
+def _append_analyst_entries(
+    lines: list[str],
+    label: str,
+    value: Any,
+    max_items: int,
+    item_limit: int,
+) -> None:
+    if value is None or value == "" or value == [] or value == {}:
+        return
+    entries = value if isinstance(value, list) else [value]
+    lines.append(f"{label}：")
+    for entry in entries[:max_items]:
+        if isinstance(entry, dict):
+            evidence_id = str(entry.get("evidence_id") or entry.get("id") or "")
+            statement = (
+                entry.get("statement")
+                or entry.get("question")
+                or entry.get("description")
+                or entry.get("reason")
+                or _compact_dict(entry)
+            )
+            source = entry.get("source") or entry.get("source_type")
+            prefix = f"{evidence_id}：" if evidence_id else "- "
+            suffix = f" ({_brief(source, 100)})" if source else ""
+            lines.append(f"  - {prefix}{_brief(statement, item_limit)}{suffix}")
+        else:
+            lines.append(f"  - {_brief(entry, item_limit)}")
+    if len(entries) > max_items:
+        lines.append(f"  - 其余 {len(entries) - max_items} 项见任务记录")
 
 
 def _render_critic(payload: dict[str, Any], ctx: Any) -> list[str]:
@@ -389,31 +488,184 @@ def _render_final_delivery(payload: dict[str, Any], ctx: Any) -> list[str]:
     )
     lines = ["", "最终交付方案："]
     groups = delivery.get("groups")
+    items = delivery.get("items") if isinstance(delivery.get("items"), list) else []
+    item_by_id = {
+        str(item.get("item_id")): item
+        for item in items
+        if isinstance(item, dict) and item.get("item_id")
+    }
     if isinstance(groups, list) and groups:
-        item_by_id = {
-            str(item.get("item_id")): item
-            for item in delivery.get("items", [])
-            if isinstance(item, dict) and item.get("item_id")
-        }
+        lines.append(
+            f"范围：{len(groups)} 个组，"
+            f"{sum(len(_notification_group_items(group, item_by_id)) for group in groups if isinstance(group, dict))} 个条目"
+        )
         for group_index, group in enumerate(groups):
             if not isinstance(group, dict):
                 continue
             title = group.get("title") or group.get("group_id")
             if title:
                 lines.append(f"{group_index + 1}. {_brief(title, 180)}")
+            _append_final_field(lines, "目标", group.get("objective"), 220, indent="   ")
             group_items = _notification_group_items(group, item_by_id)
             for item in group_items:
-                item_id = str(item.get("item_id") or "")
-                item_title = item.get("title") or item.get("objective") or item_id
-                if item_id and item_title:
-                    lines.append(f"   - {item_id}：{_brief(item_title, 180)}")
+                lines.extend(_render_final_item(item))
     else:
-        _append_field(lines, "方案", delivery.get("items") or delivery.get("plan"), 420)
-    _append_field(lines, "审查结果", delivery.get("review_results") or delivery.get("outcomes"), 220)
-    _append_field(lines, "修订情况", delivery.get("revisions"), 180)
-    _append_field(lines, "剩余风险", delivery.get("remaining_risks") or delivery.get("risks"), 260)
+        _append_final_field(lines, "方案", items or delivery.get("plan"), 520)
+    implementation = getattr(ctx, "request_payload", {}).get("implementation_proposal")
+    if isinstance(implementation, dict):
+        lines.append("实现方案：")
+        _append_final_field(lines, "目标", implementation.get("objective"), 320, indent="   ")
+        _append_final_field(
+            lines,
+            "涉及位置",
+            implementation.get("affected_modules") or implementation.get("files"),
+            420,
+            indent="   ",
+        )
+        _append_final_field(
+            lines,
+            "执行步骤",
+            implementation.get("control_flow")
+            or implementation.get("steps")
+            or implementation.get("data_flow"),
+            560,
+            indent="   ",
+        )
+        _append_final_field(
+            lines,
+            "流程/状态",
+            implementation.get("state_transitions")
+            or implementation.get("control_flow")
+            or implementation.get("data_flow"),
+            560,
+            indent="   ",
+        )
+        _append_final_field(
+            lines,
+            "接口/数据契约",
+            implementation.get("interfaces")
+            or implementation.get("data_contracts"),
+            460,
+            indent="   ",
+        )
+        _append_final_field(
+            lines,
+            "复用/新增",
+            implementation.get("reused_components")
+            or implementation.get("new_components"),
+            420,
+            indent="   ",
+        )
+        _append_final_field(
+            lines,
+            "验证/回滚",
+            implementation.get("verification")
+            or implementation.get("verification_plan")
+            or implementation.get("rollback"),
+            460,
+            indent="   ",
+        )
+        _append_final_field(
+            lines,
+            "异常与重试",
+            implementation.get("error_handling")
+            or implementation.get("timeout_retry"),
+            420,
+            indent="   ",
+        )
+        _append_final_field(
+            lines,
+            "交付物",
+            implementation.get("completed_outputs"),
+            360,
+            indent="   ",
+        )
+        _append_final_field(
+            lines,
+            "执行边界",
+            implementation.get("execution_status")
+            or implementation.get("constraints")
+            or implementation.get("migration")
+            or implementation.get("configuration"),
+            360,
+            indent="   ",
+        )
+    _append_final_field(lines, "审查结果", delivery.get("review_results") or delivery.get("outcomes"), 260)
+    _append_final_field(lines, "修订情况", delivery.get("revisions"), 220)
+    _append_final_field(lines, "剩余风险", delivery.get("remaining_risks") or delivery.get("risks"), 360)
     lines.append("说明：方案通过不代表代码已实现或测试已执行。")
     return lines
+
+
+def _render_final_item(item: dict[str, Any]) -> list[str]:
+    item_id = str(item.get("item_id") or "")
+    title = item.get("title") or item.get("objective") or item_id
+    lines = [f"   - {item_id}：{_brief(title, 220)}"] if item_id else []
+    _append_final_field(lines, "问题", item.get("problem_addressed"), 320, indent="     ")
+    _append_final_field(lines, "目标", item.get("objective"), 320, indent="     ")
+    _append_final_field(lines, "关键证据", item.get("basis_evidence"), 300, indent="     ")
+    _append_final_field(
+        lines,
+        "实施/调查步骤",
+        item.get("implementation_steps")
+        or item.get("steps")
+        or item.get("expected_outputs"),
+        520,
+        indent="     ",
+    )
+    _append_final_field(
+        lines,
+        "验收标准",
+        item.get("acceptance_signals") or item.get("acceptance_criteria"),
+        420,
+        indent="     ",
+    )
+    _append_final_field(lines, "风险", item.get("risk_signals"), 300, indent="     ")
+    proposal = item.get("implementation_proposal")
+    if isinstance(proposal, dict):
+        _append_final_field(lines, "实现方案", proposal.get("objective"), 320, indent="     ")
+        _append_final_field(
+            lines,
+            "涉及位置",
+            proposal.get("affected_modules") or proposal.get("files"),
+            360,
+            indent="     ",
+        )
+        _append_final_field(
+            lines,
+            "执行步骤",
+            proposal.get("control_flow")
+            or proposal.get("steps")
+            or proposal.get("diagnostic_scope"),
+            520,
+            indent="     ",
+        )
+    return lines
+
+
+def _append_final_field(
+    lines: list[str],
+    label: str,
+    value: Any,
+    limit: int,
+    indent: str = "",
+) -> None:
+    if value is None or value == "" or value == [] or value == {}:
+        return
+    if isinstance(value, list):
+        parts = [_brief(item, max(80, limit // max(1, min(len(value), 5)))) for item in value]
+        text = "；".join(parts)
+    elif isinstance(value, dict):
+        preferred = (
+            value.get("summary")
+            or value.get("description")
+            or value.get("objective")
+            or value.get("status")
+        )
+        text = _brief(preferred if preferred is not None else _compact_dict(value), limit)
+    else:
+        text = _brief(value, limit)
+    lines.append(f"{indent}{label}：{_brief(text, limit)}")
 
 
 def _append_field(lines: list[str], label: str, value: Any, limit: int) -> None:

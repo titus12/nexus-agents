@@ -14,7 +14,11 @@ from .models import AgentRequest, DeliveryReceipt, HumanGate
 from .models import AgentBinding, ExternalMessage
 from .transitions import TransitionPolicy
 from .validators import RejectedReply, validate_agent_reply
-from .notifications import build_agent_notification, should_emit_notification
+from .notifications import (
+    build_agent_notification,
+    build_agent_notification_parts,
+    should_emit_notification,
+)
 
 
 logger = logging.getLogger("review_orchestrator_fsm")
@@ -104,6 +108,45 @@ class BaseState:
             return Event("NOOP")
         message = replies[0]
         allowed = _allowed_actions(self.name)
+        normalized_payload = _normalize_agent_reply_action(
+            self.name,
+            message.payload,
+        )
+        if normalized_payload is not message.payload:
+            message = ExternalMessage(
+                message.author_id,
+                normalized_payload,
+                message.external_id,
+                message.raw_content,
+            )
+        if message.payload.get("action") == "__UNSTRUCTURED_REPLY__":
+            logger.warning(
+                "AGENT_REPLY_UNSTRUCTURED task_id=%s state=%s request_id=%s external_id=%s",
+                ctx.task_id,
+                self.name,
+                ctx.active_request_id,
+                message.external_id,
+            )
+            raw_reply = str(message.payload.get("raw_reply") or "")
+            launch_failed = (
+                "start opencode" in raw_reply.lower()
+                and "too long" in raw_reply.lower()
+            )
+            ctx.last_error = {
+                "code": "AGENT_LAUNCH_FAILED" if launch_failed else "AGENT_REPLY_UNSTRUCTURED",
+                "reason": "OPENCODE_COMMAND_LINE_TOO_LONG" if launch_failed else "REPLY_BODY_NOT_STRUCTURED",
+                "message": raw_reply[:500],
+                "external_id": message.external_id,
+            }
+            ctx.request_payload["last_rejected_reply"] = copy.deepcopy(
+                message.payload
+            )
+            ctx.reply_retry_count += 1
+            return Event("AGENT_REPLY_REJECTED", {
+                "reason": "REPLY_BODY_NOT_STRUCTURED",
+                "resume_state": self.name,
+                "max_retries": ctx.max_reply_retries,
+            })
         result = validate_agent_reply(
             message,
             AgentBinding(
@@ -433,7 +476,10 @@ def _attach_repair_feedback(prompt: str, ctx: StateContext) -> str:
     last_error = ctx.last_error if isinstance(ctx.last_error, dict) else {}
     code = str(last_error.get("code", ""))
     reason = str(last_error.get("reason") or last_error.get("message") or "")
-    repairable = code == "AGENT_REPLY_CONTRACT_REJECTED" or (
+    repairable = code in {
+        "AGENT_REPLY_CONTRACT_REJECTED",
+        "AGENT_REPLY_UNSTRUCTURED",
+    } or (
         code == "AGENT_REPLY_REJECTED"
         and reason == "INVALID_ACTION"
     )
@@ -448,7 +494,10 @@ def _attach_repair_feedback(prompt: str, ctx: StateContext) -> str:
             "This is a bounded structure-repair turn. Preserve confirmed facts, "
             "requirements, items, evidence, scope, and decisions. Only repair "
             "the reported protocol error; do not restart investigation, invent "
-            "facts, or change the workflow decision. Return one complete JSON."
+            "facts, or change the workflow decision. For an unstructured reply, "
+            "convert only the original reply into the one JSON contract required "
+            "by the current phase; do not re-analyze or change decisions. Return "
+            "one complete JSON."
         ),
     }
     try:
@@ -787,10 +836,101 @@ def _normalize_solver_payload(
     return normalized, notes
 
 
+def _compact_solver_prompt_value(value: Any, string_limit: int = 220) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= string_limit else value[: string_limit - 1] + "…"
+    if isinstance(value, list):
+        return [
+            _compact_solver_prompt_value(item, string_limit)
+            for item in value[:8]
+        ]
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_solver_prompt_value(item, string_limit)
+            for key, item in list(value.items())[:24]
+        }
+    return value
+
+
+def _compact_analyst_plan_for_solver(plan: dict[str, Any]) -> dict[str, Any]:
+    serialized_size = len(json.dumps(plan, ensure_ascii=False, separators=(",", ":")))
+    if serialized_size <= 5000:
+        return copy.deepcopy(plan)
+    keys = (
+        "plan_id",
+        "version",
+        "phase",
+        "problem_interpretation",
+        "objective",
+        "success_definition",
+        "requirements",
+        "goals",
+        "non_goals",
+        "confirmed_facts",
+        "conflicts",
+        "candidate_items",
+        "candidate_groups",
+        "dependencies",
+        "constraints",
+        "scope",
+        "assumptions",
+        "unknowns",
+        "risks",
+        "questions_for_solver",
+        "candidate_verification_questions",
+    )
+    compact = {
+        key: _compact_solver_prompt_value(plan[key])
+        for key in keys
+        if key in plan
+    }
+    if len(json.dumps(compact, ensure_ascii=False, separators=(",", ":"))) > 5000:
+        compact["problem_interpretation"] = _compact_solver_prompt_value(plan.get("problem_interpretation", ""), 160)
+        compact["objective"] = _compact_solver_prompt_value(plan.get("objective", ""), 180)
+        compact["confirmed_facts"] = [
+            {
+                key: fact.get(key)
+                for key in ("evidence_id", "statement", "source", "source_type", "confidence")
+                if key in fact
+            }
+            for fact in plan.get("confirmed_facts", [])
+            if isinstance(fact, dict)
+        ][:6]
+        compact["requirements"] = [
+            {
+                key: requirement.get(key)
+                for key in ("requirement_id", "statement", "priority", "scope")
+                if key in requirement
+            }
+            for requirement in plan.get("requirements", [])
+            if isinstance(requirement, dict)
+        ]
+        compact["candidate_items"] = [
+            {
+                key: item.get(key)
+                for key in ("item_id", "title", "objective", "basis_evidence", "dependencies")
+                if key in item
+            }
+            for item in plan.get("candidate_items", [])
+            if isinstance(item, dict)
+        ]
+        compact["candidate_groups"] = [
+            {
+                key: group.get(key)
+                for key in ("candidate_group_id", "title", "objective", "related_items", "basis_evidence")
+                if key in group
+            }
+            for group in plan.get("candidate_groups", [])
+            if isinstance(group, dict)
+        ]
+    return compact
+
+
 def _zhongshu_solver_prompt(ctx: StateContext) -> str:
     analyst_plan = ctx.request_payload.get("analyst_plan")
     if not isinstance(analyst_plan, dict):
         raise RuntimeError("validated analyst_plan is missing from StateContext")
+    analyst_plan_for_prompt = _compact_analyst_plan_for_solver(analyst_plan)
     value = {
         "task": ctx.raw_request,
         "role": "ZHONGSHU_SOLVER",
@@ -800,7 +940,7 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
             "candidate_groups 转为可审议的正式 items/groups，交给 Critic 审查。"
         ),
         "upstream": {
-            "analyst_plan": analyst_plan,
+            "analyst_plan": analyst_plan_for_prompt,
             "critic_review": ctx.request_payload.get("zhongshu_critic_review"),
             "previous_plan": _compact_solver_previous_plan(ctx.request_payload.get("candidate_plan")),
             "human_decision": ctx.request_payload.get("human_decision"),
@@ -865,6 +1005,35 @@ def _zhongshu_solver_prompt(ctx: StateContext) -> str:
             },
         },
     }
+    prompt_size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    if prompt_size > 7000:
+        value["upstream"].pop("previous_plan", None)
+        value["working_rules"] = [
+            "Return exactly one JSON object.",
+            "Preserve requirements, evidence, scope, risks, and item coverage.",
+            "Use plan.items as the complete item set.",
+            "Use plan.groups[*].item_ids to reference plan.items exactly once.",
+            "Do not modify files or invent facts.",
+        ]
+        value["required_plan_content"] = {
+            "requirements": "Preserve and formalize analyst_plan.requirements.",
+            "items": "Return complete plan.items.",
+            "groups": "Every group must reference plan.items by item_ids.",
+            "scope": "Preserve in_scope, out_of_scope, and protected_paths.",
+            "evidence": "Preserve evidence IDs and confidence boundaries.",
+        }
+        value["output_example"] = {
+            "action": "READY_FOR_CRITIC",
+            "plan": {
+                "requirements": [],
+                "items": [{"item_id": "item-000001", "title": "string", "objective": "string"}],
+                "groups": [{"group_id": "group-000001", "title": "string", "item_ids": ["item-000001"]}],
+            },
+        }
+        value["response_contract"] = {
+            "allowed_actions": ["READY_FOR_CRITIC", "HUMAN_GATE", "BLOCKED"],
+            "required": ["action", "plan"],
+        }
     last_error = ctx.last_error if isinstance(ctx.last_error, dict) else {}
     if str(last_error.get("code", "")) == "AGENT_REPLY_CONTRACT_REJECTED":
         value["repair_feedback"] = {
@@ -929,7 +1098,10 @@ def _compact_solver_previous_plan(value: Any) -> dict[str, Any] | None:
 
 def _is_multica_resume(ctx: StateContext) -> bool:
     last_error = ctx.last_error if isinstance(ctx.last_error, dict) else {}
-    return str(last_error.get("code", "")) == "MULTICA_ERROR"
+    return str(last_error.get("code", "")) in {
+        "MULTICA_ERROR",
+        "AGENT_LAUNCH_FAILED",
+    }
 
 
 def _zhongshu_solver_resume_prompt(ctx: StateContext) -> str:
@@ -1225,20 +1397,26 @@ class DoneState(TerminalState):
                 final_delivery = _build_final_delivery(ctx)
                 request_payload["final_delivery"] = final_delivery
             payload["final_delivery"] = final_delivery
-        self._notify_once(
-            ctx,
-            f"{ctx.task_id}:{ctx.sequence}:DONE:enter",
-            notify,
-            build_agent_notification(
-                "review-critic",
-                "DONE",
-                "AGENT_REPLY_ACCEPTED",
-                ctx,
-                payload,
-            ),
-            "critic",
+        messages = build_agent_notification_parts(
+            "review-critic",
             "DONE",
+            "AGENT_REPLY_ACCEPTED",
+            ctx,
+            payload,
         )
+        for index, message in enumerate(messages):
+            self._notify_once(
+                ctx,
+                (
+                    f"{ctx.task_id}:{ctx.sequence}:DONE:enter"
+                    if index == 0
+                    else f"{ctx.task_id}:{ctx.sequence}:DONE:details:{index}"
+                ),
+                notify,
+                message,
+                "critic",
+                "DONE",
+            )
 
 
 class CancelledState(TerminalState):
@@ -1279,6 +1457,19 @@ def build_state_registry(
     return {state_class().name: state_class(multica, feishu, clock, agent_ids) for state_class in classes}
 
 
+def _normalize_agent_reply_action(
+    state: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if state != "MENXIA_GROUP_GATE" or payload.get("action") != "REVISE_GROUP":
+        return payload
+    normalized = copy.deepcopy(payload)
+    normalized["action"] = "REQUEST_GROUP_REVISION"
+    normalized["original_action"] = "REVISE_GROUP"
+    normalized["action_normalized"] = True
+    return normalized
+
+
 def _allowed_actions(state: str) -> set[str]:
     values = {
         "ZHONGSHU_ANALYST": {"READY_FOR_SOLVER", "HUMAN_GATE", "BLOCKED"},
@@ -1287,6 +1478,12 @@ def _allowed_actions(state: str) -> set[str]:
         "MENXIA_ITEM_SOLVER": {"FEASIBLE", "READY_FOR_CRITIC", "HUMAN_GATE", "BLOCKED"},
         "MENXIA_ITEM_ANALYST": {"EVIDENCE_SUFFICIENT", "NEEDS_MORE_EVIDENCE", "REQUEST_SOLVER_REVISION", "HUMAN_GATE", "BLOCKED"},
         "MENXIA_ITEM_CRITIC": {"APPROVE_ITEM", "REVISE_ITEM", "SPLIT_ITEM", "MERGE_ITEM", "REMOVE_ITEM", "REQUEST_SOLVER_REVISION", "HUMAN_GATE", "BLOCKED"},
-        "MENXIA_GROUP_GATE": {"APPROVE_GROUP", "APPROVE_FREEZE", "HUMAN_GATE", "BLOCKED"},
+        "MENXIA_GROUP_GATE": {
+            "APPROVE_GROUP",
+            "APPROVE_FREEZE",
+            "REQUEST_GROUP_REVISION",
+            "HUMAN_GATE",
+            "BLOCKED",
+        },
     }
     return values.get(state, set())

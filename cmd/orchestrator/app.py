@@ -18,6 +18,7 @@ from .events import Event
 from .locks import TaskLock, TaskLockError
 from .logging_setup import configure_logging
 from .models import HumanGate
+from .notifications import build_agent_notification
 from .persistence import JsonStateStore, PersistenceError
 from .recovery import RecoveryManager
 from .state_machine import StateMachine
@@ -87,6 +88,8 @@ class OrchestratorApp:
                 self.machine.dispatch(event)
                 self._record_event_context(event)
             outcome = self.ctx.workflow_state.lower()
+            if self.ctx.workflow_state == "DONE":
+                self._write_final_delivery_files()
             return self.ctx.workflow_state == "DONE"
         except (TransitionError, PersistenceError, RuntimeError) as error:
             outcome = "fsm_fatal"
@@ -379,6 +382,29 @@ class OrchestratorApp:
                 self.ctx.active_item_id = None
                 self.ctx.request_payload["active_item"] = None
                 event.payload["next_state"] = "MENXIA_GROUP_GATE"
+        elif event.action == "REQUEST_GROUP_REVISION" and self.ctx.workflow_state == "MENXIA_GROUP_GATE":
+            groups = self.ctx.request_payload.get("frozen_plan", {}).get("groups", [])
+            current_group = self.ctx.group_index or 0
+            group = groups[current_group] if current_group < len(groups) else {}
+            items = group.get("items", []) if isinstance(group, dict) else []
+            target_item_id = str(
+                event.payload.get("item_id")
+                or event.payload.get("revision_item_id")
+                or ""
+            )
+            target_index = next(
+                (
+                    index
+                    for index, item in enumerate(items)
+                    if isinstance(item, dict)
+                    and str(item.get("item_id") or "") == target_item_id
+                ),
+                0,
+            )
+            self.ctx.item_index = target_index
+            if isinstance(group, dict):
+                self._set_active_group_item(group, target_index)
+            event.payload["next_state"] = "MENXIA_ITEM_SOLVER"
         elif event.action in {"APPROVE_GROUP", "APPROVE_FREEZE"} and self.ctx.workflow_state == "MENXIA_GROUP_GATE":
             groups = self.ctx.request_payload.get("frozen_plan", {}).get("groups", [])
             current_group = self.ctx.group_index or 0
@@ -409,6 +435,33 @@ class OrchestratorApp:
             encoding="utf-8",
         )
         self.ctx.last_artifact_id = artifact_id
+
+
+    def _write_final_delivery_files(self) -> None:
+        delivery = self.ctx.request_payload.get("final_delivery")
+        if not isinstance(delivery, dict):
+            logger.warning(
+                "FINAL_DELIVERY_FILE_SKIPPED task_id=%s reason=missing_final_delivery",
+                self.ctx.task_id,
+            )
+            return
+        markdown_path = self.root / "final_delivery.md"
+        rendered = build_agent_notification(
+            "review-critic",
+            "DONE",
+            "AGENT_REPLY_ACCEPTED",
+            self.ctx,
+            {"final_delivery": delivery},
+            limit=100000,
+        )
+        markdown_path.write_text(rendered, encoding="utf-8", newline="\n")
+        logger.info(
+            "FINAL_DELIVERY_FILE_WRITTEN task_id=%s markdown=%s "
+            "markdown_chars=%s",
+            self.ctx.task_id,
+            markdown_path,
+            len(rendered),
+        )
 
     def _update_findings(self, payload: dict[str, Any]) -> None:
         findings = payload.get("findings")

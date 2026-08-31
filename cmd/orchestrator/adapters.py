@@ -252,9 +252,16 @@ class MulticaCliAdapter:
             comments: list[dict],
             allowed_ids: set[str] | None = None,
             allow_request_fallback: bool = False,
-        ) -> tuple[list[ExternalMessage], list[str], dict[str, int], int]:
+        ) -> tuple[
+            list[ExternalMessage],
+            list[str],
+            list[ExternalMessage],
+            dict[str, int],
+            int,
+        ]:
             result: list[ExternalMessage] = []
             supplemental_reports: list[str] = []
+            unstructured_candidates: list[ExternalMessage] = []
             stats = {
                 "author_mismatch": 0,
                 "dispatch_comment": 0,
@@ -294,6 +301,21 @@ class MulticaCliAdapter:
                     stats["unstructured"] += 1
                     if body.strip():
                         supplemental_reports.append(body)
+                        unstructured_candidates.append(
+                            ExternalMessage(
+                                author_id,
+                                {
+                                    "action": "__UNSTRUCTURED_REPLY__",
+                                    "task_id": request.task_id,
+                                    "request_id": request.request_id,
+                                    "role": request.role,
+                                    "phase": request.phase,
+                                    "raw_reply": body,
+                                },
+                                comment_id,
+                                body,
+                            )
+                        )
                     continue
                 payload_request_id = payload.get("request_id")
                 if payload_request_id and payload_request_id != request.request_id:
@@ -314,7 +336,13 @@ class MulticaCliAdapter:
                 payload.setdefault("role", request.role)
                 payload.setdefault("phase", request.phase)
                 result.append(ExternalMessage(author_id, payload, comment_id, body))
-            return result, supplemental_reports, stats, len(ordered_comments)
+            return (
+                result,
+                supplemental_reports,
+                unstructured_candidates,
+                stats,
+                len(ordered_comments),
+            )
 
         thread_args = ["issue", "comment", "list", issue_id]
         if request.dispatch_external_message_id:
@@ -325,9 +353,13 @@ class MulticaCliAdapter:
             thread_args += ["--recent", "50"]
         thread_args += ["--output", "json"]
         value = self._run_with_read_retry(*thread_args)
-        result, supplemental_reports, stats, comments_total = parse_comments(
-            comments_from(value)
-        )
+        (
+            result,
+            supplemental_reports,
+            unstructured_candidates,
+            stats,
+            comments_total,
+        ) = parse_comments(comments_from(value))
         recovery_ids: set[str] = set()
 
         if (
@@ -344,7 +376,13 @@ class MulticaCliAdapter:
                 "--recent", "100", "--output", "json",
             )
             root_comments = comments_from(root_value)
-            root_result, root_supplemental, root_stats, root_total = parse_comments(
+            (
+                root_result,
+                root_supplemental,
+                root_unstructured_candidates,
+                root_stats,
+                root_total,
+            ) = parse_comments(
                 root_comments,
                 allow_request_fallback=True,
             )
@@ -352,6 +390,7 @@ class MulticaCliAdapter:
             if candidate_count == 1:
                 result = root_result
                 supplemental_reports.extend(root_supplemental)
+                unstructured_candidates.extend(root_unstructured_candidates)
                 for key, value_count in root_stats.items():
                     stats[key] += value_count
                 comments_total += root_total
@@ -365,6 +404,7 @@ class MulticaCliAdapter:
                     result[0].external_id,
                 )
             elif root_supplemental:
+                unstructured_candidates = root_unstructured_candidates
                 logger.info(
                     "REPLY_SUPPLEMENTAL_ONLY issue_id=%s task_id=%s request_id=%s "
                     "reports=%s reason=unstructured_or_ambiguous",
@@ -390,12 +430,17 @@ class MulticaCliAdapter:
                     "issue", "comment", "list", issue_id,
                     "--recent", "100", "--output", "json",
                 )
-                root_result, root_supplemental, root_stats, root_total = parse_comments(
-                    comments_from(root_value), recovery_ids
-                )
+                (
+                    root_result,
+                    root_supplemental,
+                    root_unstructured_candidates,
+                    root_stats,
+                    root_total,
+                ) = parse_comments(comments_from(root_value), recovery_ids)
                 comments_total += root_total
                 result = root_result
                 supplemental_reports.extend(root_supplemental)
+                unstructured_candidates.extend(root_unstructured_candidates)
                 for key, value_count in root_stats.items():
                     stats[key] += value_count
                 if result:
@@ -417,6 +462,18 @@ class MulticaCliAdapter:
                     request.request_id,
                     request.dispatch_external_message_id,
                 )
+
+        if not result and len(unstructured_candidates) == 1:
+            candidate = unstructured_candidates[0]
+            result = [candidate]
+            logger.warning(
+                "REPLY_UNSTRUCTURED_REPAIR_CANDIDATE issue_id=%s task_id=%s "
+                "request_id=%s external_id=%s",
+                issue_id,
+                request.task_id,
+                request.request_id,
+                candidate.external_id,
+            )
 
         if supplemental_reports:
             for message in result:
@@ -675,6 +732,8 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "REQUEST_SOLVER_REVISION",
             "APPROVE_GROUP",
             "APPROVE_FREEZE",
+            "REQUEST_GROUP_REVISION",
+            "REVISE_GROUP",
             "HUMAN_GATE",
             "BLOCKED",
         ]

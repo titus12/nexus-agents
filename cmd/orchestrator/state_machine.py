@@ -169,6 +169,17 @@ class StateMachine:
         return self.ctx.to_dict()
 
     def _apply_counters(self, event: Event, transition: Transition) -> None:
+        source_state = self.ctx.workflow_state
+        reply_retry_transition = (
+            source_state == "INVALID_AGENT_REPLY"
+            or transition.to_state == "INVALID_AGENT_REPLY"
+        )
+        if (
+            not reply_retry_transition
+            and transition.to_state != source_state
+            and self.ctx.reply_retry_count
+        ):
+            self.ctx.reply_retry_count = 0
         if event.name == "FREEZE_REJECTED" or event.action in {"FREEZE_REJECTED", "FREEZE_RETRY"}:
             self.ctx.freeze_check_attempt += 1
             self.ctx.zhongshu_revision_round += 1

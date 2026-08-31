@@ -178,6 +178,13 @@ class TransitionPolicy:
                 return Transition(state, name, "BLOCKED")
 
         if state == "MENXIA_GROUP_GATE":
+            if action == "REQUEST_GROUP_REVISION":
+                return Transition(
+                    state,
+                    name,
+                    "MENXIA_ITEM_SOLVER",
+                    "group revision",
+                )
             if action in {"APPROVE_GROUP", "APPROVE_FREEZE"}:
                 if any(finding.active for finding in ctx.finding_objects()):
                     return Transition(
