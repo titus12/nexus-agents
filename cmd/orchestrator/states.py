@@ -35,6 +35,15 @@ ROLE_BY_STATE = {
 }
 
 
+def _text_diagnostics(text: str) -> dict[str, int]:
+    """Return encoding clues without logging the reply body."""
+    return {
+        "question_marks": text.count("?"),
+        "non_ascii": sum(1 for char in text if ord(char) > 127),
+        "replacement_chars": text.count("\ufffd"),
+    }
+
+
 class BaseState:
     name = ""
 
@@ -107,10 +116,21 @@ class BaseState:
             )
             return Event("NOOP")
         message = replies[0]
+        raw_content = message.raw_content or ""
+        serialized_payload = ""
         try:
-            payload_size = len(json.dumps(message.payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            serialized_payload = json.dumps(
+                message.payload, ensure_ascii=False, separators=(",", ":")
+            )
         except (TypeError, ValueError):
-            payload_size = len(message.raw_content.encode("utf-8")) if message.raw_content else 0
+            pass
+        payload_size = (
+            len(serialized_payload.encode("utf-8"))
+            if serialized_payload
+            else len(raw_content.encode("utf-8"))
+        )
+        raw_diagnostics = _text_diagnostics(raw_content)
+        payload_diagnostics = _text_diagnostics(serialized_payload)
         logger.info(
             "AGENT_REPLY_RECEIVED task_id=%s state=%s request_id=%s external_id=%s "
             "payload_bytes=%s payload_keys=%s raw_chars=%s",
@@ -120,7 +140,22 @@ class BaseState:
             message.external_id,
             payload_size,
             sorted(message.payload.keys()),
-            len(message.raw_content or ""),
+            len(raw_content),
+        )
+        logger.info(
+            "AGENT_REPLY_TEXT_DIAGNOSTICS task_id=%s state=%s request_id=%s external_id=%s "
+            "raw_question_marks=%s raw_non_ascii=%s raw_replacement_chars=%s "
+            "payload_question_marks=%s payload_non_ascii=%s payload_replacement_chars=%s",
+            ctx.task_id,
+            self.name,
+            ctx.active_request_id,
+            message.external_id,
+            raw_diagnostics["question_marks"],
+            raw_diagnostics["non_ascii"],
+            raw_diagnostics["replacement_chars"],
+            payload_diagnostics["question_marks"],
+            payload_diagnostics["non_ascii"],
+            payload_diagnostics["replacement_chars"],
         )
         allowed = _allowed_actions(self.name)
         normalized_payload = _normalize_agent_reply_action(
