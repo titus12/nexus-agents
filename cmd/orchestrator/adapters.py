@@ -252,6 +252,7 @@ class MulticaCliAdapter:
             comments: list[dict],
             allowed_ids: set[str] | None = None,
             allow_request_fallback: bool = False,
+            require_explicit_binding: bool = False,
         ) -> tuple[
             list[ExternalMessage],
             list[str],
@@ -287,11 +288,11 @@ class MulticaCliAdapter:
                     or comment.get("user_id")
                     or ""
                 )
-                if author_id != request.agent_id:
-                    stats["author_mismatch"] += 1
-                    continue
                 if comment_id and comment_id == request.dispatch_external_message_id:
                     stats["dispatch_comment"] += 1
+                    continue
+                if author_id != request.agent_id:
+                    stats["author_mismatch"] += 1
                     continue
                 created_at = str(comment.get("created_at") or "")
                 if request.sent_after and created_at and created_at <= request.sent_after:
@@ -299,6 +300,28 @@ class MulticaCliAdapter:
                     continue
                 if not isinstance(payload, dict) or not payload.get("action"):
                     stats["unstructured"] += 1
+                    if require_explicit_binding:
+                        parent_id = str(
+                            comment.get("parent_id")
+                            or comment.get("parent_comment_id")
+                            or comment.get("thread_id")
+                            or ""
+                        )
+                        if parent_id != request.dispatch_external_message_id:
+                            stats["uncorrelated"] += 1
+                            logger.warning(
+                                "REPLY_CORRELATION_FILTERED issue_id=%s task_id=%s request_id=%s "
+                                "external_id=%s actual_author_id=%s parent_id=%s "
+                                "payload_request_id=%s reason=missing_explicit_binding",
+                                issue_id,
+                                request.task_id,
+                                request.request_id,
+                                comment_id,
+                                author_id,
+                                parent_id,
+                                "",
+                            )
+                            continue
                     if body.strip():
                         supplemental_reports.append(body)
                         unstructured_candidates.append(
@@ -318,6 +341,39 @@ class MulticaCliAdapter:
                         )
                     continue
                 payload_request_id = payload.get("request_id")
+                parent_id = str(
+                    comment.get("parent_id")
+                    or comment.get("parent_comment_id")
+                    or comment.get("thread_id")
+                    or ""
+                )
+                request_bound = payload_request_id == request.request_id
+                thread_bound = parent_id == request.dispatch_external_message_id
+                parent_field_present = any(
+                    key in comment
+                    for key in ("parent_id", "parent_comment_id", "thread_id")
+                )
+                thread_relation_required = (
+                    request.dispatch_external_message_id and parent_field_present
+                )
+                if (
+                    (require_explicit_binding or thread_relation_required)
+                    and not (request_bound or thread_bound)
+                ):
+                    stats["uncorrelated"] += 1
+                    logger.warning(
+                        "REPLY_CORRELATION_FILTERED issue_id=%s task_id=%s request_id=%s "
+                        "external_id=%s actual_author_id=%s parent_id=%s payload_request_id=%s "
+                        "reason=missing_explicit_binding",
+                        issue_id,
+                        request.task_id,
+                        request.request_id,
+                        comment_id,
+                        author_id,
+                        parent_id,
+                        payload_request_id or "",
+                    )
+                    continue
                 if payload_request_id and payload_request_id != request.request_id:
                     if not allow_request_fallback:
                         stats["request_mismatch"] += 1
@@ -365,10 +421,14 @@ class MulticaCliAdapter:
         if (
             not result
             and request.dispatch_external_message_id
+            and len(unstructured_candidates) != 1
             and (
+                comments_total > 0
+                or
                 stats["author_mismatch"]
                 or stats["unstructured"]
                 or stats["request_mismatch"]
+                or stats["uncorrelated"]
             )
         ):
             root_value = self._run_with_read_retry(
@@ -385,12 +445,13 @@ class MulticaCliAdapter:
             ) = parse_comments(
                 root_comments,
                 allow_request_fallback=True,
+                require_explicit_binding=True,
             )
             candidate_count = len(root_result)
+            unstructured_candidates = root_unstructured_candidates
             if candidate_count == 1:
                 result = root_result
                 supplemental_reports.extend(root_supplemental)
-                unstructured_candidates.extend(root_unstructured_candidates)
                 for key, value_count in root_stats.items():
                     stats[key] += value_count
                 comments_total += root_total

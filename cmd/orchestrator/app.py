@@ -22,7 +22,12 @@ from .notifications import build_agent_notification
 from .persistence import JsonStateStore, PersistenceError
 from .recovery import RecoveryManager
 from .state_machine import StateMachine
-from .states import build_state_registry
+from .states import (
+    _critic_finding_ids,
+    _current_item_payload,
+    _solver_response_finding_ids,
+    build_state_registry,
+)
 from .transitions import TransitionError
 
 logger = logging.getLogger("review_orchestrator_fsm")
@@ -355,17 +360,64 @@ class OrchestratorApp:
             self.ctx.request_payload["zhongshu_critic_review"] = copy.deepcopy(payload)
         elif self.ctx.workflow_state == "MENXIA_ITEM_SOLVER":
             proposal = payload.get("implementation_proposal")
-            self.ctx.request_payload["implementation_proposal"] = (
+            proposal_value = (
                 copy.deepcopy(proposal) if isinstance(proposal, dict) else copy.deepcopy(payload)
             )
-            self.ctx.request_payload["notification_payload"] = self.ctx.request_payload["implementation_proposal"]
+            item_id = str(self.ctx.active_item_id or "")
+            critic_review = _current_item_payload(
+                self.ctx.request_payload,
+                "item_critic_reviews",
+                item_id,
+            ) or {}
+            critic_finding_ids = _critic_finding_ids(critic_review)
+            response_ids = _solver_response_finding_ids(payload)
+            proposals = self.ctx.request_payload.setdefault("item_implementation_proposals", {})
+            if item_id:
+                proposals[item_id] = copy.deepcopy(proposal_value)
+            self.ctx.request_payload["implementation_proposal"] = copy.deepcopy(proposal_value)
+            self.ctx.request_payload["notification_payload"] = copy.deepcopy(proposal_value)
+            logger.info(
+                "AGENT_REPLY_MERGE task_id=%s state=%s group_id=%s item_id=%s "
+                "action=%s merged_fields=%s preserved_global_keys=%s",
+                self.ctx.task_id,
+                self.ctx.workflow_state,
+                self.ctx.active_group_id or "",
+                item_id,
+                action,
+                sorted(proposal_value.keys()),
+                ["frozen_plan", "candidate_plan", "active_group", "active_item"],
+            )
+            logger.info(
+                "SOLVER_CRITIC_RESPONSE_MERGE task_id=%s state=%s group_id=%s item_id=%s "
+                "critic_finding_count=%s critic_finding_ids=%s response_field_present=%s "
+                "responded_finding_ids=%s unresponded_finding_ids=%s",
+                self.ctx.task_id,
+                self.ctx.workflow_state,
+                self.ctx.active_group_id or "",
+                item_id,
+                len(critic_finding_ids),
+                critic_finding_ids,
+                "responses_to_critic" in payload,
+                response_ids,
+                [finding_id for finding_id in critic_finding_ids if finding_id not in response_ids],
+            )
         elif self.ctx.workflow_state == "MENXIA_ITEM_ANALYST":
-            self.ctx.request_payload["analyst_review"] = copy.deepcopy(payload)
-            self.ctx.request_payload["notification_payload"] = self.ctx.request_payload["analyst_review"]
+            review = copy.deepcopy(payload)
+            item_id = str(self.ctx.active_item_id or "")
+            reviews = self.ctx.request_payload.setdefault("item_analyst_reviews", {})
+            if item_id:
+                reviews[item_id] = copy.deepcopy(review)
+            self.ctx.request_payload["analyst_review"] = review
+            self.ctx.request_payload["notification_payload"] = copy.deepcopy(review)
         elif self.ctx.workflow_state == "MENXIA_ITEM_CRITIC":
             self._update_findings(payload)
-            self.ctx.request_payload["critic_review"] = copy.deepcopy(payload)
-            self.ctx.request_payload["notification_payload"] = self.ctx.request_payload["critic_review"]
+            review = copy.deepcopy(payload)
+            item_id = str(self.ctx.active_item_id or "")
+            reviews = self.ctx.request_payload.setdefault("item_critic_reviews", {})
+            if item_id:
+                reviews[item_id] = copy.deepcopy(review)
+            self.ctx.request_payload["critic_review"] = review
+            self.ctx.request_payload["notification_payload"] = copy.deepcopy(review)
 
     def _decorate_progress_event(self, event: Event) -> None:
         if event.action == "APPROVE_ITEM" and self.ctx.workflow_state == "MENXIA_ITEM_CRITIC":

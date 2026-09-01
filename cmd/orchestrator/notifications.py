@@ -91,10 +91,14 @@ def build_agent_notification(
     if not should_emit_notification(event_name):
         return ""
 
-    lines = [f"【{display_role}｜{_state_label(state, event_name, payload)}】"]
+    lines = [f"【{display_role}｜{_state_label(state, event_name, payload, ctx)}】"]
     lines.extend(_context_lines(ctx))
 
-    if state == "DONE" or payload.get("action") == "DONE":
+    if event_name in {"AGENT_REPLY_REJECTED", "AGENT_REPLY_CONTRACT_REJECTED"}:
+        lines.extend(_render_reply_rejection(ctx))
+    elif event_name == "STATE_ENTER" and _is_reply_retry(ctx):
+        lines.extend(_render_reply_retry(ctx))
+    elif state == "DONE" or payload.get("action") == "DONE":
         lines.extend(_render_final_delivery(payload, ctx))
     elif state == "MENXIA_GROUP_GATE" or payload.get("action") == "APPROVE_GROUP":
         lines.extend(_render_group_summary(payload, ctx))
@@ -159,15 +163,58 @@ def build_agent_notification_parts(
     return chunks
 
 
-def _state_label(state: str, event_name: str, payload: dict[str, Any]) -> str:
+def _state_label(
+    state: str,
+    event_name: str,
+    payload: dict[str, Any],
+    ctx: Any,
+) -> str:
     action = payload.get("action")
     if event_name == "STATE_ENTER":
+        if _is_reply_retry(ctx):
+            return "回复修正重试"
         return "开始处理"
+    if event_name in {"AGENT_REPLY_REJECTED", "AGENT_REPLY_CONTRACT_REJECTED"}:
+        return "回复需要修正"
     if event_name == "LOCAL_VALIDATION_PASSED":
         return "本地校验通过"
     if event_name == "HUMAN_DECISION_RECEIVED":
         return "人工决策已收到"
     return ACTION_LABELS.get(action, "处理结果")
+
+
+def _is_reply_retry(ctx: Any) -> bool:
+    if isinstance(ctx, dict):
+        return int(ctx.get("reply_retry_count") or 0) > 0
+    return int(getattr(ctx, "reply_retry_count", 0) or 0) > 0
+
+
+def _render_reply_rejection(ctx: Any) -> list[str]:
+    error = getattr(ctx, "last_error", None)
+    reason = ""
+    if isinstance(error, dict):
+        reason = str(error.get("reason") or error.get("message") or "").strip()
+    lines = [
+        "",
+        "上一次 Agent 回复未通过协议校验，系统将重新派发修订任务。",
+    ]
+    if reason:
+        lines.append(f"校验原因：{_brief(reason, 300)}")
+    return lines
+
+
+def _render_reply_retry(ctx: Any) -> list[str]:
+    error = getattr(ctx, "last_error", None)
+    reason = ""
+    if isinstance(error, dict):
+        reason = str(error.get("reason") or error.get("message") or "").strip()
+    lines = [
+        "",
+        "这是对上一次未通过协议校验的回复进行重试，不是新的任务。",
+    ]
+    if reason:
+        lines.append(f"上次校验原因：{_brief(reason, 300)}")
+    return lines
 
 
 def _context_lines(ctx: Any) -> list[str]:
@@ -291,27 +338,36 @@ def _render_analyst(payload: dict[str, Any], ctx: Any) -> list[str]:
     lines = ["", "\u8bc1\u636e\u5ba1\u67e5："]
     if getattr(ctx, "current_phase", "") == "MENXIA":
         implementation = getattr(ctx, "request_payload", {}).get("implementation_proposal", {})
-        if isinstance(implementation, dict) and implementation.get("objective"):
-            lines.append(f"\u5ba1\u67e5\u5bf9\u8c61：{_brief(implementation.get('objective'), 220)}")
-        lines.append("\u68c0\u67e5\u91cd\u70b9：\u5b9e\u73b0\u8fb9\u754c、\u73b0\u6709\u80fd\u529b\u590d\u7528、\u6570\u636e\u6d41和\u9a8c\u8bc1\u65b9\u5f0f。")
-    action = payload.get("action")
-    assessment = payload.get("assessment")
+        if isinstance(implementation, dict):
+            review_subject = (
+                implementation.get("objective")
+                or implementation.get("changes")
+                or implementation.get("item_id")
+            )
+            if review_subject:
+                lines.append(f"\u5ba1\u67e5\u5bf9\u8c61：{_brief(review_subject, 220)}")
+        lines.append("\u6b63\u5411\u68c0\u67e5\u91cd\u70b9：\u5b9e\u73b0\u8fb9\u754c、\u73b0\u6709\u80fd\u529b\u590d\u7528、\u6570\u636e\u6d41和\u9a8c\u8bc1\u65b9\u5f0f。")
+    plan = payload.get("plan")
+    source = plan if isinstance(plan, dict) else payload
+
+    action = payload.get("action") or source.get("action")
+    assessment = payload.get("assessment") or source.get("assessment")
     verdict = assessment or action
     if verdict:
         lines.append(f"\u7ed3\u8bba：{_action_label(verdict)}")
 
-    facts = payload.get("confirmed_facts") or payload.get("evidence")
+    facts = source.get("confirmed_facts") or source.get("evidence")
     _append_analyst_entries(lines, "\u5df2\u786e\u8ba4", facts, 4, 190)
 
-    gaps = payload.get("missing_evidence") or payload.get("unknowns")
+    gaps = source.get("missing_evidence") or source.get("unknowns")
     _append_analyst_entries(lines, "\u8bc1\u636e\u7f3a\u53e3 / \u672a\u77e5", gaps, 3, 190)
 
-    trace = payload.get("requirement_trace")
+    trace = source.get("requirement_trace")
     _append_analyst_trace(lines, trace)
 
-    questions = payload.get("questions_for_solver") or payload.get("follow_up")
+    questions = source.get("questions_for_solver") or source.get("follow_up")
     _append_analyst_entries(lines, "\u540e\u7eed\u8981\u6c42", questions, 3, 190)
-    _append_analyst_entries(lines, "\u9700\u8981\u7528\u6237\u786e\u8ba4", payload.get("questions_for_user"), 2, 180)
+    _append_analyst_entries(lines, "\u9700\u8981\u7528\u6237\u786e\u8ba4", source.get("questions_for_user"), 2, 180)
     return lines if len(lines) > 2 else ["", "\u5206\u6790\u5e08\u6b63\u5728\u6838\u9a8c\u5f53\u524d\u6761\u76ee\u7684\u8bc1\u636e。"]
 
 
