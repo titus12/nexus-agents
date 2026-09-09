@@ -9,8 +9,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .domain.errors import LeaseLostError
 
-class TaskLockError(RuntimeError):
+class TaskLockError(LeaseLostError):
     pass
 
 
@@ -31,12 +32,24 @@ class TaskLock:
         except FileExistsError as error:
             metadata = self._read_metadata()
             if self._can_reclaim(metadata):
+                reclaim_path = self.path.with_name(
+                    f"{self.path.name}.reclaim.{self.owner_token}"
+                )
                 try:
-                    self.path.unlink()
-                    self.meta_path.unlink(missing_ok=True)
-                except OSError as reclaim_error:
-                    raise TaskLockError(f"task lock exists and cannot be reclaimed: {self.path}") from reclaim_error
-                self._handle = self.path.open("x", encoding="utf-8")
+                    # Rename is atomic on the same volume and does not delete
+                    # a lock that another contender may have created after the
+                    # stale owner was observed.
+                    self.path.rename(reclaim_path)
+                except (FileNotFoundError, OSError) as reclaim_error:
+                    raise TaskLockError(
+                        f"task lock changed while reclaiming: {self.path}"
+                    ) from reclaim_error
+                try:
+                    self._handle = self.path.open("x", encoding="utf-8")
+                except FileExistsError as acquire_error:
+                    raise TaskLockError(
+                        f"task lock was acquired by another owner: {self.path}"
+                    ) from acquire_error
                 try:
                     self._write_metadata()
                 except Exception:
