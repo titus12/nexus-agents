@@ -42,6 +42,7 @@ from .engine import (
     WorkflowEngine,
     WorkflowState,
 )
+from .reducer import LinearContextReducer
 
 __all__ = [
     "CommitResult",
@@ -78,6 +79,7 @@ __all__ = [
     "StateRegistry",
     "WorkflowEngine",
     "WorkflowState",
+    "LinearContextReducer",
     "WorkflowRepository",
     "WorkflowSnapshot",
 ]
