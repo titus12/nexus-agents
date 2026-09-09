@@ -13,7 +13,8 @@ from types import MappingProxyType
 from typing import ClassVar, Protocol, runtime_checkable
 
 from .context import WorkflowContext
-from .decisions import StateDecision
+from .context import ProgressUpdate
+from .decisions import ContextUpdate, StateDecision
 from .errors import InvariantViolation
 from .events import DomainEvent, TransitionRequest
 from .transitions import ALL_STATES, BUSINESS_STATES, SYSTEM_STATES
@@ -77,11 +78,18 @@ class _ConcreteWorkflowState:
         )
 
     def _transition_decision(self, event: DomainEvent) -> StateDecision:
+        update = ContextUpdate()
+        if event.name in {"RETRY", "BLOCK", "OPEN_HUMAN_GATE"}:
+            # System states must carry an explicit, validated return point.
+            update = ContextUpdate(
+                progression=ProgressUpdate(resume_state=self.name)
+            )
         return StateDecision(
             transition=TransitionRequest(
                 action=event.name,
                 reason_code=self._reason_code(event),
-            )
+            ),
+            update=update,
         )
 
     @staticmethod

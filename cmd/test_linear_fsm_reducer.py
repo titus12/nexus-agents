@@ -11,7 +11,8 @@ from orchestrator.domain.context import (
 )
 from orchestrator.domain.decisions import ContextUpdate, StateDecision
 from orchestrator.domain.errors import InvariantViolation
-from orchestrator.domain.events import TransitionRequest
+from orchestrator.domain.events import DomainEvent, TransitionRequest
+from orchestrator.domain.states import ZhongshuCriticState
 from orchestrator.runtime.reducer import LinearContextReducer
 from orchestrator.runtime.repository import WorkflowSnapshot
 
@@ -54,6 +55,24 @@ class LinearReducerTests(unittest.TestCase):
 
         with self.assertRaises(InvariantViolation):
             self.reducer.apply(self.snapshot, decision)
+
+    def test_business_state_declares_resume_point_for_system_transition(self) -> None:
+        critic = WorkflowSnapshot(
+            "task-1",
+            WorkflowContext(
+                self.snapshot.context.identity,
+                ProgressState("ZHONGSHU_CRITIC", 0, "now"),
+            ),
+            0,
+        )
+        decision = ZhongshuCriticState().handle(
+            critic.context,
+            DomainEvent("OPEN_HUMAN_GATE", "task-1", 0, {}, "now"),
+        )
+
+        after = self.reducer.apply(critic, decision)
+        self.assertEqual(after.context.progression.state, "HUMAN_GATE")
+        self.assertEqual(after.context.progression.resume_state, "ZHONGSHU_CRITIC")
 
     def test_resume_uses_recorded_resume_state_and_preserves_gate(self) -> None:
         gated = WorkflowSnapshot(
