@@ -68,6 +68,29 @@ class FailureAttributionContractTests(unittest.TestCase):
         self.assertIsNone(failure.worker_id)
         self.assertIsNone(failure.node_run_id)
 
+    def test_typed_error_preserves_failure_record(self):
+        module = importlib.import_module("orchestrator.domain.errors")
+        failure = module.FailureRecord(
+            failure_id="failure-3",
+            stage="transport",
+            owner_component="multica",
+            task_id="task-1",
+            state="ZHONGSHU_SOLVER",
+            sequence=5,
+            node_run_id=None,
+            worker_id=None,
+            effect_id="effect-1",
+            error_code="TRANSPORT_ERROR",
+            retryable=True,
+            message="dispatch failed",
+            cause_type="TransportError",
+        )
+
+        error = module.TransportError("dispatch failed", failure)
+
+        self.assertIs(error.failure, failure)
+        self.assertEqual(error.error_code, "TRANSPORT_ERROR")
+
 
 if __name__ == "__main__":
     unittest.main()
