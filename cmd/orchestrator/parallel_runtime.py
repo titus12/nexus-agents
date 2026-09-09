@@ -12,9 +12,14 @@ from typing import Any, Callable
 from .concurrency import ConcurrencyAdmission
 from .lifecycle import LifecyclePaths, write_stage_result, write_stage_verdict
 from .models import AgentRequest, DispatchReceipt, ExternalMessage
+from .transport import RawTransportReply, ReplyBinding, ReplyNormalizer
 from .zhongshu_review_queue import ReviewJob, TaskReviewQueue
 
 logger = logging.getLogger("review_orchestrator_fsm")
+
+
+def _error_code(error: BaseException) -> str:
+    return str(getattr(error, "error_code", None) or type(error).__name__.upper())
 
 
 @dataclass(frozen=True)
@@ -81,6 +86,7 @@ class ParallelCoordinatorDriver:
         self.dispatch = dispatch
         self.poll = poll
         self.find_existing_request = find_existing_request
+        self.reply_normalizer = ReplyNormalizer()
         self.max_attempts = max(1, max_attempts)
         self.poll_interval = max(0.0, poll_interval)
         self.timeout_seconds = max(1.0, timeout_seconds)
@@ -150,6 +156,7 @@ class ParallelCoordinatorDriver:
         def execute(worker: ParallelWorker) -> dict[str, Any]:
             lease: Any | None = None
             last_error = ""
+            last_error_code = "WORKER_FAILED"
             rejected_reply_paths: list[str] = []
             worker_deadline = time.monotonic() + worker_timeout
             try:
@@ -212,7 +219,8 @@ class ParallelCoordinatorDriver:
                     if not self.admission.refresh(lease.lease_id):
                         raise RuntimeError("CONCURRENCY_LEASE_LOST")
                     if time.monotonic() >= worker_deadline:
-                        last_error = "TimeoutError: parallel worker total timeout exceeded"
+                        last_error_code = "WORKER_TIMEOUT"
+                        last_error = "WORKER_TIMEOUT: parallel worker total timeout exceeded"
                         break
                     logical_request = worker.request
                     attempt_request = replace(
@@ -333,13 +341,47 @@ class ParallelCoordinatorDriver:
                                 raise RuntimeError("CONCURRENCY_LEASE_LOST")
                             replies = self.poll(poll_request)
                             if replies:
-                                payload = dict(replies[-1].payload)
+                                external_reply = replies[-1]
+                                raw_reply = RawTransportReply(
+                                    author_id=external_reply.author_id,
+                                    external_message_id=external_reply.external_id,
+                                    request_id=None,
+                                    payload=external_reply.payload,
+                                    received_at=datetime.now(timezone.utc).isoformat(),
+                                    source="parallel_poll",
+                                )
+                                binding = ReplyBinding(
+                                    task_id=worker.request.task_id or self.task_id,
+                                    request_id=poll_request.request_id,
+                                    author_id=worker.request.agent_id,
+                                    phase=worker.request.phase or phase,
+                                    role=worker.request.role,
+                                    target_state=(
+                                        worker.request.target_state
+                                        or worker.phase
+                                    ),
+                                )
+                                envelope = self.reply_normalizer.normalize(
+                                    raw_reply,
+                                    binding,
+                                    lambda value: dict(value),
+                                )
+                                payload = dict(envelope.payload)
                                 last_payload = dict(payload)
                                 reported_worker_id = str(payload.get("worker_id") or "")
                                 if reported_worker_id and reported_worker_id != worker.worker_id:
                                     raise ValueError(
                                         "PARALLEL_REPLY_WORKER_ID_MISMATCH"
                                     )
+                                # The canonical normalizer owns transport binding.  Project
+                                # its resolved metadata into the legacy payload callback only
+                                # after validation; this preserves the callback API without
+                                # reimplementing binding rules in app.py.
+                                payload.setdefault("task_id", envelope.task_id)
+                                payload.setdefault("request_id", envelope.request_id)
+                                payload.setdefault("phase", envelope.phase)
+                                payload.setdefault("role", envelope.role)
+                                payload.setdefault("target_state", envelope.target_state)
                                 payload.setdefault("worker_id", worker.worker_id)
                                 payload.setdefault("phase", phase)
                                 payload.setdefault("revision_id", revision_id)
@@ -388,7 +430,8 @@ class ParallelCoordinatorDriver:
                             time.sleep(self.poll_interval)
                         raise TimeoutError("parallel worker timed out")
                     except Exception as error:
-                        last_error = f"{type(error).__name__}: {error}"
+                        last_error_code = _error_code(error)
+                        last_error = f"{last_error_code}: {error}"
                         if phase == "ZHONGSHU" and last_payload is not None:
                             try:
                                 rejected_path = write_stage_result(self.lifecycle, phase=phase, revision=revision_id, state=worker.role, worker_id=f"{worker.worker_id}-rejected-{logical_request.request_id.rsplit(':', 1)[-1]}-{attempt}", payload={"error": last_error, "reply": last_payload, "logical_request_id": logical_request.request_id, "request_id": attempt_request.request_id})
@@ -406,6 +449,7 @@ class ParallelCoordinatorDriver:
                         "phase": phase,
                         "revision_id": revision_id,
                         "attempts": worker_attempts,
+                        "error_code": last_error_code,
                         "error": last_error or "worker failed",
                         "rejected_reply_paths": rejected_reply_paths,
                     },
@@ -445,6 +489,7 @@ class ParallelCoordinatorDriver:
                         "phase": phase,
                         "revision_id": revision_id,
                         "attempts": worker_attempts,
+                        "error_code": _error_code(error),
                         "error": f"{type(error).__name__}: {error}",
                     })
                     continue

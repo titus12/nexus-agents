@@ -27,7 +27,7 @@ from .lifecycle import (
     write_stage_verdict,
 )
 from .logging_setup import configure_logging
-from .models import AgentBinding, ExternalMessage, HumanGate, Finding
+from .models import HumanGate, Finding
 from .notifications import build_agent_notification
 from .persistence import JsonStateStore, PersistenceError
 from .parallel_runtime import ParallelCoordinatorDriver, external_target_parallelism
@@ -65,7 +65,6 @@ from .zhongshu_parallel import (
     validate_zhongshu_requirement_contract,
 )
 from .transitions import TransitionError
-from .validators import RejectedReply, validate_agent_reply
 from .zhongshu_review import (
     ANALYST_ACTIONS,
     CRITIC_ACTIONS,
@@ -2649,9 +2648,48 @@ class OrchestratorApp:
         ctx: StateContext | None = None,
         review_job: Any | None = None,
     ) -> None:
+        """Validate parallel domain invariants after transport normalization.
+
+        ``ParallelCoordinatorDriver`` has already validated the observed
+        transport author and request binding through ``ReplyNormalizer``.
+        This method deliberately owns only worker, revision, scope, and
+        role-specific payload rules; it must not reconstruct an
+        ``ExternalMessage`` from the expected worker identity.
+        """
         if payload.get("action") == "__UNSTRUCTURED_REPLY__":
             raise ValueError("REPLY_BODY_NOT_STRUCTURED")
         target_state = str(worker.request.target_state or "")
+        allowed = _allowed_actions(target_state)
+        if target_state == "ZHONGSHU_ANALYST":
+            mode = (
+                "requirement_contract"
+                if worker.request.context.get("contract_mode")
+                else str(
+                    worker.request.context.get("zhongshu_dispatch_mode")
+                    or "evidence_collection"
+                )
+            )
+            allowed = set(ANALYST_ACTIONS.get(mode, allowed))
+        elif target_state == "ZHONGSHU_CRITIC":
+            allowed = set(
+                TASK_CRITIC_ACTIONS
+                if str(worker.request.context.get("zhongshu_dispatch_mode") or "")
+                == "task_review"
+                else CRITIC_ACTIONS
+            )
+        if not allowed:
+            allowed = {
+                "READY_FOR_SOLVER",
+                "HUMAN_GATE",
+                "BLOCKED",
+                "APPROVE_FREEZE",
+                "REQUEST_ANALYST_EVIDENCE",
+                "REQUEST_SOLVER_REVISION",
+                "REQUEST_REGROUP",
+            }
+        action = payload.get("action")
+        if action not in allowed:
+            raise ValueError(f"ACTION_NOT_ALLOWED:{action}")
         canonical_requirements = (
             worker.request.context.get("requirement_contract")
             if target_state == "ZHONGSHU_ANALYST"
@@ -2684,37 +2722,6 @@ class OrchestratorApp:
             if protocol_error:
                 raise ValueError(protocol_error)
         is_requirement_contract = payload.get("action") == "REQUIREMENT_CONTRACT_READY"
-        allowed = _allowed_actions(target_state)
-        if target_state == "ZHONGSHU_ANALYST":
-            mode = "requirement_contract" if worker.request.context.get("contract_mode") else str(worker.request.context.get("zhongshu_dispatch_mode") or "evidence_collection")
-            allowed = set(ANALYST_ACTIONS.get(mode, allowed))
-        elif target_state == "ZHONGSHU_CRITIC":
-            allowed = set(
-                TASK_CRITIC_ACTIONS
-                if str(worker.request.context.get("zhongshu_dispatch_mode") or "") == "task_review"
-                else CRITIC_ACTIONS
-            )
-        if not allowed:
-            allowed = {"READY_FOR_SOLVER", "HUMAN_GATE", "BLOCKED", "APPROVE_FREEZE", "REQUEST_ANALYST_EVIDENCE", "REQUEST_SOLVER_REVISION", "REQUEST_REGROUP"}
-        result = validate_agent_reply(
-            ExternalMessage(
-                worker.request.agent_id,
-                payload,
-                payload.get("request_id", worker.request.request_id),
-            ),
-            AgentBinding(
-                author_id=worker.request.agent_id,
-                task_id=worker.request.task_id,
-                request_id=worker.request.request_id,
-                role=worker.request.role,
-                phase=worker.request.phase,
-                target_state=worker.request.target_state,
-                target_role=worker.request.target_role,
-            ),
-            allowed,
-        )
-        if isinstance(result, RejectedReply):
-            raise ValueError(result.reason)
         if payload.get("phase") != worker.request.phase:
             raise ValueError("PARALLEL_REPLY_PHASE_MISMATCH")
         if payload.get("worker_id") != worker.worker_id:
