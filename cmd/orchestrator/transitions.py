@@ -41,6 +41,79 @@ class TransitionPolicy:
         "MULTICA_ERROR",
     }
 
+    RESUMABLE_STATES = NON_TERMINAL - {
+        "REQUEST_INTAKE",
+        "TIMEOUT",
+        "HUMAN_GATE_TIMEOUT",
+        "HUMAN_GATE_ERROR",
+        "INVALID_AGENT_REPLY",
+        "MULTICA_ERROR",
+    }
+
+    @classmethod
+    def validate_target(
+        cls,
+        ctx: StateContext,
+        event: Event,
+        transition: Transition,
+        known_states: dict[str, Any],
+    ) -> None:
+        """Reject untrusted dynamic targets before mutating or persisting FSM state."""
+        target = str(transition.to_state or "")
+        if target not in known_states:
+            raise TransitionError(
+                f"transition target is not registered: {target or '<empty>'}"
+            )
+
+        dynamic = event.payload.get("next_state") or event.payload.get("resume_state")
+        if not dynamic:
+            return
+
+        allowed: set[str] | None = None
+        if ctx.workflow_state == "MENXIA_ITEM_CRITIC" and event.action == "APPROVE_ITEM":
+            allowed = {"MENXIA_ITEM_SOLVER", "MENXIA_GROUP_GATE", "HUMAN_GATE"}
+        elif ctx.workflow_state == "MENXIA_GROUP_GATE" and event.action in {
+            "APPROVE_GROUP",
+            "APPROVE_FREEZE",
+        }:
+            allowed = {"MENXIA_ITEM_SOLVER", "DONE"}
+        elif ctx.workflow_state == "ZHONGSHU_ANALYST":
+            allowed = {
+                "ZHONGSHU_SOLVER",
+                "HUMAN_GATE",
+                "INVALID_AGENT_REPLY",
+                "BLOCKED",
+            }
+        elif ctx.workflow_state == "ZHONGSHU_SOLVER":
+            allowed = {
+                "ZHONGSHU_CRITIC",
+                "ZHONGSHU_ANALYST",
+                "HUMAN_GATE",
+                "INVALID_AGENT_REPLY",
+                "BLOCKED",
+            }
+        elif ctx.workflow_state == "ZHONGSHU_CRITIC":
+            allowed = {
+                "ZHONGSHU_SOLVER",
+                "ZHONGSHU_ANALYST",
+                "ZHONGSHU_FREEZE_CHECK",
+                "HUMAN_GATE",
+                "INVALID_AGENT_REPLY",
+                "BLOCKED",
+            }
+        elif ctx.workflow_state == "HUMAN_GATE" and event.name == "HUMAN_DECISION_RECEIVED":
+            allowed = cls.RESUMABLE_STATES
+        elif ctx.workflow_state in {"INVALID_AGENT_REPLY", "MULTICA_ERROR"}:
+            allowed = cls.RESUMABLE_STATES
+        elif ctx.workflow_state == "TIMEOUT" and event.name == "RESUME":
+            allowed = cls.RESUMABLE_STATES
+
+        if allowed is not None and target not in allowed:
+            raise TransitionError(
+                f"transition target is not allowed: state={ctx.workflow_state}, "
+                f"event={event.name}, target={target}"
+            )
+
     @classmethod
     def resolve(cls, ctx: StateContext, event: Event) -> Transition:
         state = ctx.workflow_state
@@ -80,7 +153,7 @@ class TransitionPolicy:
             return Transition(state, name, "ZHONGSHU_ANALYST", "request accepted")
 
         if state == "ZHONGSHU_ANALYST":
-            if action == "READY_FOR_SOLVER":
+            if action in {"READY_FOR_SOLVER", "EVIDENCE_PACKET_READY", "EVIDENCE_SUPPLEMENT_READY"}:
                 return Transition(state, name, "ZHONGSHU_SOLVER")
             if action == "HUMAN_GATE":
                 return Transition(state, name, "HUMAN_GATE")
@@ -90,6 +163,8 @@ class TransitionPolicy:
         if state == "ZHONGSHU_SOLVER":
             if action == "READY_FOR_CRITIC":
                 return Transition(state, name, "ZHONGSHU_CRITIC")
+            if action in {"REQUEST_ANALYST_EVIDENCE", "NEEDS_MORE_EVIDENCE"}:
+                return Transition(state, name, "ZHONGSHU_ANALYST", "Solver evidence is insufficient")
             if action == "HUMAN_GATE":
                 return Transition(state, name, "HUMAN_GATE")
             if action == "BLOCKED":
@@ -97,18 +172,44 @@ class TransitionPolicy:
 
         if state == "ZHONGSHU_CRITIC":
             if action == "APPROVE_FREEZE":
-                target = "ZHONGSHU_SOLVER" if ctx.active_finding_ids else "ZHONGSHU_FREEZE_CHECK"
-                return Transition(state, name, target, "active P0/P1 remain" if ctx.active_finding_ids else "")
+                blocking = ctx.blocking_finding_ids
+                if blocking and ctx.zhongshu_revision_round >= ctx.max_zhongshu_revision_rounds:
+                    event.payload.setdefault("resume_state", "ZHONGSHU_SOLVER")
+                    event.payload.setdefault("human_gate", {
+                        "question": (
+                            "中书省已达到最大修订轮次，但仍有活动的 P0/P1 finding。"
+                            "请确认是否人工处理后继续。"
+                        ),
+                        "next_state": "ZHONGSHU_SOLVER",
+                    })
+                    return Transition(
+                        state,
+                        name,
+                        "HUMAN_GATE",
+                        "Zhongshu revision limit reached with active P0/P1 findings",
+                    )
+                target = "ZHONGSHU_SOLVER" if blocking else "ZHONGSHU_FREEZE_CHECK"
+                return Transition(state, name, target, "active P0/P1 remain" if blocking else "")
             if action == "REQUEST_ANALYST_EVIDENCE":
                 return Transition(state, name, "ZHONGSHU_ANALYST")
             if action in {"REQUEST_SOLVER_REVISION", "REQUEST_REGROUP"}:
+                if ctx.zhongshu_revision_round >= ctx.max_zhongshu_revision_rounds:
+                    event.payload.setdefault("resume_state", "ZHONGSHU_SOLVER")
+                    event.payload.setdefault("human_gate", {
+                        "question": "中书省已达到最大修订轮次，请确认剩余问题的处理方式。",
+                        "next_state": "ZHONGSHU_SOLVER",
+                    })
+                    return Transition(
+                        state,
+                        name,
+                        "HUMAN_GATE",
+                        "Zhongshu revision limit reached",
+                    )
                 return Transition(state, name, "ZHONGSHU_SOLVER")
             if action == "HUMAN_GATE":
                 return Transition(state, name, "HUMAN_GATE")
             if action == "BLOCKED":
-                if event.payload.get("action_normalized") or ctx.active_finding_ids:
-                    return Transition(state, name, "ZHONGSHU_SOLVER", "action normalized to solver revision")
-                return Transition(state, name, "BLOCKED")
+                return Transition(state, name, "HUMAN_GATE" if event.payload.get("human_required") else "BLOCKED", "Critic reported an explicit blocker")
 
         if state == "ZHONGSHU_FREEZE_CHECK":
             if action in {"FREEZE_OK", "APPROVE_FREEZE"}:
@@ -138,7 +239,10 @@ class TransitionPolicy:
 
         if state == "MENXIA_ITEM_CRITIC":
             if action == "APPROVE_ITEM":
-                active_findings = ctx.finding_objects()
+                active_findings = ctx.finding_objects_for(
+                    ctx.active_group_id,
+                    ctx.active_item_id,
+                )
                 blocking = [finding for finding in active_findings if finding.active]
                 if blocking:
                     severe = [
@@ -186,7 +290,13 @@ class TransitionPolicy:
                     "group revision",
                 )
             if action in {"APPROVE_GROUP", "APPROVE_FREEZE"}:
-                if any(finding.active for finding in ctx.finding_objects()):
+                if any(
+                    finding.active
+                    for finding in ctx.finding_objects_for(
+                        ctx.active_group_id,
+                        include_global=True,
+                    )
+                ):
                     return Transition(
                         state,
                         name,

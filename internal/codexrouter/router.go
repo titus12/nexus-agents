@@ -75,18 +75,19 @@ type Config struct {
 }
 
 type Route struct {
-	ID          string   `json:"id"`
-	DisplayName string   `json:"displayName"`
-	Description string   `json:"description"`
-	API         string   `json:"api"`
-	BaseURL     string   `json:"baseUrl"`
-	Model       string   `json:"model"`
-	Provider    string   `json:"provider"`
-	AuthMode    string   `json:"authMode"`
-	APIKey      string   `json:"-"`
-	APIKeyEnv   string   `json:"apiKeyEnv,omitempty"`
-	Priority    int      `json:"priority"`
-	DropParams  []string `json:"dropParams,omitempty"`
+	ID                    string   `json:"id"`
+	DisplayName           string   `json:"displayName"`
+	Description           string   `json:"description"`
+	API                   string   `json:"api"`
+	BaseURL               string   `json:"baseUrl"`
+	Model                 string   `json:"model"`
+	Provider              string   `json:"provider"`
+	AuthMode              string   `json:"authMode"`
+	APIKey                string   `json:"-"`
+	APIKeyEnv             string   `json:"apiKeyEnv,omitempty"`
+	Priority              int      `json:"priority"`
+	DropParams            []string `json:"dropParams,omitempty"`
+	StructuredOutputModes []string `json:"structuredOutputModes,omitempty"`
 }
 
 type Service struct {
@@ -484,6 +485,26 @@ func (s *Service) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	route := s.routeForModel(request.Model)
+	structuredMode, structuredRequested, structuredReason := requestedStructuredOutputMode(request.Raw)
+	if structuredRequested {
+		supported, capabilityReason := routeSupportsStructuredOutput(route, structuredMode)
+		if structuredReason != "" {
+			capabilityReason = structuredReason
+			supported = false
+		}
+		log.Printf("[codex] STRUCTURED_OUTPUT_PREFLIGHT model=%s route=%s requested_mode=%s supported=%v reason=%s drop_params=%v declared_modes=%v",
+			request.Model, route.ID, stringOr(structuredMode, "-"), supported, capabilityReason,
+			route.DropParams, route.StructuredOutputModes,
+		)
+		if !supported {
+			writeJSON(w, http.StatusBadRequest, openAIErrorWithCode(
+				fmt.Sprintf("structured output mode %q is unavailable on route %q (%s)", structuredMode, route.ID, capabilityReason),
+				"structured_output_unavailable",
+				http.StatusBadRequest,
+			))
+			return
+		}
+	}
 	if route.API == "responses" && route.AuthMode == "codex_openai" {
 		s.rememberCodexCredentials(r.Header.Get("Authorization"), r.Header)
 	}
@@ -1336,6 +1357,15 @@ func openAIError(message string, status int) map[string]any {
 	}
 }
 
+func openAIErrorWithCode(message string, code string, status int) map[string]any {
+	body := openAIError(message, status)
+	if value, ok := body["error"].(map[string]any); ok {
+		value["code"] = code
+		value["status"] = status
+	}
+	return body
+}
+
 func joinUpstreamURL(baseURL string, endpoint string) string {
 	cleanBase := strings.TrimRight(baseURL, "/")
 	if strings.HasSuffix(cleanBase, endpoint) {
@@ -1444,9 +1474,38 @@ func normalizeRole(role string) string {
 
 func routeDropsParam(route Route, param string) bool {
 	for _, p := range route.DropParams {
-		if p == param {
+		if strings.EqualFold(strings.TrimSpace(p), param) {
 			return true
 		}
 	}
 	return false
+}
+
+func requestedStructuredOutputMode(raw map[string]any) (string, bool, string) {
+	value, ok := raw["response_format"]
+	if !ok || value == nil {
+		return "", false, ""
+	}
+	format, ok := value.(map[string]any)
+	if !ok {
+		return "", true, "invalid_response_format"
+	}
+	mode, _ := format["type"].(string)
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "", true, "invalid_response_format"
+	}
+	return mode, true, ""
+}
+
+func routeSupportsStructuredOutput(route Route, mode string) (bool, string) {
+	if routeDropsParam(route, "response_format") {
+		return false, "route_drops_response_format"
+	}
+	for _, declared := range route.StructuredOutputModes {
+		if strings.EqualFold(strings.TrimSpace(declared), mode) {
+			return true, ""
+		}
+	}
+	return false, "route_capability_not_declared"
 }

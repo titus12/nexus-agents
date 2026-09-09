@@ -4,17 +4,103 @@ from datetime import datetime, timezone
 from typing import Protocol
 import uuid
 import json
+import hashlib
 import logging
 import os
 import re
 import subprocess
+import threading
 import time
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from .prompt_bundle import PromptBundleBuilder
+from .agent_result_file import (
+    AgentResultFileError,
+    read_agent_result_file,
+    write_agent_result_file,
+)
+from .comment_feed import IncrementalCommentFeed, comment_order_key, timestamp_order_key
+from .structured_output import (
+    role_mode_for,
+    state_actions,
+    stable_role_fields,
+)
+from .zhongshu_solver_contract import (
+    ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND,
+    ZHONGSHU_SOLVER_REQUIRED_ITEM_FIELDS,
+)
+
 logger = logging.getLogger("review_orchestrator_fsm")
+
+
+def _fingerprint_text(text: str) -> dict[str, object]:
+    """Return durable boundary metadata without logging business content."""
+    encoded = text.encode("utf-8", errors="replace")
+    stripped = text.lstrip("\ufeff\u200b").strip()
+    return {
+        "chars": len(text),
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "first_char": text[:1],
+        "last_char": text[-1:] if text else "",
+        "starts_with_json": stripped.startswith("{") or stripped.startswith("["),
+        "ends_with_json": stripped.endswith("}") or stripped.endswith("]"),
+    }
+
+
+def _path_identity(path: str | Path) -> str:
+    """Normalize a filesystem path for request-boundary comparisons."""
+    value = str(path or "").strip()
+    if not value:
+        return ""
+    try:
+        value = os.path.abspath(os.path.expanduser(value))
+    except (OSError, ValueError):
+        pass
+    return os.path.normcase(os.path.normpath(value))
+
+
+def _json_parse_diagnostic(text: str) -> dict[str, object]:
+    _, status, error_message, error_position = _parse_json_candidate(text)
+    return {
+        "json_status": status,
+        "json_error": error_message,
+        "json_error_position": error_position,
+    }
+
+
+def _parse_json_candidate(
+    text: str,
+) -> tuple[object | None, str, str, int | None]:
+    """Parse one Agent JSON document with narrowly scoped framing recovery.
+
+    The external comment transport is text, so the Agent can occasionally emit
+    a valid root object followed by one accidental closing brace. Recover only
+    that exact shape. In particular, never accept the first document from
+    concatenated JSON or discard arbitrary trailing content because doing so
+    could silently lose a decision or finding.
+    """
+    candidate = str(text).lstrip("\ufeff\u200b").strip()
+    try:
+        return json.loads(candidate), "valid", "", None
+    except json.JSONDecodeError as error:
+        strict_error = error
+    except (TypeError, ValueError) as error:
+        return None, "invalid", str(error)[:200], None
+
+    try:
+        value, end = json.JSONDecoder().raw_decode(candidate)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, "invalid", strict_error.msg, strict_error.pos
+
+    trailing = candidate[end:].strip()
+    if isinstance(value, dict) and trailing == "}":
+        return value, "repaired", "", end
+    return None, "invalid", strict_error.msg, strict_error.pos
 
 
 from .models import (
@@ -27,9 +113,14 @@ from .models import (
 )
 
 
+class RequestLookupError(RuntimeError):
+    """The external request index could not be queried safely."""
+
+
 class MulticaAdapter(Protocol):
     def dispatch(self, request: AgentRequest) -> DispatchReceipt: ...
     def poll(self, request: AgentRequest) -> list[ExternalMessage]: ...
+    def get_run_status(self, request: AgentRequest) -> str: ...
     def find_existing_request(self, idempotency_key: str, issue_id: str = "") -> DispatchReceipt | None: ...
 
 
@@ -51,6 +142,7 @@ class FakeMulticaAdapter:
     def __init__(self) -> None:
         self.dispatched: list[AgentRequest] = []
         self.replies: dict[str, list[ExternalMessage]] = {}
+        self.run_statuses: dict[str, str] = {}
 
     def dispatch(self, request: AgentRequest) -> DispatchReceipt:
         self.dispatched.append(request)
@@ -59,10 +151,18 @@ class FakeMulticaAdapter:
     def poll(self, request: AgentRequest) -> list[ExternalMessage]:
         return self.replies.pop(request.request_id, [])
 
+    def get_run_status(self, request: AgentRequest) -> str:
+        key = request.dispatch_external_message_id or request.request_id
+        return self.run_statuses.get(key, "completed")
+
     def find_existing_request(self, idempotency_key: str, issue_id: str = "") -> DispatchReceipt | None:
         for request in self.dispatched:
             if request.idempotency_key == idempotency_key:
-                return DispatchReceipt(operation_id=f"existing-{request.request_id}", external_message_id=request.request_id)
+                return DispatchReceipt(
+                    operation_id=f"existing-{request.request_id}",
+                    external_message_id=request.request_id,
+                    request_id=request.request_id,
+                )
         return None
 
     def queue_reply(self, request_id: str, message: ExternalMessage) -> None:
@@ -85,12 +185,44 @@ class FakeFeishuAdapter:
         self.replies.setdefault(decision_id, []).append(reply)
 
 
+class NullFeishuAdapter:
+    """No-network adapter used by local regression tests and dry runs."""
+
+    def send_gate(self, gate: HumanGate) -> DeliveryReceipt:
+        return DeliveryReceipt(channel="disabled", message_id=f"disabled-{gate.decision_id}")
+
+    def poll_reply(self, gate: HumanGate) -> list[HumanReply]:
+        return []
+
+
 class MulticaCliAdapter:
     """Production adapter over the installed multica CLI."""
 
     def __init__(self, log_dir: str | Path = "logs") -> None:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.prompt_transport_mode = os.environ.get("PROMPT_TRANSPORT_MODE", "prompt_file").lower()
+        self.prompt_bundle_builder = PromptBundleBuilder(self.log_dir / "prompt-bundles")
+        self.agent_result_allowed_root = Path(os.environ.get("AGENT_RESULT_ALLOWED_ROOT", str(self.log_dir.parent)))
+        self.orchestrator_result_write_enabled = (
+            os.environ.get("ORCHESTRATOR_RESULT_WRITE_ENABLED", "true").lower()
+            not in {"0", "false", "no", "off"}
+        )
+        self.inline_result_max_bytes = max(
+            1,
+            int(os.environ.get("INLINE_RESULT_MAX_BYTES", str(64 * 1024))),
+        )
+        logger.info(
+            "PROMPT_TRANSPORT_CONFIG mode=%s bundle_root=%s result_allowed_root=%s "
+            "prompt_encoding=utf-8 prompt_bom=false result_encoding=utf-8 "
+            "result_bom=writer_expected_false_reader_tolerant "
+            "orchestrator_result_write_enabled=%s inline_result_max_bytes=%s",
+            self.prompt_transport_mode,
+            self.log_dir / "prompt-bundles",
+            self.agent_result_allowed_root,
+            self.orchestrator_result_write_enabled,
+            self.inline_result_max_bytes,
+        )
         self.last_issue_id = ""
         self.cli_timeout_seconds = float(os.environ.get("MULTICA_CLI_TIMEOUT_SEC", "30"))
         self.cli_read_timeout_seconds = float(
@@ -100,6 +232,95 @@ class MulticaCliAdapter:
             0,
             int(os.environ.get("MULTICA_CLI_READ_RETRIES", "1")),
         )
+        self.comment_feed = IncrementalCommentFeed(
+            overlap_seconds=max(0, int(os.environ.get("MULTICA_COMMENT_CURSOR_OVERLAP_SEC", "2"))),
+            state_path=self.log_dir / "comment-cursor.json",
+        )
+        self._dispatch_index_path = self.log_dir / "dispatch-index.json"
+        self._dispatch_index_lock = threading.RLock()
+        self._dispatch_index: dict[str, dict[str, str]] = {}
+        self._load_dispatch_index()
+
+    def _load_dispatch_index(self) -> None:
+        try:
+            value = json.loads(self._dispatch_index_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return
+        entries = value.get("requests", {}) if isinstance(value, dict) else {}
+        if not isinstance(entries, dict):
+            return
+        for key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            operation_id = str(entry.get("operation_id") or "")
+            external_message_id = str(entry.get("external_message_id") or "")
+            request_id = str(entry.get("request_id") or "")
+            if key and (operation_id or external_message_id):
+                self._dispatch_index[str(key)] = {
+                    "operation_id": operation_id,
+                    "external_message_id": external_message_id,
+                    "request_id": request_id,
+                }
+
+    def _save_dispatch_index(self) -> None:
+        value = {"version": 1, "requests": self._dispatch_index}
+        self._dispatch_index_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(
+            prefix=self._dispatch_index_path.name + ".",
+            suffix=".tmp",
+            dir=self._dispatch_index_path.parent,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                json.dump(value, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._dispatch_index_path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+    def _index_dispatch_comments(self, comments: list[dict[str, Any]]) -> None:
+        changed = False
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            payload = _extract_json(
+                str(comment.get("content") or comment.get("body") or "")
+            )
+            if not isinstance(payload, dict):
+                continue
+            transport = payload.get("transport")
+            stored_key = payload.get("idempotency_key") or (
+                transport.get("idempotency_key")
+                if isinstance(transport, dict)
+                else None
+            )
+            if not stored_key:
+                continue
+            comment_id = str(comment.get("id") or comment.get("comment_id") or "")
+            if not comment_id:
+                continue
+            entry = {
+                "operation_id": comment_id,
+                "external_message_id": comment_id,
+                "request_id": str(
+                    payload.get("request_id")
+                    or (
+                        payload.get("transport", {}).get("request_id")
+                        if isinstance(payload.get("transport"), dict)
+                        else ""
+                    )
+                    or ""
+                ),
+            }
+            if self._dispatch_index.get(str(stored_key)) != entry:
+                self._dispatch_index[str(stored_key)] = entry
+                changed = True
+        if changed:
+            self._save_dispatch_index()
 
     @staticmethod
     def _is_read_command(args: tuple[str, ...]) -> bool:
@@ -178,6 +399,23 @@ class MulticaCliAdapter:
             len(result.stdout or ""),
             len(result.stderr or ""),
         )
+        stdout_text = result.stdout or ""
+        stdout_meta = _fingerprint_text(stdout_text)
+        logger.info(
+            "MULTICA_CLI_RESPONSE_FINGERPRINT command=%s operation=%s rc=%s "
+            "chars=%s bytes=%s sha256=%s first_char=%r last_char=%r "
+            "starts_with_json=%s ends_with_json=%s",
+            command_text,
+            "read" if self._is_read_command(args) else "write",
+            result.returncode,
+            stdout_meta["chars"],
+            stdout_meta["bytes"],
+            stdout_meta["sha256"],
+            stdout_meta["first_char"],
+            stdout_meta["last_char"],
+            stdout_meta["starts_with_json"],
+            stdout_meta["ends_with_json"],
+        )
         if result.returncode:
             logger.error(
                 "MULTICA_CLI_FAILED command=%s rc=%s stderr=%r",
@@ -187,43 +425,182 @@ class MulticaCliAdapter:
             )
             raise RuntimeError(f"multica failed rc={result.returncode}: {result.stderr[:500]}")
         try:
-            return json.loads(result.stdout)
+            return json.loads(stdout_text)
         except json.JSONDecodeError:
             logger.warning(
                 "MULTICA_CLI_NON_JSON command=%s stdout_preview=%r",
                 command_text,
-                (result.stdout or "")[:300],
+                stdout_text[:300],
             )
-            return result.stdout.strip()
+            return stdout_text.strip()
 
     def dispatch(self, request: AgentRequest) -> DispatchReceipt:
         self.last_issue_id = request.issue_id or request.task_id
+        skill_lock = request.context.get("active_runtime_skill_lock")
+        if request.phase in {"ZHONGSHU", "MENXIA"} and request.role in {
+            "review-analyst",
+            "review-solver",
+            "review-critic",
+        }:
+            if (
+                not isinstance(skill_lock, dict)
+                or skill_lock.get("status") != "locked"
+                or not skill_lock.get("name")
+                or not skill_lock.get("source")
+                or not skill_lock.get("version")
+                or not skill_lock.get("sha256")
+            ):
+                raise RuntimeError("ACTIVE_RUNTIME_SKILL_BINDING_MISSING")
         issue_id = request.issue_id or request.task_id
         # Multica Agent runtime is triggered by issue assignment. The comment
         # carries the structured request, but assignment selects the Agent
         # that should consume it.
-        self._run(
-            "issue",
-            "update",
-            issue_id,
-            "--assignee-id",
-            request.agent_id,
-            "--output",
-            "json",
+        structured_result_required = bool(
+            isinstance(request.structured_output, dict)
+            and request.structured_output.get("mode") == "result_file"
+            and request.structured_output.get("schema_hash")
         )
+        use_legacy_transport = (
+            self.prompt_transport_mode == "legacy"
+            and not structured_result_required
+        )
+        if self.prompt_transport_mode == "legacy" and structured_result_required:
+            logger.warning(
+                "PROMPT_TRANSPORT_LEGACY_BYPASSED task_id=%s request_id=%s "
+                "phase=%s role=%s reason=structured_result_requires_prompt_bundle",
+                request.task_id,
+                request.request_id,
+                request.phase,
+                request.role,
+            )
+        if use_legacy_transport:
+            prompt_payload = {"prompt": request.prompt}
+            if request.phase in {"ZHONGSHU", "MENXIA"} and isinstance(skill_lock, dict):
+                skill_bytes = Path(str(skill_lock["source"])).read_bytes()
+                if hashlib.sha256(skill_bytes).hexdigest() != skill_lock["sha256"]:
+                    raise RuntimeError("ACTIVE_RUNTIME_SKILL_HASH_MISMATCH")
+                prompt_payload["active_runtime_skill_content"] = skill_bytes.decode("utf-8")
+            logger.warning(
+                "PROMPT_TRANSPORT_LEGACY task_id=%s request_id=%s phase=%s role=%s",
+                request.task_id,
+                request.request_id,
+                request.phase,
+                request.role,
+            )
+        else:
+            bundle = self.prompt_bundle_builder.build(
+                task_id=request.task_id,
+                request_id=request.request_id,
+                phase=request.phase,
+                role=request.role,
+                prompt=request.prompt,
+                revision_id=str(request.context.get("revision_id", "")),
+                context={
+                    **request.context,
+                    "task_id": request.task_id,
+                    "request_id": request.request_id,
+                    "phase": request.phase,
+                    "role": request.role,
+                    "issue_id": request.issue_id,
+                    "idempotency_key": request.idempotency_key,
+                    "sent_after": request.sent_after,
+                    "dispatch_external_message_id": request.dispatch_external_message_id,
+                },
+            )
+            prompt_ref = bundle.reference()
+            result_path = str(prompt_ref.get("result_path") or "")
+            schema_hash = str((request.structured_output or {}).get("schema_hash") or "")
+            if schema_hash:
+                structured_output_instruction = (
+                    "Do not modify project files. Write exactly one complete business result "
+                    f"to {result_path} as UTF-8 JSON without BOM, using a real JSON "
+                    "serializer so quotes and control characters are escaped by the serializer. "
+                    f"The JSON root must include structured_output_protocol={request.structured_output.get('protocol')}. "
+                    f"The JSON root must include structured_output_schema_hash={schema_hash}. "
+                    "The root must also include the exact contract_id, task_id, request_id, phase, state, role, and mode from the prompt bundle. "
+                    "You may create or replace only that result file. Do not paste the business "
+                    "result into the issue comment. After the file is durably written, reply with "
+                    "only the compact nexus-agent-result-ref-v1 pointer required by the transport. "
+                    "Do not return Markdown, a diff/patch, or a second business result."
+                )
+            else:
+                structured_output_instruction = (
+                    "Do not modify project files. Return exactly one complete structured JSON "
+                    "result in the reply; the Orchestrator will validate and persist it. "
+                    "Do not return Markdown, a result pointer, a diff/patch, or a partial result."
+                )
+            prompt_payload = {
+                "prompt": (
+                    f"Read every required file in the prompt bundle manifest as UTF-8, including active-skill.md when present, then follow prompt.txt. "
+                    f"Active runtime Skill: {request.context.get('active_runtime_skill', '')}. "
+                    f"Skill lock: {json.dumps(request.context.get('active_runtime_skill_lock', {}), ensure_ascii=False, sort_keys=True)}. "
+                    f"Runtime directive: {request.context.get('active_runtime_skill_directive', '')} "
+                    f"Active phase/state: {request.context.get('active_runtime_phase', request.phase)}/{request.context.get('active_runtime_state', request.role)}. "
+                    "Only the active runtime Skill is authoritative; other attached Skills are inactive for this turn. "
+                    f"{structured_output_instruction}"
+                ),
+                "prompt_ref": prompt_ref,
+                "structured_output": request.structured_output,
+            }
+        # Validate/build all local artifacts before assignment can trigger an Agent.
+        self._run("issue", "update", issue_id, "--assignee-id", request.agent_id, "--output", "json")
         content = json.dumps({
-            "prompt": request.prompt,
+            **prompt_payload,
             "response_contract": _response_contract_for(request),
             "transport": {
                 "task_id": request.task_id,
                 "request_id": request.request_id,
                 "role": request.role,
                 "phase": request.phase,
+                "target_state": request.target_state or request.context.get("target_state", ""),
+                "target_role": request.target_role or request.context.get("target_role", ""),
                 "idempotency_key": request.idempotency_key,
                 "reply_correlation_id": request.request_id,
                 "reply_mode": "REPLY_TO_TRIGGER_COMMENT",
+                "active_runtime_skill_lock": request.context.get(
+                    "active_runtime_skill_lock", {}
+                ),
             },
         }, ensure_ascii=False, indent=2)
+        logger.info(
+            "AGENT_DISPATCH_TRANSPORT task_id=%s request_id=%s phase=%s role=%s "
+            "mode=%s comment_payload_bytes=%s full_prompt_bytes=%s manifest_path=%s "
+            "manifest_hash=%s result_path=%s structured_output_mode=%s "
+            "structured_output_schema_hash=%s",
+            request.task_id,
+            request.request_id,
+            request.phase,
+            request.role,
+            "legacy" if use_legacy_transport else "prompt_file",
+            len(content.encode("utf-8")),
+            len(request.prompt.encode("utf-8")),
+            prompt_payload.get("prompt_ref", {}).get("manifest_path", ""),
+            prompt_payload.get("prompt_ref", {}).get("manifest_hash", ""),
+            prompt_payload.get("prompt_ref", {}).get("result_path", ""),
+            (request.structured_output or {}).get("mode", ""),
+            (request.structured_output or {}).get("schema_hash", ""),
+        )
+        dispatch_meta = _fingerprint_text(content)
+        logger.info(
+            "AGENT_DISPATCH_PAYLOAD_FINGERPRINT task_id=%s request_id=%s "
+            "dispatch_idempotency_key=%s phase=%s role=%s chars=%s bytes=%s "
+            "sha256=%s first_char=%r last_char=%r starts_with_json=%s ends_with_json=%s "
+            "structured_output_mode=%s structured_output_schema_hash=%s",
+            request.task_id,
+            request.request_id,
+            request.idempotency_key,
+            request.phase,
+            request.role,
+            dispatch_meta["chars"],
+            dispatch_meta["bytes"],
+            dispatch_meta["sha256"],
+            dispatch_meta["first_char"],
+            dispatch_meta["last_char"],
+            dispatch_meta["starts_with_json"],
+            dispatch_meta["ends_with_json"],
+            (request.structured_output or {}).get("mode", ""),
+            (request.structured_output or {}).get("schema_hash", ""),
+        )
         path = self.log_dir / f"dispatch_{request.request_id.replace(':', '_')}.json"
         path.write_text(content, encoding="utf-8")
         value = self._run(
@@ -234,11 +611,240 @@ class MulticaCliAdapter:
         external_id = ""
         if isinstance(value, dict):
             external_id = str(value.get("id") or value.get("comment_id") or value.get("comment", {}).get("id") or "")
-        return DispatchReceipt(operation_id=request.idempotency_key, external_message_id=external_id)
+        if not external_id:
+            external_id = self._resolve_trigger_comment_id(
+                issue_id=issue_id,
+                content=content,
+                request=request,
+            )
+        if not external_id:
+            logger.error(
+                "AGENT_DISPATCH_TRIGGER_ID_MISSING task_id=%s request_id=%s "
+                "phase=%s role=%s reason=comment_add_output_missing_and_lookup_failed",
+                request.task_id,
+                request.request_id,
+                request.phase,
+                request.role,
+            )
+        else:
+            logger.info(
+                "AGENT_DISPATCH_TRIGGER_READY task_id=%s request_id=%s "
+                "phase=%s role=%s trigger_comment_id=%s",
+                request.task_id,
+                request.request_id,
+                request.phase,
+                request.role,
+                external_id,
+            )
+        if external_id:
+            with self._dispatch_index_lock:
+                self._dispatch_index[request.idempotency_key] = {
+                    "operation_id": request.idempotency_key,
+                    "external_message_id": external_id,
+                    "request_id": request.request_id,
+                }
+                self._save_dispatch_index()
+        return DispatchReceipt(
+            operation_id=request.idempotency_key,
+            external_message_id=external_id,
+            request_id=request.request_id,
+        )
+
+    def _resolve_trigger_comment_id(
+        self,
+        issue_id: str,
+        content: str,
+        request: AgentRequest,
+    ) -> str:
+        """Resolve the trigger comment id when the CLI add command omits it."""
+        try:
+            value = self.comment_feed.read(
+                f"{issue_id}:dispatch:{request.request_id}",
+                lambda since: self._run_with_read_retry(
+                    "issue", "comment", "list", issue_id,
+                    *(('--since', since) if since else ()),
+                    "--output", "json",
+                ),
+                initial_since=request.sent_after or datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as error:
+            logger.warning(
+                "AGENT_DISPATCH_TRIGGER_LOOKUP_FAILED task_id=%s request_id=%s "
+                "issue_id=%s error=%s",
+                request.task_id,
+                request.request_id,
+                issue_id,
+                str(error)[:300],
+            )
+            return ""
+        comments = value
+        expected_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        matches: list[dict] = []
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            comment_id = str(comment.get("id") or comment.get("comment_id") or "")
+            body = str(comment.get("content") or comment.get("body") or "")
+            if not comment_id or not body:
+                continue
+            body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            if body == content or body_hash == expected_hash:
+                matches.append(comment)
+                continue
+            try:
+                payload = json.loads(body.lstrip("\ufeff\u200b").strip())
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(payload, dict)
+                and str(payload.get("transport", {}).get("request_id") or "")
+                == request.request_id
+            ):
+                matches.append(comment)
+        if not matches:
+            logger.warning(
+                "AGENT_DISPATCH_TRIGGER_LOOKUP_MISS task_id=%s request_id=%s "
+                "issue_id=%s expected_payload_sha256=%s",
+                request.task_id,
+                request.request_id,
+                issue_id,
+                expected_hash,
+            )
+            return ""
+        matches.sort(key=comment_order_key)
+        resolved = str(matches[-1].get("id") or matches[-1].get("comment_id") or "")
+        logger.info(
+            "AGENT_DISPATCH_TRIGGER_LOOKUP_HIT task_id=%s request_id=%s "
+            "issue_id=%s trigger_comment_id=%s candidates=%s "
+            "expected_payload_sha256=%s",
+            request.task_id,
+            request.request_id,
+            issue_id,
+            resolved,
+            len(matches),
+            expected_hash,
+        )
+        return resolved
+
+    def _recover_result_file(self, request: AgentRequest) -> ExternalMessage | None:
+        result_path = self.prompt_bundle_builder.result_path(
+            request.task_id,
+            request.request_id,
+        )
+        logger.info(
+            "AGENT_REPLY_FILE_RECOVERY_SCAN task_id=%s request_id=%s phase=%s role=%s "
+            "path=%s exists=%s",
+            request.task_id,
+            request.request_id,
+            request.phase,
+            request.role,
+            result_path,
+            result_path.is_file(),
+        )
+        if not result_path.is_file():
+            return None
+        try:
+            file_result = read_agent_result_file(
+                {"result_path": str(result_path)},
+                task_id=request.task_id,
+                request_id=request.request_id,
+                phase=request.phase,
+                role=request.role,
+                allowed_root=self.agent_result_allowed_root,
+                expected_schema_hash=str(
+                    (request.structured_output or {}).get("schema_hash") or ""
+                ),
+                expected_state=request.target_state
+                or str(request.context.get("target_state") or "")
+                or str((request.structured_output or {}).get("state") or ""),
+                expected_role_mode=str(
+                    request.context.get("structured_output_role_mode")
+                    or (request.structured_output or {}).get("role_mode")
+                    or ""
+                ),
+                allow_transport_backfill=True,
+            )
+        except AgentResultFileError as error:
+            logger.warning(
+                "AGENT_REPLY_FILE_RECOVERY_REJECTED task_id=%s request_id=%s "
+                "path=%s reason=%s",
+                request.task_id,
+                request.request_id,
+                result_path,
+                str(error),
+            )
+            return None
+        logger.info(
+            "AGENT_REPLY_FILE_RECOVERED task_id=%s request_id=%s phase=%s role=%s "
+            "path=%s sha256=%s bytes=%s source=directory_scan",
+            request.task_id,
+            request.request_id,
+            request.phase,
+            request.role,
+            file_result.path,
+            file_result.sha256,
+            file_result.bytes,
+        )
+        return ExternalMessage(
+            request.agent_id,
+            file_result.payload,
+            f"file:{request.request_id}",
+            "",
+        )
+
+    def _persist_inline_result(
+        self,
+        request: AgentRequest,
+        payload: dict,
+    ) -> dict:
+        if not self.orchestrator_result_write_enabled:
+            return payload
+        inline_payload = payload
+        if payload.get("protocol") == "nexus-agent-result-inline-v1":
+            nested = payload.get("result")
+            if not isinstance(nested, dict):
+                raise AgentResultFileError("inline result.result must be an object")
+            inline_payload = nested
+        encoded_size = len(
+            json.dumps(inline_payload, ensure_ascii=False).encode("utf-8")
+        )
+        if encoded_size > self.inline_result_max_bytes:
+            raise AgentResultFileError(
+                f"inline result exceeds limit: {encoded_size}>{self.inline_result_max_bytes}"
+            )
+        result_path = self.prompt_bundle_builder.result_path(
+            request.task_id,
+            request.request_id,
+        )
+        file_result = write_agent_result_file(
+            inline_payload,
+            target_path=result_path,
+            task_id=request.task_id,
+            request_id=request.request_id,
+            phase=request.phase,
+            role=request.role,
+            allowed_root=self.agent_result_allowed_root,
+            expected_schema_hash=str(
+                (request.structured_output or {}).get("schema_hash") or ""
+            ),
+            expected_state=request.target_state or str(
+                request.context.get("target_state") or ""
+            ),
+            expected_role_mode=str(
+                request.context.get("structured_output_role_mode")
+                or (request.structured_output or {}).get("role_mode")
+                or ""
+            ),
+        )
+        return file_result.payload
 
     def poll(self, request: AgentRequest) -> list[ExternalMessage]:
         self.last_issue_id = request.issue_id or request.task_id
         issue_id = request.issue_id or request.task_id
+        structured_result_required = (
+            isinstance(request.structured_output, dict)
+            and request.structured_output.get("mode") == "result_file"
+        )
 
         def comments_from(value: object) -> list[dict]:
             if isinstance(value, list):
@@ -260,6 +866,10 @@ class MulticaCliAdapter:
             dict[str, int],
             int,
         ]:
+            structured_result_required = (
+                isinstance(request.structured_output, dict)
+                and request.structured_output.get("mode") == "result_file"
+            )
             result: list[ExternalMessage] = []
             supplemental_reports: list[str] = []
             unstructured_candidates: list[ExternalMessage] = []
@@ -271,10 +881,7 @@ class MulticaCliAdapter:
                 "request_mismatch": 0,
                 "uncorrelated": 0,
             }
-            ordered_comments = sorted(
-                comments,
-                key=lambda item: str(item.get("created_at") or ""),
-            )
+            ordered_comments = sorted(comments, key=comment_order_key)
             for comment in ordered_comments:
                 comment_id = str(comment.get("id") or "")
                 if allowed_ids is not None and comment_id not in allowed_ids:
@@ -282,24 +889,232 @@ class MulticaCliAdapter:
                     continue
                 body = str(comment.get("content") or comment.get("body") or "")
                 payload = _extract_json(body)
+                result_was_file = False
+                inline_result_pending = False
+                if payload is None:
+                    payload = _extract_result_pointer(body)
+                    if isinstance(payload, dict):
+                        logger.info(
+                            "AGENT_REPLY_POINTER_PARSED task_id=%s request_id=%s "
+                            "phase=%s role=%s comment_id=%s result_path=%s",
+                            request.task_id,
+                            request.request_id,
+                            request.phase,
+                            request.role,
+                            comment_id,
+                            payload.get("result_path", ""),
+                        )
                 author_id = str(
                     comment.get("author_id")
                     or comment.get("creator_id")
                     or comment.get("user_id")
                     or ""
                 )
+                body_meta = _fingerprint_text(body)
+                parse_meta = _json_parse_diagnostic(body)
+                logger.info(
+                    "AGENT_REPLY_COMMENT_READ task_id=%s request_id=%s phase=%s role=%s "
+                    "dispatch_idempotency_key=%s dispatch_external_message_id=%s comment_id=%s "
+                    "author_id=%s chars=%s bytes=%s sha256=%s first_char=%r last_char=%r "
+                    "starts_with_json=%s ends_with_json=%s json_status=%s json_error=%r "
+                    "json_error_position=%s",
+                    request.task_id,
+                    request.request_id,
+                    request.phase,
+                    request.role,
+                    request.idempotency_key,
+                    request.dispatch_external_message_id,
+                    comment_id,
+                    author_id,
+                    body_meta["chars"],
+                    body_meta["bytes"],
+                    body_meta["sha256"],
+                    body_meta["first_char"],
+                    body_meta["last_char"],
+                    body_meta["starts_with_json"],
+                    body_meta["ends_with_json"],
+                    parse_meta["json_status"],
+                    parse_meta["json_error"],
+                    parse_meta["json_error_position"],
+                )
+                if author_id == request.agent_id:
+                    logger.info(
+                        "AGENT_OUTPUT_FINGERPRINT task_id=%s request_id=%s phase=%s role=%s "
+                        "dispatch_external_message_id=%s comment_id=%s chars=%s bytes=%s "
+                        "sha256=%s first_char=%r last_char=%r starts_with_json=%s "
+                        "ends_with_json=%s json_status=%s json_error=%r json_error_position=%s",
+                        request.task_id,
+                        request.request_id,
+                        request.phase,
+                        request.role,
+                        request.dispatch_external_message_id,
+                        comment_id,
+                        body_meta["chars"],
+                        body_meta["bytes"],
+                        body_meta["sha256"],
+                        body_meta["first_char"],
+                        body_meta["last_char"],
+                        body_meta["starts_with_json"],
+                        body_meta["ends_with_json"],
+                        parse_meta["json_status"],
+                        parse_meta["json_error"],
+                        parse_meta["json_error_position"],
+                    )
                 if comment_id and comment_id == request.dispatch_external_message_id:
                     stats["dispatch_comment"] += 1
                     continue
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("protocol") == "nexus-agent-result-ref-v1"
+                ):
+                    pointer_task_id = str(payload.get("task_id") or "")
+                    pointer_request_id = str(payload.get("request_id") or "")
+                    if (
+                        pointer_task_id != request.task_id
+                        or pointer_request_id != request.request_id
+                    ):
+                        stats["request_mismatch"] += 1
+                        logger.warning(
+                            "STALE_RESULT_POINTER issue_id=%s task_id=%s "
+                            "request_id=%s comment_id=%s pointer_task_id=%s "
+                            "pointer_request_id=%s result_path=%s reason=pointer_binding_mismatch",
+                            issue_id,
+                            request.task_id,
+                            request.request_id,
+                            comment_id,
+                            pointer_task_id,
+                            pointer_request_id,
+                            payload.get("result_path", ""),
+                        )
+                        continue
+                    expected_result_path = self.prompt_bundle_builder.result_path(
+                        request.task_id,
+                        request.request_id,
+                    )
+                    actual_result_path = str(payload.get("result_path") or "").strip()
+                    if (
+                        not actual_result_path
+                        or _path_identity(actual_result_path)
+                        != _path_identity(expected_result_path)
+                    ):
+                        stats["request_mismatch"] += 1
+                        logger.warning(
+                            "STALE_RESULT_POINTER issue_id=%s task_id=%s "
+                            "request_id=%s comment_id=%s pointer_task_id=%s "
+                            "pointer_request_id=%s expected_result_path=%s "
+                            "actual_result_path=%s reason=result_path_binding_mismatch",
+                            issue_id,
+                            request.task_id,
+                            request.request_id,
+                            comment_id,
+                            pointer_task_id,
+                            pointer_request_id,
+                            expected_result_path,
+                            actual_result_path,
+                        )
+                        continue
+                    try:
+                        file_result = read_agent_result_file(
+                            payload,
+                            task_id=request.task_id,
+                            request_id=request.request_id,
+                            phase=request.phase,
+                            role=request.role,
+                            allowed_root=self.agent_result_allowed_root,
+                            expected_schema_hash=str(
+                                (request.structured_output or {}).get("schema_hash") or ""
+                            ),
+                            expected_state=request.target_state
+                            or str(request.context.get("target_state") or "")
+                            or str(
+                                (request.structured_output or {}).get("state") or ""
+                            ),
+                            expected_role_mode=str(
+                                request.context.get("structured_output_role_mode")
+                                or (request.structured_output or {}).get("role_mode")
+                                or ""
+                            ),
+                            allow_transport_backfill=True,
+                        )
+                        payload = file_result.payload
+                        result_was_file = True
+                    except AgentResultFileError as error:
+                        stats["unstructured"] += 1
+                        logger.warning(
+                            "AGENT_REPLY_FILE_REJECTED task_id=%s request_id=%s "
+                            "phase=%s role=%s comment_id=%s reason=%s",
+                            request.task_id,
+                            request.request_id,
+                            request.phase,
+                            request.role,
+                            comment_id,
+                            str(error),
+                        )
+                        continue
                 if author_id != request.agent_id:
                     stats["author_mismatch"] += 1
                     continue
                 created_at = str(comment.get("created_at") or "")
-                if request.sent_after and created_at and created_at <= request.sent_after:
+                if (
+                    request.sent_after
+                    and created_at
+                    and timestamp_order_key(created_at) <= timestamp_order_key(request.sent_after)
+                ):
                     stats["stale"] += 1
                     continue
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("action")
+                    and not result_was_file
+                    and payload.get("protocol")
+                    != "nexus-agent-result-ref-v1"
+                ):
+                    if structured_result_required:
+                        stats["unstructured"] += 1
+                        logger.warning(
+                            "AGENT_REPLY_INLINE_RESULT_REJECTED task_id=%s request_id=%s "
+                            "phase=%s role=%s comment_id=%s reason=RESULT_FILE_REQUIRED "
+                            "schema_hash=%s",
+                            request.task_id,
+                            request.request_id,
+                            request.phase,
+                            request.role,
+                            comment_id,
+                            (request.structured_output or {}).get("schema_hash", ""),
+                        )
+                        continue
+                    payload_request_id = payload.get("request_id")
+                    if payload_request_id and payload_request_id != request.request_id:
+                        stats["request_mismatch"] += 1
+                        logger.warning(
+                            "STALE_INLINE_RESULT issue_id=%s task_id=%s "
+                            "request_id=%s comment_id=%s payload_request_id=%s "
+                            "reason=payload_binding_mismatch",
+                            issue_id,
+                            request.task_id,
+                            request.request_id,
+                            comment_id,
+                            payload_request_id,
+                        )
+                        continue
+                    inline_result_pending = True
                 if not isinstance(payload, dict) or not payload.get("action"):
                     stats["unstructured"] += 1
+                    if author_id == request.agent_id:
+                        logger.warning(
+                            "AGENT_REPLY_PARSE_FAILED task_id=%s request_id=%s phase=%s role=%s "
+                            "comment_id=%s sha256=%s json_status=%s json_error=%r "
+                            "json_error_position=%s",
+                            request.task_id,
+                            request.request_id,
+                            request.phase,
+                            request.role,
+                            comment_id,
+                            body_meta["sha256"],
+                            parse_meta["json_status"],
+                            parse_meta["json_error"],
+                            parse_meta["json_error_position"],
+                        )
                     if require_explicit_binding:
                         parent_id = str(
                             comment.get("parent_id")
@@ -333,7 +1148,24 @@ class MulticaCliAdapter:
                                     "request_id": request.request_id,
                                     "role": request.role,
                                     "phase": request.phase,
-                                    "raw_reply": body,
+                                    "response_source": "comment",
+                                    "structured_output_schema_hash": str(
+                                        (request.structured_output or {}).get("schema_hash") or ""
+                                    ),
+                                    "raw_reply": body[:500],
+                                    "raw_reply_truncated": len(body) > 500,
+                                    "raw_reply_chars": body_meta["chars"],
+                                    "raw_reply_bytes": body_meta["bytes"],
+                                    "raw_reply_sha256": body_meta["sha256"],
+                                    "raw_reply_first_char": body_meta["first_char"],
+                                    "raw_reply_last_char": body_meta["last_char"],
+                                    "json_status": parse_meta["json_status"],
+                                    "json_error": parse_meta["json_error"],
+                                    "json_error_position": parse_meta["json_error_position"],
+                                    "launch_failed": (
+                                        "start opencode" in body.lower()
+                                        and "too long" in body.lower()
+                                    ),
                                 },
                                 comment_id,
                                 body,
@@ -375,18 +1207,54 @@ class MulticaCliAdapter:
                     )
                     continue
                 if payload_request_id and payload_request_id != request.request_id:
-                    if not allow_request_fallback:
-                        stats["request_mismatch"] += 1
-                        continue
-                    payload["source_request_id"] = payload_request_id
-                    payload["correlation_method"] = "issue+agent+unique_recent_reply"
-                    payload["correlation_confidence"] = "medium"
+                    stats["request_mismatch"] += 1
+                    logger.warning(
+                        "REPLY_CORRELATION_FILTERED issue_id=%s task_id=%s request_id=%s "
+                        "external_id=%s payload_request_id=%s reason=request_id_mismatch",
+                        issue_id,
+                        request.task_id,
+                        request.request_id,
+                        comment_id,
+                        payload_request_id,
+                    )
+                    continue
                 payload_task_id = payload.get("task_id")
                 if payload_task_id and payload_task_id != request.task_id:
-                    if not allow_request_fallback:
-                        stats["request_mismatch"] += 1
+                    stats["request_mismatch"] += 1
+                    logger.warning(
+                        "REPLY_CORRELATION_FILTERED issue_id=%s task_id=%s request_id=%s "
+                        "external_id=%s payload_task_id=%s reason=task_id_mismatch",
+                        issue_id,
+                        request.task_id,
+                        request.request_id,
+                        comment_id,
+                        payload_task_id,
+                    )
+                    continue
+                if inline_result_pending:
+                    try:
+                        payload = self._persist_inline_result(request, payload)
+                        logger.info(
+                            "AGENT_INLINE_RESULT_ACCEPTED task_id=%s request_id=%s "
+                            "phase=%s role=%s comment_id=%s",
+                            request.task_id,
+                            request.request_id,
+                            request.phase,
+                            request.role,
+                            comment_id,
+                        )
+                    except AgentResultFileError as error:
+                        logger.warning(
+                            "AGENT_INLINE_RESULT_REJECTED task_id=%s request_id=%s "
+                            "phase=%s role=%s comment_id=%s reason=%s",
+                            request.task_id,
+                            request.request_id,
+                            request.phase,
+                            request.role,
+                            comment_id,
+                            str(error),
+                        )
                         continue
-                    payload["source_task_id"] = payload_task_id
                 payload["task_id"] = request.task_id
                 payload["request_id"] = request.request_id
                 payload.setdefault("role", request.role)
@@ -400,22 +1268,54 @@ class MulticaCliAdapter:
                 len(ordered_comments),
             )
 
-        thread_args = ["issue", "comment", "list", issue_id]
         if request.dispatch_external_message_id:
-            thread_args += ["--thread", request.dispatch_external_message_id, "--tail", "30"]
-            if request.sent_after:
-                thread_args += ["--since", request.sent_after]
+            thread_value = self.comment_feed.read(
+                f"{issue_id}:thread:{request.dispatch_external_message_id}",
+                lambda since: self._run_with_read_retry(
+                    "issue", "comment", "list", issue_id,
+                    "--thread", request.dispatch_external_message_id,
+                    "--tail", "30",
+                    *(('--since', since) if since else ()),
+                    "--output", "json",
+                ),
+                initial_since=request.sent_after,
+            )
         else:
-            thread_args += ["--recent", "50"]
-        thread_args += ["--output", "json"]
-        value = self._run_with_read_retry(*thread_args)
+            thread_value = self.comment_feed.read(
+                f"{issue_id}:recent:{request.request_id}",
+                lambda since: self._run_with_read_retry(
+                    "issue", "comment", "list", issue_id,
+                    "--recent", "50",
+                    *(('--since', since) if since else ()),
+                    "--output", "json",
+                ),
+                initial_since=request.sent_after,
+            )
         (
             result,
             supplemental_reports,
             unstructured_candidates,
             stats,
             comments_total,
-        ) = parse_comments(comments_from(value))
+        ) = parse_comments(comments_from(thread_value))
+        if structured_result_required:
+            remote_run_status = self.get_run_status(request)
+            if remote_run_status != "completed":
+                logger.warning(
+                    "AGENT_REPLY_WAITING_REMOTE_TERMINAL task_id=%s request_id=%s "
+                    "phase=%s role=%s status=%s observed_result=%s",
+                    request.task_id,
+                    request.request_id,
+                    request.phase,
+                    request.role,
+                    remote_run_status,
+                    bool(result),
+                )
+                return []
+        if not result:
+            recovered_file_message = self._recover_result_file(request)
+            if recovered_file_message is not None:
+                result = [recovered_file_message]
         recovery_ids: set[str] = set()
 
         if (
@@ -431,11 +1331,15 @@ class MulticaCliAdapter:
                 or stats["uncorrelated"]
             )
         ):
-            root_value = self._run_with_read_retry(
-                "issue", "comment", "list", issue_id,
-                "--recent", "100", "--output", "json",
+            root_comments = self.comment_feed.read(
+                f"{issue_id}:{request.task_id}:{request.request_id}",
+                lambda since: self._run_with_read_retry(
+                    "issue", "comment", "list", issue_id,
+                    *(('--since', since) if since else ()),
+                    "--output", "json",
+                ),
+                initial_since=request.sent_after,
             )
-            root_comments = comments_from(root_value)
             (
                 root_result,
                 root_supplemental,
@@ -444,20 +1348,18 @@ class MulticaCliAdapter:
                 root_total,
             ) = parse_comments(
                 root_comments,
-                allow_request_fallback=True,
                 require_explicit_binding=True,
             )
-            candidate_count = len(root_result)
             unstructured_candidates = root_unstructured_candidates
-            if candidate_count == 1:
+            if root_result:
                 result = root_result
                 supplemental_reports.extend(root_supplemental)
                 for key, value_count in root_stats.items():
                     stats[key] += value_count
                 comments_total += root_total
-                logger.warning(
-                    "REPLY_CORRELATION_FALLBACK_ACCEPTED issue_id=%s task_id=%s "
-                    "request_id=%s matched_by=issue+agent+unique_recent_reply "
+                logger.info(
+                    "REPLY_CORRELATION_RECOVERED issue_id=%s task_id=%s "
+                    "request_id=%s matched_by=explicit_thread_or_request_binding "
                     "external_id=%s",
                     issue_id,
                     request.task_id,
@@ -487,9 +1389,14 @@ class MulticaCliAdapter:
                     request.dispatch_external_message_id,
                     sorted(recovery_ids),
                 )
-                root_value = self._run_with_read_retry(
-                    "issue", "comment", "list", issue_id,
-                    "--recent", "100", "--output", "json",
+                root_comments = self.comment_feed.read(
+                    f"{issue_id}:{request.task_id}:{request.request_id}",
+                    lambda since: self._run_with_read_retry(
+                        "issue", "comment", "list", issue_id,
+                        *(('--since', since) if since else ()),
+                        "--output", "json",
+                    ),
+                    initial_since=request.sent_after,
                 )
                 (
                     root_result,
@@ -497,7 +1404,7 @@ class MulticaCliAdapter:
                     root_unstructured_candidates,
                     root_stats,
                     root_total,
-                ) = parse_comments(comments_from(root_value), recovery_ids)
+                ) = parse_comments(root_comments, recovery_ids)
                 comments_total += root_total
                 result = root_result
                 supplemental_reports.extend(root_supplemental)
@@ -557,10 +1464,63 @@ class MulticaCliAdapter:
             stats["request_mismatch"],
             sorted(recovery_ids),
         )
+        logger.info(
+            "AGENT_REPLY_CORRELATION_RESULT task_id=%s request_id=%s phase=%s role=%s "
+            "dispatch_external_message_id=%s comments_total=%s valid_replies=%s "
+            "unstructured=%s request_mismatch=%s uncorrelated=%s stale=%s "
+            "author_mismatch=%s correlation_ids=%s",
+            request.task_id,
+            request.request_id,
+            request.phase,
+            request.role,
+            request.dispatch_external_message_id,
+            comments_total,
+            len(result),
+            stats["unstructured"],
+            stats["request_mismatch"],
+            stats["uncorrelated"],
+            stats["stale"],
+            stats["author_mismatch"],
+            sorted(recovery_ids),
+        )
         return result
 
     def _find_correlated_delivery_ids(self, request: AgentRequest) -> set[str]:
+        matches = self._matching_runs(request)
+        if not matches:
+            logger.info(
+                "REPLY_CORRELATION_MISS issue_id=%s task_id=%s request_id=%s "
+                "trigger_comment_id=%s",
+                request.issue_id or request.task_id,
+                request.task_id,
+                request.request_id,
+                request.dispatch_external_message_id,
+            )
+            return set()
+        run = matches[0]
+        if self._normalize_run_status(run.get("status")) != "completed":
+            return set()
+        delivered = run.get("delivered_comment_ids") or []
+        return {str(comment_id) for comment_id in delivered if comment_id}
+
+    @staticmethod
+    def _normalize_run_status(value: object) -> str:
+        status = str(value or "").strip().lower()
+        if status in {"succeeded", "success", "done", "finished"}:
+            return "completed"
+        if status in {"error", "errored", "cancelled", "canceled"}:
+            return "failed"
+        if status in {"running", "queued", "pending", "created"}:
+            return "running"
+        if status in {"completed", "failed"}:
+            return status
+        return "unknown"
+
+    def _matching_runs(self, request: AgentRequest) -> list[dict[str, object]]:
         issue_id = request.issue_id or request.task_id
+        trigger_id = str(request.dispatch_external_message_id or "")
+        if not trigger_id:
+            return []
         try:
             value = self._run_with_read_retry(
                 "issue", "runs", issue_id, "--output", "json"
@@ -574,7 +1534,7 @@ class MulticaCliAdapter:
                 request.request_id,
                 str(error)[:300],
             )
-            return set()
+            return []
         runs = value if isinstance(value, list) else (
             value.get("runs", value.get("items", []))
             if isinstance(value, dict)
@@ -583,51 +1543,89 @@ class MulticaCliAdapter:
         matches = [
             run for run in runs
             if isinstance(run, dict)
-            and str(run.get("trigger_comment_id") or "")
-            == request.dispatch_external_message_id
+            and trigger_id in {
+                str(run.get("trigger_comment_id") or ""),
+                *(str(item) for item in (run.get("coalesced_comment_ids") or [])),
+                *(str(item) for item in (run.get("delivered_comment_ids") or [])),
+            }
         ]
+        matches.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
+        return matches
+
+    def get_run_status(self, request: AgentRequest) -> str:
+        matches = self._matching_runs(request)
         if not matches:
             logger.info(
-                "REPLY_CORRELATION_MISS issue_id=%s task_id=%s request_id=%s "
-                "trigger_comment_id=%s",
-                issue_id,
+                "AGENT_REMOTE_RUN_STATUS_UNKNOWN task_id=%s request_id=%s "
+                "trigger_comment_id=%s reason=no_matching_run",
                 request.task_id,
                 request.request_id,
                 request.dispatch_external_message_id,
             )
-            return set()
-        matches.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
-        run = matches[0]
-        if str(run.get("status") or "") != "completed":
-            return set()
-        delivered = run.get("delivered_comment_ids") or []
-        return {str(comment_id) for comment_id in delivered if comment_id}
+            return "unknown"
+        status = self._normalize_run_status(matches[0].get("status"))
+        logger.info(
+            "AGENT_REMOTE_RUN_STATUS task_id=%s request_id=%s trigger_comment_id=%s status=%s",
+            request.task_id,
+            request.request_id,
+            request.dispatch_external_message_id,
+            status,
+        )
+        return status
 
     def find_existing_request(self, idempotency_key: str, issue_id: str = "") -> DispatchReceipt | None:
-        try:
-            issue_id = issue_id or self.last_issue_id
-            if not issue_id:
-                return None
-            value = self._run_with_read_retry("issue", "comment", "list", issue_id, "--recent", "100", "--output", "json")
-        except Exception:
-            return None
-        comments = value if isinstance(value, list) else value.get("comments", value.get("items", [])) if isinstance(value, dict) else []
-        for comment in comments:
-            if not isinstance(comment, dict):
-                continue
-            payload = _extract_json(str(comment.get("content") or comment.get("body") or ""))
-            stored_key = (
-                payload.get("idempotency_key")
-                or payload.get("transport", {}).get("idempotency_key")
-                if isinstance(payload, dict)
-                else None
-            )
-            if stored_key == idempotency_key:
+        with self._dispatch_index_lock:
+            key = str(idempotency_key or "")
+            cached = self._dispatch_index.get(key)
+            if cached is not None:
                 return DispatchReceipt(
-                    operation_id=str(comment.get("id") or idempotency_key),
-                    external_message_id=str(comment.get("id") or ""),
+                    operation_id=cached.get("operation_id") or key,
+                    external_message_id=cached.get("external_message_id") or "",
+                    request_id=cached.get("request_id") or "",
                 )
-        return None
+            try:
+                issue_id = issue_id or self.last_issue_id
+                if not issue_id:
+                    return None
+                scope = f"{issue_id}:dispatch"
+                cursor_snapshot = self.comment_feed.snapshot(scope)
+                comments = self.comment_feed.read(
+                    scope,
+                    lambda since: self._run_with_read_retry(
+                        "issue", "comment", "list", issue_id,
+                        *(('--since', since) if since else ('--recent', '20')),
+                        "--output", "json",
+                    ),
+                    # The dispatch index is the dependent durable side
+                    # effect.  Commit the cursor only after that index is
+                    # durably updated, closing the crash window between the
+                    # two files.
+                    persist=False,
+                )
+                self._index_dispatch_comments(comments)
+                self.comment_feed.commit()
+            except Exception as error:
+                if "cursor_snapshot" in locals():
+                    self.comment_feed.restore(scope, cursor_snapshot)
+                logger.warning(
+                    "REQUEST_LOOKUP_FAILED issue_id=%s idempotency_key=%s "
+                    "error_type=%s error=%s",
+                    issue_id,
+                    idempotency_key,
+                    type(error).__name__,
+                    str(error)[:300],
+                )
+                raise RequestLookupError(
+                    f"unable to query existing request for {idempotency_key}"
+                ) from error
+            cached = self._dispatch_index.get(key)
+            if cached is None:
+                return None
+            return DispatchReceipt(
+                operation_id=cached.get("operation_id") or key,
+                external_message_id=cached.get("external_message_id") or "",
+                request_id=cached.get("request_id") or "",
+            )
 
     def add_comment(self, issue_id: str, text: str) -> str:
         path = self.log_dir / f"fallback_{int(time.time() * 1000)}.md"
@@ -675,41 +1673,77 @@ def _response_contract_for(request: AgentRequest) -> dict:
         "questions_for_user",
     ]
     allowed_actions: list[str] = []
+    required_by_action: dict[str, list[str]] = {}
     instruction = (
         "Return one structured JSON response. Put the full analysis in the "
         "business fields; do not send a separate unbound Markdown reply."
     )
     if request.phase == "ZHONGSHU" and request.role == "review-analyst":
-        optional.extend(["plan", "next_actions"])
-        allowed_actions = ["READY_FOR_SOLVER", "HUMAN_GATE", "BLOCKED"]
-        instruction = (
-            "You are the Zhongshu evidence Analyst. Return the single strict "
-            "new-format plan contract supplied in the prompt. Do not emit legacy "
-            "evidence_packet, analyst_draft, or top-level candidate_groups fields."
-        )
+        dispatch_mode = str(request.context.get("zhongshu_dispatch_mode") or "evidence_collection")
+        if request.context.get("contract_mode") or dispatch_mode == "requirement_contract":
+            optional.extend(["requirements", "unknowns", "next_actions"])
+            allowed_actions = ["REQUIREMENT_CONTRACT_READY", "HUMAN_GATE", "BLOCKED"]
+            instruction = (
+                "You are the Zhongshu requirement-contract Analyst. Return only "
+                "the atomic requirement contract requested in the prompt. Do not "
+                "emit task proposals or implementation details."
+            )
+            required_by_action = {
+                "REQUIREMENT_CONTRACT_READY": ["action", "requirements"],
+            }
+        elif dispatch_mode == "evidence_supplement":
+            optional.extend(["evidence_updates", "unknowns", "unknown_resolutions", "confirmed_facts", "risks"])
+            allowed_actions = ["EVIDENCE_SUPPLEMENT_READY", "HUMAN_GATE", "BLOCKED"]
+            required_by_action = {"EVIDENCE_SUPPLEMENT_READY": ["action", "evidence_updates"]}
+            instruction = "Only supplement the supplied evidence gaps. Preserve the current graph and requirement identities. Return targeted evidence_updates or explicit unknowns, not a new task graph."
+        else:
+            optional.extend([
+                "lens", "requirements", "evidence_updates", "confirmed_facts",
+                "constraints", "conflicts", "unknowns", "unknown_requirement_ids",
+                "risks", "scope", "questions_for_solver", "questions_for_user",
+            ])
+            allowed_actions = ["EVIDENCE_PACKET_READY", "HUMAN_GATE", "BLOCKED"]
+            instruction = (
+                "You are the Zhongshu evidence-only Analyst. Return requirements "
+                "and traceable evidence only. Do not emit task proposals, candidate "
+                "items, candidate groups, or implementation details."
+            )
     elif request.phase == "ZHONGSHU" and request.role == "review-solver":
         optional.extend([
             "plan",
-            "requirements",
-            "options",
-            "comparison",
-            "recommendation",
+            "changes",
             "dependencies",
             "scope",
-            "assumptions",
             "unknowns",
-            "risk_signals",
-            "candidate_verification_questions",
-            "source_revalidation",
-            "context_check",
+            "risks",
+            "finding_resolutions",
+            "finding_batch",
             "next_actions",
         ])
-        allowed_actions = ["READY_FOR_CRITIC", "HUMAN_GATE", "BLOCKED"]
+        allowed_actions = [
+            "READY_FOR_CRITIC",
+            "REQUEST_ANALYST_EVIDENCE",
+            "NEEDS_MORE_EVIDENCE",
+            "HUMAN_GATE",
+            "BLOCKED",
+        ]
         instruction = (
-            "You are the Zhongshu planning Solver. Produce a read-only solution "
-            "plan only; do not modify files or implement code. Reuse upstream "
-            "evidence, stop repeated searching when evidence is sufficient, "
-            "and always finish with exactly one structured JSON response."
+            "You are the Zhongshu task-graph Solver. Preserve Analyst requirements "
+            "and produce one auditable formal task graph. Do not emit implementation "
+            "design, options, comparison, or recommendation fields; do not modify "
+            "files; on the initial run return the complete plan, while a revision "
+            "with current_formal_plan returns bounded changes (changes=[] is valid) "
+            "and finding_resolutions so the orchestrator can materialize the full "
+            "plan. A revision must return finding_resolutions only for a bounded "
+            "selected batch plus finding_batch.selected_finding_ids and "
+            "finding_batch.remaining_finding_ids covering all active findings. "
+            "The orchestrator carries the declared remainder to the next round. "
+            "For compact full-plan output, groups MUST use item_ids that refer "
+            "to complete plan.items; do not emit groups[*].items or duplicate "
+            "task objects. Always "
+            "finish with exactly one structured JSON response. Preserve every "
+            "Analyst candidate item_id in plan.items and plan.groups; do not silently "
+            "drop a candidate task during normalization."
         )
     elif request.phase == "ZHONGSHU" and request.role == "review-critic":
         optional.extend([
@@ -721,6 +1755,8 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "grouping_review",
             "dependency_review",
             "risk_signals",
+            "plan_hash",
+            "reviewed_plan_hash",
             "findings",
             "next_actions",
             "remaining_blockers",
@@ -728,19 +1764,62 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "questions_for_analyst",
             "questions_for_user",
         ])
-        allowed_actions = [
-            "APPROVE_FREEZE",
-            "REQUEST_ANALYST_EVIDENCE",
-            "REQUEST_SOLVER_REVISION",
-            "REQUEST_REGROUP",
-            "HUMAN_GATE",
-            "BLOCKED",
-        ]
-        instruction = (
-            "You are the Zhongshu plan Critic. Return one structured JSON "
-            "object with the allowed action and evidence-backed findings; do "
-            "not modify files or output final approval beyond the action."
-        )
+        if str(request.context.get("zhongshu_dispatch_mode") or "") == "task_review":
+            optional.extend([
+                "group_id",
+                "item_id",
+                "reviewed_task_hash",
+                "reviewed_dependency_hash",
+                "review_checks",
+                "evidence_ids",
+                "unknowns",
+            ])
+            allowed_actions = [
+                "TASK_APPROVED",
+                "TASK_CHANGES_REQUIRED",
+                "REQUEST_ANALYST_EVIDENCE",
+                "HUMAN_GATE",
+                "BLOCKED",
+            ]
+            instruction = (
+                "You are the Zhongshu task Critic. Review only the assigned "
+                "group_id/item_id capsule. Return the exact revision and task hashes, "
+                "all review_checks, and task-scoped evidence-backed findings. Do not "
+                "review or create findings for any other task, and do not design implementation."
+            )
+            required_by_action = {
+                action: [
+                    "action", "revision_id", "group_id", "item_id",
+                    "reviewed_task_hash", "reviewed_dependency_hash",
+                    "review_checks", "findings", "evidence_ids", "unknowns",
+                ]
+                for action in allowed_actions
+            }
+        else:
+            allowed_actions = [
+                "APPROVE_FREEZE",
+                "REQUEST_ANALYST_EVIDENCE",
+                "REQUEST_SOLVER_REVISION",
+                "REQUEST_REGROUP",
+                "HUMAN_GATE",
+                "BLOCKED",
+            ]
+            instruction = (
+                "You are the Zhongshu plan Critic. Return one structured JSON "
+                "object with the allowed action, the exact reviewed_plan_hash, and "
+                "evidence-backed findings; include explicit resolutions of prior findings you reviewed. "
+                "Omission does not close history. Independent workers may reach identical conclusions. Do not "
+                "modify files or output final approval beyond the action."
+            )
+            required_by_action = {
+                action: ["action", "reviewed_plan_hash", "findings"]
+                for action in (
+                    "APPROVE_FREEZE",
+                    "REQUEST_ANALYST_EVIDENCE",
+                    "REQUEST_SOLVER_REVISION",
+                    "REQUEST_REGROUP",
+                )
+            }
     elif request.phase == "MENXIA" and request.role == "review-analyst":
         optional.extend([
             "assessment",
@@ -812,7 +1891,37 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "next_actions",
         ])
         allowed_actions = ["FEASIBLE", "READY_FOR_ANALYST", "READY_FOR_CRITIC", "HUMAN_GATE", "BLOCKED"]
-    return {
+    if request.phase == "ZHONGSHU":
+        from .zhongshu_review import ANALYST_ACTIONS, CRITIC_ACTIONS, TASK_CRITIC_ACTIONS
+        if request.role == "review-analyst":
+            mode = "requirement_contract" if request.context.get("contract_mode") else str(request.context.get("zhongshu_dispatch_mode") or "evidence_collection")
+            if mode == "task_discovery":
+                mode = "evidence_collection"
+            if mode in ANALYST_ACTIONS:
+                allowed_actions = sorted(ANALYST_ACTIONS[mode])
+        elif request.role == "review-critic":
+            if str(request.context.get("zhongshu_dispatch_mode") or "") == "task_review":
+                allowed_actions = sorted(TASK_CRITIC_ACTIONS)
+                required_by_action = {
+                    action: [
+                        "action", "revision_id", "group_id", "item_id",
+                        "reviewed_task_hash", "reviewed_dependency_hash",
+                        "review_checks", "findings", "evidence_ids", "unknowns",
+                    ]
+                    for action in allowed_actions
+                }
+            else:
+                allowed_actions = sorted(
+                    action for action in CRITIC_ACTIONS
+                    if action not in {"TASK_APPROVED", "TASK_CHANGES_REQUIRED"}
+                )
+                required_by_action = {
+                    action: ["action", "reviewed_plan_hash"] + (
+                        [] if action in {"HUMAN_GATE", "BLOCKED"} else ["findings"]
+                    )
+                    for action in allowed_actions
+                }
+    contract = {
         "format": "json",
         "required": ["action"],
         "optional": list(dict.fromkeys(optional)),
@@ -820,6 +1929,95 @@ def _response_contract_for(request: AgentRequest) -> dict:
         "do_not_echo": ["task_id", "request_id", "role", "phase"],
         "instruction": instruction,
     }
+    if (
+        isinstance(request.structured_output, dict)
+        and request.structured_output.get("mode") == "result_file"
+    ):
+        contract["format"] = "result_file_json_plus_compact_pointer"
+        contract["do_not_echo"] = []
+        contract["instruction"] = (
+            "Write the complete business JSON object to the exact result_path "
+            "in prompt_ref using a real JSON serializer. The file must include "
+            "the request binding fields and structured_output_schema_hash. "
+            "After the durable file write, reply only with the compact result "
+            "pointer; do not put the business JSON in the issue comment."
+        )
+        contract["contract_id"] = str(
+            request.structured_output.get("contract_id") or ""
+        )
+    if required_by_action:
+        contract["required_by_action"] = required_by_action
+    if request.phase == "ZHONGSHU" and request.role == "review-solver":
+        contract["formal_item_required_fields"] = list(ZHONGSHU_SOLVER_REQUIRED_ITEM_FIELDS)
+        contract["formal_item_rule"] = (
+            "For READY_FOR_CRITIC, every object in plan.items must include all "
+            "formal_item_required_fields. Groups must contain item_ids that reference "
+            "plan.items; do not emit groups[*].items or duplicate task objects. Empty "
+            "unknowns and risks must be emitted as [] and parallelizable must be a boolean."
+        )
+        contract["finding_batch_rule"] = (
+            "On revisions, select the orchestrator-provided focus_finding_ids. Each Finding is atomic "
+            f"and must be included in full; select no more than {ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND} "
+            "findings, return resolutions for selected IDs, and explicitly list all remaining IDs in finding_batch."
+        )
+        if request.context.get("solver_revision_mode") or request.context.get("has_current_plan"):
+            contract["required_by_action"] = {
+                # Revision accepts either bounded changes or a full plan when
+                # the requested topology cannot be represented by a patch.
+                # State validation enforces that one of them materializes.
+                "READY_FOR_CRITIC": ["action"],
+            }
+        else:
+            contract["required_by_action"] = {
+                "READY_FOR_CRITIC": ["action", "plan"],
+            }
+    stable_fields = stable_role_fields(request.phase, request.role)
+    if stable_fields and isinstance(request.structured_output, dict):
+        target_state = str(
+            request.target_state or request.context.get("target_state") or ""
+        )
+        valid_state_actions = state_actions(target_state)
+        if valid_state_actions:
+            allowed_actions = [
+                action for action in allowed_actions
+                if action in valid_state_actions
+            ]
+        transport_fields = [
+            "task_id", "request_id", "phase", "state", "role", "mode",
+            "structured_output_protocol", "structured_output_schema_hash",
+        ]
+        role_mode = str(
+            request.context.get("structured_output_role_mode")
+            or request.structured_output.get("role_mode")
+            or role_mode_for(request.phase, request.role, request.context)
+        )
+        contract["required"] = ["action", *transport_fields, *stable_fields]
+        contract["optional"] = []
+        contract["required_by_action"] = {
+            action: ["action", *transport_fields, *stable_fields]
+            for action in allowed_actions
+        }
+        contract["stable_role_protocol"] = {
+            "phase": request.phase,
+            "role": request.role,
+            "state": target_state,
+            "mode": role_mode,
+            "transport_fields": transport_fields,
+            "fields": stable_fields,
+            "rule": (
+                "Always emit the same fields for this role. Put [] or null in fields "
+                "that are not used by the current mode; do not change the root shape."
+            ),
+        }
+        if contract.get("format") == "result_file_json_plus_compact_pointer":
+            contract["instruction"] = (
+                "Write one complete result using this role's fixed field set to the exact "
+                "result_path in prompt_ref. The root must include state, mode, every stable "
+                "role field, and the supplied protocol/schema hash. Use [] or null for fields "
+                "not used by the current mode. After the durable file write, reply only with "
+                "the compact result pointer; do not put business JSON in the issue comment."
+            )
+    return contract
 
 
 class FeishuHttpAdapter:
@@ -1004,8 +2202,71 @@ def _extract_json(body: str) -> object:
     if "```" in body:
         candidates.append(body.replace("```json", "").replace("```", "").strip())
     for candidate in candidates:
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
+        value, status, _, _ = _parse_json_candidate(candidate)
+        if status in {"valid", "repaired"}:
+            if status == "repaired":
+                logger.warning(
+                    "AGENT_REPLY_JSON_REPAIRED repair=EXTRA_CLOSING_BRACE "
+                    "sha256=%s",
+                    _fingerprint_text(body)["sha256"],
+                )
+            return value
+    repaired = _repair_diff_prefixed_json(body)
+    if repaired is not None:
+        return repaired
     return None
+
+
+def _repair_diff_prefixed_json(body: str) -> object | None:
+    """Repair only an unmistakable line-prefixed diff wrapper around JSON."""
+    lines = body.lstrip("\ufeff\u200b").strip().splitlines()
+    plus_lines = [line for line in lines if line.startswith("+")]
+    if len(plus_lines) < 2:
+        return None
+    if any(line.startswith(("---", "+++")) for line in lines):
+        return None
+    repaired = "\n".join(
+        line[1:] if line.startswith("+") else line
+        for line in lines
+    ).strip()
+    try:
+        payload = json.loads(repaired)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    logger.warning(
+        "AGENT_REPLY_DIFF_PREFIX_REPAIRED chars=%s plus_lines=%s",
+        len(body),
+        len(plus_lines),
+    )
+    return payload
+
+
+def _extract_result_pointer(body: str) -> dict[str, str] | None:
+    """Parse the compact human-readable result pointer emitted by some Agents."""
+    lines = [line.strip() for line in body.lstrip("\ufeff\u200b").splitlines() if line.strip()]
+    if not lines or lines[0].lower() != "nexus-agent-result-ref-v1":
+        return None
+    payload: dict[str, str] = {"protocol": "nexus-agent-result-ref-v1"}
+    for line in lines[1:]:
+        if line.startswith("-"):
+            line = line[1:].strip()
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if key in {
+            "task_id",
+            "request_id",
+            "phase",
+            "role",
+            "result_path",
+            "result_sha256",
+            "manifest_hash",
+            "structured_output_schema_hash",
+            "action",
+        }:
+            payload[key] = value.strip()
+    required = {"task_id", "request_id", "result_path", "action"}
+    if not required.issubset(payload):
+        return None
+    return payload

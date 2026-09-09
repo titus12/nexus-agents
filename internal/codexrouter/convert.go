@@ -51,9 +51,9 @@ func (h *responseHistory) record(id string, messages []map[string]any) {
 // convertedRequest is the result of turning a Codex Responses request into a
 // Chat Completions request body.
 type convertedRequest struct {
-	body              map[string]any
-	toolContext       *toolContext
-	wantsStream       bool
+	body               map[string]any
+	toolContext        *toolContext
+	wantsStream        bool
 	messagesForHistory []map[string]any
 }
 
@@ -117,6 +117,9 @@ func responsesToChatRequest(request responseRequest, route Route, history *respo
 	if value, ok := request.Raw["stop"]; ok {
 		body["stop"] = value
 	}
+	// handleResponses performs the route capability preflight before this
+	// conversion runs, so this forwarding path cannot silently degrade a
+	// requested structured response into free text.
 	if value, ok := request.Raw["response_format"]; ok && !routeDropsParam(route, "response_format") {
 		body["response_format"] = value
 	}
@@ -457,9 +460,9 @@ func responseUsage(usage any) map[string]any {
 		}
 	}
 	return map[string]any{
-		"input_tokens":  inputTokens,
-		"output_tokens": outputTokens,
-		"total_tokens":  total,
+		"input_tokens":          inputTokens,
+		"output_tokens":         outputTokens,
+		"total_tokens":          total,
 		"input_tokens_details":  map[string]any{"cached_tokens": cached},
 		"output_tokens_details": map[string]any{"reasoning_tokens": reasoning},
 	}

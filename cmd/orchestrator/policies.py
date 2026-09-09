@@ -28,8 +28,9 @@ DEFAULT_RETRY_POLICIES = {
 
 
 def normalize_critic_action(ctx: StateContext, action: str) -> str:
-    if action == "BLOCKED" and ctx.active_finding_ids and ctx.zhongshu_revision_round < ctx.max_zhongshu_revision_rounds:
+    blocking = ctx.blocking_finding_ids
+    if action == "BLOCKED" and blocking and ctx.zhongshu_revision_round < ctx.max_zhongshu_revision_rounds:
         return "REQUEST_SOLVER_REVISION"
-    if action == "APPROVE_FREEZE" and ctx.active_finding_ids:
+    if action == "APPROVE_FREEZE" and blocking:
         return "REQUEST_SOLVER_REVISION"
     return action

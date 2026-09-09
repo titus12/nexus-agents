@@ -31,10 +31,14 @@ def validate_agent_reply(
         return RejectedReply("TASK_ID_MISMATCH", payload, message.external_id)
     if str(payload.get("request_id", "")) != expected.request_id:
         return RejectedReply("REQUEST_ID_MISMATCH", payload, message.external_id)
+    target_state = str(payload.get("target_state") or "")
+    if target_state and expected.target_state and target_state != expected.target_state:
+        return RejectedReply("TARGET_STATE_MISMATCH", payload, message.external_id)
+    target_role = str(payload.get("target_role") or "")
+    if target_role and expected.target_role and target_role != expected.target_role:
+        return RejectedReply("TARGET_ROLE_MISMATCH", payload, message.external_id)
     normalized = dict(payload)
-    # Some Multica Agent runtimes omit role/phase even though the author,
-    # task_id and request_id bind the reply unambiguously. Infer only missing
-    # fields; an explicitly wrong role/phase remains a hard rejection.
+    # Missing role/phase may be inferred only after transport correlation.
     if not payload.get("role"):
         normalized["role"] = expected.role
         normalized["binding_normalized"] = True

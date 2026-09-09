@@ -5,6 +5,7 @@ import socket
 import time
 import uuid
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,20 +37,47 @@ class TaskLock:
                 except OSError as reclaim_error:
                     raise TaskLockError(f"task lock exists and cannot be reclaimed: {self.path}") from reclaim_error
                 self._handle = self.path.open("x", encoding="utf-8")
-                self._write_metadata()
+                try:
+                    self._write_metadata()
+                except Exception:
+                    self._handle.close()
+                    self._handle = None
+                    try:
+                        self.path.unlink()
+                    except OSError:
+                        pass
+                    raise
                 return
             raise TaskLockError(f"task lock already exists: {self.path}") from error
-        self._write_metadata()
+        try:
+            self._write_metadata()
+        except Exception:
+            self._handle.close()
+            self._handle = None
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+            raise
 
     def refresh(self) -> None:
         if self._handle is None:
             raise TaskLockError("lock is not held")
+        metadata = self._read_metadata()
+        if metadata.get("owner_token") != self.owner_token:
+            raise TaskLockError(f"task lock ownership lost: {self.path}")
         self._write_metadata()
 
     def release(self) -> None:
-        if self._handle is not None:
+        if self._handle is None:
+            return
+        try:
             self._handle.close()
+        finally:
             self._handle = None
+        metadata = self._read_metadata()
+        if metadata.get("owner_token") != self.owner_token:
+            return
         for path in (self.path, self.meta_path):
             try:
                 path.unlink()
@@ -71,10 +99,23 @@ class TaskLock:
             "acquired_at": time.time(),
             "lease_until": time.time() + self.lease_seconds,
         }
-        self.meta_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        fd, temporary = tempfile.mkstemp(
+            prefix=self.meta_path.name + ".",
+            suffix=".tmp",
+            dir=str(self.meta_path.parent),
         )
+        temporary_path = Path(temporary)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self.meta_path)
+        finally:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _read_metadata(self) -> dict[str, Any]:
         try:
@@ -83,8 +124,11 @@ class TaskLock:
             return {}
 
     def _can_reclaim(self, metadata: dict[str, Any]) -> bool:
-        lease_until = float(metadata.get("lease_until", 0))
-        pid = int(metadata.get("pid", 0) or 0)
+        try:
+            lease_until = float(metadata.get("lease_until", 0))
+            pid = int(metadata.get("pid", 0) or 0)
+        except (TypeError, ValueError):
+            return False
         if lease_until >= time.time() or pid <= 0:
             return False
         try:

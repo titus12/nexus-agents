@@ -15,6 +15,10 @@ ACTION_LABELS = {
     "EVIDENCE_SUFFICIENT": "证据审查通过",
     "APPROVE_ITEM": "方案审查通过",
     "REQUEST_SOLVER_REVISION": "需要规划师修订",
+    "REQUEST_ANALYST_EVIDENCE": "需要分析师补充证据",
+    "NEEDS_MORE_EVIDENCE": "需要补充证据",
+    "TASK_CHANGES_REQUIRED": "任务需要修订",
+    "TASK_APPROVED": "任务审查通过",
     "REVISE_ITEM": "当前条目需要修订",
     "HUMAN_GATE": "需要人工决策",
     "APPROVE_GROUP": "当前组审查通过",
@@ -29,6 +33,9 @@ PRESENTATION_EVENTS = {
     "LOCAL_VALIDATION_PASSED",
     "HUMAN_DECISION_RECEIVED",
     "HEARTBEAT",
+    "ZHONGSHU_FANOUT_STARTED",
+    "ZHONGSHU_WORKER_RETRY",
+    "ZHONGSHU_FANIN_COMPLETED",
 }
 
 HIDDEN_EVENTS = {
@@ -114,6 +121,8 @@ def build_agent_notification(
     text = "\n".join(line for line in lines if line)
     if state == "DONE":
         render_limit = limit
+    elif role == "review-critic" and event_name == "AGENT_REPLY_ACCEPTED":
+        render_limit = 2800
     elif state == "MENXIA_ITEM_ANALYST" and event_name == "AGENT_REPLY_ACCEPTED":
         render_limit = 2200
     else:
@@ -163,6 +172,69 @@ def build_agent_notification_parts(
     return chunks
 
 
+def build_zhongshu_parallel_notification(
+    ctx: Any,
+    event_name: str,
+    summary: dict[str, Any],
+    limit: int = 1800,
+) -> str:
+    """Render bounded Zhongshu fan-out/retry/fan-in status for Feishu."""
+    phase = str(summary.get("phase") or getattr(ctx, "workflow_state", "ZHONGSHU"))
+    revision_id = str(summary.get("revision_id") or summary.get("plan_revision_id") or "")
+    lines = ["【中书省并发进度】", f"阶段：{phase}"]
+    if revision_id:
+        lines.append(f"方案版本：{revision_id}")
+    lines.append(f"事件：{event_name}")
+
+    workers = summary.get("workers") or []
+    if isinstance(workers, list) and workers:
+        lines.extend(["", "Worker 状态："])
+        for worker in workers[:8]:
+            if not isinstance(worker, dict):
+                continue
+            worker_id = str(worker.get("worker_id") or "unknown")
+            status = str(worker.get("status") or "unknown").upper()
+            attempt = worker.get("attempt")
+            max_attempts = worker.get("max_attempts", 3)
+            error = str(worker.get("error") or "").strip()
+            marker = {
+                "COMPLETED": "✓",
+                "RUNNING": "…",
+                "RETRYING": "↻",
+                "FAILED": "✗",
+                "REJECTED": "!",
+            }.get(status, "?")
+            attempt_text = (
+                f"（第 {attempt}/{max_attempts} 次）"
+                if attempt is not None
+                else ""
+            )
+            line = f"- {marker} {worker_id}：{status}{attempt_text}"
+            if error:
+                line += f"；{_brief(error, 160)}"
+            lines.append(line)
+        if len(workers) > 8:
+            lines.append(f"- 其余 {len(workers) - 8} 个 Worker 见任务日志")
+
+    for label, key in (
+        ("已完成", "completed"),
+        ("失败", "failed"),
+        ("被并发上限拒绝", "rejected"),
+        ("未解决冲突", "unresolved_conflicts"),
+        ("已解决冲突", "resolved_conflicts"),
+    ):
+        value = summary.get(key)
+        if isinstance(value, (list, tuple)):
+            if value:
+                lines.append(f"{label}：{len(value)}")
+        elif value not in (None, ""):
+            lines.append(f"{label}：{value}")
+    action = str(summary.get("action") or "")
+    if action:
+        lines.append(f"下一步：{action}")
+    return _bounded("\n".join(lines), limit)
+
+
 def _state_label(
     state: str,
     event_name: str,
@@ -206,14 +278,45 @@ def _render_reply_rejection(ctx: Any) -> list[str]:
 def _render_reply_retry(ctx: Any) -> list[str]:
     error = getattr(ctx, "last_error", None)
     reason = ""
+    contract_id = ""
+    contract_errors: list[str] = []
     if isinstance(error, dict):
         reason = str(error.get("reason") or error.get("message") or "").strip()
+        contract_id = str(error.get("contract_id") or "").strip()
+        parallel = error.get("parallel")
+        if isinstance(parallel, dict) and not contract_id:
+            contract_id = str(parallel.get("contract_id") or "").strip()
+        reasons = [reason]
+        if isinstance(parallel, dict):
+            reasons.extend(
+                str(worker.get("error") or worker.get("reason") or "")
+                for worker in (
+                    *parallel.get("failed_workers", ()),
+                    *parallel.get("rejected_workers", ()),
+                )
+                if isinstance(worker, dict)
+            )
+        marker = "STRUCTURED_ROLE_CONTRACT_INVALID:"
+        for item in reasons:
+            if marker in item:
+                contract_errors.extend(
+                    value.strip()
+                    for value in item.split(marker, 1)[1].split(";")
+                    if value.strip()
+                )
     lines = [
         "",
         "这是对上一次未通过协议校验的回复进行重试，不是新的任务。",
     ]
     if reason:
         lines.append(f"上次校验原因：{_brief(reason, 300)}")
+    if contract_id:
+        lines.append(f"contract_id={contract_id}")
+    if contract_errors:
+        lines.append(
+            "contract_repair_paths="
+            + "; ".join(list(dict.fromkeys(contract_errors))[:20])
+        )
     return lines
 
 
@@ -422,11 +525,43 @@ def _append_analyst_entries(
         lines.append(f"  - 其余 {len(entries) - max_items} 项见任务记录")
 
 
+def _append_critic_entries(
+    lines: list[str],
+    label: str,
+    value: Any,
+    max_items: int,
+    item_limit: int,
+) -> None:
+    """Render critic follow-up requests without exposing the raw payload."""
+    if value is None or value == "" or value == [] or value == {}:
+        return
+    entries = value if isinstance(value, list) else [value]
+    lines.append(f"{label}：")
+    for entry in entries[:max_items]:
+        if isinstance(entry, dict):
+            text = (
+                entry.get("question")
+                or entry.get("required_change")
+                or entry.get("required_action")
+                or entry.get("description")
+                or entry.get("reason")
+                or _compact_dict(entry)
+            )
+        else:
+            text = entry
+        lines.append(f"  - {_brief(text, item_limit)}")
+    if len(entries) > max_items:
+        lines.append(f"  - 其余 {len(entries) - max_items} 项见任务记录")
+
+
 def _render_critic(payload: dict[str, Any], ctx: Any) -> list[str]:
     lines = ["", "方案审查："]
     action = payload.get("action")
     if action:
-        lines.append(f"结论：{_action_label(action)}")
+        action_text = str(action)
+        lines.append(f"结论：{_action_label(action_text)}")
+        if action_text in {"REQUEST_ANALYST_EVIDENCE", "NEEDS_MORE_EVIDENCE"}:
+            lines.append("后续处理：先补充证据，再由规划师重新处理当前方案。")
     findings = payload.get("findings")
     if isinstance(findings, list) and findings:
         severity_counts: dict[str, int] = {}
@@ -444,27 +579,46 @@ def _render_critic(payload: dict[str, Any], ctx: Any) -> list[str]:
             )
             lines.append(f"问题等级：{summary}")
         lines.append("关键问题：")
-        for finding in findings[:4]:
+        for finding in findings:
             if not isinstance(finding, dict):
                 continue
             severity = _finding_severity(finding)
             status = _finding_status(finding)
             title = finding.get("title") or finding.get("claim") or finding.get("finding_id")
+            scope = "/".join(
+                str(value)
+                for value in (finding.get("group_id"), finding.get("item_id"))
+                if value
+            )
             required = (
                 finding.get("required_change")
                 or finding.get("required_action")
                 or finding.get("next_action")
             )
             prefix = "、".join(value for value in (severity, status) if value)
-            if title:
-                lines.append(
-                    f"- [{prefix}] {_brief(title, 180)}"
-                    if prefix
-                    else f"- {_brief(title, 180)}"
-                )
+            title_text = _brief(title, 150) if title else "未命名问题"
+            if scope:
+                title_text = f"{scope}：{title_text}"
+            lines.append(
+                f"- [{prefix}] {title_text}"
+                if prefix
+                else f"- {title_text}"
+            )
             if required:
-                lines.append(f"  要求：{_brief(required, 220)}")
-    _append_field(lines, "要求修改", payload.get("required_changes"), 300)
+                lines.append(f"  要求：{_brief(required, 180)}")
+    _append_critic_entries(
+        lines,
+        "补证据说明",
+        payload.get("questions_for_analyst") or payload.get("missing_evidence"),
+        5,
+        150,
+    )
+    _append_field(
+        lines,
+        "要求修改",
+        payload.get("required_changes") or payload.get("required_change"),
+        300,
+    )
     if len(lines) == 1:
         lines.append("审查员正在检查当前方案的边界、风险和可验证性。")
     return lines

@@ -13,6 +13,7 @@ from orchestrator.adapters import (
     FakeMulticaAdapter,
     MulticaCliAdapter,
     _extract_json,
+    _repair_diff_prefixed_json,
 )
 from orchestrator.app import OrchestratorApp, build_context
 from orchestrator.context import StateContext
@@ -31,6 +32,17 @@ from orchestrator.transitions import TransitionPolicy
 from orchestrator.validators import RejectedReply, ValidReply, validate_agent_reply
 
 class ReplyHandlingTests(unittest.TestCase):
+    def test_extract_json_repairs_unmistakable_diff_line_prefixes(self):
+        body = '{\n  "action": "BLOCKED",\n+  "next_actions": [],\n+  "remaining_blockers": []\n+}'
+        payload = _extract_json(body)
+        self.assertEqual(payload["action"], "BLOCKED")
+        self.assertEqual(payload["next_actions"], [])
+
+    def test_diff_repair_does_not_strip_plus_inside_json_strings(self):
+        body = '{"action":"BLOCKED","message":"a+b"}'
+        payload = _extract_json(body)
+        self.assertEqual(payload["message"], "a+b")
+
     def test_freeze_check_reads_nested_solver_plan_groups(self):
         ctx = StateContext(task_id="task-20260820-test")
         ctx.request_payload["candidate_plan"] = {
