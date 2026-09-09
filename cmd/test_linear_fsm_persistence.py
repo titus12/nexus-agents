@@ -5,7 +5,13 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from orchestrator.domain.context import ProgressState, TaskIdentity, WorkflowContext
+from orchestrator.domain.context import (
+    ProgressState,
+    TaskIdentity,
+    WorkflowContext,
+    context_from_dto,
+    context_to_dto,
+)
 from orchestrator.domain.decisions import EffectRequest, StateDecision
 from orchestrator.domain.errors import PersistenceError
 from orchestrator.runtime.repository import (
@@ -111,6 +117,8 @@ class JournalFirstRepositoryTests(unittest.TestCase):
         restarted = JsonWorkflowRepository(self.root)
         pending = restarted.pending_effects("task-1")
         self.assertEqual([item.effect_id for item in pending], ["effect-1"])
+        self.assertEqual(pending[0].state, "REQUEST_INTAKE")
+        self.assertEqual(pending[0].sequence, 0)
         restarted.mark_effect_running("effect-1")
         self.assertEqual(restarted.pending_effects("task-1")[0].status, "RUNNING")
         restarted.commit_effect_result(EffectResult("effect-1", "task-1", "SUCCEEDED"))
@@ -126,6 +134,15 @@ class JournalFirstRepositoryTests(unittest.TestCase):
 
         with self.assertRaises(PersistenceError):
             self.repository.load("task-1")
+
+    def test_malformed_optional_context_aggregates_fail_closed(self) -> None:
+        base = context_to_dto(self.before.context)
+        for field, value in (("review", "corrupt"), ("human_gate", [])):
+            with self.subTest(field=field):
+                corrupted = dict(base)
+                corrupted[field] = value
+                with self.assertRaises(ValueError):
+                    context_from_dto(corrupted)
 
     def test_persistence_degraded_context_round_trips_resume_state(self) -> None:
         degraded = self.snapshot("PERSISTENCE_DEGRADED", 1, 1)

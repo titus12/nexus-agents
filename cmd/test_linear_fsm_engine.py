@@ -4,7 +4,11 @@ import unittest
 
 from orchestrator.domain.context import ProgressState, TaskIdentity, WorkflowContext
 from orchestrator.domain.decisions import EffectRequest, StateDecision
-from orchestrator.domain.errors import InvariantViolation, LeaseLostError
+from orchestrator.domain.errors import (
+    InvariantViolation,
+    LeaseLostError,
+    PostCommitLeaseReleaseError,
+)
 from orchestrator.domain.events import DomainEvent
 from orchestrator.runtime.engine import WorkflowEngine
 from orchestrator.runtime.repository import CommitResult, WorkflowSnapshot
@@ -165,6 +169,22 @@ class WorkflowEngineTests(unittest.TestCase):
         with self.assertRaises(LeaseLostError):
             engine.dispatch(DomainEvent("START", "task-1", 0, {}, "now"))
         self.assertEqual(failing_lock.calls, ["acquire:task-1"])
+
+    def test_release_failure_after_commit_exposes_durable_transition(self) -> None:
+        repository = _Repository(_snapshot())
+        lock = _Lock()
+        lock.fail_release = RuntimeError("release failed")
+        engine = WorkflowEngine(repository, _States(_State()), lock, _Reducer())
+
+        with self.assertRaises(PostCommitLeaseReleaseError) as raised:
+            engine.dispatch(DomainEvent("START", "task-1", 0, {}, "now"))
+
+        error = raised.exception
+        self.assertTrue(error.committed)
+        self.assertEqual(error.transition_id, "task-1:1")
+        self.assertEqual(error.state, "REQUEST_INTAKE")
+        self.assertEqual(error.sequence, 1)
+        self.assertEqual(len(repository.commits), 1)
 
 
 if __name__ == "__main__":

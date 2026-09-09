@@ -74,6 +74,32 @@ class LinearReducerTests(unittest.TestCase):
         self.assertEqual(after.context.progression.state, "HUMAN_GATE")
         self.assertEqual(after.context.progression.resume_state, "ZHONGSHU_CRITIC")
 
+    def test_human_gate_metadata_is_preserved_when_event_provides_it(self) -> None:
+        critic = WorkflowSnapshot(
+            "task-1",
+            WorkflowContext(
+                self.snapshot.context.identity,
+                ProgressState("ZHONGSHU_CRITIC", 0, "now"),
+            ),
+            0,
+        )
+        decision = ZhongshuCriticState().handle(
+            critic.context,
+            DomainEvent(
+                "OPEN_HUMAN_GATE",
+                "task-1",
+                0,
+                {"decision_id": "decision-1", "reason_code": "CRITIC_BLOCKED"},
+                "now",
+            ),
+        )
+
+        after = self.reducer.apply(critic, decision)
+
+        self.assertEqual(after.context.human_gate.decision_id, "decision-1")
+        self.assertEqual(after.context.human_gate.reason_code, "CRITIC_BLOCKED")
+        self.assertEqual(after.context.human_gate.resume_state, "ZHONGSHU_CRITIC")
+
     def test_resume_uses_recorded_resume_state_and_preserves_gate(self) -> None:
         gated = WorkflowSnapshot(
             "task-1",

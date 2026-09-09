@@ -7,7 +7,7 @@ from typing import Protocol
 
 from ..domain.context import WorkflowContext
 from ..domain.decisions import StateDecision
-from ..domain.errors import InvariantViolation
+from ..domain.errors import InvariantViolation, PostCommitLeaseReleaseError
 from ..domain.events import DomainEvent
 from .repository import CommitResult, WorkflowRepository, WorkflowSnapshot
 
@@ -63,6 +63,7 @@ class WorkflowEngine:
             raise InvariantViolation("dispatch requires a domain event with task_id")
 
         self._lock.acquire(event.task_id)
+        commit_result: CommitResult | None = None
         try:
             before = self._repository.load(event.task_id)
             if before.task_id != event.task_id:
@@ -76,7 +77,7 @@ class WorkflowEngine:
             self._validate_decision(event.task_id, decision)
             after = self._reducer.apply(before, decision)
             self._validate_after(before, after)
-            self._repository.commit_transition(before, after, decision)
+            commit_result = self._repository.commit_transition(before, after, decision)
         except BaseException as error:
             try:
                 self._lock.release(event.task_id)
@@ -84,7 +85,18 @@ class WorkflowEngine:
                 error.add_note(f"lock release failed: {release_error}")
             raise
         else:
-            self._lock.release(event.task_id)
+            try:
+                self._lock.release(event.task_id)
+            except Exception as release_error:
+                if commit_result is None:
+                    raise
+                raise PostCommitLeaseReleaseError(
+                    task_id=event.task_id,
+                    transition_id=commit_result.transition_id,
+                    state=commit_result.snapshot.context.progression.state,
+                    sequence=commit_result.snapshot.context.progression.sequence,
+                    cause=release_error,
+                ) from release_error
             return decision
 
     @staticmethod

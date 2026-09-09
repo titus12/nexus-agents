@@ -158,7 +158,11 @@ class LinearContextReducer:
             raise InvariantViolation("human gate update requires decision_id and resume_state")
         return HumanGateState(
             decision_id=decision_id,
-            reason_code=current.reason_code if current else "",
+            reason_code=(
+                update.human_gate.reason_code
+                if update.human_gate.reason_code is not None
+                else current.reason_code if current else ""
+            ),
             resume_state=resume_state,
         )
 

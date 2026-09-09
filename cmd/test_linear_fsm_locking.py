@@ -6,8 +6,9 @@ import unittest
 import uuid
 from pathlib import Path
 
-from orchestrator.domain.errors import LeaseLostError
+from orchestrator.domain.errors import InvariantViolation, LeaseLostError
 from orchestrator.locks import TaskLock, TaskLockError
+from orchestrator.runtime.lock_adapter import TaskLockAdapter
 
 
 class TaskLockTests(unittest.TestCase):
@@ -61,6 +62,20 @@ class TaskLockTests(unittest.TestCase):
             lock.refresh()
         lock.release()
         self.assertTrue(path.exists())
+
+    def test_task_lock_adapter_binds_runtime_calls_to_one_task(self) -> None:
+        path = self.root / "task.lock"
+        lock = TaskLock(path)
+        adapter = TaskLockAdapter("task-1", lock)
+
+        adapter.acquire("task-1")
+        try:
+            adapter.refresh("task-1")
+            with self.assertRaises(InvariantViolation):
+                adapter.release("other-task")
+            self.assertTrue(path.exists())
+        finally:
+            adapter.release("task-1")
 
 
 if __name__ == "__main__":

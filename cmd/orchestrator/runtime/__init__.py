@@ -43,6 +43,7 @@ from .engine import (
     WorkflowState,
 )
 from .reducer import LinearContextReducer
+from .lock_adapter import TaskLockAdapter
 
 __all__ = [
     "CommitResult",
@@ -80,6 +81,7 @@ __all__ = [
     "WorkflowEngine",
     "WorkflowState",
     "LinearContextReducer",
+    "TaskLockAdapter",
     "WorkflowRepository",
     "WorkflowSnapshot",
 ]

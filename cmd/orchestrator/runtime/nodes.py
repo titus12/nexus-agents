@@ -31,6 +31,8 @@ class NodeContext:
     revision_id: str
     group_id: str | None = None
     item_id: str | None = None
+    state: str = ""
+    sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -164,8 +166,8 @@ def _run_worker(
                 stage="node_worker",
                 owner_component="worker_runner",
                 task_id=context.task_id,
-                state="",
-                sequence=0,
+                state=context.state,
+                sequence=context.sequence,
                 node_run_id=context.node_run_id,
                 worker_id=binding.worker_id,
                 effect_id=None,
@@ -205,8 +207,8 @@ def _join_results(
                 stage="node_join",
                 owner_component="node_joiner",
                 task_id=context.task_id,
-                state="",
-                sequence=0,
+                state=context.state,
+                sequence=context.sequence,
                 node_run_id=context.node_run_id,
                 worker_id=None,
                 effect_id=None,

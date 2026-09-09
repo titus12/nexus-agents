@@ -52,7 +52,15 @@ def _effect(effect_id: str = "effect-1", effect_type: str = "dispatch") -> Effec
         idempotency_key=f"idem-{effect_id}",
         payload_ref="payload-1",
     )
-    return EffectRecord(effect_id, "task-1", request, "PENDING", 0)
+    return EffectRecord(
+        effect_id,
+        "task-1",
+        request,
+        "PENDING",
+        0,
+        "ZHONGSHU_SOLVER",
+        5,
+    )
 
 
 class EffectManagerTests(unittest.TestCase):
@@ -80,6 +88,8 @@ class EffectManagerTests(unittest.TestCase):
         self.assertEqual(failure.stage, "effect")
         self.assertEqual(failure.owner_component, "dispatch")
         self.assertEqual(failure.effect_id, "effect-1")
+        self.assertEqual(failure.state, "ZHONGSHU_SOLVER")
+        self.assertEqual(failure.sequence, 5)
         self.assertEqual(failure.error_code, "TRANSPORT_ERROR")
         self.assertEqual(failure.message, "gateway unavailable")
         self.assertEqual(repository.results, list(results))

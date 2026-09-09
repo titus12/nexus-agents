@@ -55,7 +55,15 @@ class _Joiner:
 
 class NodeExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.context = NodeContext("task-1", "node-1", "revision-1", "group-1", None)
+        self.context = NodeContext(
+            "task-1",
+            "node-1",
+            "revision-1",
+            "group-1",
+            None,
+            "ZHONGSHU_ANALYST",
+            4,
+        )
         self.node = ReviewNode(
             "node-1",
             "ZHONGSHU",
@@ -88,6 +96,8 @@ class NodeExecutionTests(unittest.TestCase):
         self.assertEqual(failed.failure.stage, "node_worker")
         self.assertEqual(failed.failure.worker_id, "worker-b")
         self.assertEqual(failed.failure.node_run_id, "node-1")
+        self.assertEqual(failed.failure.state, "ZHONGSHU_ANALYST")
+        self.assertEqual(failed.failure.sequence, 4)
         self.assertEqual(len(joiner.received), 2)
 
     def test_join_failure_is_not_misattributed_to_worker(self) -> None:
@@ -100,6 +110,8 @@ class NodeExecutionTests(unittest.TestCase):
         assert result.failure is not None
         self.assertEqual(result.failure.stage, "node_join")
         self.assertIsNone(result.failure.worker_id)
+        self.assertEqual(result.failure.state, "ZHONGSHU_ANALYST")
+        self.assertEqual(result.failure.sequence, 4)
 
     def test_node_context_is_immutable_and_empty_node_is_rejected(self) -> None:
         with self.assertRaises(FrozenInstanceError):

@@ -81,6 +81,46 @@ class LeaseLostError(DomainError):
     error_code = "LEASE_LOST"
 
 
+class PostCommitLeaseReleaseError(LeaseLostError):
+    """The transition is durable, but ownership cleanup failed afterwards."""
+
+    error_code = "POST_COMMIT_LEASE_RELEASE_FAILED"
+
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        transition_id: str,
+        state: str,
+        sequence: int,
+        cause: BaseException,
+    ) -> None:
+        self.task_id = task_id
+        self.transition_id = transition_id
+        self.state = state
+        self.sequence = sequence
+        self.committed = True
+        failure = FailureRecord(
+            failure_id=uuid.uuid4().hex,
+            stage="lock",
+            owner_component="workflow_engine",
+            task_id=task_id,
+            state=state,
+            sequence=sequence,
+            node_run_id=None,
+            worker_id=None,
+            effect_id=None,
+            error_code=self.error_code,
+            retryable=False,
+            message=str(cause),
+            cause_type=type(cause).__name__,
+        )
+        super().__init__(
+            f"transition {transition_id!r} committed, but lock release failed: {cause}",
+            failure=failure,
+        )
+
+
 class PersistenceError(DomainError):
     error_code = "PERSISTENCE_ERROR"
 
@@ -99,6 +139,7 @@ __all__ = [
     "HumanGateDeliveryError",
     "InvariantViolation",
     "LeaseLostError",
+    "PostCommitLeaseReleaseError",
     "PersistenceError",
     "ReplyBindingError",
     "ReplyValidationError",

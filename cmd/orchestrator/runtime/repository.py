@@ -39,6 +39,8 @@ class EffectRecord:
     request: EffectRequest
     status: str
     attempt: int
+    state: str = ""
+    sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,8 @@ class JsonWorkflowRepository:
                 request=request,
                 status="PENDING",
                 attempt=0,
+                state=before.context.progression.state,
+                sequence=before.context.progression.sequence,
             )
             for request in decision.effects
         )
@@ -215,6 +219,8 @@ class JsonWorkflowRepository:
                 request=effect.request,
                 status=statuses.get(effect.effect_id, effect.status),
                 attempt=effect.attempt + (1 if statuses.get(effect.effect_id) == "RUNNING" else 0),
+                state=effect.state,
+                sequence=effect.sequence,
             )
             for effect in intents.values()
             if statuses.get(effect.effect_id, effect.status) not in {"SUCCEEDED", "FAILED"}
@@ -476,6 +482,8 @@ def _effect_to_dto(effect: EffectRecord) -> dict[str, object]:
         "task_id": effect.task_id,
         "status": effect.status,
         "attempt": effect.attempt,
+        "state": effect.state,
+        "sequence": effect.sequence,
         "request": asdict(effect.request),
     }
 
@@ -492,6 +500,8 @@ def _effect_from_dto(value: Mapping[str, object]) -> EffectRecord:
             request=request,
             status=str(value["status"]),
             attempt=int(value.get("attempt", 0)),
+            state=str(value.get("state") or ""),
+            sequence=int(value.get("sequence", 0)),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise PersistenceError("invalid effect record") from error

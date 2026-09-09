@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import ClassVar, Protocol, runtime_checkable
 
 from .context import WorkflowContext
-from .context import ProgressUpdate
+from .context import HumanGateUpdate, ProgressUpdate
 from .decisions import ContextUpdate, StateDecision
 from .errors import InvariantViolation
 from .events import DomainEvent, TransitionRequest
@@ -84,6 +84,17 @@ class _ConcreteWorkflowState:
             update = ContextUpdate(
                 progression=ProgressUpdate(resume_state=self.name)
             )
+        if event.name == "OPEN_HUMAN_GATE" and isinstance(event.payload, Mapping):
+            decision_id = event.payload.get("decision_id")
+            if isinstance(decision_id, str) and decision_id:
+                update = ContextUpdate(
+                    progression=ProgressUpdate(resume_state=self.name),
+                    human_gate=HumanGateUpdate(
+                        decision_id=decision_id,
+                        resume_state=self.name,
+                        reason_code=self._reason_code(event),
+                    ),
+                )
         return StateDecision(
             transition=TransitionRequest(
                 action=event.name,

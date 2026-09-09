@@ -99,6 +99,7 @@ class HumanGateUpdate:
 
     decision_id: str | None = None
     resume_state: str | None = None
+    reason_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,8 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
 
     review_value = value.get("review")
     review = None
+    if review_value is not None and not isinstance(review_value, Mapping):
+        raise ValueError("context.review must be null or an object")
     if isinstance(review_value, Mapping):
         findings_value = review_value.get("findings", [])
         if not isinstance(findings_value, list):
@@ -164,6 +167,8 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
         )
 
     gate_value = value.get("human_gate")
+    if gate_value is not None and not isinstance(gate_value, Mapping):
+        raise ValueError("context.human_gate must be null or an object")
     human_gate = (
         _context_part(gate_value, "human_gate", HumanGateState)
         if isinstance(gate_value, Mapping)
