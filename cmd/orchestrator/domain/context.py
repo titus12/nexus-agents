@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
 
 from .findings import Finding
 
@@ -120,6 +121,64 @@ class WorkflowContext:
     human_gate: HumanGateState | None = None
 
 
+def context_to_dto(context: WorkflowContext) -> dict[str, object]:
+    """Serialize the immutable aggregate without exposing mutable internals."""
+
+    return {
+        "identity": asdict(context.identity),
+        "progression": asdict(context.progression),
+        "delivery": asdict(context.delivery),
+        "recovery": asdict(context.recovery),
+        "review": (
+            {
+                **asdict(context.review),
+                "findings": [asdict(finding) for finding in context.review.findings],
+            }
+            if context.review
+            else None
+        ),
+        "human_gate": asdict(context.human_gate) if context.human_gate else None,
+    }
+
+
+def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
+    """Deserialize a DTO into fresh immutable value objects."""
+
+    identity = _context_part(value, "identity", TaskIdentity)
+    progression = _context_part(value, "progression", ProgressState)
+    delivery = _context_part(value, "delivery", DeliveryState)
+    recovery = _context_part(value, "recovery", RecoveryState)
+
+    review_value = value.get("review")
+    review = None
+    if isinstance(review_value, Mapping):
+        findings_value = review_value.get("findings", [])
+        if not isinstance(findings_value, list):
+            raise ValueError("review.findings must be an array")
+        findings = tuple(Finding(**dict(item)) for item in findings_value)
+        review = ReviewState(
+            revision_id=str(review_value.get("revision_id") or ""),
+            active_group_id=review_value.get("active_group_id"),
+            active_item_id=review_value.get("active_item_id"),
+            findings=findings,
+        )
+
+    gate_value = value.get("human_gate")
+    human_gate = (
+        _context_part(gate_value, "human_gate", HumanGateState)
+        if isinstance(gate_value, Mapping)
+        else None
+    )
+    return WorkflowContext(identity, progression, delivery, recovery, review, human_gate)
+
+
+def _context_part(value: Mapping[str, object], name: str, cls: type):
+    item = value.get(name)
+    if not isinstance(item, Mapping):
+        raise ValueError(f"context.{name} must be an object")
+    return cls(**dict(item))
+
+
 __all__ = [
     "DeliveryState",
     "DeliveryUpdate",
@@ -133,4 +192,6 @@ __all__ = [
     "ReviewUpdate",
     "TaskIdentity",
     "WorkflowContext",
+    "context_from_dto",
+    "context_to_dto",
 ]
