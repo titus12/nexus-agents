@@ -33,6 +33,15 @@ from .nodes import (
     WorkerResult,
     WorkerRunner,
 )
+from .engine import (
+    ContextReducer,
+    DomainEventInbox,
+    LockPort,
+    RunResult,
+    StateRegistry,
+    WorkflowEngine,
+    WorkflowState,
+)
 
 __all__ = [
     "CommitResult",
@@ -62,6 +71,13 @@ __all__ = [
     "WorkerBinding",
     "WorkerResult",
     "WorkerRunner",
+    "ContextReducer",
+    "DomainEventInbox",
+    "LockPort",
+    "RunResult",
+    "StateRegistry",
+    "WorkflowEngine",
+    "WorkflowState",
     "WorkflowRepository",
     "WorkflowSnapshot",
 ]
