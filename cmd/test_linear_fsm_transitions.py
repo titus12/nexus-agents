@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import unittest
 
 
@@ -43,6 +44,49 @@ class LinearTransitionContractTests(unittest.TestCase):
                 "ZHONGSHU_CRITIC",
                 "not-a-registered-state",
             )
+
+    def test_unknown_action_is_rejected(self):
+        with self.assertRaises(self.transition_module.TransitionError):
+            self.registry.target_for("ZHONGSHU_ANALYST", "NOT_REGISTERED")
+
+    def test_recovery_requires_a_legal_resume_state(self):
+        with self.assertRaises(self.transition_module.TransitionError):
+            self.registry.target_for("HUMAN_GATE", "RESUME")
+
+        self.assertEqual(
+            self.registry.target_for(
+                "HUMAN_GATE",
+                "RESUME",
+                "ZHONGSHU_SOLVER",
+            ),
+            "ZHONGSHU_SOLVER",
+        )
+
+        with self.assertRaises(self.transition_module.TransitionError):
+            self.registry.target_for("HUMAN_GATE", "RESUME", "DONE")
+
+    def test_state_registry_covers_all_declared_states(self):
+        states = importlib.import_module("orchestrator.domain.states")
+        transitions = self.transition_module
+        registry = states.StateRegistry.default()
+
+        self.assertEqual(set(registry.names()), set(transitions.ALL_STATES))
+        for state_name in transitions.ALL_STATES:
+            state = registry.get(state_name)
+            self.assertEqual(state.name, state_name)
+            self.assertIsInstance(state, states.WorkflowState)
+
+    def test_domain_states_do_not_depend_on_legacy_runtime_modules(self):
+        states = importlib.import_module("orchestrator.domain.states")
+        source = inspect.getsource(states)
+        for forbidden_module in (
+            "orchestrator.app",
+            "orchestrator.adapters",
+            "orchestrator.state_machine",
+            "orchestrator.states",
+        ):
+            with self.subTest(forbidden_module=forbidden_module):
+                self.assertNotIn(forbidden_module, source)
 
 
 if __name__ == "__main__":
