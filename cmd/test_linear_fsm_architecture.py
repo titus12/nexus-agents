@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import unittest
+from dataclasses import FrozenInstanceError
 
 
 def _load(module_name: str, attribute: str):
@@ -46,8 +47,6 @@ class LinearFsmArchitectureContractTests(unittest.TestCase):
         TaskIdentity = _load("orchestrator.domain.context", "TaskIdentity")
         ProgressState = _load("orchestrator.domain.context", "ProgressState")
         WorkflowContext = _load("orchestrator.domain.context", "WorkflowContext")
-        NodeContext = _load("orchestrator.runtime.nodes", "NodeContext")
-        WorkerBinding = _load("orchestrator.runtime.nodes", "WorkerBinding")
 
         workflow_context = WorkflowContext(
             identity=TaskIdentity("task-1", "issue-1", "demo", "request-1"),
@@ -57,25 +56,8 @@ class LinearFsmArchitectureContractTests(unittest.TestCase):
                 entered_at="2026-09-09T00:00:00Z",
             ),
         )
-        node_context = NodeContext(
-            task_id="task-1",
-            node_run_id="node-1",
-            revision_id="revision-1",
-            group_id=None,
-            item_id=None,
-        )
-        binding = WorkerBinding(
-            worker_id="analyst-1",
-            agent_id="agent-1",
-            task_id="task-1",
-            request_id="request-1",
-            role="ANALYST",
-            phase="ZHONGSHU",
-        )
-
-        self.assertIsNot(node_context, workflow_context)
-        self.assertNotIsInstance(node_context, WorkflowContext)
-        self.assertFalse(hasattr(node_context, "progression"))
+        with self.assertRaises(FrozenInstanceError):
+            workflow_context.progression = workflow_context.progression
         self.assertEqual(workflow_context.progression.state, "ZHONGSHU_ANALYST")
 
 
