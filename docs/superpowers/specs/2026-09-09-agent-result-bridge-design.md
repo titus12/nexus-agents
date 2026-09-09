@@ -83,7 +83,24 @@ Canonical D: pointers remain supported exactly as before. A path outside both
 the canonical result path and the constrained Multica workspaces root is
 rejected.
 
-### 4. Error and race behavior
+### 4. Terminal remote-file discovery
+
+When a structured remote run is terminal and no valid inline reply or pointer
+has been observed, the adapter performs a bounded recovery scan under the same
+configured Multica workspaces root. It considers only files named
+`workdir\result.json`, then reads enough JSON metadata to select candidates
+whose `task_id` and `request_id` exactly match the current request.
+
+The adapter bridges the file only when exactly one matching candidate exists.
+It rejects zero candidates as missing and rejects multiple candidates as
+ambiguous; it never guesses between workspaces or scans outside the configured
+root. The selected file then passes the same phase, role, state, protocol,
+schema, and request validation as a pointer before being persisted to the D:
+canonical result path. Discovery is attempted only after the remote run is
+reported completed, so a partially-written local file is not consumed while
+the Agent is still running.
+
+### 5. Error and race behavior
 
 - If a remote pointer arrives after the Agent has deleted the C: file, the
   pointer is rejected with an explicit remote-file-missing diagnostic; it is not
@@ -93,7 +110,7 @@ rejected.
   inline result is rejected and does not overwrite the canonical artifact.
 - Canonical writes use the existing temporary-file-plus-`os.replace` flow.
 
-### 5. Observability
+### 6. Observability
 
 Add log distinctions for:
 
@@ -114,6 +131,8 @@ Add focused regression coverage for:
 - inline result acceptance when structured output mode is `result_file`;
 - inline result schema, request, size, and role validation;
 - bridging a valid C: pointer into the canonical result file;
+- recovering a valid C: result file when the Agent emits no pointer;
+- rejecting ambiguous matching remote result files;
 - rejecting a pointer outside the Multica workspaces root;
 - rejecting a remote path that is not `workdir\result.json`;
 - preserving existing canonical D: pointer behavior and cross-worker rejection.
