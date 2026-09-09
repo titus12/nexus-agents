@@ -39,7 +39,7 @@
 状态转换必须由以下数据决定：
 
 ```text
-CurrentState + DomainEvent + WorkflowContext -> TransitionDecision
+CurrentState + DomainEvent + WorkflowContext -> StateDecision
 ```
 
 ### 3.2 状态对象只负责领域决策
@@ -61,7 +61,7 @@ CurrentState + DomainEvent + WorkflowContext -> TransitionDecision
 
 ### 3.3 副作用显式化
 
-网络请求、通知、artifact 写入和 checkpoint 都表示为 `Effect`。状态转换先产生 effect intent，再由 `EffectExecutor` 执行。
+网络请求、通知和 artifact 写入表示为 `EffectRequest`。状态转换先产生 effect intent，再由 `EffectManager` 执行。状态持久化不是业务 effect，由 `WorkflowRepository` 在提交状态转换时完成。
 
 每个 effect 都有：
 
@@ -97,12 +97,12 @@ Fan-out -> Worker execution -> Reply validation -> Join -> Domain aggregation
 
 职责：
 
-- 获取 task lock；
-- 加载 `WorkflowSnapshot`；
-- 从 `EventSource` 接收事件；
+- 通过 `LockPort` 获得并维护 task ownership；
+- 通过 `WorkflowRepository` 加载 `WorkflowSnapshot`；
+- 从 `DomainEventInbox` 接收已经规范化的领域事件；
 - 调用当前 `WorkflowState`；
-- 生成并持久化 `TransitionDecision`；
-- 交给 `EffectExecutor` 执行副作用；
+- 生成 `StateDecision` 并交给 `WorkflowRepository.commit_transition()`；
+- 将持久化后的 effect intent 交给 `EffectManager` 执行；
 - 处理中断、超时、取消和恢复。
 
 接口：
@@ -110,12 +110,12 @@ Fan-out -> Worker execution -> Reply validation -> Join -> Domain aggregation
 ```python
 class WorkflowEngine:
     def run(self, task_id: str) -> RunResult: ...
-    def dispatch(self, event: DomainEvent) -> TransitionDecision: ...
+    def dispatch(self, event: DomainEvent) -> StateDecision: ...
     def resume(self, snapshot: WorkflowSnapshot) -> RunResult: ...
     def cancel(self, task_id: str) -> bool: ...
 ```
 
-`WorkflowEngine` 不包含角色 prompt、finding merge、并行 worker 逻辑或 transport 兼容解析。
+`WorkflowEngine` 不包含角色 prompt、finding merge、并行 worker 逻辑、transport 兼容解析、文件读写或 retry 判断。它只通过 `LockPort`、`WorkflowRepository`、`DomainEventInbox`、`StateRegistry` 和 `EffectManager` 工作。
 
 ### 4.2 WorkflowState
 
@@ -142,10 +142,10 @@ class WorkflowState(Protocol):
 class StateDecision:
     transition: TransitionRequest | None
     effects: tuple[EffectRequest, ...]
-    context_patch: ContextPatch
+    update: ContextUpdate
 ```
 
-状态对象不能返回任意动态 target。所有 target 必须通过集中式 transition registry 校验。
+`ContextUpdate` 必须是按聚合定义的不可变类型，不允许使用任意字典或路径字符串修改 context。状态对象只产生 decision，不直接修改 context；所有 target 必须通过集中式 transition registry 校验。禁止在通用状态基类中通过 `if state.name == ...` 承载状态差异。
 
 ### 4.3 WorkflowContext
 
@@ -178,7 +178,7 @@ WorkflowContext
 
 ```python
 @dataclass(frozen=True)
-class ReplyEnvelope:
+class ReplyEnvelope(Generic[TPayload]):
     task_id: str
     request_id: str
     author_id: str
@@ -186,10 +186,12 @@ class ReplyEnvelope:
     phase: str
     role: str
     target_state: str
-    payload: Mapping[str, Any]
+    payload: TPayload
     received_at: str
     source: str
 ```
+
+transport adapter 先将旧格式转换成内部 `TransportReply`，再由 `ReplyNormalizer` 生成带有具体 role payload 类型的 `ReplyEnvelope`。`Mapping[str, Any]` 只允许存在于 adapter 边界，不得进入 domain 层。
 
 `ReplyEnvelope` 在 transport 边界完成：
 
@@ -201,13 +203,13 @@ class ReplyEnvelope:
 
 进入 domain 层之后不再使用原始 `ExternalMessage` 或任意 transport dict。
 
-### 4.5 EffectExecutor
+### 4.5 EffectManager and external ports
 
-统一副作用接口：
+外部端口只负责一次实际 I/O，不负责业务 retry、状态持久化或主 FSM 推进：
 
 ```python
-class EffectExecutor(Protocol):
-    def execute(self, effect: EffectRequest) -> EffectResult: ...
+class ExternalEffectRunner(Protocol):
+    def run_once(self, effect: EffectRequest) -> EffectResult: ...
 ```
 
 具体 effect 类型：
@@ -217,22 +219,16 @@ DispatchAgentEffect
 PollAgentEffect
 NotifyEffect
 WriteArtifactEffect
-PersistCheckpointEffect
 ReleaseLeaseEffect
 ```
 
-effect 执行器负责：
+`EffectManager` 负责 effect 生命周期、幂等、retry、timeout、错误分类和 effect 结果事件；`ExternalEffectRunner` 只负责一次外部 I/O。
 
-- idempotency key；
-- retry policy；
-- timeout；
-- external error 分类；
-- effect 状态持久化；
-- 失败后的可恢复性判断。
-
-状态对象不能绕过 effect executor 直接发消息。
+`EffectManager` 负责 effect 生命周期、幂等、retry 和 effect 结果事件。状态对象不能绕过 effect manager 直接访问外部端口。
 
 ### 4.6 NodeExecutor
+
+`WorkerRunner` 负责单个 worker 的 binding、dispatch、poll、reply validation 和 attempt；`NodeJoiner` 负责纯聚合和 quorum 判断。`NodeExecutor` 只负责编排一个或多个 `WorkerRunner` 并调用 `NodeJoiner`，不负责主 FSM、effect 持久化或 finding 生命周期。
 
 节点执行器封装顺序或并发 worker：
 
@@ -289,6 +285,7 @@ RETRY_WAIT
 BLOCKED
 CANCELLED
 FAILED
+PERSISTENCE_DEGRADED
 ```
 
 系统状态必须保留 `resume_state`，但不能任意跳转到其他业务节点。恢复只能回到记录的 `resume_state`，并且必须通过 transition registry 验证。
@@ -545,3 +542,98 @@ NotificationPort
 - 不允许用宽泛异常类型决定状态损坏；
 - 不允许在 domain 层处理 legacy transport 格式。
 
+## 13. Self-review corrections before implementation
+
+本节是对前述设计边界的强制约束，优先级高于任何含义较宽的接口描述。完成本节后，设计才满足开工条件。
+
+### 13.1 WorkflowEngine 不承载基础设施语义
+
+`WorkflowEngine` 只做流程协调，不直接实现文件读写、锁、transport、worker、retry 或异常分类。它只依赖以下端口：
+
+```text
+LockPort
+WorkflowRepository
+DomainEventInbox
+StateRegistry
+EffectManager
+```
+
+职责边界固定为：
+
+- `LockPort`：task ownership 和 lease；
+- `WorkflowRepository`：journal、snapshot、effect intent/result；
+- `DomainEventInbox`：接收已经规范化的领域事件；
+- `StateRegistry`：根据状态名返回状态对象；
+- `EffectManager`：执行已持久化的 effect 并投递 effect result event；
+- `WorkflowEngine`：按照顺序调用这些端口。
+
+### 13.2 StateDecision 不允许成为万能 patch
+
+`StateDecision` 中的更新必须是强类型 `ContextUpdate`，按聚合拆分为 `ReviewUpdate`、`DeliveryUpdate`、`HumanGateUpdate`、`RecoveryUpdate` 等。禁止使用任意字典、路径字符串或反射修改 context。
+
+状态对象只能返回 decision，不能直接改变 context、写文件或访问外部服务。禁止在通用状态基类中通过 `if state.name == ...` 承载状态差异；差异必须位于具体状态对象或具体策略对象中。
+
+### 13.3 Effect、worker 和 join 必须各自只有一种语义
+
+- `ExternalEffectRunner`：只执行一次外部 I/O，不负责 retry、持久化或主 FSM 推进；
+- `EffectManager`：只管理 effect 生命周期、幂等、retry 和 effect 结果；
+- `WorkerRunner`：只负责一个 worker 的 dispatch、poll、binding 和 worker attempt；
+- `NodeExecutor`：只负责顺序/并发调度 worker；
+- `NodeJoiner`：只负责纯聚合和 quorum 判断；
+- `WorkflowState`：只负责领域决策和状态转换。
+
+`PersistCheckpointEffect` 不属于 effect 类型。transition record、snapshot 和 effect intent 由 `WorkflowRepository.commit_transition()` 在一个逻辑提交中完成。
+
+### 13.4 持久化提交顺序
+
+`WorkflowRepository` 采用 journal-first 语义：
+
+```text
+normalize event
+  -> state decision
+  -> append transition journal + fsync
+  -> atomically update snapshot
+  -> EffectManager runs persisted intents
+  -> append effect result + fsync
+```
+
+journal 是提交事实来源，snapshot 是可重建的加速视图。journal 追加失败时不得推进业务状态，任务进入 `PERSISTENCE_DEGRADED`，并保留 append intent。`PERSISTENCE_DEGRADED` 必须列入 system state，并保留原始 `resume_state`。
+
+### 13.5 错误必须可归因
+
+所有跨边界错误统一转换为不可变 `FailureRecord`，至少包含：
+
+```text
+failure_id
+stage
+owner_component
+task_id
+state
+sequence
+node_run_id
+worker_id
+effect_id
+error_code
+retryable
+cause_type
+external_id
+```
+
+每个边界只允许转换一次错误，并保留 cause chain。日志、journal、snapshot 和最终失败状态都引用同一个 `failure_id`。`last_error` 只能作为展示摘要，不能作为归因数据源。
+
+### 13.6 ReplyEnvelope 必须是类型化领域输入
+
+transport adapter 可以使用 `Mapping[str, Any]`，但进入 domain 层前必须由 `ReplyNormalizer` 生成 `ReplyEnvelope[RoleReply]`。直接路径和并行路径必须调用同一个 normalizer 和同一个 binding validator。
+
+### 13.7 开工前的硬门槛
+
+在开始迁移运行时代码前，必须先完成以下契约测试：
+
+- transition registry 覆盖所有业务状态和 system state；
+- `PERSISTENCE_DEGRADED` 可以安全暂停和恢复；
+- journal 追加失败不会推进主 FSM；
+- direct/parallel reply 的 author binding 结果完全一致；
+- worker 只能产出 `WorkerResult`，不能修改主 context；
+- 每个失败场景都能通过 `failure_id` 定位到唯一 stage 和 owner；
+- `StateDecision` 不接受任意动态 context patch；
+- 现有 CLI、Multica、Feishu 和 result-file compatibility tests 保持通过。
