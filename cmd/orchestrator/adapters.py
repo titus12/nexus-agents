@@ -631,6 +631,13 @@ class MulticaCliAdapter:
             (request.structured_output or {}).get("mode", ""),
             (request.structured_output or {}).get("schema_hash", ""),
         )
+        # Multica Agent runtime is triggered by issue assignment, not by the
+        # agent_id carried in the comment payload.  Update the assignee to the
+        # target agent before posting so the correct Agent consumes the work.
+        # The resulting direct run has no trigger_comment_id and is filtered
+        # out by the orchestrator's run polling.
+        if request.agent_id:
+            self._run("issue", "update", issue_id, "--assignee-id", request.agent_id, "--output", "json")
         path = self.log_dir / f"dispatch_{request.request_id.replace(':', '_')}.json"
         path.write_text(content, encoding="utf-8")
         value = self._run(

@@ -94,6 +94,19 @@ class _Reducer:
 
 
 class WorkflowEngineTests(unittest.TestCase):
+    def test_anonymous_event_gets_deterministic_replay_identity(self) -> None:
+        repository = _Repository(_snapshot())
+        lock = _Lock()
+        state = _State()
+        engine = WorkflowEngine(repository, _States(state), lock, _Reducer())
+
+        engine.dispatch(DomainEvent("START", "task-1", 0, {}, "now"))
+
+        self.assertEqual(
+            repository.commits[0][2].source_event_id,
+            "task-1:0:START",
+        )
+
     def test_dispatch_is_linear_and_releases_lock_after_commit(self) -> None:
         repository = _Repository(_snapshot())
         lock = _Lock()

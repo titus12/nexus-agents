@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from orchestrator.domain.errors import ReplyBindingError
-from orchestrator.models import AgentBinding, ExternalMessage
+from orchestrator.transport.external import AgentBinding, ExternalMessage
 from orchestrator.transport import ReplyEnvelope
 from orchestrator.validators import (
     RejectedReply,

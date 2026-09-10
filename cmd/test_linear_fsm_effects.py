@@ -6,8 +6,10 @@ from dataclasses import FrozenInstanceError
 from orchestrator.domain.decisions import EffectRequest
 from orchestrator.domain.errors import InvariantViolation, TransportError
 from orchestrator.runtime.effects import EffectManager, EffectRunnerNotFound
+from orchestrator.runtime.node_effects import NodeEffectRunner
+from orchestrator.runtime.nodes import NodeResult
 from orchestrator.runtime.ports import (
-    AgentRequest,
+    AgentDispatchRequest,
     ArtifactInput,
     DispatchReceipt,
     NotificationRequest,
@@ -42,6 +44,22 @@ class _Runner:
         if self.error is not None:
             raise self.error
         return object()
+
+
+class _NodeExecutor:
+    def execute(self, node: object, context: object) -> NodeResult:
+        return NodeResult(
+            "node-1",
+            "SUCCEEDED",
+            (),
+            aggregate={
+                "action": "APPROVE_ITEM",
+                "group_id": "group-from-aggregate",
+                "item_id": "item-from-aggregate",
+                "revision_id": "revision-from-aggregate",
+                "plan_hash": "hash-from-aggregate",
+            },
+        )
 
 
 def _effect(effect_id: str = "effect-1", effect_type: str = "dispatch") -> EffectRecord:
@@ -127,11 +145,45 @@ class EffectManagerTests(unittest.TestCase):
         self.assertEqual(runner.requests, [_effect().request])
         self.assertEqual(empty, ())
 
+    def test_node_completion_preserves_aggregate_correlation_metadata(self) -> None:
+        request = EffectRequest(
+            effect_id="node-1",
+            effect_type="node_dispatch",
+            task_id="task-1",
+            idempotency_key="node-1",
+            payload={
+                "node_run_id": "node-1",
+                "phase": "ZHONGSHU",
+                "state": "ZHONGSHU_ANALYST",
+                "sequence": 4,
+                "bindings": [
+                    {
+                        "worker_id": "worker-1",
+                        "agent_id": "agent-1",
+                        "task_id": "task-1",
+                        "request_id": "request-1",
+                        "role": "review-analyst",
+                        "phase": "ZHONGSHU",
+                    }
+                ],
+            },
+        )
+
+        outcome = NodeEffectRunner(_NodeExecutor()).run_once(request)
+
+        self.assertEqual(outcome.event_name, "NODE_COMPLETED")
+        self.assertEqual(outcome.event_payload["group_id"], "group-from-aggregate")
+        self.assertEqual(outcome.event_payload["item_id"], "item-from-aggregate")
+        self.assertEqual(outcome.event_payload["revision_id"], "revision-from-aggregate")
+        self.assertEqual(outcome.event_payload["plan_hash"], "hash-from-aggregate")
+
 
 class PortContractTests(unittest.TestCase):
     def test_port_dtos_are_frozen(self) -> None:
         records = (
-            AgentRequest("task", "request", "agent", "payload"),
+            AgentDispatchRequest(
+                "task", "issue", "request", "agent", "role", "phase", "payload", "idempotency"
+            ),
             PollRequest("task", "request", "operation"),
             DispatchReceipt("operation", "message", True),
             NotificationRequest("task", "notification", "body"),

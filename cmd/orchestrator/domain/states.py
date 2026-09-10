@@ -13,6 +13,7 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import ClassVar, Protocol, runtime_checkable
 
+from ..zhongshu_parallel import canonical_plan_hash
 from .context import (
     DeliveryUpdate,
     HumanGateUpdate,
@@ -30,6 +31,16 @@ from .events import DomainEvent, TransitionRequest
 from .policies.zhongshu import merge_findings
 from .policies.prompts import build_prompt
 from .transitions import ALL_STATES, BUSINESS_STATES, SYSTEM_STATES, TransitionRegistry
+
+
+def _resolve_plan_hash(payload: Mapping[str, object]) -> str | None:
+    raw = payload.get("plan_hash") or payload.get("reviewed_plan_hash") or ""
+    if raw:
+        return str(raw)
+    plan = payload.get("plan")
+    if isinstance(plan, dict) and plan.get("items"):
+        return canonical_plan_hash(plan)
+    return None
 
 
 _ROLE_BY_STATE: dict[str, tuple[str, str]] = {
@@ -417,10 +428,7 @@ class _ConcreteWorkflowState:
             ),
             findings=merge_findings(existing, findings),
             plan_ref=str(plan_ref) if plan_ref else None,
-            plan_hash=(
-                str(payload.get("plan_hash") or payload.get("reviewed_plan_hash") or "")
-                or None
-            ),
+            plan_hash=_resolve_plan_hash(payload),
             task_graph_ref=str(task_graph_ref) if task_graph_ref else None,
             task_items=task_items,
             task_groups=task_groups,
