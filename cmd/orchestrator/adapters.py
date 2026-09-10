@@ -64,6 +64,19 @@ def _path_identity(path: str | Path) -> str:
     return os.path.normcase(os.path.normpath(value))
 
 
+def _default_multica_workspaces_root() -> Path:
+    """Resolve a safe default without requiring a complete user environment."""
+    home = (
+        os.environ.get("USERPROFILE")
+        or os.environ.get("HOME")
+        or (
+            f"{os.environ.get('HOMEDRIVE', '')}"
+            f"{os.environ.get('HOMEPATH', '')}"
+        )
+    )
+    return Path(home or Path.cwd()) / "multica_workspaces"
+
+
 def _json_parse_diagnostic(text: str) -> dict[str, object]:
     _, status, error_message, error_position = _parse_json_candidate(text)
     return {
@@ -103,7 +116,7 @@ def _parse_json_candidate(
     return None, "invalid", strict_error.msg, strict_error.pos
 
 
-from .models import (
+from .transport.external import (
     AgentRequest,
     DispatchReceipt,
     ExternalMessage,
@@ -204,6 +217,12 @@ class MulticaCliAdapter:
         self.prompt_transport_mode = os.environ.get("PROMPT_TRANSPORT_MODE", "prompt_file").lower()
         self.prompt_bundle_builder = PromptBundleBuilder(self.log_dir / "prompt-bundles")
         self.agent_result_allowed_root = Path(os.environ.get("AGENT_RESULT_ALLOWED_ROOT", str(self.log_dir.parent)))
+        self.multica_workspaces_root = Path(
+            os.environ.get(
+                "MULTICA_WORKSPACES_ROOT",
+                str(_default_multica_workspaces_root()),
+            )
+        ).expanduser().resolve()
         self.orchestrator_result_write_enabled = (
             os.environ.get("ORCHESTRATOR_RESULT_WRITE_ENABLED", "true").lower()
             not in {"0", "false", "no", "off"}
@@ -214,12 +233,14 @@ class MulticaCliAdapter:
         )
         logger.info(
             "PROMPT_TRANSPORT_CONFIG mode=%s bundle_root=%s result_allowed_root=%s "
+            "multica_workspaces_root=%s "
             "prompt_encoding=utf-8 prompt_bom=false result_encoding=utf-8 "
             "result_bom=writer_expected_false_reader_tolerant "
             "orchestrator_result_write_enabled=%s inline_result_max_bytes=%s",
             self.prompt_transport_mode,
             self.log_dir / "prompt-bundles",
             self.agent_result_allowed_root,
+            self.multica_workspaces_root,
             self.orchestrator_result_write_enabled,
             self.inline_result_max_bytes,
         )
@@ -505,6 +526,7 @@ class MulticaCliAdapter:
                     "idempotency_key": request.idempotency_key,
                     "sent_after": request.sent_after,
                     "dispatch_external_message_id": request.dispatch_external_message_id,
+                    "structured_output": request.structured_output,
                 },
             )
             prompt_ref = bundle.reference()
@@ -512,16 +534,21 @@ class MulticaCliAdapter:
             schema_hash = str((request.structured_output or {}).get("schema_hash") or "")
             if schema_hash:
                 structured_output_instruction = (
-                    "Do not modify project files. Write exactly one complete business result "
-                    f"to {result_path} as UTF-8 JSON without BOM, using a real JSON "
+                    "Do not modify source or project files. The Orchestrator-owned canonical result "
+                    f"is {result_path}; do not write that path. Write exactly one complete "
+                    "business result to relative result.json in "
+                    "the current Agent workspace as UTF-8 JSON without BOM, using a real JSON "
                     "serializer so quotes and control characters are escaped by the serializer. "
                     f"The JSON root must include structured_output_protocol={request.structured_output.get('protocol')}. "
                     f"The JSON root must include structured_output_schema_hash={schema_hash}. "
                     "The root must also include the exact contract_id, task_id, request_id, phase, state, role, and mode from the prompt bundle. "
-                    "You may create or replace only that result file. Do not paste the business "
-                    "result into the issue comment. After the file is durably written, reply with "
-                    "only the compact nexus-agent-result-ref-v1 pointer required by the transport. "
-                    "Do not return Markdown, a diff/patch, or a second business result."
+                    "You may create or replace only that local result file. For result_file mode, "
+                    "do not return the business JSON or a transport envelope inline. After the "
+                    "file is durably written, return exactly one compact "
+                    "nexus-agent-result-ref-v1 pointer containing the exact task_id, request_id, "
+                    "and actual local result.json path; do not return ./result.json or Markdown. "
+                    "Keep the file until the response has been emitted, and do not return a "
+                    "second business result."
                 )
             else:
                 structured_output_instruction = (
@@ -838,6 +865,170 @@ class MulticaCliAdapter:
         )
         return file_result.payload
 
+    def _is_remote_result_path(self, raw_path: str | Path) -> bool:
+        """Return whether a pointer names a constrained Multica task result."""
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            path.relative_to(self.multica_workspaces_root)
+        except (OSError, ValueError):
+            return False
+        return path.name.lower() == "result.json" and path.parent.name.lower() == "workdir"
+
+    def _discover_remote_result_candidates(
+        self,
+        request: AgentRequest,
+    ) -> list[Path]:
+        """Find validly-shaped remote result files bound to this request."""
+        candidates: list[Path] = []
+        try:
+            paths = self.multica_workspaces_root.rglob("result.json")
+            for raw_path in paths:
+                try:
+                    path = raw_path.resolve()
+                    path.relative_to(self.multica_workspaces_root)
+                except (OSError, ValueError):
+                    continue
+                if (
+                    path.name.lower() != "result.json"
+                    or path.parent.name.lower() != "workdir"
+                    or not path.is_file()
+                ):
+                    continue
+                try:
+                    text = path.read_bytes().decode("utf-8-sig", errors="strict")
+                    payload = json.loads(text)
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                    logger.warning(
+                        "REMOTE_RESULT_FILE_DISCOVERY_INVALID task_id=%s "
+                        "request_id=%s path=%s reason=%s",
+                        request.task_id,
+                        request.request_id,
+                        path,
+                        str(error),
+                    )
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if (
+                    str(payload.get("task_id") or "") == request.task_id
+                    and str(payload.get("request_id") or "") == request.request_id
+                ):
+                    candidates.append(path)
+        except OSError as error:
+            logger.warning(
+                "REMOTE_RESULT_FILE_DISCOVERY_FAILED task_id=%s request_id=%s "
+                "root=%s reason=%s",
+                request.task_id,
+                request.request_id,
+                self.multica_workspaces_root,
+                str(error),
+            )
+        logger.info(
+            "REMOTE_RESULT_FILE_DISCOVERY_SCAN task_id=%s request_id=%s "
+            "root=%s candidates=%s",
+            request.task_id,
+            request.request_id,
+            self.multica_workspaces_root,
+            len(candidates),
+        )
+        return candidates
+
+    def _bridge_remote_result_file(
+        self,
+        request: AgentRequest,
+        reference: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read a same-host Agent result and persist it under Orchestrator ownership."""
+        file_result = read_agent_result_file(
+            reference,
+            task_id=request.task_id,
+            request_id=request.request_id,
+            phase=request.phase,
+            role=request.role,
+            allowed_root=self.multica_workspaces_root,
+            expected_schema_hash=str(
+                (request.structured_output or {}).get("schema_hash") or ""
+            ),
+            expected_state=request.target_state
+            or str(request.context.get("target_state") or "")
+            or str((request.structured_output or {}).get("state") or ""),
+            expected_role_mode=str(
+                request.context.get("structured_output_role_mode")
+                or (request.structured_output or {}).get("role_mode")
+                or ""
+            ),
+            allow_transport_backfill=True,
+        )
+        payload = self._persist_inline_result(request, file_result.payload)
+        payload["result_source"] = "orchestrator_bridge"
+        payload["remote_result_path"] = str(file_result.path)
+        logger.info(
+            "REMOTE_RESULT_FILE_BRIDGED task_id=%s request_id=%s phase=%s role=%s "
+            "remote_path=%s canonical_path=%s sha256=%s bytes=%s",
+            request.task_id,
+            request.request_id,
+            request.phase,
+            request.role,
+            file_result.path,
+            payload.get("result_path", ""),
+            file_result.sha256,
+            file_result.bytes,
+        )
+        return payload
+
+    def _recover_remote_result_file(
+        self,
+        request: AgentRequest,
+    ) -> ExternalMessage | None:
+        """Recover one terminal remote result when no pointer was emitted."""
+        candidates = self._discover_remote_result_candidates(request)
+        if not candidates:
+            logger.info(
+                "REMOTE_RESULT_FILE_DISCOVERY_MISSING task_id=%s request_id=%s",
+                request.task_id,
+                request.request_id,
+            )
+            return None
+        if len(candidates) != 1:
+            logger.warning(
+                "REMOTE_RESULT_FILE_DISCOVERY_AMBIGUOUS task_id=%s request_id=%s "
+                "candidates=%s",
+                request.task_id,
+                request.request_id,
+                ",".join(str(path) for path in candidates),
+            )
+            return None
+        remote_path = candidates[0]
+        try:
+            payload = self._bridge_remote_result_file(
+                request,
+                {"result_path": str(remote_path)},
+            )
+        except (AgentResultFileError, OSError) as error:
+            logger.warning(
+                "REMOTE_RESULT_FILE_DISCOVERY_REJECTED task_id=%s "
+                "request_id=%s path=%s reason=%s",
+                request.task_id,
+                request.request_id,
+                remote_path,
+                str(error),
+            )
+            return None
+        logger.info(
+            "REMOTE_RESULT_FILE_DISCOVERED task_id=%s request_id=%s "
+            "remote_path=%s canonical_path=%s",
+            request.task_id,
+            request.request_id,
+            remote_path,
+            payload.get("result_path", ""),
+        )
+        return ExternalMessage(
+            request.agent_id,
+            payload,
+            f"remote-file:{request.request_id}",
+            "",
+        )
+
     def poll(self, request: AgentRequest) -> list[ExternalMessage]:
         self.last_issue_id = request.issue_id or request.task_id
         issue_id = request.issue_id or request.task_id
@@ -845,6 +1036,7 @@ class MulticaCliAdapter:
             isinstance(request.structured_output, dict)
             and request.structured_output.get("mode") == "result_file"
         )
+        remote_run_status = ""
 
         def comments_from(value: object) -> list[dict]:
             if isinstance(value, list):
@@ -992,11 +1184,16 @@ class MulticaCliAdapter:
                         request.request_id,
                     )
                     actual_result_path = str(payload.get("result_path") or "").strip()
-                    if (
-                        not actual_result_path
-                        or _path_identity(actual_result_path)
-                        != _path_identity(expected_result_path)
-                    ):
+                    canonical_result_path = (
+                        bool(actual_result_path)
+                        and _path_identity(actual_result_path)
+                        == _path_identity(expected_result_path)
+                    )
+                    remote_result_path = (
+                        bool(actual_result_path)
+                        and self._is_remote_result_path(actual_result_path)
+                    )
+                    if not canonical_result_path and not remote_result_path:
                         stats["request_mismatch"] += 1
                         logger.warning(
                             "STALE_RESULT_POINTER issue_id=%s task_id=%s "
@@ -1014,32 +1211,53 @@ class MulticaCliAdapter:
                         )
                         continue
                     try:
-                        file_result = read_agent_result_file(
-                            payload,
-                            task_id=request.task_id,
-                            request_id=request.request_id,
-                            phase=request.phase,
-                            role=request.role,
-                            allowed_root=self.agent_result_allowed_root,
-                            expected_schema_hash=str(
-                                (request.structured_output or {}).get("schema_hash") or ""
-                            ),
-                            expected_state=request.target_state
-                            or str(request.context.get("target_state") or "")
-                            or str(
-                                (request.structured_output or {}).get("state") or ""
-                            ),
-                            expected_role_mode=str(
-                                request.context.get("structured_output_role_mode")
-                                or (request.structured_output or {}).get("role_mode")
-                                or ""
-                            ),
-                            allow_transport_backfill=True,
-                        )
-                        payload = file_result.payload
+                        if remote_result_path:
+                            payload = self._bridge_remote_result_file(request, payload)
+                        else:
+                            file_result = read_agent_result_file(
+                                payload,
+                                task_id=request.task_id,
+                                request_id=request.request_id,
+                                phase=request.phase,
+                                role=request.role,
+                                allowed_root=self.agent_result_allowed_root,
+                                expected_schema_hash=str(
+                                    (request.structured_output or {}).get("schema_hash") or ""
+                                ),
+                                expected_state=request.target_state
+                                or str(request.context.get("target_state") or "")
+                                or str(
+                                    (request.structured_output or {}).get("state") or ""
+                                ),
+                                expected_role_mode=str(
+                                    request.context.get("structured_output_role_mode")
+                                    or (request.structured_output or {}).get("role_mode")
+                                    or ""
+                                ),
+                                allow_transport_backfill=True,
+                            )
+                            payload = file_result.payload
                         result_was_file = True
                     except AgentResultFileError as error:
                         stats["unstructured"] += 1
+                        if remote_result_path:
+                            remote_error_event = (
+                                "REMOTE_RESULT_FILE_MISSING"
+                                if str(error).startswith("result file is missing:")
+                                else "REMOTE_RESULT_FILE_REJECTED"
+                            )
+                            logger.warning(
+                                "%s task_id=%s request_id=%s "
+                                "phase=%s role=%s comment_id=%s path=%s reason=%s",
+                                remote_error_event,
+                                request.task_id,
+                                request.request_id,
+                                request.phase,
+                                request.role,
+                                comment_id,
+                                actual_result_path,
+                                str(error),
+                            )
                         logger.warning(
                             "AGENT_REPLY_FILE_REJECTED task_id=%s request_id=%s "
                             "phase=%s role=%s comment_id=%s reason=%s",
@@ -1069,20 +1287,6 @@ class MulticaCliAdapter:
                     and payload.get("protocol")
                     != "nexus-agent-result-ref-v1"
                 ):
-                    if structured_result_required:
-                        stats["unstructured"] += 1
-                        logger.warning(
-                            "AGENT_REPLY_INLINE_RESULT_REJECTED task_id=%s request_id=%s "
-                            "phase=%s role=%s comment_id=%s reason=RESULT_FILE_REQUIRED "
-                            "schema_hash=%s",
-                            request.task_id,
-                            request.request_id,
-                            request.phase,
-                            request.role,
-                            comment_id,
-                            (request.structured_output or {}).get("schema_hash", ""),
-                        )
-                        continue
                     payload_request_id = payload.get("request_id")
                     if payload_request_id and payload_request_id != request.request_id:
                         stats["request_mismatch"] += 1
@@ -1300,6 +1504,31 @@ class MulticaCliAdapter:
         ) = parse_comments(comments_from(thread_value))
         if structured_result_required:
             remote_run_status = self.get_run_status(request)
+            if remote_run_status == "failed":
+                logger.error(
+                    "AGENT_REMOTE_RUN_FAILED task_id=%s request_id=%s "
+                    "phase=%s role=%s",
+                    request.task_id,
+                    request.request_id,
+                    request.phase,
+                    request.role,
+                )
+                return [
+                    ExternalMessage(
+                        request.agent_id,
+                        {
+                            "action": "__REMOTE_RUN_FAILED__",
+                            "task_id": request.task_id,
+                            "request_id": request.request_id,
+                            "phase": request.phase,
+                            "role": request.role,
+                            "response_source": "remote_run",
+                            "remote_run_status": remote_run_status,
+                        },
+                        f"remote-run:{request.request_id}",
+                        "",
+                    )
+                ]
             if remote_run_status != "completed":
                 logger.warning(
                     "AGENT_REPLY_WAITING_REMOTE_TERMINAL task_id=%s request_id=%s "
@@ -1316,6 +1545,14 @@ class MulticaCliAdapter:
             recovered_file_message = self._recover_result_file(request)
             if recovered_file_message is not None:
                 result = [recovered_file_message]
+        if (
+            not result
+            and structured_result_required
+            and remote_run_status == "completed"
+        ):
+            recovered_remote_message = self._recover_remote_result_file(request)
+            if recovered_remote_message is not None:
+                result = [recovered_remote_message]
         recovery_ids: set[str] = set()
 
         if (
@@ -1519,8 +1756,6 @@ class MulticaCliAdapter:
     def _matching_runs(self, request: AgentRequest) -> list[dict[str, object]]:
         issue_id = request.issue_id or request.task_id
         trigger_id = str(request.dispatch_external_message_id or "")
-        if not trigger_id:
-            return []
         try:
             value = self._run_with_read_retry(
                 "issue", "runs", issue_id, "--output", "json"
@@ -1540,17 +1775,74 @@ class MulticaCliAdapter:
             if isinstance(value, dict)
             else []
         )
-        matches = [
+        exact_matches = [
             run for run in runs
             if isinstance(run, dict)
-            and trigger_id in {
-                str(run.get("trigger_comment_id") or ""),
-                *(str(item) for item in (run.get("coalesced_comment_ids") or [])),
-                *(str(item) for item in (run.get("delivered_comment_ids") or [])),
-            }
+            and trigger_id
+            and self._run_correlation_ids(run)
+            and trigger_id in self._run_correlation_ids(run)
         ]
-        matches.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
-        return matches
+        if exact_matches:
+            exact_matches.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
+            return exact_matches
+
+        # Failed Reasonix runs can be terminal before Multica has populated
+        # trigger/coalesced/delivered comment ids.  When that happens, the
+        # issue endpoint is still authoritative for issue scope and the run
+        # carries the assigned agent.  Accept this fallback only when one
+        # candidate is uniquely identifiable by agent and dispatch time; a
+        # broad "latest run" fallback would risk stealing another worker's
+        # result.
+        candidates = [
+            run for run in runs
+            if isinstance(run, dict)
+            and str(run.get("agent_id") or "") == str(request.agent_id or "")
+            and self._run_created_after_dispatch(run, request.sent_after)
+        ]
+        if len(candidates) == 1:
+            logger.warning(
+                "AGENT_REMOTE_RUN_CORRELATION_FALLBACK task_id=%s request_id=%s "
+                "agent_id=%s reason=unique_agent_and_dispatch_time",
+                request.task_id,
+                request.request_id,
+                request.agent_id,
+            )
+            return candidates
+        if candidates:
+            logger.warning(
+                "AGENT_REMOTE_RUN_CORRELATION_AMBIGUOUS task_id=%s request_id=%s "
+                "agent_id=%s candidates=%s",
+                request.task_id,
+                request.request_id,
+                request.agent_id,
+                len(candidates),
+            )
+        return []
+
+    @staticmethod
+    def _run_correlation_ids(run: dict[str, object]) -> set[str]:
+        return {
+            str(run.get("trigger_comment_id") or ""),
+            *(str(item) for item in (run.get("coalesced_comment_ids") or [])),
+            *(str(item) for item in (run.get("delivered_comment_ids") or [])),
+            str(run.get("request_id") or ""),
+        } - {""}
+
+    @staticmethod
+    def _run_created_after_dispatch(run: dict[str, object], sent_after: str) -> bool:
+        created_at = str(run.get("created_at") or "")
+        if not sent_after or not created_at:
+            return True
+        try:
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            dispatched = datetime.fromisoformat(sent_after.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if dispatched.tzinfo is None:
+            dispatched = dispatched.replace(tzinfo=timezone.utc)
+        return created >= dispatched
 
     def get_run_status(self, request: AgentRequest) -> str:
         matches = self._matching_runs(request)
@@ -2020,6 +2312,28 @@ def _response_contract_for(request: AgentRequest) -> dict:
     return contract
 
 
+def _external_notifications_disabled_for_tests() -> bool:
+    """Hard stop for test runs before any Feishu HTTP request is attempted."""
+
+    return os.environ.get("NEXUS_TEST_NO_EXTERNAL_NOTIFICATIONS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _external_notifications_explicitly_enabled() -> bool:
+    """Require an explicit opt-in before any Feishu network operation."""
+
+    return os.environ.get("ENABLE_FEISHU_NOTIFICATIONS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 class FeishuHttpAdapter:
     """Production adapter for role-specific bot messages and human gate replies."""
 
@@ -2069,6 +2383,11 @@ class FeishuHttpAdapter:
         return self.send_text(gate.prompt, "gate")
 
     def send_text(self, text: str, role: str = "gate") -> DeliveryReceipt:
+        if (
+            _external_notifications_disabled_for_tests()
+            or not _external_notifications_explicitly_enabled()
+        ):
+            raise RuntimeError("FEISHU_EXTERNAL_DISABLED_FOR_TESTS")
         logger.info(
             "FEISHU_HTTP_SEND_START role=%s text_chars=%s chat_configured=%s",
             role,
@@ -2120,6 +2439,11 @@ class FeishuHttpAdapter:
         return receipt.message_id
 
     def poll_reply(self, gate: HumanGate) -> list[HumanReply]:
+        if (
+            _external_notifications_disabled_for_tests()
+            or not _external_notifications_explicitly_enabled()
+        ):
+            raise RuntimeError("FEISHU_EXTERNAL_DISABLED_FOR_TESTS")
         if not self.chat_id:
             return []
         value = self._request(

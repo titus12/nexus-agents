@@ -42,9 +42,9 @@ _EVIDENCE_REQUEST = object_schema(
 FIELDS = {
     "summary": string(),
     "requirements": array(_REQUIREMENT),
-    "task_proposals": array(),
-    "candidate_items": array(),
-    "candidate_groups": array(),
+    "task_proposals": array(max_items=0),
+    "candidate_items": array(max_items=0),
+    "candidate_groups": array(max_items=0),
     "evidence_updates": array(_EVIDENCE_UPDATE),
     "confirmed_facts": array(),
     "constraints": array(),
@@ -69,6 +69,7 @@ CONTRACT = make_contract(
     fields=FIELDS,
     prompt_rules=(
         "Collect evidence only; do not create or group implementation tasks.",
+        "task_proposals, candidate_items, and candidate_groups must always be empty; Solver is the only task-graph producer.",
         "Every evidence update must include decision_relevance from the contract enum.",
         "Return the complete envelope even when an array is empty.",
     ),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -14,6 +15,19 @@ class DomainEvent:
     sequence: int
     payload: object
     occurred_at: str
+    event_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.task_id:
+            raise ValueError("domain event name and task_id are required")
+        if self.sequence < 0:
+            raise ValueError("domain event sequence must be non-negative")
+
+    @property
+    def payload_mapping(self) -> Mapping[str, object]:
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("domain event payload must be a mapping")
+        return self.payload
 
 
 @dataclass(frozen=True)

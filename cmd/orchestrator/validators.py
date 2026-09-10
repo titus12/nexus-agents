@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .models import AgentBinding, ExternalMessage
+from .transport.external import AgentBinding, ExternalMessage
 from .transport import RawTransportReply, ReplyBinding, ReplyEnvelope, ReplyNormalizer
 
 

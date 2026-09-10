@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .structured_output import STRUCTURED_OUTPUT_PROTOCOL
+from .structured_output import (
+    STRUCTURED_OUTPUT_PROTOCOL,
+    validate_role_result_shape,
+)
 
 logger = logging.getLogger("review_orchestrator_fsm")
 
@@ -24,6 +27,30 @@ class AgentResultFile:
     path: Path
     sha256: str
     bytes: int
+
+
+def _validate_structured_shape(
+    payload: dict[str, Any],
+    *,
+    phase: str,
+    role: str,
+    expected_schema_hash: str,
+    expected_state: str,
+    expected_role_mode: str,
+) -> None:
+    """Reject transport-only envelopes before they become canonical results."""
+    if not expected_schema_hash:
+        return
+    error = validate_role_result_shape(
+        payload,
+        phase=phase,
+        role=role,
+        state=expected_state,
+        role_mode=expected_role_mode,
+        expected_schema_hash=expected_schema_hash,
+    )
+    if error:
+        raise AgentResultFileError(f"structured result shape invalid: {error}")
 
 
 def write_agent_result_file(
@@ -80,6 +107,14 @@ def write_agent_result_file(
         normalized["structured_output_schema_hash"] = expected_schema_hash
     if not normalized.get("action"):
         raise AgentResultFileError("inline result action is missing")
+    _validate_structured_shape(
+        normalized,
+        phase=phase,
+        role=role,
+        expected_schema_hash=expected_schema_hash,
+        expected_state=expected_state,
+        expected_role_mode=expected_role_mode,
+    )
 
     path = Path(target_path).expanduser().resolve()
     root = Path(allowed_root).expanduser().resolve()
@@ -328,6 +363,14 @@ def read_agent_result_file(
             raise AgentResultFileError("result role mismatch")
     if not payload.get("action"):
         raise AgentResultFileError("result action is missing")
+    _validate_structured_shape(
+        payload,
+        phase=phase,
+        role=role,
+        expected_schema_hash=expected_schema_hash,
+        expected_state=expected_state,
+        expected_role_mode=expected_role_mode,
+    )
 
     payload["result_source"] = "file"
     payload["result_path"] = str(path)

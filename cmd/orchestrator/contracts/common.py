@@ -26,12 +26,15 @@ def array(
     items: dict[str, Any] | None = None,
     *,
     min_items: int | None = None,
+    max_items: int | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {"type": "array"}
     if items is not None:
         result["items"] = items
     if min_items is not None:
         result["minItems"] = min_items
+    if max_items is not None:
+        result["maxItems"] = max_items
     return result
 
 
@@ -131,6 +134,8 @@ def validate_schema(value: Any, schema: Mapping[str, Any], path: str, errors: li
     if isinstance(value, list):
         if "minItems" in schema and len(value) < int(schema["minItems"]):
             errors.append(f"{path}: fewer than minItems")
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            errors.append(f"{path}: more than maxItems")
         item_schema = schema.get("items")
         if isinstance(item_schema, Mapping):
             for index, item in enumerate(value):

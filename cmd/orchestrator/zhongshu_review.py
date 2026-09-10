@@ -6,8 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-from .models import normalize_finding_status
-from .zhongshu_review_queue import TaskReviewQueue
+from .domain.findings import normalize_finding_status
 
 CRITIC_ACTIONS = frozenset({
     "APPROVE_FREEZE", "REQUEST_SOLVER_REVISION", "REQUEST_REGROUP",
@@ -624,7 +623,7 @@ def aggregate_reviews(
 def aggregate_task_review_results(
     revision: str,
     plan_hash: str,
-    queue: TaskReviewQueue,
+    queue: Any,
     results: list[dict[str, Any]],
     *,
     previous: dict[str, Any] | None = None,

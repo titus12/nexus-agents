@@ -65,6 +65,16 @@ class TransportError(DomainError):
     error_code = "TRANSPORT_ERROR"
 
 
+class RemoteRunFailed(TransportError):
+    """Remote service supplied terminal failure evidence."""
+
+    error_code = "REMOTE_RUN_FAILED"
+
+
+class ArtifactError(DomainError):
+    error_code = "ARTIFACT_ERROR"
+
+
 class ReplyBindingError(DomainError):
     error_code = "REPLY_BINDING_ERROR"
 
@@ -137,12 +147,14 @@ __all__ = [
     "DomainError",
     "FailureRecord",
     "HumanGateDeliveryError",
+    "ArtifactError",
     "InvariantViolation",
     "LeaseLostError",
     "PostCommitLeaseReleaseError",
     "PersistenceError",
     "ReplyBindingError",
     "ReplyValidationError",
+    "RemoteRunFailed",
     "TransportError",
     "WorkerTimeoutError",
 ]

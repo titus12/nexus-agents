@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .contracts import all_contracts, contract_for_state
-from .contracts.common import STRUCTURED_OUTPUT_PROTOCOL, PhaseContract, empty_payload
+from .contracts.common import (
+    STRUCTURED_OUTPUT_PROTOCOL,
+    PhaseContract,
+    empty_payload,
+    validate_schema,
+)
 
 
 STRUCTURED_OUTPUT_MODE = "result_file"
@@ -139,7 +144,55 @@ def _schema_for(
     context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     contract = _contract_for(phase, role, context=context)
-    return copy.deepcopy(contract.schema) if contract is not None else None
+    if contract is None:
+        return None
+    schema = copy.deepcopy(contract.schema)
+    _bind_solver_requirement_schema(schema, context or {})
+    return schema
+
+
+def _bind_solver_requirement_schema(
+    schema: dict[str, Any],
+    context: Mapping[str, Any],
+) -> None:
+    """Bind Solver requirement references to the canonical Analyst contract."""
+    state = str(
+        context.get("active_runtime_state")
+        or context.get("target_state")
+        or ""
+    ).upper()
+    if state != "ZHONGSHU_SOLVER":
+        return
+    analyst_plan = context.get("analyst_plan")
+    if not isinstance(analyst_plan, Mapping):
+        return
+    requirements = analyst_plan.get("requirements")
+    if not isinstance(requirements, list):
+        return
+    requirement_ids = [
+        str(item.get("requirement_id") or "").strip()
+        for item in requirements
+        if isinstance(item, Mapping) and str(item.get("requirement_id") or "").strip()
+    ]
+    if len(requirement_ids) != len(requirements) or len(set(requirement_ids)) != len(requirement_ids):
+        return
+    plan_schema = schema.get("properties", {}).get("plan")
+    if not isinstance(plan_schema, Mapping):
+        return
+    requirements_schema = plan_schema.get("properties", {}).get("requirements")
+    if not isinstance(requirements_schema, dict):
+        return
+    requirements_schema["minItems"] = len(requirement_ids)
+    requirements_schema["maxItems"] = len(requirement_ids)
+    requirement_schema = requirements_schema.get("items")
+    if not isinstance(requirement_schema, dict):
+        return
+    properties = requirement_schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+    requirement_id_schema = properties.get("requirement_id")
+    if isinstance(requirement_id_schema, dict):
+        requirement_id_schema["enum"] = requirement_ids
 
 
 def build_structured_output_spec(
@@ -153,6 +206,7 @@ def build_structured_output_spec(
     if contract is None:
         return None
     schema = copy.deepcopy(contract.schema)
+    _bind_solver_requirement_schema(schema, context)
     encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     state = str(context.get("active_runtime_state") or context.get("target_state") or contract.state)
     return StructuredOutputSpec(
@@ -206,6 +260,7 @@ def validate_role_result_shape(
     state: str = "",
     role_mode: str = "",
     expected_schema_hash: str = "",
+    schema: Mapping[str, Any] | None = None,
 ) -> str:
     """Validate the selected contract before business-state validation."""
     contract = _contract_for(phase, role, state=state)
@@ -233,7 +288,9 @@ def validate_role_result_shape(
         return "STRUCTURED_ROLE_SCHEMA_HASH_MISMATCH"
     if not isinstance(payload.get("action"), str) or not payload["action"]:
         return "STRUCTURED_ROLE_ACTION_MISSING"
-    errors = contract.validate(payload)
+    errors: list[str] = []
+    active_schema = schema if isinstance(schema, Mapping) else contract.schema
+    validate_schema(payload, active_schema, "", errors)
     if errors:
         return "STRUCTURED_ROLE_CONTRACT_INVALID:" + ";".join(errors[:20])
     return ""

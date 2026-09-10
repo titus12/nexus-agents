@@ -8,17 +8,27 @@ or mutate a workflow context.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
+from ..domain.events import DomainEvent
 from ..transport.replies import RawTransportReply
 
 
 @dataclass(frozen=True)
-class AgentRequest:
+class AgentDispatchRequest:
+    """Canonical request handed to an agent transport adapter."""
+
     task_id: str
+    issue_id: str
     request_id: str
     agent_id: str
-    payload_ref: str
+    role: str
+    phase: str
+    prompt_ref: str
+    idempotency_key: str
+    target_state: str = ""
+    revision_id: str = ""
+    plan_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,36 @@ class DispatchReceipt:
     operation_id: str
     external_message_id: str
     confirmed: bool
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
+class RemoteRunStatus:
+    """Terminality observed for one externally dispatched run."""
+
+    request_id: str
+    operation_id: str | None
+    status: Literal["RUNNING", "COMPLETED", "FAILED", "UNKNOWN"]
+    result_ref: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class AdmissionKey:
+    task_id: str
+    phase: str
+    worker_id: str
+    revision_id: str
+    external_target_key: str = ""
+
+
+@dataclass(frozen=True)
+class LeaseReceipt:
+    lease_id: str
+    key: AdmissionKey
+    acquired_at: str
+    expires_at: str
 
 
 @dataclass(frozen=True)
@@ -64,11 +104,41 @@ class ArtifactReceipt:
 class AgentTransportPort(Protocol):
     """One-call boundary for agent dispatch, polling, and lookup."""
 
-    def dispatch(self, request: AgentRequest) -> DispatchReceipt: ...
+    def dispatch(self, request: AgentDispatchRequest) -> DispatchReceipt: ...
+
+    def find_existing(self, request: AgentDispatchRequest) -> DispatchReceipt | None: ...
 
     def poll(self, request: PollRequest) -> tuple[RawTransportReply, ...]: ...
 
     def lookup(self, operation_id: str) -> DispatchReceipt | None: ...
+
+    def status(self, request: PollRequest) -> RemoteRunStatus: ...
+
+
+class DomainEventInbox(Protocol):
+    def next(self, task_id: str) -> DomainEvent | None: ...
+
+    def publish(self, event: DomainEvent) -> None: ...
+
+    def ack(self, event: DomainEvent) -> None: ...
+
+
+class LockPort(Protocol):
+    """Durable task-lock boundary used by the workflow engine."""
+
+    def acquire(self, task_id: str) -> None: ...
+
+    def refresh(self, task_id: str) -> None: ...
+
+    def release(self, task_id: str) -> None: ...
+
+
+class ConcurrencyAdmissionPort(Protocol):
+    def acquire(self, key: AdmissionKey, deadline: float) -> LeaseReceipt | None: ...
+
+    def refresh(self, lease_id: str) -> bool: ...
+
+    def release(self, lease_id: str) -> bool: ...
 
 
 class NotificationPort(Protocol):
@@ -82,16 +152,23 @@ class ArtifactPort(Protocol):
 
     def write(self, artifact: ArtifactInput) -> ArtifactReceipt: ...
 
+    def read(self, task_id: str, artifact_id: str) -> bytes: ...
+
 
 __all__ = [
-    "AgentRequest",
+    "AgentDispatchRequest",
     "AgentTransportPort",
+    "AdmissionKey",
     "ArtifactInput",
     "ArtifactPort",
     "ArtifactReceipt",
     "DispatchReceipt",
+    "DomainEventInbox",
+    "LockPort",
+    "LeaseReceipt",
     "NotificationPort",
     "NotificationReceipt",
     "NotificationRequest",
     "PollRequest",
+    "RemoteRunStatus",
 ]

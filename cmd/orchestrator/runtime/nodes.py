@@ -33,6 +33,9 @@ class NodeContext:
     item_id: str | None = None
     state: str = ""
     sequence: int = 0
+    prompt_ref: str = ""
+    issue_id: str = ""
+    plan_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,7 @@ class WorkerResult:
     status: str
     payload_ref: str | None
     failure: FailureRecord | None = None
+    result_payload: object | None = None
 
 
 @dataclass(frozen=True)

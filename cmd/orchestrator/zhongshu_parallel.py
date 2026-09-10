@@ -1,23 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 import copy
 import hashlib
 import json
 import logging
-import inspect
 
-from .concurrency import ConcurrencyAdmission
-from .models import normalize_finding_status
+from .domain.findings import normalize_finding_status
 from .zhongshu_review import (
     merge_evidence_updates,
     records,
     semantic_fingerprint,
     union_records,
 )
-from .notifications import build_zhongshu_parallel_notification
 
 
 logger = logging.getLogger("review_orchestrator_fsm")
@@ -797,7 +793,8 @@ def _compact_solver_list(values: Any) -> list[Any]:
 def build_solver_evidence_context(packet: dict[str, Any]) -> dict[str, Any]:
     """Build a decision-focused Analyst context for the single Solver.
 
-    The full Analyst packet remains lossless in StateContext for audit and
+    The full Analyst packet remains lossless in immutable workflow artifacts
+    for audit and
     recovery. Solver receives a bounded projection: canonical evidence,
     requirement boundaries, and unresolved decision blockers. Open-ended
     questions_for_solver stay in the durable packet because they expand the
@@ -1324,278 +1321,6 @@ class CriticAggregate:
             "unresolved_conflicts": [item.conflict_id for item in self.unresolved_conflicts],
             "action": self.action,
             "decision_basis": list(self.decision_basis),
-        }
-
-
-@dataclass(frozen=True)
-class ZhongshuWorkerSpec:
-    worker_id: str
-    phase: str
-    prompt: str
-
-
-@dataclass(frozen=True)
-class ZhongshuFanoutResult:
-    revision_id: str
-    completed: tuple[dict[str, Any], ...]
-    failed: tuple[dict[str, Any], ...]
-    rejected: tuple[dict[str, Any], ...]
-
-
-class ZhongshuFanoutCoordinator:
-    """Run bounded Analyst/Critic workers and release every lease exactly once."""
-
-    def __init__(
-        self,
-        admission: ConcurrencyAdmission,
-        max_workers: int = 3,
-        max_attempts: int = 3,
-        notify: Any | None = None,
-        notification_context: Any | None = None,
-    ) -> None:
-        if max_workers < 1:
-            raise ValueError("max_workers must be >= 1")
-        if max_attempts < 1:
-            raise ValueError("max_attempts must be >= 1")
-        self.admission = admission
-        self.max_workers = max_workers
-        self.max_attempts = max_attempts
-        self.notify = notify
-        self.notification_context = notification_context
-
-    def _notify_status(
-        self,
-        event_name: str,
-        task_id: str,
-        revision_id: str,
-        phase: str,
-        workers: list[dict[str, Any]],
-        **summary: Any,
-    ) -> None:
-        if not self.notify:
-            return
-        payload = {
-            "phase": phase,
-            "revision_id": revision_id,
-            "workers": workers,
-            **summary,
-        }
-        text = build_zhongshu_parallel_notification(
-            self.notification_context or {},
-            event_name,
-            payload,
-        )
-        self.notify(text, "gate")
-
-    @staticmethod
-    def _call_worker(execute: Any, spec: ZhongshuWorkerSpec, attempt: int) -> Any:
-        try:
-            parameters = inspect.signature(execute).parameters
-            accepts_attempt = len(parameters) >= 2
-        except (TypeError, ValueError):
-            accepts_attempt = True
-        return execute(spec, attempt) if accepts_attempt else execute(spec)
-
-    def run(
-        self,
-        task_id: str,
-        revision_id: str,
-        specs: list[ZhongshuWorkerSpec],
-        execute: Any,
-    ) -> ZhongshuFanoutResult:
-        if not specs:
-            raise ValueError("at least one worker spec is required")
-        if len(specs) > self.max_workers:
-            raise ValueError("worker specs exceed configured max_workers")
-        leases: dict[str, Any] = {}
-        rejected: list[dict[str, Any]] = []
-        for spec in specs:
-            lease = self.admission.try_acquire(
-                task_id,
-                spec.phase,
-                spec.worker_id,
-                revision_id,
-            )
-            if lease is None:
-                rejected.append(
-                    {
-                        "worker_id": spec.worker_id,
-                        "reason": "CONCURRENCY_LIMIT_REACHED",
-                    }
-                )
-                continue
-            leases[spec.worker_id] = lease
-
-        completed: list[dict[str, Any]] = []
-        failed: list[dict[str, Any]] = []
-        logger.info(
-            "ZHONGSHU_FANOUT_STARTED task_id=%s revision_id=%s requested=%s "
-            "admitted=%s rejected=%s",
-            task_id,
-            revision_id,
-            len(specs),
-            len(leases),
-            len(rejected),
-        )
-        self._notify_status(
-            "ZHONGSHU_FANOUT_STARTED",
-            task_id,
-            revision_id,
-            specs[0].phase,
-            [
-                {
-                    "worker_id": spec.worker_id,
-                    "status": "RUNNING" if spec.worker_id in leases else "REJECTED",
-                    "attempt": 1 if spec.worker_id in leases else None,
-                    "max_attempts": self.max_attempts,
-                    "error": (
-                        "CONCURRENCY_LIMIT_REACHED"
-                        if spec.worker_id not in leases
-                        else ""
-                    ),
-                }
-                for spec in specs
-            ],
-            rejected=rejected,
-        )
-        if leases:
-            with ThreadPoolExecutor(max_workers=len(leases)) as pool:
-                futures = {
-                    pool.submit(self._run_with_retries, task_id, revision_id, spec, execute, leases[spec.worker_id]): spec
-                    for spec in specs
-                    if spec.worker_id in leases
-                }
-                for future in as_completed(futures):
-                    spec = futures[future]
-                    try:
-                        value = future.result()
-                        if value["status"] == "completed":
-                            completed.append(value["result"])
-                        else:
-                            failed.append(value["failure"])
-                    finally:
-                        self.admission.release(leases[spec.worker_id].lease_id)
-        output = ZhongshuFanoutResult(
-            revision_id=revision_id,
-            completed=tuple(sorted(completed, key=lambda item: str(item.get("worker_id", "")))),
-            failed=tuple(sorted(failed, key=lambda item: str(item.get("worker_id", "")))),
-            rejected=tuple(sorted(rejected, key=lambda item: str(item.get("worker_id", "")))),
-        )
-        logger.info(
-            "ZHONGSHU_FANOUT_COMPLETED task_id=%s revision_id=%s completed=%s "
-            "failed=%s rejected=%s",
-            task_id,
-            revision_id,
-            len(output.completed),
-            len(output.failed),
-            len(output.rejected),
-        )
-        self._notify_status(
-            "ZHONGSHU_FANIN_COMPLETED",
-            task_id,
-            revision_id,
-            specs[0].phase,
-            [
-                {
-                    "worker_id": item["worker_id"],
-                    "status": "COMPLETED",
-                    "attempt": item.get("attempt"),
-                    "max_attempts": self.max_attempts,
-                }
-                for item in output.completed
-            ]
-            + [
-                {
-                    "worker_id": item["worker_id"],
-                    "status": "FAILED",
-                    "attempt": item.get("attempts"),
-                    "max_attempts": self.max_attempts,
-                    "error": item.get("error"),
-                }
-                for item in output.failed
-            ]
-            + [
-                {
-                    "worker_id": item["worker_id"],
-                    "status": "REJECTED",
-                    "error": item.get("reason"),
-                }
-                for item in output.rejected
-            ],
-            completed=output.completed,
-            failed=output.failed,
-            rejected=output.rejected,
-        )
-        return output
-
-    def _run_with_retries(
-        self,
-        task_id: str,
-        revision_id: str,
-        spec: ZhongshuWorkerSpec,
-        execute: Any,
-        lease: Any,
-    ) -> dict[str, Any]:
-        last_error: Exception | None = None
-        for attempt in range(1, self.max_attempts + 1):
-            logger.info(
-                "ZHONGSHU_WORKER_ATTEMPT task_id=%s phase=%s worker_id=%s "
-                "revision_id=%s attempt=%s max_attempts=%s lease_id=%s",
-                task_id,
-                spec.phase,
-                spec.worker_id,
-                revision_id,
-                attempt,
-                self.max_attempts,
-                lease.lease_id,
-            )
-            try:
-                value = self._call_worker(execute, spec, attempt)
-                if not isinstance(value, dict):
-                    raise TypeError("worker result must be a dict")
-                result = dict(value)
-                reported_worker_id = str(result.get("worker_id") or "")
-                if reported_worker_id and reported_worker_id != spec.worker_id:
-                    raise ValueError("worker result worker_id mismatch")
-                result.setdefault("worker_id", spec.worker_id)
-                result.setdefault("phase", spec.phase)
-                result.setdefault("revision_id", revision_id)
-                result["attempt"] = attempt
-                return {"status": "completed", "result": result}
-            except Exception as error:
-                last_error = error
-                logger.warning(
-                    "ZHONGSHU_WORKER_FAILED task_id=%s phase=%s worker_id=%s "
-                    "revision_id=%s attempt=%s max_attempts=%s error_type=%s error=%s",
-                    task_id,
-                    spec.phase,
-                    spec.worker_id,
-                    revision_id,
-                    attempt,
-                    self.max_attempts,
-                    type(error).__name__,
-                    str(error)[:300],
-                )
-                if attempt < self.max_attempts:
-                    logger.info(
-                        "ZHONGSHU_WORKER_RETRY_SCHEDULED task_id=%s phase=%s "
-                        "worker_id=%s revision_id=%s next_attempt=%s",
-                        task_id,
-                        spec.phase,
-                        spec.worker_id,
-                        revision_id,
-                        attempt + 1,
-                    )
-        return {
-            "status": "failed",
-            "failure": {
-                "worker_id": spec.worker_id,
-                "phase": spec.phase,
-                "revision_id": revision_id,
-                "attempts": self.max_attempts,
-                "error_type": type(last_error).__name__ if last_error else "UnknownError",
-                "error": str(last_error)[:500] if last_error else "worker failed",
-            },
         }
 
 

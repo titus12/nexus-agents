@@ -11,6 +11,8 @@ ZHONGSHU_SOLVER_REQUIRED_ITEM_FIELDS = (
     "unknowns",
     "risks",
     "parallelizable",
+    "rationale",
+    "benefit",
 )
 
 ZHONGSHU_SOLVER_FORBIDDEN_FIELDS = frozenset(
@@ -39,7 +41,8 @@ def zhongshu_solver_runtime_rules() -> tuple[str, ...]:
         "Solver owns task-graph quality: coverage, task boundaries, dependencies, grouping, parallelism, acceptance, scope, unknowns, and risks.",
         "Dependencies are allowed, but they are directed prerequisites only: A dependency means the referenced task must finish before the current task. The complete task graph must be a DAG. Direct cycles, transitive cycles, and dependency edges that merely mean related-to are forbidden. Before READY_FOR_CRITIC, perform a topological preflight over every plan.items dependency.",
         "Preserve every Analyst requirement_id and statement exactly; do not invent, rename, delete, or silently reinterpret requirements.",
-        "Account for every Analyst candidate. Preserve item_id for unchanged tasks; when merging or splitting, list source_candidate_ids on formal tasks and preserve each source's requirement coverage, evidence, risks and unknowns. A topology change may use a complete plan instead of changes.",
+        "plan.requirements is an exact copy of the upstream Analyst requirement contract. Evidence, inferred opportunities, optimizations, and task decomposition belong in plan.items and plan.groups, never in new requirement objects.",
+        "The current Analyst handoff is evidence-only, so candidate_items and candidate_groups are empty by design. Create plan.items and plan.groups from the evidence; if a legacy candidate is present, preserve its item_id or account for it with source_candidate_ids when merging or splitting.",
         "Every task must be independently actionable, traceable to known requirements, dependency-valid, and observable through acceptance_signals.",
         "Use only Analyst-cited evidence and the current graph for targeted revalidation; do not perform a repository-wide investigation.",
         "If a graph decision cannot be supported by the supplied evidence, return NEEDS_MORE_EVIDENCE or HUMAN_GATE instead of guessing.",

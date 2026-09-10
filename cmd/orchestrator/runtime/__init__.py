@@ -8,18 +8,37 @@ from .repository import (
     WorkflowRepository,
     WorkflowSnapshot,
 )
-from .effects import EffectManager, EffectRunner, EffectRunnerNotFound
+from .effects import EffectManager, EffectOutcome, EffectRunner, EffectRunnerNotFound
+from .event_inbox import (
+    EventInbox,
+    InMemoryDomainEventInbox,
+    JsonDomainEventInbox,
+    effect_result_event,
+)
+from .agent_effects import AgentNodeJoiner, AgentNodeWorkerRunner, AgentWorkerRunner
+from .compat_effects import FileArtifactStore, MulticaTransportAdapter
+from .node_effects import NodeEffectRunner
+from .notification_effects import (
+    FeishuNotificationPort,
+    NotificationEffectRunner,
+    NullNotificationPort,
+)
 from .ports import (
-    AgentRequest,
+    AgentDispatchRequest,
     AgentTransportPort,
+    AdmissionKey,
     ArtifactInput,
     ArtifactPort,
     ArtifactReceipt,
     DispatchReceipt,
+    DomainEventInbox,
+    LeaseReceipt,
+    LockPort,
     NotificationPort,
     NotificationReceipt,
     NotificationRequest,
     PollRequest,
+    RemoteRunStatus,
 )
 from .nodes import (
     ConcurrentNodeExecutor,
@@ -35,8 +54,6 @@ from .nodes import (
 )
 from .engine import (
     ContextReducer,
-    DomainEventInbox,
-    LockPort,
     RunResult,
     StateRegistry,
     WorkflowEngine,
@@ -44,37 +61,68 @@ from .engine import (
 )
 from .reducer import LinearContextReducer
 from .lock_adapter import TaskLockAdapter
+from .concurrency import (
+    ConcurrencyAdmission,
+    ConcurrencyError,
+    ConcurrencyLimits,
+    ConcurrencySnapshot,
+    DuplicateLeaseError,
+    RuntimeConcurrencyAdmission,
+)
 
 __all__ = [
     "CommitResult",
-    "AgentRequest",
+    "ConcurrencyAdmission",
+    "ConcurrencyError",
+    "ConcurrencyLimits",
+    "ConcurrencySnapshot",
+    "DuplicateLeaseError",
+    "AgentWorkerRunner",
+    "AgentNodeJoiner",
+    "AgentNodeWorkerRunner",
+    "AgentDispatchRequest",
     "AgentTransportPort",
+    "AdmissionKey",
     "ArtifactInput",
     "ArtifactPort",
     "ArtifactReceipt",
     "DispatchReceipt",
+    "DomainEventInbox",
     "EffectManager",
+    "EffectOutcome",
     "EffectRecord",
     "EffectResult",
     "EffectRunner",
     "EffectRunnerNotFound",
+    "EventInbox",
+    "InMemoryDomainEventInbox",
     "JsonWorkflowRepository",
+    "JsonDomainEventInbox",
+    "FileArtifactStore",
+    "MulticaTransportAdapter",
+    "LeaseReceipt",
     "NotificationPort",
     "NotificationReceipt",
     "NotificationRequest",
     "PollRequest",
+    "RemoteRunStatus",
     "ConcurrentNodeExecutor",
     "NodeContext",
+    "NodeEffectRunner",
+    "FeishuNotificationPort",
+    "NotificationEffectRunner",
+    "NullNotificationPort",
     "NodeExecutor",
     "NodeJoiner",
     "NodeResult",
     "ReviewNode",
+    "RuntimeConcurrencyAdmission",
     "SequentialNodeExecutor",
     "WorkerBinding",
     "WorkerResult",
     "WorkerRunner",
     "ContextReducer",
-    "DomainEventInbox",
+    "effect_result_event",
     "LockPort",
     "RunResult",
     "StateRegistry",

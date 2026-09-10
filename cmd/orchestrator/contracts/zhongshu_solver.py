@@ -12,8 +12,9 @@ _TASK = object_schema(
         "source_requirement_ids": array(string()), "dependencies": array(string()),
         "acceptance_signals": array(string()), "unknowns": array(),
         "risks": array(), "parallelizable": {"type": "boolean"},
+        "rationale": string(), "benefit": string(), "tradeoffs": string(),
     },
-    required=("item_id", "title", "objective", "source_requirement_ids", "dependencies", "acceptance_signals", "unknowns", "risks", "parallelizable"),
+    required=("item_id", "title", "objective", "source_requirement_ids", "dependencies", "acceptance_signals", "unknowns", "risks", "parallelizable", "rationale", "benefit"),
 )
 _REQUIREMENT = object_schema(
     {
@@ -75,6 +76,8 @@ CONTRACT = make_contract(
     modes=_MODES, actions=_ACTIONS, fields=FIELDS,
     prompt_rules=(
         "Own task graph quality, dependencies, grouping, acceptance, unknowns, and risks.",
+        "plan.requirements is the immutable Analyst contract; use only the supplied requirement_id values and put evidence-derived work in plan.items.",
+        "Analyst candidate_items and candidate_groups are empty in the current evidence-only handoff; Solver creates the formal task graph from evidence.",
         "Dependencies are one-way execution prerequisites only. The complete plan.items dependency graph must be a directed acyclic graph: direct and transitive cycles are invalid, and related-but-not-blocking work must not be encoded as depends_on.",
         "plan.items is the only complete task-object index. Every group must use item_ids to reference plan.items; never emit groups[*].items or duplicate task objects.",
         "Do not emit implementation-level design fields forbidden by the solver protocol.",

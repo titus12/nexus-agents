@@ -1,9 +1,4 @@
-"""Journal-first persistence for the new immutable workflow context.
-
-The legacy :class:`JsonStateStore` remains available for old callers.  This
-module deliberately stores the new domain context through an explicit DTO
-boundary instead of exposing the mutable ``StateContext`` to the FSM.
-"""
+"""Journal-first persistence for the immutable workflow context."""
 
 from __future__ import annotations
 
@@ -23,6 +18,7 @@ from ..domain.context import (
 )
 from ..domain.decisions import EffectRequest, StateDecision
 from ..domain.errors import FailureRecord, PersistenceError
+from ..domain.events import DomainEvent
 
 
 @dataclass(frozen=True)
@@ -49,6 +45,11 @@ class EffectResult:
     task_id: str
     status: str
     failure: FailureRecord | None = None
+    event_name: str | None = None
+    event_payload: object | None = None
+    request_id: str | None = None
+    operation_id: str | None = None
+    deadline_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,16 @@ class WorkflowRepository(Protocol):
     def mark_effect_running(self, effect_id: str) -> None: ...
 
     def commit_effect_result(self, result: EffectResult) -> None: ...
+
+    def append_domain_event(self, event: DomainEvent) -> None: ...
+
+    def pending_domain_events(self, task_id: str) -> tuple[DomainEvent, ...]: ...
+
+    def ack_domain_event(self, event: DomainEvent) -> None: ...
+
+    def is_event_processed(self, event_id: str) -> bool: ...
+
+    def seed_effect(self, effect: EffectRecord) -> None: ...
 
 
 class JsonWorkflowRepository:
@@ -179,6 +190,7 @@ class JsonWorkflowRepository:
             "transition": (
                 asdict(decision.transition) if decision.transition is not None else None
             ),
+            "source_event_id": decision.source_event_id,
         }
         try:
             self._append_record(record)
@@ -208,6 +220,12 @@ class JsonWorkflowRepository:
                 for item in record.get("effects", []):
                     effect = _effect_from_dto(item)
                     intents[effect.effect_id] = effect
+            elif record.get("record_type") == "effect_intent":
+                effect_value = record.get("effect")
+                if not isinstance(effect_value, Mapping):
+                    raise PersistenceError("effect_intent record is incomplete")
+                effect = _effect_from_dto(effect_value)
+                intents[effect.effect_id] = effect
             elif record.get("record_type") == "effect_running":
                 statuses[str(record.get("effect_id"))] = "RUNNING"
             elif record.get("record_type") == "effect_result":
@@ -254,6 +272,23 @@ class JsonWorkflowRepository:
                 status = str(record["status"])
         return status
 
+    def seed_effect(self, effect: EffectRecord) -> None:
+        """Durably rehydrate one in-flight legacy effect exactly once."""
+
+        existing = self._find_effect(effect.effect_id)
+        if existing is not None:
+            if existing != effect:
+                raise PersistenceError(f"legacy effect id conflict: {effect.effect_id}")
+            return
+        self._append_record(
+            {
+                "record_type": "effect_intent",
+                "effect_id": effect.effect_id,
+                "task_id": effect.task_id,
+                "effect": _effect_to_dto(effect),
+            }
+        )
+
     def commit_effect_result(self, result: EffectResult) -> None:
         effect = self._find_effect(result.effect_id)
         if effect is None or effect.task_id != result.task_id:
@@ -277,7 +312,83 @@ class JsonWorkflowRepository:
                 "task_id": result.task_id,
                 "status": result.status,
                 "failure": _failure_to_dto(result.failure),
+                "event_name": result.event_name,
+                "event_payload": result.event_payload,
+                "request_id": result.request_id,
+                "operation_id": result.operation_id,
+                "deadline_at": result.deadline_at,
             }
+        )
+
+    def append_domain_event(self, event: DomainEvent) -> None:
+        event_id = event.event_id or f"{event.task_id}:{event.sequence}:{event.name}"
+        candidate = {
+            "record_type": "domain_event",
+            "event_id": event_id,
+            "name": event.name,
+            "task_id": event.task_id,
+            "sequence": event.sequence,
+            "payload": event.payload,
+            "occurred_at": event.occurred_at,
+        }
+        for record in self._read_journal():
+            if record.get("record_type") != "domain_event" or record.get("event_id") != event_id:
+                continue
+            if any(record.get(key) != value for key, value in candidate.items()):
+                raise PersistenceError(f"domain event id conflict: {event_id}")
+            return
+        self._append_record(candidate)
+
+    def pending_domain_events(self, task_id: str) -> tuple[DomainEvent, ...]:
+        records = self._read_journal()
+        consumed = {
+            str(record.get("event_id"))
+            for record in records
+            if record.get("record_type") == "domain_event_ack"
+        }
+        processed = {
+            str(record.get("source_event_id"))
+            for record in records
+            if record.get("record_type") == "transition" and record.get("source_event_id")
+        }
+        result: list[DomainEvent] = []
+        for record in records:
+            if record.get("record_type") != "domain_event" or record.get("task_id") != task_id:
+                continue
+            event_id = str(record.get("event_id") or "")
+            if event_id in consumed or event_id in processed:
+                continue
+            result.append(
+                DomainEvent(
+                    name=str(record["name"]),
+                    task_id=str(record["task_id"]),
+                    sequence=int(record["sequence"]),
+                    payload=record.get("payload", {}),
+                    occurred_at=str(record.get("occurred_at") or ""),
+                    event_id=event_id,
+                )
+            )
+        return tuple(sorted(result, key=lambda item: (item.sequence, item.event_id)))
+
+    def ack_domain_event(self, event: DomainEvent) -> None:
+        event_id = event.event_id or f"{event.task_id}:{event.sequence}:{event.name}"
+        self._append_record(
+            {
+                "record_type": "domain_event_ack",
+                "event_id": event_id,
+                "task_id": event.task_id,
+            }
+        )
+
+    def is_event_processed(self, event_id: str) -> bool:
+        """Return whether a transition journal already consumed this event."""
+
+        if not event_id:
+            return False
+        return any(
+            record.get("record_type") == "transition"
+            and record.get("source_event_id") == event_id
+            for record in self._read_journal()
         )
 
     def _find_transition(self, transition_id: str) -> dict[str, object] | None:
@@ -292,9 +403,16 @@ class JsonWorkflowRepository:
     def _find_effect(self, effect_id: str) -> EffectRecord | None:
         result: EffectRecord | None = None
         for record in self._read_journal():
-            if record.get("record_type") != "transition":
+            if record.get("record_type") not in {"transition", "effect_intent"}:
                 continue
-            for item in record.get("effects", []):
+            raw_effects = (
+                record.get("effects", [])
+                if record.get("record_type") == "transition"
+                else [record.get("effect")]
+            )
+            for item in raw_effects:
+                if not isinstance(item, Mapping):
+                    continue
                 effect = _effect_from_dto(item)
                 if effect.effect_id == effect_id:
                     result = effect
@@ -364,16 +482,38 @@ class JsonWorkflowRepository:
                 if not isinstance(effect, Mapping):
                     raise TypeError("effect record must be an object")
                 _effect_from_dto(effect)
+            source_event_id = record.get("source_event_id", "")
+            if source_event_id is not None and not isinstance(source_event_id, str):
+                raise TypeError("transition source_event_id must be a string")
             return
         if record_type == "effect_running":
             if not record.get("effect_id") or not record.get("task_id"):
                 raise ValueError("effect_running record is incomplete")
+            return
+        if record_type == "effect_intent":
+            if not record.get("effect_id") or not record.get("task_id"):
+                raise ValueError("effect_intent record is incomplete")
+            effect = record.get("effect")
+            if not isinstance(effect, Mapping):
+                raise TypeError("effect_intent effect must be an object")
+            _effect_from_dto(effect)
             return
         if record_type == "effect_result":
             if not record.get("effect_id") or not record.get("task_id"):
                 raise ValueError("effect_result record is incomplete")
             if record.get("status") not in {"SUCCEEDED", "FAILED"}:
                 raise ValueError("effect_result status is invalid")
+            return
+        if record_type == "domain_event":
+            required = ("event_id", "name", "task_id", "sequence", "occurred_at")
+            if any(not record.get(name) and name != "sequence" for name in required):
+                raise ValueError("domain_event record is incomplete")
+            if int(record["sequence"]) < 0:
+                raise ValueError("domain_event sequence is invalid")
+            return
+        if record_type == "domain_event_ack":
+            if not record.get("event_id") or not record.get("task_id"):
+                raise ValueError("domain_event_ack record is incomplete")
             return
         raise ValueError(f"unknown journal record type: {record_type}")
 
@@ -484,7 +624,15 @@ def _effect_to_dto(effect: EffectRecord) -> dict[str, object]:
         "attempt": effect.attempt,
         "state": effect.state,
         "sequence": effect.sequence,
-        "request": asdict(effect.request),
+        "request": {
+            "effect_id": effect.request.effect_id,
+            "effect_type": effect.request.effect_type,
+            "task_id": effect.request.task_id,
+            "idempotency_key": effect.request.idempotency_key,
+            "payload_ref": effect.request.payload_ref,
+            "payload": dict(effect.request.payload),
+            "deadline_at": effect.request.deadline_at,
+        },
     }
 
 

@@ -1,26 +1,34 @@
 """Immutable domain contracts for the linear review workflow."""
 
 from .context import (
+    AuditState,
     DeliveryState,
     DeliveryUpdate,
     HumanGateState,
     HumanGateUpdate,
+    MenxiaParallelLimits,
+    ParallelState,
+    ParallelUpdate,
     ProgressState,
     ProgressUpdate,
+    RequestState,
     RecoveryState,
     RecoveryUpdate,
     ReviewState,
     ReviewUpdate,
     TaskIdentity,
     WorkflowContext,
+    ZhongshuParallelLimits,
 )
 from .decisions import ContextUpdate, EffectRequest, StateDecision
 from .errors import (
+    ArtifactError,
     FailureRecord,
     HumanGateDeliveryError,
     InvariantViolation,
     LeaseLostError,
     PersistenceError,
+    RemoteRunFailed,
     ReplyBindingError,
     ReplyValidationError,
     TransportError,
@@ -31,6 +39,8 @@ from .findings import Finding
 
 __all__ = [
     "ContextUpdate",
+    "ArtifactError",
+    "AuditState",
     "DeliveryState",
     "DeliveryUpdate",
     "DomainEvent",
@@ -40,11 +50,16 @@ __all__ = [
     "HumanGateDeliveryError",
     "HumanGateState",
     "HumanGateUpdate",
+    "MenxiaParallelLimits",
+    "ParallelState",
+    "ParallelUpdate",
     "InvariantViolation",
     "LeaseLostError",
     "PersistenceError",
+    "RemoteRunFailed",
     "ProgressState",
     "ProgressUpdate",
+    "RequestState",
     "RecoveryState",
     "RecoveryUpdate",
     "ReplyBindingError",
@@ -56,5 +71,6 @@ __all__ = [
     "TransitionRequest",
     "TransportError",
     "WorkflowContext",
+    "ZhongshuParallelLimits",
     "WorkerTimeoutError",
 ]
