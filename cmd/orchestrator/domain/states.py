@@ -265,46 +265,20 @@ class _ConcreteWorkflowState:
                 audit=update.audit,
             )
         elif target in {"HUMAN_GATE", "DONE"}:
-            notification_key = (
-                f"{context.identity.task_id}:human-gate:{context.progression.sequence + 1}"
-                if target == "HUMAN_GATE"
-                else f"{context.identity.task_id}:final:{context.progression.sequence + 1}"
-            )
-            decision_id = str(
-                payload.get("decision_id")
-                or notification_key
-            )
-            effect = EffectRequest(
-                effect_id=f"notification:{notification_key}",
-                effect_type="notification",
-                task_id=context.identity.task_id,
-                idempotency_key=f"notification:{notification_key}",
-                payload={
-                    "notification_key": notification_key,
-                    "body": str(
-                        payload.get("body")
-                        or payload.get("reason")
-                        or (
-                            f"Human decision required for task {context.identity.task_id}"
-                            if target == "HUMAN_GATE"
-                            else f"Review completed for task {context.identity.task_id}"
-                        )
-                    ),
-                    "state": target,
-                    "sequence": context.progression.sequence,
-                },
-            )
             if target == "HUMAN_GATE":
+                notification_key = f"{context.identity.task_id}:human-gate:{context.progression.sequence + 1}"
+                decision_id = str(payload.get("decision_id") or notification_key)
                 update = replace(
                     update,
                     delivery=DeliveryUpdate(
                         active_request_id=decision_id,
-                        idempotency_key=effect.idempotency_key,
+                        idempotency_key=notification_key,
                         status="PENDING",
                         phase="HUMAN_GATE",
                         role="human-gate",
                     ),
                 )
+            effect = None
         else:
             effect = None
         return StateDecision(

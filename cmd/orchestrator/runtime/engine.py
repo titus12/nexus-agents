@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from ..domain.context import WorkflowContext
-from ..domain.decisions import StateDecision
+from ..domain.context import AuditUpdate, WorkflowContext
+from ..domain.decisions import ContextUpdate, StateDecision
 from ..domain.errors import InvariantViolation, PostCommitLeaseReleaseError
 from ..domain.events import DomainEvent
 from .repository import CommitResult, WorkflowRepository, WorkflowSnapshot
@@ -29,6 +29,15 @@ class ContextReducer(Protocol):
     def apply(self, snapshot: WorkflowSnapshot, decision: StateDecision) -> WorkflowSnapshot: ...
 
 
+class EventNotifier(Protocol):
+    def emit(
+        self,
+        before: WorkflowContext,
+        event: DomainEvent,
+        after: WorkflowContext,
+    ) -> tuple[str, ...]: ...
+
+
 @dataclass(frozen=True)
 class RunResult:
     task_id: str
@@ -45,11 +54,13 @@ class WorkflowEngine:
         states: StateRegistry,
         lock: LockPort,
         reducer: ContextReducer,
+        notifier: EventNotifier | None = None,
     ) -> None:
         self._repository = repository
         self._states = states
         self._lock = lock
         self._reducer = reducer
+        self._notifier = notifier
 
     def dispatch(self, event: DomainEvent) -> StateDecision:
         if not isinstance(event, DomainEvent) or not event.task_id:
@@ -88,6 +99,28 @@ class WorkflowEngine:
                 decision = replace(decision, source_event_id=event.event_id)
             self._validate_decision(event.task_id, decision)
             after = self._reducer.apply(before, decision)
+            if self._notifier is not None:
+                notification_keys = self._notifier.emit(
+                    before.context,
+                    event,
+                    after.context,
+                )
+                if notification_keys:
+                    current_audit = decision.update.audit or AuditUpdate()
+                    decision = replace(
+                        decision,
+                        update=replace(
+                            decision.update,
+                            audit=replace(
+                                current_audit,
+                                sent_notification_keys=(
+                                    *current_audit.sent_notification_keys,
+                                    *notification_keys,
+                                ),
+                            ),
+                        ),
+                    )
+                    after = self._reducer.apply(before, decision)
             self._validate_after(before, after)
             commit_result = self._repository.commit_transition(before, after, decision)
         except BaseException as error:
@@ -139,4 +172,5 @@ __all__ = [
     "StateRegistry",
     "WorkflowEngine",
     "WorkflowState",
+    "EventNotifier",
 ]

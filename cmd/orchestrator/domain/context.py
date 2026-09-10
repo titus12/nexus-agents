@@ -252,6 +252,7 @@ class AuditUpdate:
     """Typed operational bookkeeping updates."""
 
     sent_notification_key: str | None = None
+    sent_notification_keys: tuple[str, ...] = ()
     heartbeat_count: int | None = None
     last_heartbeat_at: str | None = None
     reply_history_ref: str | None = None

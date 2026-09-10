@@ -31,6 +31,11 @@ def _safe_component(value: str) -> str:
     return component or "unnamed"
 
 
+def remote_result_filename(request_id: str) -> str:
+    """Return a collision-resistant result filename for the remote workspace."""
+    return f"result_{_safe_component(request_id)}.json"
+
+
 def _atomic_write_bytes(path: Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
@@ -145,6 +150,7 @@ class PromptBundleBuilder:
             and structured_output.get("mode") == "result_file"
         ):
             result_path = (root / "result.json").resolve()
+            remote_result_name = remote_result_filename(request_id)
             structured_output_path = (root / "structured-output.json").resolve()
             schema_hash = str(structured_output.get("schema_hash") or "")
             stable_fields = structured_output.get("stable_fields")
@@ -156,7 +162,7 @@ class PromptBundleBuilder:
                 "TRANSPORT CONTRACT (authoritative): the Orchestrator-owned "
                 f"canonical result is {result_path}; the remote Agent must not "
                 "write that path. Write exactly one complete business JSON "
-                "result to relative result.json in the current Agent workspace "
+                f"result to relative {remote_result_name} in the current Agent workspace "
                 "as UTF-8 without BOM. Use a real JSON serializer so embedded "
                 "quotes and control characters are escaped. "
                 "Include the exact root field "
@@ -169,8 +175,8 @@ class PromptBundleBuilder:
                 "return the business JSON or a transport envelope inline. After the "
                 "file is durably written, return exactly one compact "
                 "nexus-agent-result-ref-v1 pointer containing the exact task_id, "
-                "request_id, and actual local result.json path. Do not return "
-                "./result.json or Markdown; keep the file until the response has "
+                f"request_id, and actual local {remote_result_name} path. Do not return "
+                f"./{remote_result_name} or Markdown; keep the file until the response has "
                 "been emitted, and do not return a second business result. "
                 "ROLE PROTOCOL (authoritative): keep one fixed response shape for "
                 f"phase={structured_output.get('phase')} role={structured_output.get('role')}. "

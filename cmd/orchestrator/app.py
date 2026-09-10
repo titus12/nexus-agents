@@ -12,7 +12,8 @@ from pathlib import Path
 import time
 import uuid
 
-from .adapters import MulticaCliAdapter
+from .adapters import MulticaCliAdapter, feishu_notifications_enabled
+from .notifications import DirectNotificationEmitter
 from .domain.context import (
     ProgressState,
     RequestState,
@@ -40,7 +41,6 @@ from .runtime import (
     MulticaTransportAdapter,
     NodeEffectRunner,
     FeishuNotificationPort,
-    NotificationEffectRunner,
     NullNotificationPort,
     RuntimeConcurrencyAdmission,
     TaskLockAdapter,
@@ -73,6 +73,7 @@ class OrchestratorApp:
         *,
         poll_interval: float = 8.0,
         timeout_seconds: int = 900,
+        notification_port: object | None = None,
     ) -> None:
         if not isinstance(context, WorkflowContext):
             raise TypeError("OrchestratorApp requires WorkflowContext")
@@ -97,6 +98,11 @@ class OrchestratorApp:
         )
         self.poll_interval = max(0.0, poll_interval)
         self.timeout_seconds = max(0.0, float(timeout_seconds))
+        self.notification_port = notification_port or (
+            FeishuNotificationPort()
+            if feishu_notifications_enabled()
+            else NullNotificationPort()
+        )
         self.admission = RuntimeConcurrencyAdmission(
             ConcurrencyLimits(
                 global_max=int(os.environ.get("GLOBAL_MAX_WORKERS", "6")),
@@ -152,16 +158,6 @@ class OrchestratorApp:
             {
                 "agent_dispatch": self.runner,
                 "node_dispatch": self.node_effects,
-                "notification": NotificationEffectRunner(
-                    (
-                        FeishuNotificationPort()
-                        if os.environ.get("ENABLE_FEISHU_NOTIFICATIONS", "").lower()
-                        in {"1", "true", "yes", "on"}
-                        and os.environ.get("NEXUS_TEST_NO_EXTERNAL_NOTIFICATIONS", "").lower()
-                        not in {"1", "true", "yes", "on"}
-                        else NullNotificationPort()
-                    )
-                ),
             },
         )
         self.inbox = JsonDomainEventInbox(self.repository)
@@ -172,6 +168,7 @@ class OrchestratorApp:
             StateRegistry.default(),
             TaskLockAdapter(context.identity.task_id, TaskLock(self.root / "task.lock")),
             LinearContextReducer(),
+            DirectNotificationEmitter(self.notification_port),
         )
         self._max_idle_seconds = max(1.0, self.timeout_seconds)
 
@@ -392,11 +389,21 @@ def main(argv: list[str] | None = None) -> int:
         else:
             task_id = f"task-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
             raw_request = normalize_task_request(args.new or "")
+            analyst_agent_id = os.environ.get("AGENT_ANALYST_ID", "")
+            if args.issue:
+                issue_data = multica.get_issue(args.issue)
+                current_assignee = str(issue_data.get("assignee_id") or "")
+                if not current_assignee:
+                    parser.error(
+                        f"Issue {args.issue} has no assignee. "
+                        "Assign the target agent before starting the review."
+                    )
             issue_id = args.issue or multica.create_issue(
                 "Review: " + raw_request[:60],
                 raw_request,
                 args.project,
                 allow_duplicate=args.allow_duplicate,
+                assignee_id=analyst_agent_id,
             )
             context = build_context(args, issue_id, raw_request, task_id)
     except (ValueError, OSError, json.JSONDecodeError) as error:

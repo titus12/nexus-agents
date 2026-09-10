@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .prompt_bundle import PromptBundleBuilder
+from .prompt_bundle import PromptBundleBuilder, remote_result_filename
 from .agent_result_file import (
     AgentResultFileError,
     read_agent_result_file,
@@ -532,11 +532,16 @@ class MulticaCliAdapter:
             prompt_ref = bundle.reference()
             result_path = str(prompt_ref.get("result_path") or "")
             schema_hash = str((request.structured_output or {}).get("schema_hash") or "")
-            if schema_hash:
+            is_result_file = (
+                isinstance(request.structured_output, dict)
+                and request.structured_output.get("mode") == "result_file"
+            )
+            if schema_hash and is_result_file:
+                remote_result_name = remote_result_filename(request.request_id)
                 structured_output_instruction = (
                     "Do not modify source or project files. The Orchestrator-owned canonical result "
                     f"is {result_path}; do not write that path. Write exactly one complete "
-                    "business result to relative result.json in "
+                    f"business result to relative {remote_result_name} in "
                     "the current Agent workspace as UTF-8 JSON without BOM, using a real JSON "
                     "serializer so quotes and control characters are escaped by the serializer. "
                     f"The JSON root must include structured_output_protocol={request.structured_output.get('protocol')}. "
@@ -546,7 +551,7 @@ class MulticaCliAdapter:
                     "do not return the business JSON or a transport envelope inline. After the "
                     "file is durably written, return exactly one compact "
                     "nexus-agent-result-ref-v1 pointer containing the exact task_id, request_id, "
-                    "and actual local result.json path; do not return ./result.json or Markdown. "
+                    f"and actual local {remote_result_name} path; do not return ./{remote_result_name} or Markdown. "
                     "Keep the file until the response has been emitted, and do not return a "
                     "second business result."
                 )
@@ -569,8 +574,6 @@ class MulticaCliAdapter:
                 "prompt_ref": prompt_ref,
                 "structured_output": request.structured_output,
             }
-        # Validate/build all local artifacts before assignment can trigger an Agent.
-        self._run("issue", "update", issue_id, "--assignee-id", request.agent_id, "--output", "json")
         content = json.dumps({
             **prompt_payload,
             "response_contract": _response_contract_for(request),
@@ -689,10 +692,10 @@ class MulticaCliAdapter:
                 f"{issue_id}:dispatch:{request.request_id}",
                 lambda since: self._run_with_read_retry(
                     "issue", "comment", "list", issue_id,
-                    *(('--since', since) if since else ()),
+                    *(('--since', since) if since else ('--recent', '20')),
                     "--output", "json",
                 ),
-                initial_since=request.sent_after or datetime.now(timezone.utc).isoformat(),
+                initial_since=request.sent_after,
             )
         except Exception as error:
             logger.warning(
@@ -872,7 +875,12 @@ class MulticaCliAdapter:
             path.relative_to(self.multica_workspaces_root)
         except (OSError, ValueError):
             return False
-        return path.name.lower() == "result.json" and path.parent.name.lower() == "workdir"
+        name = path.name.lower()
+        return (
+            path.parent.name.lower() == "workdir"
+            and path.suffix.lower() == ".json"
+            and (name == "result.json" or name.startswith("result_"))
+        )
 
     def _discover_remote_result_candidates(
         self,
@@ -881,16 +889,18 @@ class MulticaCliAdapter:
         """Find validly-shaped remote result files bound to this request."""
         candidates: list[Path] = []
         try:
-            paths = self.multica_workspaces_root.rglob("result.json")
-            for raw_path in paths:
+            paths_by_name: dict[str, Path] = {}
+            for pattern in ("result.json", "result_*.json"):
+                for raw_path in self.multica_workspaces_root.rglob(pattern):
+                    paths_by_name[str(raw_path)] = raw_path
+            for raw_path in paths_by_name.values():
                 try:
                     path = raw_path.resolve()
                     path.relative_to(self.multica_workspaces_root)
                 except (OSError, ValueError):
                     continue
                 if (
-                    path.name.lower() != "result.json"
-                    or path.parent.name.lower() != "workdir"
+                    not self._is_remote_result_path(path)
                     or not path.is_file()
                 ):
                     continue
@@ -1194,22 +1204,39 @@ class MulticaCliAdapter:
                         and self._is_remote_result_path(actual_result_path)
                     )
                     if not canonical_result_path and not remote_result_path:
-                        stats["request_mismatch"] += 1
-                        logger.warning(
-                            "STALE_RESULT_POINTER issue_id=%s task_id=%s "
-                            "request_id=%s comment_id=%s pointer_task_id=%s "
-                            "pointer_request_id=%s expected_result_path=%s "
-                            "actual_result_path=%s reason=result_path_binding_mismatch",
-                            issue_id,
-                            request.task_id,
-                            request.request_id,
-                            comment_id,
-                            pointer_task_id,
-                            pointer_request_id,
-                            expected_result_path,
-                            actual_result_path,
-                        )
-                        continue
+                        # Pointer path is a bare relative filename from the
+                        # remote workspace.  Resolve it via discovery scan
+                        # instead of rejecting the pointer outright.
+                        discovered = self._recover_remote_result_file(request)
+                        if discovered is not None:
+                            payload = discovered.payload
+                            result_was_file = True
+                            logger.info(
+                                "POINTER_REMOTE_RESOLVED task_id=%s request_id=%s "
+                                "comment_id=%s pointer_path=%s canonical_path=%s",
+                                request.task_id,
+                                request.request_id,
+                                comment_id,
+                                actual_result_path,
+                                expected_result_path,
+                            )
+                        else:
+                            stats["request_mismatch"] += 1
+                            logger.warning(
+                                "STALE_RESULT_POINTER issue_id=%s task_id=%s "
+                                "request_id=%s comment_id=%s pointer_task_id=%s "
+                                "pointer_request_id=%s expected_result_path=%s "
+                                "actual_result_path=%s reason=result_path_binding_mismatch",
+                                issue_id,
+                                request.task_id,
+                                request.request_id,
+                                comment_id,
+                                pointer_task_id,
+                                pointer_request_id,
+                                expected_result_path,
+                                actual_result_path,
+                            )
+                            continue
                     try:
                         if remote_result_path:
                             payload = self._bridge_remote_result_file(request, payload)
@@ -1269,7 +1296,11 @@ class MulticaCliAdapter:
                             str(error),
                         )
                         continue
-                if author_id != request.agent_id:
+                structured_output_mode = (
+                    isinstance(request.structured_output, dict)
+                    and request.structured_output.get("mode")
+                )
+                if author_id != request.agent_id and not structured_output_mode:
                     stats["author_mismatch"] += 1
                     continue
                 created_at = str(comment.get("created_at") or "")
@@ -1819,6 +1850,7 @@ class MulticaCliAdapter:
             )
         return []
 
+
     @staticmethod
     def _run_correlation_ids(run: dict[str, object]) -> set[str]:
         return {
@@ -1933,6 +1965,7 @@ class MulticaCliAdapter:
         description: str,
         project_id: str = "",
         allow_duplicate: bool = False,
+        assignee_id: str = "",
     ) -> str:
         path = self.log_dir / f"new_issue_{int(time.time() * 1000)}.md"
         path.write_text(description, encoding="utf-8")
@@ -1941,6 +1974,8 @@ class MulticaCliAdapter:
             args += ["--project", project_id]
         if allow_duplicate:
             args.append("--allow-duplicate")
+        if assignee_id:
+            args += ["--assignee-id", assignee_id]
         value = self._run(*args)
         issue_id = value.get("id") if isinstance(value, dict) else None
         if not issue_id and isinstance(value, dict):
@@ -2323,14 +2358,16 @@ def _external_notifications_disabled_for_tests() -> bool:
     }
 
 
-def _external_notifications_explicitly_enabled() -> bool:
-    """Require an explicit opt-in before any Feishu network operation."""
+def feishu_notifications_enabled() -> bool:
+    """Enable Feishu in production by default; tests may explicitly disable it."""
 
-    return os.environ.get("ENABLE_FEISHU_NOTIFICATIONS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
+    if _external_notifications_disabled_for_tests():
+        return False
+    return os.environ.get("ENABLE_FEISHU_NOTIFICATIONS", "").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
     }
 
 
@@ -2383,10 +2420,7 @@ class FeishuHttpAdapter:
         return self.send_text(gate.prompt, "gate")
 
     def send_text(self, text: str, role: str = "gate") -> DeliveryReceipt:
-        if (
-            _external_notifications_disabled_for_tests()
-            or not _external_notifications_explicitly_enabled()
-        ):
+        if not feishu_notifications_enabled():
             raise RuntimeError("FEISHU_EXTERNAL_DISABLED_FOR_TESTS")
         logger.info(
             "FEISHU_HTTP_SEND_START role=%s text_chars=%s chat_configured=%s",
@@ -2439,10 +2473,7 @@ class FeishuHttpAdapter:
         return receipt.message_id
 
     def poll_reply(self, gate: HumanGate) -> list[HumanReply]:
-        if (
-            _external_notifications_disabled_for_tests()
-            or not _external_notifications_explicitly_enabled()
-        ):
+        if not feishu_notifications_enabled():
             raise RuntimeError("FEISHU_EXTERNAL_DISABLED_FOR_TESTS")
         if not self.chat_id:
             return []

@@ -29,6 +29,7 @@ class AgentDispatchRequest:
     target_state: str = ""
     revision_id: str = ""
     plan_hash: str = ""
+    sent_after: str = ""
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,10 @@ class AgentTransportPort(Protocol):
     def lookup(self, operation_id: str) -> DispatchReceipt | None: ...
 
     def status(self, request: PollRequest) -> RemoteRunStatus: ...
+
+    def recover_completed(self, request: AgentDispatchRequest) -> RawTransportReply | None:
+        """Return a completed result when the remote artifact already exists, without dispatching again."""
+        return None
 
 
 class DomainEventInbox(Protocol):

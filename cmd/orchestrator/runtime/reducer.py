@@ -304,6 +304,9 @@ class LinearContextReducer:
         notification_key = update.audit.sent_notification_key
         if notification_key and notification_key not in keys:
             keys = (*keys, notification_key)
+        for notification_key in update.audit.sent_notification_keys:
+            if notification_key and notification_key not in keys:
+                keys = (*keys, notification_key)
         return replace(
             current,
             sent_notification_keys=keys,

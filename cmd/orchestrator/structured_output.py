@@ -16,7 +16,7 @@ from .contracts.common import (
 )
 
 
-STRUCTURED_OUTPUT_MODE = "result_file"
+STRUCTURED_OUTPUT_MODE = "inline"
 _ENVELOPE_FIELDS = {
     "action", "contract_id", "task_id", "request_id", "phase", "state", "role", "mode",
     "structured_output_protocol", "structured_output_schema_hash",
