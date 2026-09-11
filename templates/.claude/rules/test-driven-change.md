@@ -22,7 +22,12 @@ For every code-changing task:
    dependency changes, or cross-module cleanup.
 4. If the necessary scope expands, state the added impact, reason, validation
    plan, and required approval before proceeding.
-4. Reuse established project patterns and dependencies. Do not introduce a
+5. As part of the same change, if post-change review confirms that old code has
+   no callers, Unity message or Inspector/UnityEvent binding, serialization,
+   reflection, event-registration, or external-contract purpose, and is fully
+   replaced by the new logic, remove it and report the reason, evidence, and
+   validation. Do not remove merely suspected redundancy; flag it for review.
+6. Reuse established project patterns and dependencies. Do not introduce a
    public API, configuration item, or third-party dependency unless the task
    explicitly requires it.
 
@@ -67,7 +72,7 @@ When deterministic automation is practical:
 2. Run it and confirm it fails for the expected missing or incorrect behavior.
 3. Implement the necessary production change that makes it pass while keeping
    the solution proportionate to the risk.
-4. Refactor while preserving behavior.
+4. Refactor only within the changed scope while preserving behavior.
 5. Run targeted validation first, then broaden validation in proportion to the
    changed package and risk surface.
 
@@ -95,8 +100,10 @@ preserves its unique protection or explicitly record the accepted risk.
 
 Test observable behavior, domain state, and intentional boundary contracts.
 
-- Do not export a production API solely for tests.
-- Do not add test-only runtime flags, `if test` branches, or debug paths.
+- Do not add or export test-only methods, entry points, flags, branches, or APIs
+  in production code; tests must verify observable behavior through existing
+  production boundaries.
+- Do not add test-only debug paths.
 - Do not abstract every internal collaboration merely to mock it.
 - Introduce a dependency boundary only for a real external, unstable,
   expensive, or non-deterministic dependency when it also improves production
@@ -120,7 +127,7 @@ such changes as behavioral or boundary changes.
 
 For every other exception, record why automation is not appropriate now, the
 actual substitute validation, and the trigger for adding an automated test
-later. “Too hard to test” is not sufficient evidence.
+later. "Too hard to test" is not sufficient evidence.
 
 ## Review gate
 
