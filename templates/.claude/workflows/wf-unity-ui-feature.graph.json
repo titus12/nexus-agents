@@ -31,7 +31,7 @@
       "type": "agent",
       "x": 430,
       "label": "requirement-collector",
-      "detail": "Collect Feishu/user requirements, screenshots/tables, protocol/config paths, Feature Card, UI AIConfig, and KnowledgeBase into a minimal task context package."
+      "detail": "Collect Feishu/user requirements, screenshots/tables, protocol/config paths, Feature Card, UI AIConfig, and KnowledgeBase into a focused task context package."
     },
     {
       "id": "owner",

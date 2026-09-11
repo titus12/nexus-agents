@@ -40,7 +40,7 @@
       "type": "agent",
       "x": 820,
       "label": "unity-bugfix-developer",
-      "detail": "Implement smallest root-cause fix."
+      "detail": "Implement the necessary root-cause fix within the smallest reasonable scope."
     },
     {
       "id": "tester",

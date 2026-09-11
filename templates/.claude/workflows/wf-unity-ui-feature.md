@@ -342,7 +342,7 @@ Token constraints:
    business logic. If the approved plan is diagnosis-first, the next
    implementation step is diagnostic instrumentation only; do not change business behavior until the diagnostic evidence
    confirms the root cause.
-8. `ui-developer` implements the smallest clear solution in this order:
+8. `ui-developer` implements the clearest solution within the smallest necessary scope in this order:
    - create missing View / ViewModel / ItemRender scripts only after stating their mount node, responsibility, fields,
      UI nodes, and business need;
    - bind UI resources first: mount scripts and bind serialized references with Unity MCP;

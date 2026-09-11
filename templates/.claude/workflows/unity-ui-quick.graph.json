@@ -30,7 +30,7 @@
       "type": "agent",
       "x": 620,
       "label": "quick-developer",
-      "detail": "Read the smallest relevant UI context and make the minimal safe handwritten change or diagnostic."
+      "detail": "Read the relevant UI context and make the necessary safe handwritten change or targeted diagnostic."
     },
     {
       "id": "verifier",

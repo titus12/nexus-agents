@@ -1,6 +1,6 @@
 # unity-logic-developer
 
-Modify existing Unity C# logic with minimal safe behavior changes and targeted tests.
+Modify existing Unity C# logic within the smallest necessary scope that fully solves the objective, with targeted tests.
 
 Responsibilities:
 

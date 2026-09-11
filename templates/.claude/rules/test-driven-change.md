@@ -7,15 +7,20 @@ directly or through an explicitly selected `wf-*` workflow. It defines the
 minimum test-design decision before production implementation. Language and
 framework skills may add commands and examples, but must not weaken this rule.
 
-## Minimal Change Principle
+## Necessary Change Scope
 
 For every code-changing task:
 
-1. Change only the code, tests, and configuration necessary for the confirmed
-   objective.
-2. Do not bundle unrelated refactors, formatting churn, public-API changes,
+1. Change the smallest necessary set of code, tests, and configuration that
+   fully satisfies the confirmed objective and remains understandable and
+   maintainable.
+2. Prefer the option that fully resolves the confirmed cause or contract with
+   the lowest total risk. Do not choose a smaller patch when it would create
+   temporary branches, duplicated logic, avoidable technical debt, or new
+   boundary risks.
+3. Do not bundle unrelated refactors, formatting churn, public-API changes,
    dependency changes, or cross-module cleanup.
-3. If the necessary scope expands, state the added impact, reason, validation
+4. If the necessary scope expands, state the added impact, reason, validation
    plan, and required approval before proceeding.
 4. Reuse established project patterns and dependencies. Do not introduce a
    public API, configuration item, or third-party dependency unless the task
@@ -60,7 +65,8 @@ When deterministic automation is practical:
 
 1. Write or extend the smallest behavior-based test.
 2. Run it and confirm it fails for the expected missing or incorrect behavior.
-3. Implement the minimum production change that makes it pass.
+3. Implement the necessary production change that makes it pass while keeping
+   the solution proportionate to the risk.
 4. Refactor while preserving behavior.
 5. Run targeted validation first, then broaden validation in proportion to the
    changed package and risk surface.

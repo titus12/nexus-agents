@@ -35,7 +35,7 @@ Follow `.claude/rules/knowledge-retrieval.md`. Record `knowledgeRetrieval` and i
 以下是主会话中的顺序阶段角色，不是自动子代理：
 
 1. `quick-planner` - 确认范围、风险、具体文件和验证路径。
-2. `quick-developer` - 实现最小且安全的手写修改。
+2. `quick-developer` - 在合理必要范围内实现安全的手写修改。
 3. `quick-verifier` - 检查编译风险、生成文件安全和目标行为。
 
 ## 子代理派发模式
@@ -112,7 +112,7 @@ quick 日志只打边界点：ViewModel 最终数据/关键状态、View `OnBind
    不要调用 `POST /api/workflow-runs/start`。
 2. `quick-planner` 基于证据输出判断原因、修复方案、验证方式和升级条件；证据不足时先输出诊断日志计划。
 3. `quick-developer` 只读取相关的生成绑定、手写 View/ViewModel/ItemRender、Console 或必要 prefab facts。
-4. `quick-developer` 实现最小安全修改；若前一步是诊断计划，则只加诊断日志，不直接改业务行为。
+4. `quick-developer` 在合理必要范围内实现安全修改；若前一步是诊断计划，则只加诊断日志，不直接改业务行为。
 5. `quick-verifier` 验证目标行为和编译风险。验证必须包含一次 Unity MCP 控制台/编译检查；如果 Unity MCP
    不可用，需要记录具体不可用原因。
    - 如果本次修复涉及 prefab 上的脚本引用丢失/恢复，不能只验证组件类型存在；必须同时检查该脚本的关键

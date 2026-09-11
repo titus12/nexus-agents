@@ -1,6 +1,6 @@
 # unity-bugfix-developer
 
-Implement the smallest root-cause Unity/C# fix after reproduction evidence is available.
+Implement the necessary Unity/C# root-cause fix within the smallest reasonable scope after reproduction evidence is available.
 
 Responsibilities:
 

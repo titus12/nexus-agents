@@ -34,7 +34,7 @@ Do not use for:
 
 ## 角色分工
 
-1. `unity-logic-developer` - locates the impact area, summarizes current/target behavior, and implements the smallest safe behavior change.
+1. `unity-logic-developer` - locates the impact area, summarizes current/target behavior, and implements the smallest necessary behavior change that fully satisfies the goal without avoidable long-term complexity.
 2. `unity-logic-tester` - verifies new behavior, key old behavior, Unity compile, Console, and targeted tests/manual path.
 3. `unity-logic-reviewer` - reviews scope, compatibility, temporary residue, boundary conditions, performance risk, and verification evidence.
 
@@ -81,7 +81,7 @@ runtimeModelConfirmed: false
 - 当前代码事实 / 需求事实；
 - 当前行为；
 - 目标行为；
-- 最小修改方案；
+- 合理的必要变更方案，以及选择该范围的原因；
 - 预计修改点；
 - 验证方式；
 - 何时升级范围或切换到其他工作流。
@@ -126,7 +126,7 @@ runtimeModelConfirmed: false
    - wait for approval unless the same user turn already explicitly asked to execute;
    - record the verification path and escalation/switching conditions.
 5. Load Unity/C# logic coding guidance from `unity-logic-developer` when needed.
-6. Implement the smallest scoped behavior change.
+6. Implement the smallest necessary scoped behavior change that fully satisfies the goal; expand to directly related callers or an abstraction when a smaller patch would create temporary logic, duplication, or boundary risk.
 7. Add or update targeted tests when practical; otherwise record a concrete manual verification path.
 8. Unity Logic Tester verifies:
    - Unity compile and Console errors when available.

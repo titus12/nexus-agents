@@ -28,7 +28,7 @@ Use for Unity runtime, UI, asset, integration, Console, exception, regression, c
 Default roles:
 
 1. `unity-debugger` - gather evidence, reproduce when possible, identify or narrow root cause.
-2. `unity-bugfix-developer` - main agent implements the smallest root-cause fix.
+2. `unity-bugfix-developer` - main agent implements the smallest necessary root-cause fix that fully resolves the issue without avoidable long-term complexity.
 3. `unity-regression-tester` - required subagent after implementation; verifies compile, Console, tests, reproduction path, and relevant regressions.
 4. `unity-bugfix-reviewer` - required subagent after implementation; reviews diff scope, root-cause alignment, asset safety, temporary residue, and risks.
 5. `workflow-evaluator` - optional subagent for compact Nexus evidence and final report preparation.
@@ -80,7 +80,7 @@ The plan must include:
 
 - current evidence and reproduction status;
 - root-cause confidence: `unconfirmed`, `candidate`, or `confirmed`;
-- smallest diagnosis or fix plan;
+- necessary diagnosis or fix plan with explicit scope and rationale;
 - expected changed files and forbidden files;
 - validation and user-acceptance plan;
 - when the workflow will loop, ask for logs, or stop.
@@ -92,8 +92,8 @@ If root cause is not confirmed, present a diagnosis-first plan, not a speculativ
 Do not edit business behavior from a guess. Classify evidence first:
 
 - `unconfirmed`: only symptom is known; gather facts or ask for reproduction evidence.
-- `candidate`: one or more likely causes exist; add the smallest diagnostic needed to distinguish them.
-- `confirmed`: logs, stack trace, deterministic resource/code fact, failed assertion, or user-provided evidence uniquely identifies the failure point; implement the minimal fix.
+- `candidate`: one or more likely causes exist; add a targeted diagnostic needed to distinguish them.
+- `confirmed`: logs, stack trace, deterministic resource/code fact, failed assertion, or user-provided evidence uniquely identifies the failure point; implement the necessary fix within the smallest reasonable scope.
 
 Allowed diagnosis methods:
 
@@ -126,7 +126,7 @@ Loop states:
 
 1. `investigating` - collect facts and reproduce if possible.
 2. `diagnosing` - add/read minimal diagnostics and decide the next hypothesis.
-3. `implementing` - apply the smallest confirmed root-cause fix.
+3. `implementing` - apply the necessary confirmed root-cause fix within the smallest reasonable scope.
 4. `reviewing` - independent reviewer subagent checks scope, risks, and residue.
 5. `verifying` - independent tester subagent checks compile, Console, tests, and reproduction path where possible.
 6. `awaiting_user_evidence` - user must provide logs/screenshots/repro output for the next diagnosis step.
@@ -170,8 +170,8 @@ Acceptance request must include:
 
 ## Implementation Rules
 
-- Implement the smallest confirmed root-cause fix.
-- Do not refactor, retune, or broaden behavior unless required by the confirmed root cause.
+- Implement the necessary confirmed root-cause fix within the smallest reasonable scope that fully resolves the issue.
+- Do not refactor, retune, or broaden behavior unless required by the confirmed root cause or needed to avoid temporary logic, duplication, or boundary risk.
 - Do not hand-edit generated files.
 - Do not delete or casually rewrite `.meta` files.
 - For assets/prefabs/scenes, verify serialized references and component data, not only type existence.
@@ -190,12 +190,12 @@ After implementation, spawn `unity-bugfix-reviewer` with the smallest context pa
 Review must check:
 
 - fix matches the confirmed root cause;
-- diff is minimal and avoids unrelated refactors;
+- diff is limited to directly related necessary changes and avoids unrelated refactors;
 - generated files, `.meta`, prefabs/scenes/assets are handled safely;
 - lifecycle/null/async/destroyed-object/boundary risks;
 - temporary logs, mocks, local paths, debug bypasses, and stale diagnostics;
 - responsibility boundaries and extension points are respected: generic workflow nodes should not accumulate domain-specific branches when an owning controller/service/model can express the policy;
-- design issues in touched code are classified as blocking, follow-up, or acceptable minimal-fix tradeoff, with the better owner named when relevant;
+- design issues in touched code are classified as blocking, follow-up, or an acceptable necessary-scope tradeoff, with the better owner named when relevant;
 - evidence is sufficient, or acceptance remains pending.
 
 Blocking review findings return to implementation.
@@ -240,7 +240,7 @@ node .agents/skills/wf-subagents/plan-loop.mjs gate --file .nexus/plan-complianc
 2. Gather evidence and classify root-cause confidence.
 3. Present a plan. If confidence is not `confirmed`, plan only diagnostics.
 4. Run diagnosis loop until root cause is confirmed or external evidence is needed.
-5. Implement the smallest root-cause fix.
+5. Implement the necessary root-cause fix within the smallest reasonable scope.
 6. Run independent review and verification subagents.
 7. If review/verification fails, loop back to implementation or diagnosis.
 8. If internal checks pass but original acceptance is unavailable, request user acceptance and keep workflow open.
