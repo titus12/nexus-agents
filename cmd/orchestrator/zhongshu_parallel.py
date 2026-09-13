@@ -3,9 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 import copy
+import difflib
 import hashlib
 import json
 import logging
+import os
+import re
+import unicodedata
 
 from .domain.findings import normalize_finding_status
 from .zhongshu_review import (
@@ -380,6 +384,61 @@ ZHONGSHU_REQUIREMENT_CONTRACT_FIELDS = (
     "acceptance_signal",
 )
 
+# Cross-worker requirement identity fields.  ``source`` and ``acceptance_signal``
+# are worker-local provenance/quality annotations and may legitimately differ by
+# Analyst lens, so they are excluded from cross-worker conflict detection when no
+# canonical requirement contract was injected.
+ANALYST_REQUIREMENT_CONFLICT_FIELDS = (
+    "statement",
+    "priority",
+    "scope",
+    "kind",
+)
+
+# Prose fields are compared leniently: LLM paraphrases of the same requirement
+# must not reject an otherwise valid fan-in.  Enum-like fields stay strict.
+ANALYST_REQUIREMENT_PROSE_FIELDS = ("statement",)
+ANALYST_REQUIREMENT_ENUM_FIELDS = ("priority", "scope", "kind")
+ANALYST_REQUIREMENT_TEXT_SIMILARITY = 0.85
+
+
+def normalize_requirement_id(value: object) -> str:
+    """Collapse ``req-1`` / ``req-001`` / ``req-000001`` to one canonical id."""
+
+    text = str(value or "").strip().lower()
+    match = re.search(r"(\d+)$", text)
+    if not match:
+        return text
+    return f"{text[:match.start()]}{match.group(1).zfill(6)}"
+
+
+def normalize_requirement_text(value: object) -> str:
+    """Normalize prose for tolerant comparison (width, whitespace, punctuation)."""
+
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[，。；：、,.;:!?！？\"'“”‘’()（）\[\]【】]+$", "", text)
+    return text.strip().lower()
+
+
+def requirement_texts_close(left: object, right: object) -> bool:
+    """True when two prose values are equal after normalization or near-duplicate."""
+
+    first = normalize_requirement_text(left)
+    second = normalize_requirement_text(right)
+    if first == second:
+        return True
+    if not first or not second:
+        return False
+    threshold = ANALYST_REQUIREMENT_TEXT_SIMILARITY
+    raw = os.environ.get("ANALYST_REQUIREMENT_TEXT_SIMILARITY", "").strip()
+    if raw:
+        try:
+            threshold = float(raw)
+        except ValueError:
+            threshold = ANALYST_REQUIREMENT_TEXT_SIMILARITY
+    return difflib.SequenceMatcher(None, first, second).ratio() >= threshold
+
 
 def bind_zhongshu_requirement_contract(
     payload: dict[str, Any],
@@ -401,12 +460,12 @@ def bind_zhongshu_requirement_contract(
         return bound, ()
 
     expected_ids = [
-        str(item.get("requirement_id") or "").strip()
+        normalize_requirement_id(item.get("requirement_id"))
         for item in canonical_requirements
         if isinstance(item, dict)
     ]
     actual_ids = [
-        str(item.get("requirement_id") or "").strip()
+        normalize_requirement_id(item.get("requirement_id"))
         for item in requirements
         if isinstance(item, dict)
     ]
@@ -423,11 +482,11 @@ def bind_zhongshu_requirement_contract(
         )
 
     expected_by_id = {
-        str(item["requirement_id"]).strip(): item
+        normalize_requirement_id(item["requirement_id"]): item
         for item in canonical_requirements
     }
     actual_by_id = {
-        str(item["requirement_id"]).strip(): item
+        normalize_requirement_id(item["requirement_id"]): item
         for item in requirements
     }
     changed: dict[str, list[str]] = {}
@@ -641,18 +700,36 @@ def merge_analyst_evidence(
         if not raw_requirements and canonical_requirements:
             raw_requirements = canonical_requirements
         for requirement in raw_requirements:
-            requirement_id = str(requirement.get("requirement_id") or "").strip()
+            requirement_id = normalize_requirement_id(requirement.get("requirement_id"))
             if not requirement_id:
                 continue
             existing = requirement_by_id.get(requirement_id)
             if existing is None:
                 requirement_by_id[requirement_id] = copy.deepcopy(requirement)
-            else:
-                for field in ZHONGSHU_REQUIREMENT_CONTRACT_FIELDS[1:]:
-                    if field in existing and field in requirement and existing[field] != requirement[field]:
-                        raise ValueError(
-                            f"worker requirement contract violation: {requirement_id}:{field}"
-                        )
+                continue
+            for field in ANALYST_REQUIREMENT_CONFLICT_FIELDS:
+                if field not in existing or field not in requirement:
+                    continue
+                if existing[field] == requirement[field]:
+                    continue
+                if field in ANALYST_REQUIREMENT_PROSE_FIELDS and requirement_texts_close(
+                    existing[field], requirement[field]
+                ):
+                    logger.warning(
+                        "ZHONGSHU_REQUIREMENT_PROSE_VARIANT requirement_id=%s "
+                        "worker_id=%s",
+                        requirement_id,
+                        worker_id,
+                    )
+                    continue
+                if field in ANALYST_REQUIREMENT_ENUM_FIELDS and (
+                    normalize_requirement_text(existing[field])
+                    == normalize_requirement_text(requirement[field])
+                ):
+                    continue
+                raise ValueError(
+                    f"worker requirement contract violation: {requirement_id}:{field}"
+                )
         local_updates = [
             copy.deepcopy(item)
             for item in body.get("evidence_updates") or []
@@ -967,7 +1044,7 @@ def merge_analyst_outputs(
                 elif scope_key not in scope:
                     scope[scope_key] = copy.deepcopy(scope_value)
         for value in requirements:
-            requirement_id = str(value.get("requirement_id") or "").strip()
+            requirement_id = normalize_requirement_id(value.get("requirement_id"))
             statement = str(value.get("statement") or "").strip()
             if not requirement_id or not statement:
                 continue
@@ -981,19 +1058,33 @@ def merge_analyst_outputs(
                     "kind",
                     "acceptance_signal",
                 )
-                mismatches = [
-                    field
-                    for field in contract_fields
-                    if field in (existing or {}) or field in value
-                    if (existing or {}).get(field) != value.get(field)
-                ]
+                mismatches = []
+                for field in contract_fields:
+                    if field not in (existing or {}) and field not in value:
+                        continue
+                    left = (existing or {}).get(field)
+                    right = value.get(field)
+                    if left == right:
+                        continue
+                    if field in ANALYST_REQUIREMENT_PROSE_FIELDS and (
+                        requirement_texts_close(left, right)
+                    ):
+                        continue
+                    if field in ANALYST_REQUIREMENT_ENUM_FIELDS and (
+                        normalize_requirement_text(left)
+                        == normalize_requirement_text(right)
+                    ):
+                        continue
+                    mismatches.append(field)
                 if existing is None or mismatches:
                     detail = ",".join(mismatches) or "missing_requirement"
                     raise ValueError(
                         f"worker requirement contract violation: {requirement_id}:{detail}"
                     )
             else:
-                if existing is not None and _normalized_task_key(existing.get("statement")) != _normalized_task_key(statement):
+                if existing is not None and not requirement_texts_close(
+                    existing.get("statement"), statement
+                ):
                     raise ValueError(f"conflicting requirement definition: {requirement_id}")
                 if existing is None:
                     requirement_by_id[requirement_id] = dict(value)

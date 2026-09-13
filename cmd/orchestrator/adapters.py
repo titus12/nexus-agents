@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 import uuid
 import json
@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .prompt_bundle import PromptBundleBuilder, remote_result_filename
+from .prompt_bundle import PromptBundleBuilder
 from .agent_result_file import (
     AgentResultFileError,
     read_agent_result_file,
@@ -50,31 +50,6 @@ def _fingerprint_text(text: str) -> dict[str, object]:
         "starts_with_json": stripped.startswith("{") or stripped.startswith("["),
         "ends_with_json": stripped.endswith("}") or stripped.endswith("]"),
     }
-
-
-def _path_identity(path: str | Path) -> str:
-    """Normalize a filesystem path for request-boundary comparisons."""
-    value = str(path or "").strip()
-    if not value:
-        return ""
-    try:
-        value = os.path.abspath(os.path.expanduser(value))
-    except (OSError, ValueError):
-        pass
-    return os.path.normcase(os.path.normpath(value))
-
-
-def _default_multica_workspaces_root() -> Path:
-    """Resolve a safe default without requiring a complete user environment."""
-    home = (
-        os.environ.get("USERPROFILE")
-        or os.environ.get("HOME")
-        or (
-            f"{os.environ.get('HOMEDRIVE', '')}"
-            f"{os.environ.get('HOMEPATH', '')}"
-        )
-    )
-    return Path(home or Path.cwd()) / "multica_workspaces"
 
 
 def _json_parse_diagnostic(text: str) -> dict[str, object]:
@@ -214,15 +189,8 @@ class MulticaCliAdapter:
     def __init__(self, log_dir: str | Path = "logs") -> None:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.prompt_transport_mode = os.environ.get("PROMPT_TRANSPORT_MODE", "prompt_file").lower()
         self.prompt_bundle_builder = PromptBundleBuilder(self.log_dir / "prompt-bundles")
         self.agent_result_allowed_root = Path(os.environ.get("AGENT_RESULT_ALLOWED_ROOT", str(self.log_dir.parent)))
-        self.multica_workspaces_root = Path(
-            os.environ.get(
-                "MULTICA_WORKSPACES_ROOT",
-                str(_default_multica_workspaces_root()),
-            )
-        ).expanduser().resolve()
         self.orchestrator_result_write_enabled = (
             os.environ.get("ORCHESTRATOR_RESULT_WRITE_ENABLED", "true").lower()
             not in {"0", "false", "no", "off"}
@@ -232,15 +200,12 @@ class MulticaCliAdapter:
             int(os.environ.get("INLINE_RESULT_MAX_BYTES", str(64 * 1024))),
         )
         logger.info(
-            "PROMPT_TRANSPORT_CONFIG mode=%s bundle_root=%s result_allowed_root=%s "
-            "multica_workspaces_root=%s "
+            "PROMPT_TRANSPORT_CONFIG mode=prompt_file bundle_root=%s result_allowed_root=%s "
             "prompt_encoding=utf-8 prompt_bom=false result_encoding=utf-8 "
             "result_bom=writer_expected_false_reader_tolerant "
             "orchestrator_result_write_enabled=%s inline_result_max_bytes=%s",
-            self.prompt_transport_mode,
             self.log_dir / "prompt-bundles",
             self.agent_result_allowed_root,
-            self.multica_workspaces_root,
             self.orchestrator_result_write_enabled,
             self.inline_result_max_bytes,
         )
@@ -260,6 +225,7 @@ class MulticaCliAdapter:
         self._dispatch_index_path = self.log_dir / "dispatch-index.json"
         self._dispatch_index_lock = threading.RLock()
         self._dispatch_index: dict[str, dict[str, str]] = {}
+        self._run_watermarks: dict[str, list[str]] = {}
         self._load_dispatch_index()
 
     def _load_dispatch_index(self) -> None:
@@ -282,9 +248,20 @@ class MulticaCliAdapter:
                     "external_message_id": external_message_id,
                     "request_id": request_id,
                 }
+        watermarks = value.get("run_watermarks", {}) if isinstance(value, dict) else {}
+        if isinstance(watermarks, dict):
+            for key, seen in watermarks.items():
+                if isinstance(seen, list):
+                    self._run_watermarks[str(key)] = [
+                        str(item) for item in seen if str(item)
+                    ]
 
     def _save_dispatch_index(self) -> None:
-        value = {"version": 1, "requests": self._dispatch_index}
+        value = {
+            "version": 1,
+            "requests": self._dispatch_index,
+            "run_watermarks": self._run_watermarks,
+        }
         self._dispatch_index_path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(
             prefix=self._dispatch_index_path.name + ".",
@@ -302,6 +279,169 @@ class MulticaCliAdapter:
                 os.unlink(temporary)
             except OSError:
                 pass
+
+    def _capture_run_watermark(self, issue_id: str, idempotency_key: str) -> None:
+        """Record the issue's run ids immediately before a dispatch.
+
+        Switching the issue assignee makes Multica create a *direct* run that
+        carries no ``trigger_comment_id``.  Such a run can only be recognised
+        by the delta against this snapshot, which avoids comparing the
+        orchestrator's sub-second dispatch time with Multica's
+        second-granularity ``created_at``.
+        """
+
+        if not issue_id or not idempotency_key:
+            return
+        run_ids = self._issue_run_ids(issue_id)
+        if run_ids is None:
+            return
+        with self._dispatch_index_lock:
+            self._run_watermarks[str(idempotency_key)] = sorted(run_ids)
+            self._save_dispatch_index()
+
+    def _issue_run_ids(self, issue_id: str) -> set[str] | None:
+        try:
+            value = self._run_with_read_retry(
+                "issue", "runs", issue_id, "--output", "json"
+            )
+        except Exception as error:
+            logger.warning(
+                "RUN_WATERMARK_LOOKUP_FAILED issue_id=%s error=%s",
+                issue_id,
+                str(error)[:300],
+            )
+            return None
+        runs = value if isinstance(value, list) else (
+            value.get("runs", value.get("items", []))
+            if isinstance(value, dict)
+            else []
+        )
+        run_ids: set[str] = set()
+        for run in runs:
+            if isinstance(run, dict):
+                run_id = str(run.get("id") or "")
+                if run_id:
+                    run_ids.add(run_id)
+        return run_ids
+
+    def ensure_child_issue(
+        self,
+        parent_issue_id: str,
+        agent_id: str,
+        title: str,
+        marker: str = "",
+    ) -> str:
+        """Return a child issue id, creating it under ``parent_issue_id`` once.
+
+        Fan-out workers must each live in their own issue conversation so a
+        single agent identity can run them concurrently.  The lookup by
+        deterministic title makes this idempotent across retries and restarts.
+        """
+
+        parent = str(parent_issue_id or "").strip()
+        title = str(title or "").strip()
+        if not parent or not title:
+            raise RuntimeError("ensure_child_issue requires parent issue and title")
+        existing = self._find_child_issue(parent, title)
+        if existing:
+            return existing
+        description = marker or (
+            "Nexus orchestrator fan-out worker. The actionable request is "
+            "delivered as a follow-up comment; this assignment trigger is only "
+            "a placeholder."
+        )
+        digest = hashlib.sha1(f"{parent}|{title}".encode("utf-8")).hexdigest()[:16]
+        description_path = self.log_dir / f"fanout_{digest}.md"
+        description_path.write_text(description, encoding="utf-8")
+        create_args = [
+            "issue", "create",
+            "--title", title,
+            "--description-file", str(description_path),
+            "--allow-external-file",
+            "--parent", parent,
+            "--assignee-id", str(agent_id or ""),
+        ]
+        project_id = self._parent_project_id(parent)
+        if project_id:
+            create_args += ["--project", project_id]
+        create_args += ["--output", "json"]
+        value = self._run(*create_args)
+        child_id = _extract_issue_id(value)
+        if not child_id:
+            raise RuntimeError("issue create returned no child issue id")
+        logger.info(
+            "FANOUT_CHILD_ISSUE_CREATED parent=%s child=%s agent_id=%s",
+            parent,
+            child_id,
+            agent_id,
+        )
+        return child_id
+
+    def _find_child_issue(self, parent_issue_id: str, title: str) -> str:
+        try:
+            value = self._run_with_read_retry(
+                "issue", "children", parent_issue_id, "--output", "json"
+            )
+        except Exception as error:
+            logger.warning(
+                "FANOUT_CHILD_LOOKUP_FAILED parent=%s error=%s",
+                parent_issue_id,
+                str(error)[:300],
+            )
+            return ""
+        for child in _iter_child_issues(value):
+            if str(child.get("title") or "").strip() == title:
+                child_id = str(child.get("id") or child.get("issue_id") or "")
+                if child_id:
+                    logger.info(
+                        "FANOUT_CHILD_ISSUE_REUSED parent=%s child=%s",
+                        parent_issue_id,
+                        child_id,
+                    )
+                    return child_id
+        return ""
+
+    def _parent_project_id(self, parent_issue_id: str) -> str:
+        """Best-effort project inheritance so a child issue lands in the right project."""
+
+        cache = getattr(self, "_fanout_project_cache", None)
+        if cache is None:
+            cache = {}
+            self._fanout_project_cache = cache
+        if parent_issue_id in cache:
+            return cache[parent_issue_id]
+        project_id = ""
+        try:
+            value = self._run_with_read_retry(
+                "issue", "get", parent_issue_id, "--output", "json"
+            )
+            if isinstance(value, dict):
+                project_id = str(value.get("project_id") or "")
+        except Exception as error:
+            logger.warning(
+                "FANOUT_PARENT_PROJECT_LOOKUP_FAILED parent=%s error=%s",
+                parent_issue_id,
+                str(error)[:200],
+            )
+        cache[parent_issue_id] = project_id
+        return project_id
+
+    def close_issue(self, issue_id: str, status: str = "done") -> bool:
+        issue = str(issue_id or "").strip()
+        if not issue:
+            return False
+        try:
+            self._run("issue", "status", issue, str(status or "done"), "--output", "json")
+        except Exception as error:
+            logger.warning(
+                "FANOUT_CHILD_CLOSE_FAILED issue_id=%s status=%s error=%s",
+                issue,
+                status,
+                str(error)[:300],
+            )
+            return False
+        logger.info("FANOUT_CHILD_CLOSED issue_id=%s status=%s", issue, status)
+        return True
 
     def _index_dispatch_comments(self, comments: list[dict[str, Any]]) -> None:
         changed = False
@@ -353,7 +493,7 @@ class MulticaCliAdapter:
             and args[:3] == ("issue", "comment", "list")
         ) or (
             len(args) >= 2
-            and args[:2] == ("issue", "runs")
+            and args[:2] in {("issue", "runs"), ("issue", "children")}
         )
 
     def _run_with_read_retry(self, *args: str) -> object:
@@ -476,104 +616,45 @@ class MulticaCliAdapter:
         # Multica Agent runtime is triggered by issue assignment. The comment
         # carries the structured request, but assignment selects the Agent
         # that should consume it.
-        structured_result_required = bool(
-            isinstance(request.structured_output, dict)
-            and request.structured_output.get("mode") == "result_file"
-            and request.structured_output.get("schema_hash")
-        )
-        use_legacy_transport = (
-            self.prompt_transport_mode == "legacy"
-            and not structured_result_required
-        )
-        if self.prompt_transport_mode == "legacy" and structured_result_required:
-            logger.warning(
-                "PROMPT_TRANSPORT_LEGACY_BYPASSED task_id=%s request_id=%s "
-                "phase=%s role=%s reason=structured_result_requires_prompt_bundle",
-                request.task_id,
-                request.request_id,
-                request.phase,
-                request.role,
-            )
-        if use_legacy_transport:
-            prompt_payload = {"prompt": request.prompt}
-            if request.phase in {"ZHONGSHU", "MENXIA"} and isinstance(skill_lock, dict):
-                skill_bytes = Path(str(skill_lock["source"])).read_bytes()
-                if hashlib.sha256(skill_bytes).hexdigest() != skill_lock["sha256"]:
-                    raise RuntimeError("ACTIVE_RUNTIME_SKILL_HASH_MISMATCH")
-                prompt_payload["active_runtime_skill_content"] = skill_bytes.decode("utf-8")
-            logger.warning(
-                "PROMPT_TRANSPORT_LEGACY task_id=%s request_id=%s phase=%s role=%s",
-                request.task_id,
-                request.request_id,
-                request.phase,
-                request.role,
-            )
-        else:
-            bundle = self.prompt_bundle_builder.build(
-                task_id=request.task_id,
-                request_id=request.request_id,
-                phase=request.phase,
-                role=request.role,
-                prompt=request.prompt,
-                revision_id=str(request.context.get("revision_id", "")),
-                context={
-                    **request.context,
-                    "task_id": request.task_id,
-                    "request_id": request.request_id,
-                    "phase": request.phase,
-                    "role": request.role,
-                    "issue_id": request.issue_id,
-                    "idempotency_key": request.idempotency_key,
-                    "sent_after": request.sent_after,
-                    "dispatch_external_message_id": request.dispatch_external_message_id,
-                    "structured_output": request.structured_output,
-                },
-            )
-            prompt_ref = bundle.reference()
-            result_path = str(prompt_ref.get("result_path") or "")
-            schema_hash = str((request.structured_output or {}).get("schema_hash") or "")
-            is_result_file = (
-                isinstance(request.structured_output, dict)
-                and request.structured_output.get("mode") == "result_file"
-            )
-            if schema_hash and is_result_file:
-                remote_result_name = remote_result_filename(request.request_id)
-                structured_output_instruction = (
-                    "Do not modify source or project files. The Orchestrator-owned canonical result "
-                    f"is {result_path}; do not write that path. Write exactly one complete "
-                    f"business result to relative {remote_result_name} in "
-                    "the current Agent workspace as UTF-8 JSON without BOM, using a real JSON "
-                    "serializer so quotes and control characters are escaped by the serializer. "
-                    f"The JSON root must include structured_output_protocol={request.structured_output.get('protocol')}. "
-                    f"The JSON root must include structured_output_schema_hash={schema_hash}. "
-                    "The root must also include the exact contract_id, task_id, request_id, phase, state, role, and mode from the prompt bundle. "
-                    "You may create or replace only that local result file. For result_file mode, "
-                    "do not return the business JSON or a transport envelope inline. After the "
-                    "file is durably written, return exactly one compact "
-                    "nexus-agent-result-ref-v1 pointer containing the exact task_id, request_id, "
-                    f"and actual local {remote_result_name} path; do not return ./{remote_result_name} or Markdown. "
-                    "Keep the file until the response has been emitted, and do not return a "
-                    "second business result."
-                )
-            else:
-                structured_output_instruction = (
-                    "Do not modify project files. Return exactly one complete structured JSON "
-                    "result in the reply; the Orchestrator will validate and persist it. "
-                    "Do not return Markdown, a result pointer, a diff/patch, or a partial result."
-                )
-            prompt_payload = {
-                "prompt": (
-                    f"Read every required file in the prompt bundle manifest as UTF-8, including active-skill.md when present, then follow prompt.txt. "
-                    f"Active runtime Skill: {request.context.get('active_runtime_skill', '')}. "
-                    f"Skill lock: {json.dumps(request.context.get('active_runtime_skill_lock', {}), ensure_ascii=False, sort_keys=True)}. "
-                    f"Runtime directive: {request.context.get('active_runtime_skill_directive', '')} "
-                    f"Active phase/state: {request.context.get('active_runtime_phase', request.phase)}/{request.context.get('active_runtime_state', request.role)}. "
-                    "Only the active runtime Skill is authoritative; other attached Skills are inactive for this turn. "
-                    f"{structured_output_instruction}"
-                ),
-                "prompt_ref": prompt_ref,
+        bundle = self.prompt_bundle_builder.build(
+            task_id=request.task_id,
+            request_id=request.request_id,
+            phase=request.phase,
+            role=request.role,
+            prompt=request.prompt,
+            revision_id=str(request.context.get("revision_id", "")),
+            context={
+                **request.context,
+                "task_id": request.task_id,
+                "request_id": request.request_id,
+                "phase": request.phase,
+                "role": request.role,
+                "issue_id": request.issue_id,
+                "idempotency_key": request.idempotency_key,
+                "sent_after": request.sent_after,
+                "dispatch_external_message_id": request.dispatch_external_message_id,
                 "structured_output": request.structured_output,
-            }
+            },
+        )
+        prompt_ref = bundle.reference()
+        structured_output_instruction = (
+            "Do not modify project files. Return exactly one complete structured JSON "
+            "result in the reply; the Orchestrator will validate and persist it. "
+            "Do not return Markdown, a result pointer, a diff/patch, or a partial result."
+        )
+        prompt_payload = {
+            "prompt": (
+                f"Read every required file in the prompt bundle manifest as UTF-8, including active-skill.md when present, then follow prompt.txt. "
+                f"Active runtime Skill: {request.context.get('active_runtime_skill', '')}. "
+                f"Skill lock: {json.dumps(request.context.get('active_runtime_skill_lock', {}), ensure_ascii=False, sort_keys=True)}. "
+                f"Runtime directive: {request.context.get('active_runtime_skill_directive', '')} "
+                f"Active phase/state: {request.context.get('active_runtime_phase', request.phase)}/{request.context.get('active_runtime_state', request.role)}. "
+                "Only the active runtime Skill is authoritative; other attached Skills are inactive for this turn. "
+                f"{structured_output_instruction}"
+            ),
+            "prompt_ref": prompt_ref,
+            "structured_output": request.structured_output,
+        }
         content = json.dumps({
             **prompt_payload,
             "response_contract": _response_contract_for(request),
@@ -595,18 +676,17 @@ class MulticaCliAdapter:
         logger.info(
             "AGENT_DISPATCH_TRANSPORT task_id=%s request_id=%s phase=%s role=%s "
             "mode=%s comment_payload_bytes=%s full_prompt_bytes=%s manifest_path=%s "
-            "manifest_hash=%s result_path=%s structured_output_mode=%s "
+            "manifest_hash=%s structured_output_mode=%s "
             "structured_output_schema_hash=%s",
             request.task_id,
             request.request_id,
             request.phase,
             request.role,
-            "legacy" if use_legacy_transport else "prompt_file",
+            "prompt_file",
             len(content.encode("utf-8")),
             len(request.prompt.encode("utf-8")),
             prompt_payload.get("prompt_ref", {}).get("manifest_path", ""),
             prompt_payload.get("prompt_ref", {}).get("manifest_hash", ""),
-            prompt_payload.get("prompt_ref", {}).get("result_path", ""),
             (request.structured_output or {}).get("mode", ""),
             (request.structured_output or {}).get("schema_hash", ""),
         )
@@ -631,11 +711,53 @@ class MulticaCliAdapter:
             (request.structured_output or {}).get("mode", ""),
             (request.structured_output or {}).get("schema_hash", ""),
         )
+        fanout_parent = str(request.context.get("fanout_parent_id") or "").strip()
+        if fanout_parent and request.agent_id:
+            # Fan-out workers get their own child issue whose description *is*
+            # the dispatch payload: creating it assigned fires exactly one
+            # assignment run that does the real work.  This avoids the extra
+            # placeholder assignment run (and its poisoned session) that a
+            # separate follow-up comment would cause.
+            title = str(request.context.get("fanout_title") or "").strip() or (
+                f"fanout {request.request_id}"
+            )
+            child_id = self.ensure_child_issue(
+                fanout_parent, request.agent_id, title, content
+            )
+            with self._dispatch_index_lock:
+                # A brand-new child issue has no runs yet, so the assignment run
+                # it triggers is the only "fresh" run for this dispatch.
+                self._run_watermarks[request.idempotency_key] = []
+                self._dispatch_index[request.idempotency_key] = {
+                    "operation_id": child_id,
+                    "external_message_id": "",
+                    "request_id": request.request_id,
+                    "issue_id": child_id,
+                }
+                self._save_dispatch_index()
+            logger.info(
+                "FANOUT_CHILD_ISSUE_DISPATCHED parent=%s child=%s request_id=%s "
+                "agent_id=%s description_chars=%s",
+                fanout_parent,
+                child_id,
+                request.request_id,
+                request.agent_id,
+                len(content),
+            )
+            return DispatchReceipt(
+                operation_id=child_id,
+                external_message_id="",
+                confirmed=True,
+                request_id=request.request_id,
+                issue_id=child_id,
+            )
         # Multica Agent runtime is triggered by issue assignment, not by the
         # agent_id carried in the comment payload.  Update the assignee to the
         # target agent before posting so the correct Agent consumes the work.
-        # The resulting direct run has no trigger_comment_id and is filtered
-        # out by the orchestrator's run polling.
+        # The resulting direct run has no trigger_comment_id; snapshot the
+        # issue's runs first so the assignment run can be recognised by its
+        # position (run-id delta) instead of by clock comparison.
+        self._capture_run_watermark(issue_id, request.idempotency_key)
         if request.agent_id:
             self._run("issue", "update", issue_id, "--assignee-id", request.agent_id, "--output", "json")
         path = self.log_dir / f"dispatch_{request.request_id.replace(':', '_')}.json"
@@ -679,12 +801,14 @@ class MulticaCliAdapter:
                     "operation_id": request.idempotency_key,
                     "external_message_id": external_id,
                     "request_id": request.request_id,
+                    "issue_id": issue_id,
                 }
                 self._save_dispatch_index()
         return DispatchReceipt(
             operation_id=request.idempotency_key,
             external_message_id=external_id,
             request_id=request.request_id,
+            issue_id=issue_id,
         )
 
     def _resolve_trigger_comment_id(
@@ -875,185 +999,9 @@ class MulticaCliAdapter:
         )
         return file_result.payload
 
-    def _is_remote_result_path(self, raw_path: str | Path) -> bool:
-        """Return whether a pointer names a constrained Multica task result."""
-        try:
-            path = Path(raw_path).expanduser().resolve()
-            path.relative_to(self.multica_workspaces_root)
-        except (OSError, ValueError):
-            return False
-        name = path.name.lower()
-        return (
-            path.parent.name.lower() == "workdir"
-            and path.suffix.lower() == ".json"
-            and (name == "result.json" or name.startswith("result_"))
-        )
-
-    def _discover_remote_result_candidates(
-        self,
-        request: AgentRequest,
-    ) -> list[Path]:
-        """Find validly-shaped remote result files bound to this request."""
-        candidates: list[Path] = []
-        try:
-            paths_by_name: dict[str, Path] = {}
-            for pattern in ("result.json", "result_*.json"):
-                for raw_path in self.multica_workspaces_root.rglob(pattern):
-                    paths_by_name[str(raw_path)] = raw_path
-            for raw_path in paths_by_name.values():
-                try:
-                    path = raw_path.resolve()
-                    path.relative_to(self.multica_workspaces_root)
-                except (OSError, ValueError):
-                    continue
-                if (
-                    not self._is_remote_result_path(path)
-                    or not path.is_file()
-                ):
-                    continue
-                try:
-                    text = path.read_bytes().decode("utf-8-sig", errors="strict")
-                    payload = json.loads(text)
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-                    logger.warning(
-                        "REMOTE_RESULT_FILE_DISCOVERY_INVALID task_id=%s "
-                        "request_id=%s path=%s reason=%s",
-                        request.task_id,
-                        request.request_id,
-                        path,
-                        str(error),
-                    )
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                if (
-                    str(payload.get("task_id") or "") == request.task_id
-                    and str(payload.get("request_id") or "") == request.request_id
-                ):
-                    candidates.append(path)
-        except OSError as error:
-            logger.warning(
-                "REMOTE_RESULT_FILE_DISCOVERY_FAILED task_id=%s request_id=%s "
-                "root=%s reason=%s",
-                request.task_id,
-                request.request_id,
-                self.multica_workspaces_root,
-                str(error),
-            )
-        logger.info(
-            "REMOTE_RESULT_FILE_DISCOVERY_SCAN task_id=%s request_id=%s "
-            "root=%s candidates=%s",
-            request.task_id,
-            request.request_id,
-            self.multica_workspaces_root,
-            len(candidates),
-        )
-        return candidates
-
-    def _bridge_remote_result_file(
-        self,
-        request: AgentRequest,
-        reference: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Read a same-host Agent result and persist it under Orchestrator ownership."""
-        file_result = read_agent_result_file(
-            reference,
-            task_id=request.task_id,
-            request_id=request.request_id,
-            phase=request.phase,
-            role=request.role,
-            allowed_root=self.multica_workspaces_root,
-            expected_schema_hash=str(
-                (request.structured_output or {}).get("schema_hash") or ""
-            ),
-            expected_state=request.target_state
-            or str(request.context.get("target_state") or "")
-            or str((request.structured_output or {}).get("state") or ""),
-            expected_role_mode=str(
-                request.context.get("structured_output_role_mode")
-                or (request.structured_output or {}).get("role_mode")
-                or ""
-            ),
-            allow_transport_backfill=True,
-        )
-        payload = self._persist_inline_result(request, file_result.payload)
-        payload["result_source"] = "orchestrator_bridge"
-        payload["remote_result_path"] = str(file_result.path)
-        logger.info(
-            "REMOTE_RESULT_FILE_BRIDGED task_id=%s request_id=%s phase=%s role=%s "
-            "remote_path=%s canonical_path=%s sha256=%s bytes=%s",
-            request.task_id,
-            request.request_id,
-            request.phase,
-            request.role,
-            file_result.path,
-            payload.get("result_path", ""),
-            file_result.sha256,
-            file_result.bytes,
-        )
-        return payload
-
-    def _recover_remote_result_file(
-        self,
-        request: AgentRequest,
-    ) -> ExternalMessage | None:
-        """Recover one terminal remote result when no pointer was emitted."""
-        candidates = self._discover_remote_result_candidates(request)
-        if not candidates:
-            logger.info(
-                "REMOTE_RESULT_FILE_DISCOVERY_MISSING task_id=%s request_id=%s",
-                request.task_id,
-                request.request_id,
-            )
-            return None
-        if len(candidates) != 1:
-            logger.warning(
-                "REMOTE_RESULT_FILE_DISCOVERY_AMBIGUOUS task_id=%s request_id=%s "
-                "candidates=%s",
-                request.task_id,
-                request.request_id,
-                ",".join(str(path) for path in candidates),
-            )
-            return None
-        remote_path = candidates[0]
-        try:
-            payload = self._bridge_remote_result_file(
-                request,
-                {"result_path": str(remote_path)},
-            )
-        except (AgentResultFileError, OSError) as error:
-            logger.warning(
-                "REMOTE_RESULT_FILE_DISCOVERY_REJECTED task_id=%s "
-                "request_id=%s path=%s reason=%s",
-                request.task_id,
-                request.request_id,
-                remote_path,
-                str(error),
-            )
-            return None
-        logger.info(
-            "REMOTE_RESULT_FILE_DISCOVERED task_id=%s request_id=%s "
-            "remote_path=%s canonical_path=%s",
-            request.task_id,
-            request.request_id,
-            remote_path,
-            payload.get("result_path", ""),
-        )
-        return ExternalMessage(
-            request.agent_id,
-            payload,
-            f"remote-file:{request.request_id}",
-            "",
-        )
-
     def poll(self, request: AgentRequest) -> list[ExternalMessage]:
         self.last_issue_id = request.issue_id or request.task_id
         issue_id = request.issue_id or request.task_id
-        structured_result_required = (
-            isinstance(request.structured_output, dict)
-            and request.structured_output.get("mode") == "result_file"
-        )
-        remote_run_status = ""
 
         def comments_from(value: object) -> list[dict]:
             if isinstance(value, list):
@@ -1075,13 +1023,10 @@ class MulticaCliAdapter:
             dict[str, int],
             int,
         ]:
-            structured_result_required = (
-                isinstance(request.structured_output, dict)
-                and request.structured_output.get("mode") == "result_file"
-            )
             result: list[ExternalMessage] = []
             supplemental_reports: list[str] = []
             unstructured_candidates: list[ExternalMessage] = []
+            inline_result_accepted = False
             stats = {
                 "author_mismatch": 0,
                 "dispatch_comment": 0,
@@ -1098,21 +1043,7 @@ class MulticaCliAdapter:
                     continue
                 body = str(comment.get("content") or comment.get("body") or "")
                 payload = _extract_json(body)
-                result_was_file = False
                 inline_result_pending = False
-                if payload is None:
-                    payload = _extract_result_pointer(body)
-                    if isinstance(payload, dict):
-                        logger.info(
-                            "AGENT_REPLY_POINTER_PARSED task_id=%s request_id=%s "
-                            "phase=%s role=%s comment_id=%s result_path=%s",
-                            request.task_id,
-                            request.request_id,
-                            request.phase,
-                            request.role,
-                            comment_id,
-                            payload.get("result_path", ""),
-                        )
                 author_id = str(
                     comment.get("author_id")
                     or comment.get("creator_id")
@@ -1172,137 +1103,6 @@ class MulticaCliAdapter:
                 if comment_id and comment_id == request.dispatch_external_message_id:
                     stats["dispatch_comment"] += 1
                     continue
-                if (
-                    isinstance(payload, dict)
-                    and payload.get("protocol") == "nexus-agent-result-ref-v1"
-                ):
-                    pointer_task_id = str(payload.get("task_id") or "")
-                    pointer_request_id = str(payload.get("request_id") or "")
-                    if (
-                        pointer_task_id != request.task_id
-                        or pointer_request_id != request.request_id
-                    ):
-                        stats["request_mismatch"] += 1
-                        logger.warning(
-                            "STALE_RESULT_POINTER issue_id=%s task_id=%s "
-                            "request_id=%s comment_id=%s pointer_task_id=%s "
-                            "pointer_request_id=%s result_path=%s reason=pointer_binding_mismatch",
-                            issue_id,
-                            request.task_id,
-                            request.request_id,
-                            comment_id,
-                            pointer_task_id,
-                            pointer_request_id,
-                            payload.get("result_path", ""),
-                        )
-                        continue
-                    expected_result_path = self.prompt_bundle_builder.result_path(
-                        request.task_id,
-                        request.request_id,
-                    )
-                    actual_result_path = str(payload.get("result_path") or "").strip()
-                    canonical_result_path = (
-                        bool(actual_result_path)
-                        and _path_identity(actual_result_path)
-                        == _path_identity(expected_result_path)
-                    )
-                    remote_result_path = (
-                        bool(actual_result_path)
-                        and self._is_remote_result_path(actual_result_path)
-                    )
-                    if not canonical_result_path and not remote_result_path:
-                        # Pointer path is a bare relative filename from the
-                        # remote workspace.  Resolve it via discovery scan
-                        # instead of rejecting the pointer outright.
-                        discovered = self._recover_remote_result_file(request)
-                        if discovered is not None:
-                            payload = discovered.payload
-                            result_was_file = True
-                            logger.info(
-                                "POINTER_REMOTE_RESOLVED task_id=%s request_id=%s "
-                                "comment_id=%s pointer_path=%s canonical_path=%s",
-                                request.task_id,
-                                request.request_id,
-                                comment_id,
-                                actual_result_path,
-                                expected_result_path,
-                            )
-                        else:
-                            stats["request_mismatch"] += 1
-                            logger.warning(
-                                "STALE_RESULT_POINTER issue_id=%s task_id=%s "
-                                "request_id=%s comment_id=%s pointer_task_id=%s "
-                                "pointer_request_id=%s expected_result_path=%s "
-                                "actual_result_path=%s reason=result_path_binding_mismatch",
-                                issue_id,
-                                request.task_id,
-                                request.request_id,
-                                comment_id,
-                                pointer_task_id,
-                                pointer_request_id,
-                                expected_result_path,
-                                actual_result_path,
-                            )
-                            continue
-                    try:
-                        if remote_result_path:
-                            payload = self._bridge_remote_result_file(request, payload)
-                        else:
-                            file_result = read_agent_result_file(
-                                payload,
-                                task_id=request.task_id,
-                                request_id=request.request_id,
-                                phase=request.phase,
-                                role=request.role,
-                                allowed_root=self.agent_result_allowed_root,
-                                expected_schema_hash=str(
-                                    (request.structured_output or {}).get("schema_hash") or ""
-                                ),
-                                expected_state=request.target_state
-                                or str(request.context.get("target_state") or "")
-                                or str(
-                                    (request.structured_output or {}).get("state") or ""
-                                ),
-                                expected_role_mode=str(
-                                    request.context.get("structured_output_role_mode")
-                                    or (request.structured_output or {}).get("role_mode")
-                                    or ""
-                                ),
-                                allow_transport_backfill=True,
-                            )
-                            payload = file_result.payload
-                        result_was_file = True
-                    except AgentResultFileError as error:
-                        stats["unstructured"] += 1
-                        if remote_result_path:
-                            remote_error_event = (
-                                "REMOTE_RESULT_FILE_MISSING"
-                                if str(error).startswith("result file is missing:")
-                                else "REMOTE_RESULT_FILE_REJECTED"
-                            )
-                            logger.warning(
-                                "%s task_id=%s request_id=%s "
-                                "phase=%s role=%s comment_id=%s path=%s reason=%s",
-                                remote_error_event,
-                                request.task_id,
-                                request.request_id,
-                                request.phase,
-                                request.role,
-                                comment_id,
-                                actual_result_path,
-                                str(error),
-                            )
-                        logger.warning(
-                            "AGENT_REPLY_FILE_REJECTED task_id=%s request_id=%s "
-                            "phase=%s role=%s comment_id=%s reason=%s",
-                            request.task_id,
-                            request.request_id,
-                            request.phase,
-                            request.role,
-                            comment_id,
-                            str(error),
-                        )
-                        continue
                 structured_output_mode = (
                     isinstance(request.structured_output, dict)
                     and request.structured_output.get("mode")
@@ -1318,13 +1118,7 @@ class MulticaCliAdapter:
                 ):
                     stats["stale"] += 1
                     continue
-                if (
-                    isinstance(payload, dict)
-                    and payload.get("action")
-                    and not result_was_file
-                    and payload.get("protocol")
-                    != "nexus-agent-result-ref-v1"
-                ):
+                if isinstance(payload, dict) and payload.get("action"):
                     payload_request_id = payload.get("request_id")
                     if payload_request_id and payload_request_id != request.request_id:
                         stats["request_mismatch"] += 1
@@ -1474,8 +1268,20 @@ class MulticaCliAdapter:
                     )
                     continue
                 if inline_result_pending:
+                    if inline_result_accepted:
+                        logger.warning(
+                            "AGENT_INLINE_RESULT_DUPLICATE task_id=%s request_id=%s "
+                            "phase=%s role=%s comment_id=%s reason=already_accepted",
+                            request.task_id,
+                            request.request_id,
+                            request.phase,
+                            request.role,
+                            comment_id,
+                        )
+                        continue
                     try:
                         payload = self._persist_inline_result(request, payload)
+                        inline_result_accepted = True
                         logger.info(
                             "AGENT_INLINE_RESULT_ACCEPTED task_id=%s request_id=%s "
                             "phase=%s role=%s comment_id=%s",
@@ -1540,57 +1346,10 @@ class MulticaCliAdapter:
             stats,
             comments_total,
         ) = parse_comments(comments_from(thread_value))
-        if structured_result_required:
-            remote_run_status = self.get_run_status(request)
-            if remote_run_status == "failed":
-                logger.error(
-                    "AGENT_REMOTE_RUN_FAILED task_id=%s request_id=%s "
-                    "phase=%s role=%s",
-                    request.task_id,
-                    request.request_id,
-                    request.phase,
-                    request.role,
-                )
-                return [
-                    ExternalMessage(
-                        request.agent_id,
-                        {
-                            "action": "__REMOTE_RUN_FAILED__",
-                            "task_id": request.task_id,
-                            "request_id": request.request_id,
-                            "phase": request.phase,
-                            "role": request.role,
-                            "response_source": "remote_run",
-                            "remote_run_status": remote_run_status,
-                        },
-                        f"remote-run:{request.request_id}",
-                        "",
-                    )
-                ]
-            if remote_run_status != "completed":
-                logger.warning(
-                    "AGENT_REPLY_WAITING_REMOTE_TERMINAL task_id=%s request_id=%s "
-                    "phase=%s role=%s status=%s observed_result=%s",
-                    request.task_id,
-                    request.request_id,
-                    request.phase,
-                    request.role,
-                    remote_run_status,
-                    bool(result),
-                )
-                return []
         if not result:
             recovered_file_message = self._recover_result_file(request)
             if recovered_file_message is not None:
                 result = [recovered_file_message]
-        if (
-            not result
-            and structured_result_required
-            and remote_run_status == "completed"
-        ):
-            recovered_remote_message = self._recover_remote_result_file(request)
-            if recovered_remote_message is not None:
-                result = [recovered_remote_message]
         recovery_ids: set[str] = set()
 
         if (
@@ -1824,13 +1583,41 @@ class MulticaCliAdapter:
             exact_matches.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
             return exact_matches
 
-        # Failed Reasonix runs can be terminal before Multica has populated
-        # trigger/coalesced/delivered comment ids.  When that happens, the
-        # issue endpoint is still authoritative for issue scope and the run
-        # carries the assigned agent.  Accept this fallback only when one
-        # candidate is uniquely identifiable by agent and dispatch time; a
-        # broad "latest run" fallback would risk stealing another worker's
-        # result.
+        # Assignment-triggered runs carry no trigger comment id.  Recognise
+        # them by position: a direct run id that was absent from the snapshot
+        # taken just before dispatch, for the target agent, belongs to this
+        # dispatch.  Comment runs are matched by trigger id above, so only
+        # assignment runs are claimed here (never steal a concurrent worker's
+        # comment run).
+        watermark = self._watermark_for(request)
+        if watermark is not None:
+            fresh = [
+                run for run in runs
+                if isinstance(run, dict)
+                and str(run.get("id") or "") not in watermark
+                and str(run.get("agent_id") or "") == str(request.agent_id or "")
+                and self._is_assignment_run(run)
+            ]
+            if fresh:
+                fresh.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
+                logger.info(
+                    "AGENT_REMOTE_RUN_CORRELATION_WATERMARK task_id=%s request_id=%s "
+                    "agent_id=%s new_runs=%s",
+                    request.task_id,
+                    request.request_id,
+                    request.agent_id,
+                    len(fresh),
+                )
+                return fresh
+
+        # Failed runs can be terminal before Multica has populated
+        # trigger/coalesced/delivered comment ids.  Without a snapshot (e.g.
+        # after a process restart), or when the assignment run is not yet
+        # visible, the issue endpoint is still authoritative for issue scope
+        # and the run carries the assigned agent.  Accept this fallback only
+        # when one candidate is uniquely identifiable by agent and dispatch
+        # time; a broad "latest run" fallback would risk stealing another
+        # worker's result.
         candidates = [
             run for run in runs
             if isinstance(run, dict)
@@ -1858,6 +1645,29 @@ class MulticaCliAdapter:
         return []
 
 
+    def _watermark_for(self, request: AgentRequest) -> set[str] | None:
+        key = str(request.idempotency_key or "")
+        if not key:
+            return None
+        with self._dispatch_index_lock:
+            seen = self._run_watermarks.get(key)
+        if seen is None:
+            return None
+        return set(seen)
+
+    @staticmethod
+    def _is_assignment_run(run: dict[str, object]) -> bool:
+        """True when the run was triggered by an issue assignment change."""
+
+        if str(run.get("kind") or "").strip().lower() == "direct":
+            return True
+        attribution = run.get("attribution")
+        if isinstance(attribution, dict):
+            evidence = attribution.get("evidence")
+            if isinstance(evidence, dict):
+                return str(evidence.get("kind") or "") == "issue_assignment"
+        return False
+
     @staticmethod
     def _run_correlation_ids(run: dict[str, object]) -> set[str]:
         return {
@@ -1881,7 +1691,12 @@ class MulticaCliAdapter:
             created = created.replace(tzinfo=timezone.utc)
         if dispatched.tzinfo is None:
             dispatched = dispatched.replace(tzinfo=timezone.utc)
-        return created >= dispatched
+        # Multica records run ``created_at`` with second granularity while the
+        # orchestrator records ``sent_after`` with sub-second precision.  A run
+        # created in the same wall-clock second therefore truncates to a value
+        # that can read as *before* dispatch.  Allow a small slack so the same
+        # second still correlates.
+        return created >= dispatched - timedelta(seconds=2)
 
     def get_run_status(self, request: AgentRequest) -> str:
         matches = self._matching_runs(request)
@@ -1902,6 +1717,21 @@ class MulticaCliAdapter:
             request.dispatch_external_message_id,
             status,
         )
+        if status in {"failed", "error"}:
+            run = matches[0]
+            logger.warning(
+                "AGENT_REMOTE_RUN_FAILED_DETAIL task_id=%s request_id=%s "
+                "issue_id=%s run_id=%s kind=%s duration_ms=%s "
+                "error=%r failure_reason=%r",
+                request.task_id,
+                request.request_id,
+                request.issue_id,
+                str(run.get("id") or ""),
+                str(run.get("kind") or ""),
+                run.get("duration_ms"),
+                str(run.get("error") or ""),
+                str(run.get("failure_reason") or ""),
+            )
         return status
 
     def find_existing_request(self, idempotency_key: str, issue_id: str = "") -> DispatchReceipt | None:
@@ -1913,6 +1743,7 @@ class MulticaCliAdapter:
                     operation_id=cached.get("operation_id") or key,
                     external_message_id=cached.get("external_message_id") or "",
                     request_id=cached.get("request_id") or "",
+                    issue_id=cached.get("issue_id") or "",
                 )
             try:
                 issue_id = issue_id or self.last_issue_id
@@ -2263,22 +2094,6 @@ def _response_contract_for(request: AgentRequest) -> dict:
         "do_not_echo": ["task_id", "request_id", "role", "phase"],
         "instruction": instruction,
     }
-    if (
-        isinstance(request.structured_output, dict)
-        and request.structured_output.get("mode") == "result_file"
-    ):
-        contract["format"] = "result_file_json_plus_compact_pointer"
-        contract["do_not_echo"] = []
-        contract["instruction"] = (
-            "Write the complete business JSON object to the exact result_path "
-            "in prompt_ref using a real JSON serializer. The file must include "
-            "the request binding fields and structured_output_schema_hash. "
-            "After the durable file write, reply only with the compact result "
-            "pointer; do not put the business JSON in the issue comment."
-        )
-        contract["contract_id"] = str(
-            request.structured_output.get("contract_id") or ""
-        )
     if required_by_action:
         contract["required_by_action"] = required_by_action
     if request.phase == "ZHONGSHU" and request.role == "review-solver":
@@ -2343,14 +2158,6 @@ def _response_contract_for(request: AgentRequest) -> dict:
                 "that are not used by the current mode; do not change the root shape."
             ),
         }
-        if contract.get("format") == "result_file_json_plus_compact_pointer":
-            contract["instruction"] = (
-                "Write one complete result using this role's fixed field set to the exact "
-                "result_path in prompt_ref. The root must include state, mode, every stable "
-                "role field, and the supplied protocol/schema hash. Use [] or null for fields "
-                "not used by the current mode. After the durable file write, reply only with "
-                "the compact result pointer; do not put business JSON in the issue comment."
-            )
     return contract
 
 
@@ -2579,6 +2386,41 @@ def _extract_json(body: str) -> object:
     return None
 
 
+def _extract_issue_id(value: object) -> str:
+    """Pull an issue id out of a ``multica issue create`` JSON response."""
+
+    if not isinstance(value, dict):
+        return ""
+    for key in ("id", "issue_id"):
+        candidate = str(value.get(key) or "")
+        if candidate:
+            return candidate
+    nested = value.get("issue")
+    if isinstance(nested, dict):
+        return str(nested.get("id") or nested.get("issue_id") or "")
+    return ""
+
+
+def _iter_child_issues(value: object) -> list[dict]:
+    """Collect issue dicts from the ``issue children`` stage/unstaged payload."""
+
+    found: list[dict] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if (node.get("id") or node.get("issue_id")) and node.get("title"):
+                found.append(node)
+                return
+            for item in node.values():
+                walk(item)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return found
+
+
 def _repair_diff_prefixed_json(body: str) -> object | None:
     """Repair only an unmistakable line-prefixed diff wrapper around JSON."""
     lines = body.lstrip("\ufeff\u200b").strip().splitlines()
@@ -2600,35 +2442,4 @@ def _repair_diff_prefixed_json(body: str) -> object | None:
         len(body),
         len(plus_lines),
     )
-    return payload
-
-
-def _extract_result_pointer(body: str) -> dict[str, str] | None:
-    """Parse the compact human-readable result pointer emitted by some Agents."""
-    lines = [line.strip() for line in body.lstrip("\ufeff\u200b").splitlines() if line.strip()]
-    if not lines or lines[0].lower() != "nexus-agent-result-ref-v1":
-        return None
-    payload: dict[str, str] = {"protocol": "nexus-agent-result-ref-v1"}
-    for line in lines[1:]:
-        if line.startswith("-"):
-            line = line[1:].strip()
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip()
-        if key in {
-            "task_id",
-            "request_id",
-            "phase",
-            "role",
-            "result_path",
-            "result_sha256",
-            "manifest_hash",
-            "structured_output_schema_hash",
-            "action",
-        }:
-            payload[key] = value.strip()
-    required = {"task_id", "request_id", "result_path", "action"}
-    if not required.issubset(payload):
-        return None
     return payload

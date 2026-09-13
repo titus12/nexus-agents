@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+import logging
 from types import MappingProxyType
 from typing import ClassVar, Protocol, runtime_checkable
 
 from ..zhongshu_parallel import canonical_plan_hash
+from ..zhongshu_review_queue import build_review_jobs, structural_gate
 from .context import (
     DeliveryUpdate,
     HumanGateUpdate,
@@ -23,6 +25,7 @@ from .context import (
     ReviewUpdate,
     ReviewTaskGroup,
     ReviewTaskItem,
+    ReviewTaskRecord,
     WorkflowContext,
 )
 from .decisions import ContextUpdate, EffectRequest, StateDecision
@@ -57,6 +60,8 @@ _PARALLEL_WORKER_LIMIT_FIELD = {
     "ZHONGSHU_ANALYST": "analyst_default_workers",
     "ZHONGSHU_CRITIC": "critic_default_workers",
 }
+
+logger = logging.getLogger("review_orchestrator_fsm")
 
 
 @runtime_checkable
@@ -230,6 +235,34 @@ class _ConcreteWorkflowState:
             ),
         )
         if target not in {"HUMAN_GATE", "RETRY_WAIT", "BLOCKED", "PERSISTENCE_DEGRADED", "FAILED", "CANCELLED", "DONE"}:
+            pending_requirements: tuple[dict[str, object], ...] = ()
+            if update.review is not None and update.review.requirements is not None:
+                pending_requirements = update.review.requirements
+            elif context.review is not None:
+                pending_requirements = context.review.requirements
+            pending_review = None
+            if (
+                context.review is not None
+                and update.review is not None
+                and update.review.task_items is not None
+            ):
+                pending_review = replace(
+                    context.review,
+                    revision_id=(
+                        update.review.revision_id or context.review.revision_id
+                    ),
+                    task_items=update.review.task_items,
+                    task_groups=(
+                        update.review.task_groups
+                        if update.review.task_groups is not None
+                        else context.review.task_groups
+                    ),
+                    plan_hash=(
+                        update.review.plan_hash
+                        if update.review.plan_hash is not None
+                        else context.review.plan_hash
+                    ),
+                )
             effect = self._dispatch_effect(
                 context,
                 target,
@@ -238,9 +271,12 @@ class _ConcreteWorkflowState:
                     or (context.review.revision_id if context.review else "")
                 ),
                 plan_hash=(
-                    str(payload.get("plan_hash") or payload.get("reviewed_plan_hash") or "")
+                    _resolve_plan_hash(payload)
                     or (context.review.plan_hash if context.review else "")
+                    or ""
                 ),
+                canonical_requirements=pending_requirements,
+                pending_review=pending_review,
             )
             review_update = update.review
             if target == "MENXIA_ITEM_SOLVER" and context.review is not None:
@@ -371,10 +407,12 @@ class _ConcreteWorkflowState:
         payload: Mapping[str, object],
     ) -> ReviewUpdate | None:
         raw_findings = payload.get("findings")
+        raw_requirements = payload.get("requirements")
         has_review_data = any(
             key in payload
             for key in (
                 "findings",
+                "requirements",
                 "plan",
                 "plan_ref",
                 "plan_hash",
@@ -389,6 +427,13 @@ class _ConcreteWorkflowState:
             return None
         if raw_findings is not None and not isinstance(raw_findings, list):
             raise InvariantViolation("findings payload must be an array")
+        requirements: tuple[dict[str, object], ...] | None = None
+        if raw_requirements is not None:
+            if not isinstance(raw_requirements, list):
+                raise InvariantViolation("requirements payload must be an array")
+            requirements = tuple(
+                dict(item) for item in raw_requirements if isinstance(item, Mapping)
+            )
         from .findings import Finding
 
         findings = tuple(Finding.from_dict(dict(item)) for item in (raw_findings or []))
@@ -416,6 +461,7 @@ class _ConcreteWorkflowState:
                 or (context.review.revision_id if context.review else "")
                 or f"{context.identity.task_id}:{context.progression.sequence + 1}"
             ),
+            task_review_ledger=_task_review_ledger_update(context, payload),
             active_group_id=(
                 str(payload["group_id"])
                 if payload.get("group_id")
@@ -426,13 +472,16 @@ class _ConcreteWorkflowState:
                 if payload.get("item_id")
                 else context.review.active_item_id if context.review else None
             ),
-            findings=merge_findings(existing, findings),
+            findings=_merge_and_close_findings(
+                existing, findings, payload.get("task_reviews")
+            ),
             plan_ref=str(plan_ref) if plan_ref else None,
             plan_hash=_resolve_plan_hash(payload),
             task_graph_ref=str(task_graph_ref) if task_graph_ref else None,
             task_items=task_items,
             task_groups=task_groups,
             completed_item_ids=tuple(completed),
+            requirements=requirements,
         )
 
 
@@ -481,6 +530,8 @@ class _ConcreteWorkflowState:
         *,
         revision_id: str = "",
         plan_hash: str = "",
+        canonical_requirements: tuple[dict[str, object], ...] = (),
+        pending_review: object | None = None,
     ) -> EffectRequest:
         role, phase = _ROLE_BY_STATE[target]
         request_id = f"{context.identity.task_id}:{target}:{context.progression.sequence + 1}"
@@ -502,9 +553,77 @@ class _ConcreteWorkflowState:
             )
         else:
             worker_count = 1
+        if target == "ZHONGSHU_CRITIC":
+            task_bindings = _task_review_bindings(
+                context, revision_id, plan_hash, pending_review
+            )
+            if task_bindings:
+                return EffectRequest(
+                    effect_id=f"node:{request_id}",
+                    effect_type="node_dispatch",
+                    task_id=context.identity.task_id,
+                    idempotency_key=request_id,
+                    payload_ref=context.request.payload_ref,
+                    payload={
+                        "issue_id": context.identity.issue_id,
+                        "request_id": request_id,
+                        "phase": phase,
+                        "role": role,
+                        "target_state": target,
+                        "state": target,
+                        "node_run_id": f"node:{request_id}",
+                        "prompt_ref": prompt.content,
+                        "request_payload_ref": context.request.payload_ref or "",
+                        "revision_id": revision_id,
+                        "plan_hash": plan_hash,
+                        "sequence": context.progression.sequence,
+                        "dispatch_mode": "task_review",
+                        "bindings": task_bindings,
+                        "group_id": None,
+                        "item_id": None,
+                    },
+                )
+        if target == "ZHONGSHU_ANALYST" and not canonical_requirements:
+            # First Zhongshu pass: extract the authoritative requirement contract
+            # before any evidence lens runs, so the lenses never invent their own
+            # (colliding) requirement ids.
+            agent_id = f"{phase.lower()}-{role.split('-')[-1]}"
+            return EffectRequest(
+                effect_id=f"dispatch:{request_id}",
+                effect_type="agent_dispatch",
+                task_id=context.identity.task_id,
+                idempotency_key=request_id,
+                payload_ref=context.request.payload_ref,
+                payload={
+                    "issue_id": context.identity.issue_id,
+                    "request_id": request_id,
+                    "agent_id": agent_id,
+                    "role": role,
+                    "phase": phase,
+                    "target_state": target,
+                    "prompt_ref": prompt.content,
+                    "request_payload_ref": context.request.payload_ref or "",
+                    "references": dict(prompt.references),
+                    "revision_id": revision_id,
+                    "plan_hash": plan_hash,
+                    "sequence": context.progression.sequence,
+                    "dispatch_context": {
+                        "zhongshu_dispatch_mode": "requirement_contract",
+                        "contract_mode": True,
+                    },
+                    "group_id": None,
+                    "item_id": None,
+                },
+            )
         if worker_count > 1:
-            bindings = [
-                {
+            contract_payload = (
+                [dict(item) for item in canonical_requirements]
+                if canonical_requirements
+                else []
+            )
+            bindings = []
+            for index in range(1, worker_count + 1):
+                binding: dict[str, object] = {
                     "worker_id": f"{target.lower()}-worker-{index:02d}",
                     "agent_id": f"{phase.lower()}-{role.split('-')[-1]}-{index:02d}",
                     "task_id": context.identity.task_id,
@@ -512,31 +631,37 @@ class _ConcreteWorkflowState:
                     "role": role,
                     "phase": phase,
                 }
-                for index in range(1, worker_count + 1)
-            ]
+                if target == "ZHONGSHU_ANALYST" and contract_payload:
+                    binding["dispatch_context"] = {
+                        "requirement_contract": contract_payload,
+                    }
+                bindings.append(binding)
+            payload: dict[str, object] = {
+                "issue_id": context.identity.issue_id,
+                "request_id": request_id,
+                "phase": phase,
+                "role": role,
+                "target_state": target,
+                "state": target,
+                "node_run_id": f"node:{request_id}",
+                "prompt_ref": prompt.content,
+                "request_payload_ref": context.request.payload_ref or "",
+                "revision_id": revision_id,
+                "plan_hash": plan_hash,
+                "sequence": context.progression.sequence,
+                "bindings": bindings,
+                "group_id": next_item.group_id if next_item else None,
+                "item_id": next_item.item_id if next_item else None,
+            }
+            if target == "ZHONGSHU_ANALYST" and contract_payload:
+                payload["canonical_requirements"] = contract_payload
             return EffectRequest(
                 effect_id=f"node:{request_id}",
                 effect_type="node_dispatch",
                 task_id=context.identity.task_id,
                 idempotency_key=request_id,
                 payload_ref=context.request.payload_ref,
-                payload={
-                    "issue_id": context.identity.issue_id,
-                    "request_id": request_id,
-                    "phase": phase,
-                    "role": role,
-                    "target_state": target,
-                    "state": target,
-                    "node_run_id": f"node:{request_id}",
-                    "prompt_ref": prompt.content,
-                    "request_payload_ref": context.request.payload_ref or "",
-                    "revision_id": revision_id,
-                    "plan_hash": plan_hash,
-                    "sequence": context.progression.sequence,
-                    "bindings": bindings,
-                    "group_id": next_item.group_id if next_item else None,
-                    "item_id": next_item.item_id if next_item else None,
-                },
+                payload=payload,
             )
         agent_id = f"{phase.lower()}-{role.split('-')[-1]}"
         return EffectRequest(
@@ -769,6 +894,232 @@ class PersistenceDegradedState(_ConcreteWorkflowState):
         )
 
 
+def _task_review_bindings(
+    context: WorkflowContext,
+    revision_id: str,
+    plan_hash: str,
+    review_override: object | None = None,
+) -> list[dict[str, object]] | None:
+    """Build one review binding per task item for ZHONGSHU task-queue mode.
+
+    ``review_override`` lets the caller pass a review aggregate projected from
+    the transition's own update (task_items learned in the same step), because
+    ``context.review`` is still the pre-update snapshot when the effect is
+    built.
+    """
+
+    review = review_override if review_override is not None else context.review
+    if review is None or not review.task_items:
+        return None
+    revision = revision_id or review.revision_id
+    if not revision:
+        return None
+    effective_plan_hash = plan_hash or (review.plan_hash or "")
+    plan = {
+        "items": [
+            {
+                "item_id": item.item_id,
+                "group_id": item.group_id,
+                "title": item.title,
+                "objective": item.objective,
+                "dependencies": list(item.dependencies),
+                "source_requirement_ids": list(item.source_requirement_ids),
+                "acceptance_signals": list(item.acceptance_signals),
+            }
+            for item in review.task_items
+        ],
+        "groups": [
+            {"group_id": group.group_id, "item_ids": list(group.item_ids)}
+            for group in review.task_groups
+        ],
+        "requirements": [],
+    }
+    queue = build_review_jobs(plan, revision, plan_hash=effective_plan_hash)
+    issues = structural_gate(plan)
+    logger.info(
+        "ZHONGSHU_TASK_REVIEW_QUEUE task_id=%s revision_id=%s plan_hash=%s "
+        "jobs=%s pending=%s structural_issues=%s",
+        context.identity.task_id,
+        revision,
+        effective_plan_hash,
+        len(queue.jobs),
+        queue.counts().get("PENDING", 0),
+        len(issues),
+    )
+    for issue in issues:
+        logger.warning(
+            "ZHONGSHU_STRUCTURE_GATE task_id=%s revision_id=%s issue=%s",
+            context.identity.task_id,
+            revision,
+            issue,
+        )
+    selected = _select_review_jobs(queue.jobs, review)
+    logger.info(
+        "ZHONGSHU_TASK_REVIEW_SCOPE task_id=%s revision_id=%s total=%s "
+        "to_review=%s carried=%s",
+        context.identity.task_id,
+        revision,
+        len(queue.jobs),
+        len(selected),
+        len(queue.jobs) - len(selected),
+    )
+    item_by_id = {item.item_id: item for item in review.task_items}
+    group_by_id = {group.group_id: group for group in review.task_groups}
+    base_request_id = f"{context.identity.task_id}:ZHONGSHU_CRITIC:{context.progression.sequence + 1}"
+    bindings: list[dict[str, object]] = []
+    for index, job in enumerate(selected, start=1):
+        item = item_by_id.get(job.item_id)
+        group = group_by_id.get(job.group_id)
+        bindings.append(
+            {
+                "worker_id": f"zhongshu_critic-worker-{index:02d}",
+                "agent_id": f"zhongshu-critic-{index:02d}",
+                "task_id": context.identity.task_id,
+                "request_id": f"{base_request_id}:worker-{index:02d}",
+                "role": "review-critic",
+                "phase": "ZHONGSHU",
+                "group_id": job.group_id,
+                "item_id": job.item_id,
+                "prompt_ref": _task_capsule_text(job, item, group),
+                "dispatch_context": {
+                    "zhongshu_dispatch_mode": "task_review",
+                    "review_job_id": job.review_job_id,
+                    "revision_id": revision,
+                    "plan_hash": effective_plan_hash,
+                    "group_id": job.group_id,
+                    "item_id": job.item_id,
+                    "task_hash": job.task_hash,
+                    "dependency_hash": job.dependency_hash,
+                    "structural_issues": issues,
+                },
+            }
+        )
+    return bindings
+
+
+def _select_review_jobs(
+    jobs: object,
+    review: object,
+) -> list[object]:
+    """Re-review a job only when its content, dependencies, or verdict changed."""
+
+    ledger = {
+        record.item_id: record for record in getattr(review, "task_review_ledger", ())
+    }
+    selected: list[object] = []
+    for job in jobs:
+        record = ledger.get(job.item_id)
+        if (
+            record is None
+            or record.status != "APPROVED"
+            or record.task_hash != job.task_hash
+            or record.dependency_hash != job.dependency_hash
+        ):
+            selected.append(job)
+    if not selected:
+        return list(jobs)
+    return selected
+
+
+def _merge_and_close_findings(
+    existing: tuple[object, ...],
+    incoming: tuple[object, ...],
+    task_reviews: object,
+) -> tuple[object, ...]:
+    """Merge findings and close those owned by a task the Critic approved."""
+
+    merged = merge_findings(existing, incoming)
+    if not isinstance(task_reviews, list) or not task_reviews:
+        return merged
+    approved = {
+        str(entry.get("item_id"))
+        for entry in task_reviews
+        if isinstance(entry, Mapping)
+        and str(entry.get("action") or "") == "TASK_APPROVED"
+        and entry.get("item_id")
+    }
+    if not approved:
+        return merged
+    return tuple(
+        replace(
+            finding,
+            status="RESOLVED",
+            resolution=finding.resolution or "task approved in review",
+        )
+        if (finding.active and finding.item_id in approved)
+        else finding
+        for finding in merged
+    )
+
+
+def _task_review_ledger_update(
+    context: WorkflowContext,
+    payload: Mapping[str, object],
+) -> tuple[ReviewTaskRecord, ...] | None:
+    """Fold one round of per-task Critic verdicts into the review ledger."""
+
+    raw = payload.get("task_reviews")
+    if not isinstance(raw, list) or not raw:
+        return None
+    current = {
+        record.item_id: record
+        for record in (
+            context.review.task_review_ledger if context.review else ()
+        )
+    }
+    updated = False
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        item_id = str(entry.get("item_id") or "")
+        if not item_id:
+            continue
+        action = str(entry.get("action") or "")
+        current[item_id] = ReviewTaskRecord(
+            item_id=item_id,
+            task_hash=str(entry.get("reviewed_task_hash") or ""),
+            dependency_hash=str(entry.get("reviewed_dependency_hash") or ""),
+            status=("APPROVED" if action == "TASK_APPROVED" else "CHANGES_REQUIRED"),
+        )
+        updated = True
+    return tuple(current.values()) if updated else None
+
+
+def _task_capsule_text(
+    job: object,
+    item: ReviewTaskItem | None,
+    group: ReviewTaskGroup | None,
+) -> str:
+    lines = [
+        f"Review job: {getattr(job, 'review_job_id', '')}",
+        f"Review only task {getattr(job, 'item_id', '')} "
+        f"in group {getattr(job, 'group_id', '')}.",
+    ]
+    if group is not None:
+        lines.append(f"Group {group.group_id} items: {', '.join(group.item_ids)}")
+    if item is not None:
+        if item.title:
+            lines.append(f"Task title: {item.title}")
+        if item.objective:
+            lines.append(f"Task objective: {item.objective}")
+        if item.dependencies:
+            lines.append(f"Dependencies: {', '.join(item.dependencies)}")
+        if item.source_requirement_ids:
+            lines.append(
+                f"Source requirements: {', '.join(item.source_requirement_ids)}"
+            )
+        if item.acceptance_signals:
+            lines.append(
+                f"Acceptance signals: {'; '.join(item.acceptance_signals)}"
+            )
+    lines.append(
+        "Return TASK_APPROVED only when no active P0/P1 finding applies to this "
+        "task; otherwise return TASK_CHANGES_REQUIRED with this task's item_id, "
+        "group_id, reviewed_task_hash, reviewed_dependency_hash and review_checks."
+    )
+    return "\n".join(lines)
+
+
 def _task_graph_projection(
     graph: object,
 ) -> tuple[tuple[ReviewTaskItem, ...] | None, tuple[ReviewTaskGroup, ...] | None]:
@@ -816,12 +1167,30 @@ def _task_graph_projection(
             dependencies = [dependencies]
         if not isinstance(dependencies, list):
             raise InvariantViolation("task graph item dependencies must be an array")
+        source_requirements = raw_item.get("source_requirement_ids", [])
+        if isinstance(source_requirements, str):
+            source_requirements = [source_requirements]
+        if not isinstance(source_requirements, list):
+            raise InvariantViolation("task graph item source_requirement_ids must be an array")
+        acceptance = raw_item.get("acceptance_signals", raw_item.get("acceptance", []))
+        if isinstance(acceptance, str):
+            acceptance = [acceptance]
+        if not isinstance(acceptance, list):
+            raise InvariantViolation("task graph item acceptance_signals must be an array")
         items.append(
             ReviewTaskItem(
                 item_id=item_id,
                 group_id=str(raw_item.get("group_id") or group_by_item.get(item_id) or "group-001"),
                 dependencies=tuple(sorted({str(value) for value in dependencies if str(value)})),
                 order=index,
+                title=str(raw_item.get("title") or ""),
+                objective=str(raw_item.get("objective") or ""),
+                source_requirement_ids=tuple(
+                    str(value) for value in source_requirements if str(value)
+                ),
+                acceptance_signals=tuple(
+                    str(value) for value in acceptance if str(value)
+                ),
             )
         )
     if not items and not groups:

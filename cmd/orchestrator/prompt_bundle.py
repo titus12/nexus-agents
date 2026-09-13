@@ -31,11 +31,6 @@ def _safe_component(value: str) -> str:
     return component or "unnamed"
 
 
-def remote_result_filename(request_id: str) -> str:
-    """Return a collision-resistant result filename for the remote workspace."""
-    return f"result_{_safe_component(request_id)}.json"
-
-
 def _atomic_write_bytes(path: Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
@@ -86,7 +81,6 @@ class PromptBundle:
     total_bytes: int
     files: tuple[PromptFile, ...]
     context_path: Path
-    structured_output_path: Path | None = None
 
     def reference(self) -> dict[str, Any]:
         context_file = next(
@@ -97,12 +91,6 @@ class PromptBundle:
             "manifest_path": str(self.manifest_path.resolve()),
             "context_path": str(self.context_path.resolve()),
             "context_hash": context_file.sha256,
-            "structured_output_path": (
-                str(self.structured_output_path.resolve())
-                if self.structured_output_path is not None
-                else ""
-            ),
-            "result_path": str(self.root.joinpath("result.json").resolve()),
             "manifest_hash": self.manifest_hash,
             "total_bytes": self.total_bytes,
             "encoding": "utf-8",
@@ -139,56 +127,10 @@ class PromptBundleBuilder:
         if not prompt:
             raise PromptBundleError("prompt must not be empty")
         root = self.root / _safe_component(task_id) / _safe_component(request_id)
-        structured_output = (
-            context.get("structured_output")
-            if isinstance(context, Mapping)
-            else None
-        )
-        structured_output_path: Path | None = None
         if (
-            isinstance(structured_output, Mapping)
-            and structured_output.get("mode") == "result_file"
-        ):
-            result_path = (root / "result.json").resolve()
-            remote_result_name = remote_result_filename(request_id)
-            structured_output_path = (root / "structured-output.json").resolve()
-            schema_hash = str(structured_output.get("schema_hash") or "")
-            stable_fields = structured_output.get("stable_fields")
-            stable_fields_text = ", ".join(
-                str(item) for item in stable_fields if str(item).strip()
-            ) if isinstance(stable_fields, list) else ""
-            prompt = (
-                f"{prompt.rstrip()}\n\n"
-                "TRANSPORT CONTRACT (authoritative): the Orchestrator-owned "
-                f"canonical result is {result_path}; the remote Agent must not "
-                "write that path. Write exactly one complete business JSON "
-                f"result to relative {remote_result_name} in the current Agent workspace "
-                "as UTF-8 without BOM. Use a real JSON serializer so embedded "
-                "quotes and control characters are escaped. "
-                "Include the exact root field "
-                f"structured_output_protocol={structured_output.get('protocol')}. "
-                f"structured_output_schema_hash={schema_hash}. Always include "
-                "contract_id, task_id, request_id, phase, state, role, and mode using the "
-                "exact values from context.json. Read the canonical structured "
-                f"output schema from {structured_output_path} before writing. You may create "
-                "or replace only this local result file. For result_file mode, do not "
-                "return the business JSON or a transport envelope inline. After the "
-                "file is durably written, return exactly one compact "
-                "nexus-agent-result-ref-v1 pointer containing the exact task_id, "
-                f"request_id, and actual local {remote_result_name} path. Do not return "
-                f"./{remote_result_name} or Markdown; keep the file until the response has "
-                "been emitted, and do not return a second business result. "
-                "ROLE PROTOCOL (authoritative): keep one fixed response shape for "
-                f"phase={structured_output.get('phase')} role={structured_output.get('role')}. "
-                f"Use state={structured_output.get('state')} and mode={structured_output.get('role_mode')} "
-                f"as supplied. Always include these role fields: [{stable_fields_text}]. "
-                "Use [] or null for fields not used by the current mode; do not omit fields "
-                "or switch to another role's schema."
-            )
-        elif (
             isinstance(context, Mapping)
             and context.get("structured_output") is not None
-            and not isinstance(structured_output, Mapping)
+            and not isinstance(context.get("structured_output"), Mapping)
         ):
             raise PromptBundleError(
                 "structured output specification must be a JSON object"
@@ -269,35 +211,6 @@ class PromptBundleBuilder:
         )
 
         files = [prompt_file, context_file]
-        if structured_output_path is not None:
-            structured_output_bytes = json.dumps(
-                dict(structured_output), ensure_ascii=False, indent=2
-            ).encode("utf-8")
-            if len(structured_output_bytes) > self.max_file_bytes:
-                raise PromptBundleError(
-                    "structured output specification exceeds bundle file limit: "
-                    f"{len(structured_output_bytes)} > {self.max_file_bytes}"
-                )
-            _atomic_write_bytes(structured_output_path, structured_output_bytes)
-            structured_output_file = PromptFile(
-                name="structured-output.json",
-                purpose="canonical structured output schema and transport contract; read before prompt.txt",
-                required=True,
-                sha256=_sha256_bytes(structured_output_bytes),
-                bytes=len(structured_output_bytes),
-            )
-            files.append(structured_output_file)
-            logger.info(
-                "PROMPT_BUNDLE_FILE_WRITTEN task_id=%s request_id=%s phase=%s role=%s "
-                "file=%s purpose=structured_output bytes=%s sha256=%s encoding=utf-8 bom=false",
-                task_id,
-                request_id,
-                phase,
-                role,
-                structured_output_path,
-                structured_output_file.bytes,
-                structured_output_file.sha256,
-            )
         skill_lock = context_value.get("active_runtime_skill_lock")
         if isinstance(skill_lock, Mapping) and skill_lock.get("source"):
             try:
@@ -370,7 +283,6 @@ class PromptBundleBuilder:
             total_bytes=total_bytes,
             files=tuple(files),
             context_path=context_path,
-            structured_output_path=structured_output_path,
         )
 
     @staticmethod

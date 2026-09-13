@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 
-from orchestrator.prompt_bundle import remote_result_filename
 from orchestrator.runtime.compat_effects import MulticaTransportAdapter
 from orchestrator.runtime.concurrency import RuntimeConcurrencyAdmission
 from orchestrator.runtime.ports import AdmissionKey, AgentDispatchRequest, PollRequest
@@ -58,12 +57,6 @@ class DispatchCorrelationTests(unittest.TestCase):
 
 
 class RemoteResultIsolationTests(unittest.TestCase):
-    def test_remote_result_filename_is_request_unique(self):
-        first = remote_result_filename("task-1:worker-01:attempt-1")
-        second = remote_result_filename("task-1:worker-01:attempt-2")
-        self.assertNotEqual(first, second)
-        self.assertEqual(first, "result_task-1_worker-01_attempt-1.json")
-
     def test_same_external_target_cannot_hold_two_live_leases(self):
         admission = RuntimeConcurrencyAdmission()
         first_key = AdmissionKey(
