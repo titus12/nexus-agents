@@ -54,6 +54,11 @@ class Finding:
     scope: str = ""
     related_item_ids: tuple[str, ...] = ()
     canonical_key: str = ""
+    category: str = ""
+    target: str = ""
+    claim: str = ""
+    required_action: str = ""
+    impact: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -72,6 +77,8 @@ class Finding:
         data["group_id"] = str(data.get("group_id") or "").strip()
         data["item_id"] = str(data.get("item_id") or "").strip()
         data["scope"] = str(data.get("scope") or "").strip()
+        for name in ("category", "target", "claim", "required_action", "impact"):
+            data[name] = str(data.get(name) or "").strip()
         for name in ("supporting_evidence", "verification", "related_item_ids"):
             raw = data.get(name, ())
             if isinstance(raw, str) or raw is None:

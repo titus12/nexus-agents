@@ -32,6 +32,7 @@ CORE_TESTS = (
     "test_linear_fsm_transport",
     "test_linear_fsm_dto_migration",
     "test_linear_fsm_parallel_effects",
+    "test_node_join_unstructured",
     "test_linear_fsm_concurrency",
     "test_linear_fsm_terminal_run_status",
     "test_linear_fsm_entrypoint",
@@ -40,6 +41,11 @@ CORE_TESTS = (
     "test_linear_fsm_recovery",
     "test_linear_fsm_notification_safety",
     "test_linear_fsm_menxia",
+    "test_zhongshu_revision_budget",
+    "test_zhongshu_task_review_ledger",
+    "test_zhongshu_task_review_wiring",
+    "test_solver_plan_materialization",
+    "test_structured_backfill",
 )
 
 

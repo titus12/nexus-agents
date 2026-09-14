@@ -215,17 +215,29 @@ class LinearContextReducer:
                 if update.review.findings is not None
                 else current.findings if current else ()
             ),
-            zhongshu_revision_round=(current.zhongshu_revision_round if current else 0),
+            zhongshu_revision_round=(
+                update.review.zhongshu_revision_round
+                if update.review.zhongshu_revision_round is not None
+                else current.zhongshu_revision_round if current else 0
+            ),
             max_zhongshu_revision_rounds=(
                 current.max_zhongshu_revision_rounds if current else 8
             ),
-            freeze_check_attempt=(current.freeze_check_attempt if current else 0),
+            freeze_check_attempt=(
+                update.review.freeze_check_attempt
+                if update.review.freeze_check_attempt is not None
+                else current.freeze_check_attempt if current else 0
+            ),
             max_freeze_check_attempts=(
                 current.max_freeze_check_attempts if current else 2
             ),
             item_revision_round=(current.item_revision_round if current else 0),
             max_item_revision_rounds=(current.max_item_revision_rounds if current else 3),
-            last_reply_fingerprint=(current.last_reply_fingerprint if current else ""),
+            last_reply_fingerprint=(
+                update.review.last_reply_fingerprint
+                if update.review.last_reply_fingerprint is not None
+                else current.last_reply_fingerprint if current else ""
+            ),
             plan_ref=(
                 update.review.plan_ref
                 if update.review.plan_ref is not None
@@ -255,6 +267,21 @@ class LinearContextReducer:
                 update.review.completed_item_ids
                 if update.review.completed_item_ids is not None
                 else current.completed_item_ids if current else ()
+            ),
+            task_review_ledger=(
+                update.review.task_review_ledger
+                if update.review.task_review_ledger is not None
+                else current.task_review_ledger if current else ()
+            ),
+            requirements=(
+                update.review.requirements
+                if update.review.requirements is not None
+                else current.requirements if current else ()
+            ),
+            plan=(
+                dict(update.review.plan)
+                if update.review.plan is not None
+                else current.plan if current else None
             ),
         )
 

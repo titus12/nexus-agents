@@ -131,6 +131,92 @@ class NodeExecutionTests(unittest.TestCase):
             SequentialNodeExecutor(runner, _Joiner()).execute(wrong, self.context)
         self.assertEqual(runner.calls, [])
 
+    def test_sequential_progress_callback_reports_each_completion(self) -> None:
+        events: list[tuple[str, int, int, str]] = []
+
+        def on_complete(binding, result, completed, total, context):
+            events.append((binding.worker_id, completed, total, result.status))
+
+        SequentialNodeExecutor(
+            _Runner(), _Joiner(), on_worker_complete=on_complete
+        ).execute(self.node, self.context)
+
+        self.assertEqual(
+            events,
+            [("worker-a", 1, 2, "SUCCEEDED"), ("worker-b", 2, 2, "SUCCEEDED")],
+        )
+
+    def test_concurrent_progress_callback_reports_unique_indices(self) -> None:
+        seen: list[tuple[str, int, int]] = []
+        lock = threading.Lock()
+
+        def on_complete(binding, result, completed, total, context):
+            with lock:
+                seen.append((binding.worker_id, completed, total))
+
+        ConcurrentNodeExecutor(
+            _Runner(), _Joiner(), max_workers=2, on_worker_complete=on_complete
+        ).execute(self.node, self.context)
+
+        self.assertEqual(sorted(index for _, index, _ in seen), [1, 2])
+        self.assertEqual({worker for worker, _, _ in seen}, {"worker-a", "worker-b"})
+        self.assertTrue(all(total == 2 for _, _, total in seen))
+
+    def test_progress_callback_reports_failed_worker(self) -> None:
+        events: list[tuple[str, int, str]] = []
+
+        def on_complete(binding, result, completed, total, context):
+            events.append((binding.worker_id, completed, result.status))
+
+        SequentialNodeExecutor(
+            _Runner({"worker-b"}), _Joiner(), on_worker_complete=on_complete
+        ).execute(self.node, self.context)
+
+        self.assertEqual(
+            events,
+            [("worker-a", 1, "SUCCEEDED"), ("worker-b", 2, "FAILED")],
+        )
+
+    def test_progress_callback_failure_is_isolated(self) -> None:
+        def explode(*_args):
+            raise RuntimeError("notification transport down")
+
+        result = SequentialNodeExecutor(
+            _Runner(), _Joiner(), on_worker_complete=explode
+        ).execute(self.node, self.context)
+
+        self.assertEqual(result.status, "SUCCEEDED")
+
+    def test_concurrent_executor_overlaps_workers(self) -> None:
+        import time
+
+        active = {"now": 0, "peak": 0}
+        guard = threading.Lock()
+
+        class SlowRunner:
+            def run(self, binding, context):
+                with guard:
+                    active["now"] += 1
+                    active["peak"] = max(active["peak"], active["now"])
+                time.sleep(0.05)
+                with guard:
+                    active["now"] -= 1
+                return WorkerResult(binding.worker_id, "SUCCEEDED", None)
+
+        node = ReviewNode(
+            "node-1", "ZHONGSHU",
+            tuple(_binding(f"worker-{index}") for index in range(4)),
+        )
+        context = NodeContext(
+            "task-1", "node-1", "revision-1", None, None, "ZHONGSHU_CRITIC", 7,
+        )
+        result = ConcurrentNodeExecutor(
+            SlowRunner(), _Joiner(), max_workers=4
+        ).execute(node, context)
+
+        self.assertEqual(result.status, "SUCCEEDED")
+        self.assertGreaterEqual(active["peak"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

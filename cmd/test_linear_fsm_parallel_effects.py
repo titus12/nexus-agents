@@ -109,6 +109,17 @@ class LinearParallelEffectTests(unittest.TestCase):
         self.assertIsNotNone(outcome.failure)
         self.assertEqual(outcome.failure.error_code, "REMOTE_RUN_FAILED")
         self.assertEqual(transport.polled, 0)
+        self.assertTrue(outcome.event_payload["retryable"])
+
+    def test_timeout_failure_is_retryable_in_event_payload(self):
+        transport = _Transport("RUNNING")
+        runner = AgentWorkerRunner(transport, timeout_seconds=1)
+
+        outcome = runner.run_once(_request())
+
+        self.assertEqual(outcome.status, "FAILED")
+        self.assertEqual(outcome.failure.error_code, "AGENT_TIMEOUT")
+        self.assertTrue(outcome.event_payload["retryable"])
 
 
 if __name__ == "__main__":

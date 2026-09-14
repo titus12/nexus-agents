@@ -31,9 +31,34 @@ from .context import (
 from .decisions import ContextUpdate, EffectRequest, StateDecision
 from .errors import FailureRecord, InvariantViolation
 from .events import DomainEvent, TransitionRequest
-from .policies.zhongshu import merge_findings
+from .policies.solver_plan import (
+    materialize_solver_reply,
+    solver_batch_coverage_error,
+    structural_integrity_errors,
+)
+from .policies.zhongshu import (
+    FREEZE_RETRY_ACTIONS,
+    REVISION_ACTIONS,
+    active_blocker_count,
+    blocker_fingerprint,
+    freeze_retry_allowed,
+    merge_findings,
+    revision_allowed,
+    revision_made_progress,
+)
 from .policies.prompts import build_prompt
 from .transitions import ALL_STATES, BUSINESS_STATES, SYSTEM_STATES, TransitionRegistry
+
+
+def _finding_payload(finding: object) -> dict[str, object]:
+    """Serialize one finding for the Solver prompt context."""
+
+    to_dict = getattr(finding, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
+    if isinstance(finding, Mapping):
+        return dict(finding)
+    return {}
 
 
 def _resolve_plan_hash(payload: Mapping[str, object]) -> str | None:
@@ -421,6 +446,10 @@ class _ConcreteWorkflowState:
                 "group_id",
                 "item_id",
                 "completed_item_id",
+                # A failed task-review node still carries the verdicts its
+                # successful workers produced; folding them into the ledger
+                # here lets the retry re-dispatch only the missing tasks.
+                "task_reviews",
             )
         )
         if not has_review_data:
@@ -477,6 +506,7 @@ class _ConcreteWorkflowState:
             ),
             plan_ref=str(plan_ref) if plan_ref else None,
             plan_hash=_resolve_plan_hash(payload),
+            plan=dict(plan) if isinstance(plan, Mapping) else None,
             task_graph_ref=str(task_graph_ref) if task_graph_ref else None,
             task_items=task_items,
             task_groups=task_groups,
@@ -664,28 +694,52 @@ class _ConcreteWorkflowState:
                 payload=payload,
             )
         agent_id = f"{phase.lower()}-{role.split('-')[-1]}"
+        payload: dict[str, object] = {
+            "issue_id": context.identity.issue_id,
+            "request_id": request_id,
+            "agent_id": agent_id,
+            "role": role,
+            "phase": phase,
+            "target_state": target,
+            "prompt_ref": prompt.content,
+            "request_payload_ref": context.request.payload_ref or "",
+            "references": dict(prompt.references),
+            "revision_id": revision_id,
+            "plan_hash": plan_hash,
+            "sequence": context.progression.sequence,
+            "group_id": next_item.group_id if next_item else None,
+            "item_id": next_item.item_id if next_item else None,
+        }
+        if target == "ZHONGSHU_SOLVER" and context.review is not None:
+            # The Solver can only converge if it is told which findings the
+            # Critic still considers blocking, and (on a revision) the exact
+            # plan it must patch.  Without this the agent re-emits the same
+            # plan every round and the review never closes.
+            active = tuple(
+                finding for finding in context.review.findings if finding.active
+            )
+            current_plan = context.review.plan
+            has_plan = isinstance(current_plan, Mapping)
+            payload["dispatch_context"] = {
+                "zhongshu_dispatch_mode": "solver_revision",
+                "solver_revision_mode": has_plan,
+                "has_current_plan": has_plan,
+                "solver_revision_round": context.review.zhongshu_revision_round,
+                "focus_finding_ids": [finding.finding_id for finding in active],
+                "active_findings": [
+                    _finding_payload(finding) for finding in active
+                ],
+                "current_formal_plan": dict(current_plan) if has_plan else None,
+                "current_plan_ref": context.review.plan_ref or "",
+                "current_plan_hash": context.review.plan_hash or "",
+            }
         return EffectRequest(
             effect_id=f"dispatch:{request_id}",
             effect_type="agent_dispatch",
             task_id=context.identity.task_id,
             idempotency_key=request_id,
             payload_ref=context.request.payload_ref,
-            payload={
-                "issue_id": context.identity.issue_id,
-                "request_id": request_id,
-                "agent_id": agent_id,
-                "role": role,
-                "phase": phase,
-                "target_state": target,
-                "prompt_ref": prompt.content,
-                "request_payload_ref": context.request.payload_ref or "",
-                "references": dict(prompt.references),
-                "revision_id": revision_id,
-                "plan_hash": plan_hash,
-                "sequence": context.progression.sequence,
-                "group_id": next_item.group_id if next_item else None,
-                "item_id": next_item.item_id if next_item else None,
-            },
+            payload=payload,
         )
 
     @staticmethod
@@ -708,6 +762,24 @@ class _ConcreteWorkflowState:
             if isinstance(reason_code, str) and reason_code:
                 return reason_code
         return event.name
+
+    def _blocked_decision(
+        self,
+        context: WorkflowContext,
+        event: DomainEvent,
+        reason: str,
+    ) -> StateDecision:
+        """Stop an unbounded convergence loop and record why for the operator."""
+
+        decision = self._transition_decision(context, event, action="BLOCKED")
+        return replace(
+            decision,
+            transition=TransitionRequest(action="BLOCKED", reason_code=reason),
+            update=replace(
+                decision.update,
+                recovery=RecoveryUpdate(blocked_reason=reason),
+            ),
+        )
 
     def _require_current_state(self, context: WorkflowContext) -> None:
         current_state = context.progression.state
@@ -752,6 +824,72 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         "READY_FOR_CRITIC", "REQUEST_ANALYST_EVIDENCE", "NEEDS_MORE_EVIDENCE",
         "HUMAN_GATE", "BLOCKED", "RETRY", "OPEN_HUMAN_GATE",
     )
+    invalid_reason = "ZHONGSHU_SOLVER_REVISION_INVALID"
+
+    def handle(self, context: WorkflowContext, event: DomainEvent) -> StateDecision:
+        self._require_current_state(context)
+        self._require_event_task(context, event)
+        action = self._event_action(event)
+        plan_effect: EffectRequest | None = None
+        if event.name != "TIMEOUT" and action == "READY_FOR_CRITIC":
+            payload = dict(event.payload) if isinstance(event.payload, Mapping) else {}
+            review = context.review
+            active_ids = (
+                [finding.finding_id for finding in review.findings if finding.active]
+                if review is not None
+                else []
+            )
+            error = solver_batch_coverage_error(active_ids, payload)
+            materialized: dict[str, object] | None = None
+            if not error:
+                materialized, error = materialize_solver_reply(
+                    payload, review.plan if review is not None else None
+                )
+            if not error and materialized is not None:
+                integrity_errors = structural_integrity_errors(materialized)
+                if integrity_errors:
+                    error = "SOLVER_PLAN_STRUCTURE_INVALID:" + ";".join(
+                        integrity_errors[:10]
+                    )
+            if error:
+                logger.warning(
+                    "ZHONGSHU_SOLVER_REVISION_REJECTED task_id=%s error=%s",
+                    context.identity.task_id,
+                    error,
+                )
+                return self._blocked_decision(context, event, self.invalid_reason)
+            if materialized is not None:
+                # Replace the reply with the orchestrator-owned full plan so
+                # the review projection, plan hash, and next revision all use
+                # the materialized graph rather than a raw patch.
+                clean_payload = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"plan_hash", "reviewed_plan_hash"}
+                }
+                event = replace(
+                    event,
+                    payload={**clean_payload, "plan": materialized, "changes": []},
+                )
+                sequence = context.progression.sequence
+                plan_effect = EffectRequest(
+                    effect_id=f"plan:{context.identity.task_id}:{sequence + 1}",
+                    effect_type="plan_artifact",
+                    task_id=context.identity.task_id,
+                    idempotency_key=(
+                        f"{context.identity.task_id}:policy-plan:{sequence + 1}"
+                    ),
+                    payload={
+                        "plan": materialized,
+                        "plan_hash": canonical_plan_hash(materialized),
+                        "revision_id": str(payload.get("revision_id") or ""),
+                        "sequence": sequence,
+                    },
+                )
+        decision = super().handle(context, event)
+        if plan_effect is not None:
+            decision = replace(decision, effects=(plan_effect, *decision.effects))
+        return decision
 
 
 class ZhongshuCriticState(_ConcreteWorkflowState):
@@ -761,6 +899,62 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
         "REQUEST_SOLVER_REVISION", "REQUEST_REGROUP", "TASK_APPROVED",
         "TASK_CHANGES_REQUIRED", "HUMAN_GATE", "BLOCKED", "RETRY", "OPEN_HUMAN_GATE",
     )
+    exhausted_reason = "ZHONGSHU_REVISION_BUDGET_EXHAUSTED"
+    no_progress_reason = "ZHONGSHU_NO_PROGRESS"
+
+    def handle(self, context: WorkflowContext, event: DomainEvent) -> StateDecision:
+        self._require_current_state(context)
+        self._require_event_task(context, event)
+        action = self._event_action(event)
+        if event.name != "TIMEOUT" and action in REVISION_ACTIONS:
+            if not revision_allowed(context.review):
+                # The bounded Zhongshu revision budget is spent.  A further
+                # revision request must not re-dispatch the Solver forever:
+                # stop the loop and record the unresolved divergence so an
+                # operator can intervene instead of burning agent cycles.
+                return self._blocked_decision(context, event, self.exhausted_reason)
+            decision = self._transition_decision(context, event, action=action)
+            if context.review is not None:
+                merged_findings = (
+                    decision.update.review.findings
+                    if decision.update.review is not None
+                    and decision.update.review.findings is not None
+                    else context.review.findings
+                )
+                blockers = active_blocker_count(merged_findings)
+                made_progress = revision_made_progress(
+                    context.review.last_reply_fingerprint, blockers
+                )
+                no_progress = (
+                    0
+                    if made_progress
+                    else context.recovery.no_progress_count + 1
+                )
+                if no_progress >= context.recovery.max_no_progress:
+                    # Repeated rounds stopped reducing active P0/P1 blockers:
+                    # this is a stall, not convergence.
+                    return self._blocked_decision(
+                        context, event, self.no_progress_reason
+                    )
+                review_update = decision.update.review
+                if review_update is None:
+                    review_update = ReviewUpdate(revision_id=context.review.revision_id)
+                decision = replace(
+                    decision,
+                    update=replace(
+                        decision.update,
+                        review=replace(
+                            review_update,
+                            zhongshu_revision_round=(
+                                context.review.zhongshu_revision_round + 1
+                            ),
+                            last_reply_fingerprint=blocker_fingerprint(blockers),
+                        ),
+                        recovery=RecoveryUpdate(no_progress_count=no_progress),
+                    ),
+                )
+            return decision
+        return super().handle(context, event)
 
 
 class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
@@ -769,6 +963,35 @@ class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
         "FREEZE_APPROVED", "APPROVE_FREEZE", "FREEZE_OK", "FREEZE_REJECTED",
         "RETRY", "BLOCK", "OPEN_HUMAN_GATE",
     )
+    exhausted_reason = "ZHONGSHU_FREEZE_BUDGET_EXHAUSTED"
+
+    def handle(self, context: WorkflowContext, event: DomainEvent) -> StateDecision:
+        self._require_current_state(context)
+        self._require_event_task(context, event)
+        action = self._event_action(event)
+        if event.name != "TIMEOUT" and action in FREEZE_RETRY_ACTIONS:
+            if not freeze_retry_allowed(context.review):
+                # The bounded freeze-retry budget is spent: stop bouncing the
+                # plan between freeze check and Solver and hand it to an
+                # operator instead.
+                return self._blocked_decision(context, event, self.exhausted_reason)
+            decision = self._transition_decision(context, event, action=action)
+            if context.review is not None:
+                review_update = decision.update.review
+                if review_update is None:
+                    review_update = ReviewUpdate(revision_id=context.review.revision_id)
+                decision = replace(
+                    decision,
+                    update=replace(
+                        decision.update,
+                        review=replace(
+                            review_update,
+                            freeze_check_attempt=(context.review.freeze_check_attempt + 1),
+                        ),
+                    ),
+                )
+            return decision
+        return super().handle(context, event)
 
 
 class MenxiaItemSolverState(_ConcreteWorkflowState):
@@ -965,6 +1188,10 @@ def _task_review_bindings(
     )
     item_by_id = {item.item_id: item for item in review.task_items}
     group_by_id = {group.group_id: group for group in review.task_groups}
+    findings_by_item: dict[str, list[object]] = {}
+    for finding in review.findings:
+        if getattr(finding, "active", False) and getattr(finding, "item_id", ""):
+            findings_by_item.setdefault(str(finding.item_id), []).append(finding)
     base_request_id = f"{context.identity.task_id}:ZHONGSHU_CRITIC:{context.progression.sequence + 1}"
     bindings: list[dict[str, object]] = []
     for index, job in enumerate(selected, start=1):
@@ -991,6 +1218,10 @@ def _task_review_bindings(
                     "task_hash": job.task_hash,
                     "dependency_hash": job.dependency_hash,
                     "structural_issues": issues,
+                    "active_findings": [
+                        _finding_payload(finding)
+                        for finding in findings_by_item.get(job.item_id, [])
+                    ],
                 },
             }
         )

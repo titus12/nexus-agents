@@ -183,6 +183,11 @@ def legacy_dto_to_snapshot(
             task_items=task_items,
             task_groups=task_groups,
             completed_item_ids=completed_item_ids,
+            plan=(
+                dict(value["plan"])
+                if isinstance(value.get("plan"), Mapping)
+                else None
+            ),
         ),
         human_gate=(
             HumanGateState(

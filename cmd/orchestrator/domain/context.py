@@ -131,6 +131,11 @@ class ReviewState:
     task_items: tuple[ReviewTaskItem, ...] = ()
     task_groups: tuple[ReviewTaskGroup, ...] = ()
     completed_item_ids: tuple[str, ...] = ()
+    task_review_ledger: tuple[ReviewTaskRecord, ...] = ()
+    requirements: tuple[dict[str, object], ...] = ()
+    # The orchestrator-owned canonical task graph.  It is the base the Solver
+    # patches with bounded ``changes`` and the source of the plan hash.
+    plan: dict[str, object] | None = None
 
     def next_menxia_item(self) -> ReviewTaskItem | None:
         completed = set(self.completed_item_ids)
@@ -174,6 +179,10 @@ class ReviewTaskItem:
     dependencies: tuple[str, ...] = ()
     order: int = 0
     status: str = "PENDING"
+    title: str = ""
+    objective: str = ""
+    source_requirement_ids: tuple[str, ...] = ()
+    acceptance_signals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -183,6 +192,21 @@ class ReviewTaskGroup:
     group_id: str
     item_ids: tuple[str, ...] = ()
     order: int = 0
+    status: str = "PENDING"
+
+
+@dataclass(frozen=True)
+class ReviewTaskRecord:
+    """Last completed per-task Critic verdict, keyed by content hashes.
+
+    The record lets the orchestrator re-review only the tasks whose content or
+    dependency endpoints changed since the previous revision, instead of the
+    whole graph on every convergence round.
+    """
+
+    item_id: str
+    task_hash: str = ""
+    dependency_hash: str = ""
     status: str = "PENDING"
 
 
@@ -211,12 +235,18 @@ class ReviewUpdate:
     active_group_id: str | None = None
     active_item_id: str | None = None
     findings: tuple[Finding, ...] | None = None
+    zhongshu_revision_round: int | None = None
+    freeze_check_attempt: int | None = None
+    last_reply_fingerprint: str | None = None
     plan_ref: str | None = None
     plan_hash: str | None = None
     task_graph_ref: str | None = None
     task_items: tuple[ReviewTaskItem, ...] | None = None
     task_groups: tuple[ReviewTaskGroup, ...] | None = None
     completed_item_ids: tuple[str, ...] | None = None
+    task_review_ledger: tuple[ReviewTaskRecord, ...] | None = None
+    requirements: tuple[dict[str, object], ...] | None = None
+    plan: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -299,6 +329,10 @@ def context_to_dto(context: WorkflowContext) -> dict[str, object]:
         review["task_items"] = [asdict(item) for item in context.review.task_items]
         review["task_groups"] = [asdict(group) for group in context.review.task_groups]
         review["completed_item_ids"] = list(context.review.completed_item_ids)
+        review["task_review_ledger"] = [
+            asdict(record) for record in context.review.task_review_ledger
+        ]
+        review["requirements"] = [dict(item) for item in context.review.requirements]
     return {
         "identity": asdict(context.identity),
         "request": asdict(context.request),
@@ -354,6 +388,15 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
         completed_item_ids = _completed_item_ids_from_dto(
             review_value.get("completed_item_ids", [])
         )
+        task_review_ledger = _task_review_ledger_from_dto(
+            review_value.get("task_review_ledger", [])
+        )
+        requirements_value = review_value.get("requirements", [])
+        if not isinstance(requirements_value, list):
+            raise ValueError("review.requirements must be an array")
+        requirements = tuple(
+            dict(item) for item in requirements_value if isinstance(item, Mapping)
+        )
         review = ReviewState(
             revision_id=str(review_value.get("revision_id") or ""),
             active_group_id=review_value.get("active_group_id"),
@@ -372,6 +415,9 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             task_items=task_items,
             task_groups=task_groups,
             completed_item_ids=completed_item_ids,
+            task_review_ledger=task_review_ledger,
+            requirements=requirements,
+            plan=_plan_from_dto(review_value.get("plan")),
         )
 
     gate_value = value.get("human_gate")
@@ -472,7 +518,7 @@ def _review_task_items_from_dto(value: object) -> tuple[ReviewTaskItem, ...]:
         if not item_id or not group_id:
             raise ValueError(f"review.task_items[{index}] identity is incomplete")
         dependencies = item.get("dependencies", [])
-        if not isinstance(dependencies, list):
+        if not isinstance(dependencies, (list, tuple)):
             raise ValueError(f"review.task_items[{index}].dependencies must be an array")
         order = item.get("order", index)
         if isinstance(order, bool) or not isinstance(order, int):
@@ -487,9 +533,29 @@ def _review_task_items_from_dto(value: object) -> tuple[ReviewTaskItem, ...]:
                 dependencies=tuple(str(dependency) for dependency in dependencies),
                 order=order,
                 status=status,
+                title=str(item.get("title") or ""),
+                objective=str(item.get("objective") or ""),
+                source_requirement_ids=_string_tuple(
+                    item.get("source_requirement_ids", []),
+                    f"review.task_items[{index}].source_requirement_ids",
+                ),
+                acceptance_signals=_string_tuple(
+                    item.get("acceptance_signals", []),
+                    f"review.task_items[{index}].acceptance_signals",
+                ),
             )
         )
     return tuple(result)
+
+
+def _string_tuple(value: object, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field} must be an array")
+    return tuple(str(item) for item in value)
 
 
 def _review_task_groups_from_dto(value: object) -> tuple[ReviewTaskGroup, ...]:
@@ -505,7 +571,7 @@ def _review_task_groups_from_dto(value: object) -> tuple[ReviewTaskGroup, ...]:
         if not group_id:
             raise ValueError(f"review.task_groups[{index}] identity is incomplete")
         item_ids = item.get("item_ids", [])
-        if not isinstance(item_ids, list):
+        if not isinstance(item_ids, (list, tuple)):
             raise ValueError(f"review.task_groups[{index}].item_ids must be an array")
         order = item.get("order", index)
         if isinstance(order, bool) or not isinstance(order, int):
@@ -524,12 +590,43 @@ def _review_task_groups_from_dto(value: object) -> tuple[ReviewTaskGroup, ...]:
     return tuple(result)
 
 
+def _plan_from_dto(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("review.plan must be an object or null")
+    return dict(value)
+
+
 def _completed_item_ids_from_dto(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, list):
         raise ValueError("review.completed_item_ids must be an array")
     return tuple(str(item_id) for item_id in value)
+
+
+def _task_review_ledger_from_dto(value: object) -> tuple[ReviewTaskRecord, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("review.task_review_ledger must be an array")
+    result: list[ReviewTaskRecord] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"review.task_review_ledger[{index}] must be an object")
+        item_id = str(item.get("item_id") or "").strip()
+        if not item_id:
+            raise ValueError(f"review.task_review_ledger[{index}] identity is incomplete")
+        result.append(
+            ReviewTaskRecord(
+                item_id=item_id,
+                task_hash=str(item.get("task_hash") or ""),
+                dependency_hash=str(item.get("dependency_hash") or ""),
+                status=str(item.get("status") or "PENDING"),
+            )
+        )
+    return tuple(result)
 
 
 __all__ = [

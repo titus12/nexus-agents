@@ -12,6 +12,34 @@ from orchestrator.transport.external import ExternalMessage
 class _ScriptedMultica(FakeMulticaAdapter):
     def dispatch(self, request):
         receipt = super().dispatch(request)
+        if (
+            request.context.get("contract_mode")
+            or request.context.get("zhongshu_dispatch_mode") == "requirement_contract"
+        ):
+            self.queue_reply(
+                request.request_id,
+                ExternalMessage(
+                    request.agent_id,
+                    {
+                        "action": "REQUIREMENT_CONTRACT_READY",
+                        "task_id": request.task_id,
+                        "request_id": request.request_id,
+                        "phase": request.phase,
+                        "role": request.role,
+                        "requirements": [
+                            {
+                                "requirement_id": "req-000001",
+                                "statement": "run a review",
+                                "priority": "must",
+                                "scope": "in",
+                                "kind": "task",
+                            }
+                        ],
+                    },
+                    request.request_id,
+                ),
+            )
+            return receipt
         actions = {
             "ZHONGSHU_ANALYST": "READY_FOR_SOLVER",
             "ZHONGSHU_SOLVER": "READY_FOR_CRITIC",
@@ -77,8 +105,8 @@ class LinearEntrypointTests(unittest.TestCase):
             snapshot = app.repository.load("task-entry")
 
         self.assertEqual(snapshot.context.progression.state, "DONE")
-        self.assertEqual(snapshot.context.progression.sequence, 9)
-        self.assertEqual(len(adapter.dispatched), 15)
+        self.assertEqual(snapshot.context.progression.sequence, 10)
+        self.assertEqual(len(adapter.dispatched), 16)
         self.assertTrue(all(request.request_id for request in adapter.dispatched))
 
 

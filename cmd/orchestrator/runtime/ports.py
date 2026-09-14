@@ -7,7 +7,8 @@ or mutate a workflow context.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from ..domain.events import DomainEvent
@@ -30,6 +31,7 @@ class AgentDispatchRequest:
     revision_id: str = ""
     plan_hash: str = ""
     sent_after: str = ""
+    context: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class DispatchReceipt:
     external_message_id: str
     confirmed: bool
     request_id: str = ""
+    issue_id: str = ""
 
 
 @dataclass(frozen=True)

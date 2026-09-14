@@ -252,6 +252,30 @@ def role_result_template(
     return template
 
 
+def fill_role_defaults(
+    payload: dict[str, Any],
+    *,
+    phase: str,
+    role: str,
+    state: str = "",
+) -> dict[str, Any]:
+    """Backfill role fields a model omitted with the contract's empty value.
+
+    The contract tells the model to always emit every stable field (``[]``/null
+    when unused); models frequently drop one.  Filling the empty default keeps a
+    substantially complete result from being rejected outright.
+    """
+
+    contract = _contract_for(phase, role, state=state)
+    if contract is None:
+        return payload
+    template = empty_payload(contract.schema)
+    for key in contract.required_fields:
+        if key not in payload:
+            payload[key] = copy.deepcopy(template.get(key))
+    return payload
+
+
 def validate_role_result_shape(
     payload: dict[str, Any],
     *,

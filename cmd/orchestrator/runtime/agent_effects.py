@@ -682,6 +682,14 @@ class AgentNodeJoiner:
             for result in results
             if result.status != "SUCCEEDED" or _is_unstructured_reply(result)
         ]
+        # Harvest the verdicts of the workers that did finish exactly once, so
+        # every failure exit can hand them to the FSM ledger and the retry only
+        # has to re-dispatch the tasks that are still missing.
+        partial_reviews = (
+            _partial_task_reviews(results, failed)
+            if self._task_review_queue is not None
+            else []
+        )
         if failed:
             failure = next((result.failure for result in failed if result.failure), None)
             if failure is None:
@@ -725,14 +733,10 @@ class AgentNodeJoiner:
                         cause_type="WorkerResult",
                     )
             aggregate: dict[str, object] = {"action": "FAIL"}
-            if self._task_review_queue is not None:
-                # Persist the verdicts we did obtain so a retry only has to
-                # re-dispatch the tasks that are still missing (see
-                # _select_review_jobs).  The FSM folds these into the review
-                # ledger even on the FAIL -> RETRY path.
-                partial = _partial_task_reviews(results, failed)
-                if partial:
-                    aggregate["task_reviews"] = partial
+            if partial_reviews:
+                # The FSM folds these into the review ledger even on the
+                # FAIL -> RETRY path (see _select_review_jobs).
+                aggregate["task_reviews"] = partial_reviews
             return NodeResult(
                 self._node_run_id,
                 "FAILED",
@@ -748,7 +752,7 @@ class AgentNodeJoiner:
             if isinstance(payload, Mapping)
         ]
         if self._task_review_queue is not None:
-            return self._join_task_review(results, worker_payloads)
+            return self._join_task_review(results, worker_payloads, partial_reviews)
 
         payloads = [
             result.result_payload
@@ -837,7 +841,7 @@ class AgentNodeJoiner:
             aggregate = {"action": actions[0], "worker_count": len(results)}
         return NodeResult(self._node_run_id, "SUCCEEDED", results, aggregate=aggregate)
 
-    def _join_task_review(self, results, worker_payloads):
+    def _join_task_review(self, results, worker_payloads, partial_reviews=()):
         from ..zhongshu_review import aggregate_task_review_results
 
         try:
@@ -848,11 +852,16 @@ class AgentNodeJoiner:
                 worker_payloads,
             )
         except ValueError as error:
+            aggregate: dict[str, object] = {"action": "FAIL"}
+            if partial_reviews:
+                # Even when fan-in is rejected, keep the per-task verdicts we
+                # did obtain so the retry is incremental.
+                aggregate["task_reviews"] = list(partial_reviews)
             return NodeResult(
                 self._node_run_id,
                 "FAILED",
                 results,
-                aggregate={"action": "FAIL"},
+                aggregate=aggregate,
                 failure=FailureRecord(
                     failure_id=f"{self._node_run_id}:NODE_TASK_REVIEW_REJECTED",
                     stage="node_join",
