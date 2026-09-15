@@ -23,17 +23,21 @@ from .context import (
     ProgressUpdate,
     RecoveryUpdate,
     ReviewUpdate,
+    ReviewState,
     ReviewTaskGroup,
     ReviewTaskItem,
     ReviewTaskRecord,
     WorkflowContext,
+    apply_review_update,
 )
 from .decisions import ContextUpdate, EffectRequest, StateDecision
 from .errors import FailureRecord, InvariantViolation
 from .events import DomainEvent, TransitionRequest
 from .policies.solver_plan import (
+    is_retryable_solver_reply_error,
     materialize_solver_reply,
     solver_batch_coverage_error,
+    solver_revision_response_error,
     structural_integrity_errors,
 )
 from .policies.zhongshu import (
@@ -69,6 +73,21 @@ def _resolve_plan_hash(payload: Mapping[str, object]) -> str | None:
     if isinstance(plan, dict) and plan.get("items"):
         return canonical_plan_hash(plan)
     return None
+
+
+# A worker reply that is contract-valid but unusable as a per-task verdict
+# (bad identity/format).  It is retried on the dedicated reply budget rather
+# than consuming the shared transient-failure budget.
+_TASK_REVIEW_RESULT_INVALID = "NODE_TASK_REVIEW_RESULT_INVALID"
+
+
+def _failure_error_code(payload: Mapping[str, object]) -> str:
+    """Best-effort error code from a FAIL event payload."""
+
+    raw = payload.get("failure")
+    if isinstance(raw, Mapping):
+        return str(raw.get("error_code") or "")
+    return str(payload.get("error_code") or "")
 
 
 _ROLE_BY_STATE: dict[str, tuple[str, str]] = {
@@ -146,9 +165,20 @@ class _ConcreteWorkflowState:
             event.name == "FAIL"
             and isinstance(event.payload, Mapping)
             and bool(event.payload.get("retryable"))
-            and context.recovery.retry_count < context.recovery.max_retries
         ):
-            action = "RETRY"
+            if _failure_error_code(event.payload) == _TASK_REVIEW_RESULT_INVALID:
+                # A worker's reply was unusable (format/identity), not a real
+                # content disagreement.  Re-ask it on a dedicated, bounded budget
+                # so a single bad reply does not escalate straight to a human,
+                # while still refusing to loop forever.
+                action = (
+                    "RETRY"
+                    if context.recovery.reply_retry_count
+                    < context.recovery.max_reply_retries
+                    else "HUMAN_GATE"
+                )
+            elif context.recovery.retry_count < context.recovery.max_retries:
+                action = "RETRY"
         if action not in self.supported_actions and action not in {"FAIL", "CANCEL"}:
             raise InvariantViolation(
                 f"event {event.name!r} is not supported by state {self.name!r}"
@@ -235,17 +265,25 @@ class _ConcreteWorkflowState:
                 ),
             )
         if action == "RETRY" and event.name == "FAIL":
-            update = replace(
-                update,
-                recovery=RecoveryUpdate(
-                    retry_count=context.recovery.retry_count + 1,
-                    last_failure=(
-                        update.recovery.last_failure
-                        if update.recovery is not None
-                        else self._failure_from_payload(context, payload)
-                    ),
-                ),
+            failure = (
+                update.recovery.last_failure
+                if update.recovery is not None
+                else self._failure_from_payload(context, payload)
             )
+            if (
+                failure is not None
+                and failure.error_code == _TASK_REVIEW_RESULT_INVALID
+            ):
+                recovery = RecoveryUpdate(
+                    reply_retry_count=context.recovery.reply_retry_count + 1,
+                    last_failure=failure,
+                )
+            else:
+                recovery = RecoveryUpdate(
+                    retry_count=context.recovery.retry_count + 1,
+                    last_failure=failure,
+                )
+            update = replace(update, recovery=recovery)
         if action == "RESUME" and self.name == "HUMAN_GATE":
             update = replace(
                 update,
@@ -265,29 +303,14 @@ class _ConcreteWorkflowState:
                 pending_requirements = update.review.requirements
             elif context.review is not None:
                 pending_requirements = context.review.requirements
+            effective_review = apply_review_update(context.review, update.review)
             pending_review = None
             if (
-                context.review is not None
+                effective_review is not None
                 and update.review is not None
                 and update.review.task_items is not None
             ):
-                pending_review = replace(
-                    context.review,
-                    revision_id=(
-                        update.review.revision_id or context.review.revision_id
-                    ),
-                    task_items=update.review.task_items,
-                    task_groups=(
-                        update.review.task_groups
-                        if update.review.task_groups is not None
-                        else context.review.task_groups
-                    ),
-                    plan_hash=(
-                        update.review.plan_hash
-                        if update.review.plan_hash is not None
-                        else context.review.plan_hash
-                    ),
-                )
+                pending_review = effective_review
             effect = self._dispatch_effect(
                 context,
                 target,
@@ -302,6 +325,7 @@ class _ConcreteWorkflowState:
                 ),
                 canonical_requirements=pending_requirements,
                 pending_review=pending_review,
+                effective_review=effective_review,
             )
             review_update = update.review
             if target == "MENXIA_ITEM_SOLVER" and context.review is not None:
@@ -562,10 +586,18 @@ class _ConcreteWorkflowState:
         plan_hash: str = "",
         canonical_requirements: tuple[dict[str, object], ...] = (),
         pending_review: object | None = None,
+        effective_review: ReviewState | None = None,
     ) -> EffectRequest:
+        # Dispatch must observe the review as it will be *after* this decision's
+        # update commits, not the pre-transition snapshot.  Otherwise the Critic's
+        # verdict produced by the very event being handled never reaches the
+        # outgoing Solver prompt (it saw ``Current review finding count: 0`` and
+        # returned an unchanged plan every round).
+        if effective_review is not None:
+            context = replace(context, review=effective_review)
         role, phase = _ROLE_BY_STATE[target]
         request_id = f"{context.identity.task_id}:{target}:{context.progression.sequence + 1}"
-        prompt = build_prompt(context)
+        prompt = build_prompt(context, target_state=target)
         next_item = (
             context.review.next_menxia_item()
             if target == "MENXIA_ITEM_SOLVER" and context.review is not None
@@ -839,7 +871,13 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
                 if review is not None
                 else []
             )
-            error = solver_batch_coverage_error(active_ids, payload)
+            error = solver_revision_response_error(
+                active_ids,
+                review is not None and isinstance(review.plan, Mapping),
+                payload,
+            )
+            if not error:
+                error = solver_batch_coverage_error(active_ids, payload)
             materialized: dict[str, object] | None = None
             if not error:
                 materialized, error = materialize_solver_reply(
@@ -852,6 +890,11 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
                         integrity_errors[:10]
                     )
             if error:
+                if (
+                    is_retryable_solver_reply_error(error)
+                    and context.recovery.retry_count < context.recovery.max_retries
+                ):
+                    return self._retry_solver_reply(context, event, error)
                 logger.warning(
                     "ZHONGSHU_SOLVER_REVISION_REJECTED task_id=%s error=%s",
                     context.identity.task_id,
@@ -890,6 +933,56 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         if plan_effect is not None:
             decision = replace(decision, effects=(plan_effect, *decision.effects))
         return decision
+
+    def _retry_solver_reply(
+        self,
+        context: WorkflowContext,
+        event: DomainEvent,
+        error: str,
+    ) -> StateDecision:
+        """Bounce a mechanically-invalid Solver reply back for one more attempt.
+
+        ``RETRY`` parks the task in the internal ``RETRY_WAIT`` state, which the
+        runner auto-resumes to the recorded ``resume_state`` (this state), so a
+        fresh Solver dispatch is issued without involving a human.
+        """
+
+        logger.warning(
+            "ZHONGSHU_SOLVER_REPLY_RETRY task_id=%s error=%s retry=%s/%s",
+            context.identity.task_id,
+            error,
+            context.recovery.retry_count + 1,
+            context.recovery.max_retries,
+        )
+        decision = self._transition_decision(context, event, action="RETRY")
+        failure = FailureRecord(
+            failure_id=(
+                f"solver-reply:{context.identity.task_id}:"
+                f"{context.progression.sequence}"
+            ),
+            stage="agent_reply",
+            owner_component=self.name,
+            task_id=context.identity.task_id,
+            state=self.name,
+            sequence=context.progression.sequence,
+            node_run_id=context.parallel.active_node_run_id,
+            worker_id=None,
+            effect_id=None,
+            error_code=error,
+            retryable=True,
+            message=error,
+            cause_type="AgentReply",
+        )
+        return replace(
+            decision,
+            update=replace(
+                decision.update,
+                recovery=RecoveryUpdate(
+                    retry_count=context.recovery.retry_count + 1,
+                    last_failure=failure,
+                ),
+            ),
+        )
 
 
 class ZhongshuCriticState(_ConcreteWorkflowState):
@@ -1370,7 +1463,12 @@ def _task_graph_projection(
         group_id = str(raw_group.get("candidate_group_id") or raw_group.get("group_id") or "").strip()
         if not group_id:
             continue
-        related = raw_group.get("related_items") or raw_group.get("items") or []
+        related = (
+            raw_group.get("related_items")
+            or raw_group.get("items")
+            or raw_group.get("item_ids")
+            or []
+        )
         if not isinstance(related, list):
             raise InvariantViolation("task graph group items must be an array")
         item_ids = tuple(

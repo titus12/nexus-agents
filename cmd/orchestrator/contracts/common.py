@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import difflib
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -9,12 +10,32 @@ from typing import Any, Callable, Mapping, Sequence
 STRUCTURED_OUTPUT_PROTOCOL = "nexus-agent-result-file-v2"
 
 
-def string(*, enum: Sequence[str] | None = None, const: str | None = None) -> dict[str, Any]:
+def string(
+    *,
+    enum: Sequence[str] | None = None,
+    const: str | None = None,
+    aliases: Mapping[str, str] | None = None,
+    fallback: str | None = None,
+) -> dict[str, Any]:
+    """Declare a string field.
+
+    ``aliases`` maps tolerated synonyms/typos onto an enum member, and
+    ``fallback`` names the member an unrecognized value is coerced to.  Both make
+    a low-stakes categorization field tolerant of the descriptive labels models
+    routinely invent instead of the exact enum.
+    """
+
     result: dict[str, Any] = {"type": "string"}
     if enum is not None:
         result["enum"] = list(enum)
     if const is not None:
         result["const"] = const
+    if aliases:
+        result["enumAliases"] = {
+            str(key).strip().casefold(): str(value) for key, value in aliases.items()
+        }
+    if fallback is not None:
+        result["enumFallback"] = str(fallback)
     return result
 
 
@@ -96,6 +117,73 @@ def contract_schema(
     }
 
 
+def _enum_members_match(enum: Sequence[Any], value: Any) -> bool:
+    """Match an enum member, tolerating surrounding whitespace and case."""
+
+    if value in enum:
+        return True
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        return any(
+            isinstance(member, str) and member.strip().casefold() == normalized
+            for member in enum
+        )
+    return False
+
+
+def coerce_enum_values(value: Any, schema: Mapping[str, Any]) -> Any:
+    """Canonicalize string enum fields in place, tolerating case, aliases, typos.
+
+    Models routinely emit a synonym, a typo, or a differently-cased value for a
+    low-stakes categorization enum.  Rejecting the whole result stalls a
+    multi-worker fan-out for minutes, so map the value onto the declared member
+    (via casefold, a declared alias, a close typo, then the declared fallback)
+    before validation instead of discarding the reply.
+    """
+
+    if not isinstance(schema, Mapping):
+        return value
+    enum = schema.get("enum")
+    if isinstance(value, str) and enum:
+        members = [str(member) for member in enum]
+        normalized = value.strip().casefold()
+        for member in members:
+            if member.strip().casefold() == normalized:
+                return member
+        # Only fields that explicitly declare aliases/fallback opt into fuzzy
+        # coercion; a plain enum still rejects anything but a case variant.
+        aliases = schema.get("enumAliases") or {}
+        fallback = schema.get("enumFallback")
+        if not aliases and fallback is None:
+            return value
+        if normalized in aliases:
+            return str(aliases[normalized])
+        close = difflib.get_close_matches(
+            normalized, [member.casefold() for member in members], n=1, cutoff=0.82
+        )
+        if close:
+            for member in members:
+                if member.casefold() == close[0]:
+                    return member
+        if fallback is not None:
+            return str(fallback)
+        return value
+    if isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, Mapping):
+            for index, item in enumerate(value):
+                value[index] = coerce_enum_values(item, item_schema)
+        return value
+    if isinstance(value, dict):
+        properties = schema.get("properties")
+        if isinstance(properties, Mapping):
+            for key, child_schema in properties.items():
+                if key in value and isinstance(child_schema, Mapping):
+                    value[key] = coerce_enum_values(value[key], child_schema)
+        return value
+    return value
+
+
 def _type_matches(value: Any, expected: str | list[str]) -> bool:
     expected_types = expected if isinstance(expected, list) else [expected]
     for expected_type in expected_types:
@@ -124,7 +212,7 @@ def validate_schema(value: Any, schema: Mapping[str, Any], path: str, errors: li
     if "const" in schema and value != schema["const"]:
         errors.append(f"{path}: must equal {schema['const']}")
     enum = schema.get("enum")
-    if enum is not None and value not in enum:
+    if enum is not None and not _enum_members_match(enum, value):
         errors.append(f"{path}: invalid enum")
     if isinstance(value, str):
         if "minLength" in schema and len(value) < int(schema["minLength"]):

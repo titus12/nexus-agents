@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from .domain.findings import normalize_finding_status
+from .zhongshu_review_queue import ReviewQueueError
 
 CRITIC_ACTIONS = frozenset({
     "APPROVE_FREEZE", "REQUEST_SOLVER_REVISION", "REQUEST_REGROUP",
@@ -612,12 +613,99 @@ def aggregate_reviews(
         output[field] = union_records(*[review.get(field) for review in accepted])
     if action in {"HUMAN_GATE", "BLOCKED"}:
         selected = next((review for review in accepted if review["action"] == action), {})
-        for field in ("human_gate", "human_required", "question", "notification", "unblock_condition"):
+        for field in ("human_required", "question", "notification", "unblock_condition"):
             if field in selected:
                 output[field] = copy.deepcopy(selected[field])
-        if action == "HUMAN_GATE" and not output.get("human_gate"):
-            output["human_gate"] = {"question": "请明确尚未解决的中书省审查分歧。"}
+        # ``human_gate_request`` deliberately avoids the name of the FSM's
+        # ``context.human_gate`` (HumanGateState) so a review request can never
+        # be confused with the persisted gate state.
+        if isinstance(selected.get("human_gate"), Mapping):
+            output["human_gate_request"] = copy.deepcopy(selected["human_gate"])
+        if action == "HUMAN_GATE" and not output.get("human_gate_request"):
+            output["human_gate_request"] = {"question": "请明确尚未解决的中书省审查分歧。"}
     return output
+
+
+def _task_review_identity_mismatch(
+    body: dict[str, Any], job: Any, revision: str, plan_hash: str,
+) -> str:
+    """Name the first identity field that failed to match the queue job."""
+
+    checks = (
+        ("revision_id", str(body.get("revision_id") or ""), revision),
+        ("plan_hash", str(body.get("plan_hash") or ""), plan_hash),
+        ("reviewed_plan_hash", str(body.get("reviewed_plan_hash") or ""), plan_hash),
+        ("group_id", str(body.get("group_id") or ""), str(job.group_id)),
+        ("item_id", str(body.get("item_id") or ""), str(job.item_id)),
+        ("reviewed_task_hash", str(body.get("reviewed_task_hash") or ""), str(job.task_hash)),
+        (
+            "reviewed_dependency_hash",
+            str(body.get("reviewed_dependency_hash") or ""),
+            str(job.dependency_hash),
+        ),
+    )
+    for field, actual, expected in checks:
+        if actual != expected:
+            return f"{field}:got={actual!r}:expected={expected!r}"
+    return ""
+
+
+def _task_review_human_gate(
+    *,
+    complete: bool,
+    total: int,
+    accepted: int,
+    rejected: list[dict[str, Any]],
+    missing_job_ids: list[str],
+    explicit_gate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Explain, in human terms, why the batch was escalated and what to decide."""
+
+    details: list[str] = []
+    for entry in rejected:
+        label = str(entry.get("item_id") or entry.get("review_job_id") or "unknown")
+        reason = str(entry.get("reason") or "REJECTED")
+        mismatch = str(entry.get("mismatch") or "")
+        suffix = f"；{mismatch}" if mismatch else ""
+        details.append(f"{label}：审查结果被拒收（{reason}{suffix}）")
+    for job_id in missing_job_ids:
+        if job_id:
+            details.append(f"{job_id}：未收到审查结果")
+
+    if not complete:
+        reason = (
+            f"任务级审查未完整结束：{total} 个任务中只有 {accepted} 条结果通过身份校验，"
+            f"{len(rejected)} 条被拒收、{len([job for job in missing_job_ids if job])} 条缺失。"
+            "这是执行完整性问题（结果没绑定到任务），不是审查内容不合格，因此不能自动退回规划师。"
+        )
+        question = "是否重派被拒收/缺失的任务审查后再继续，还是直接按已接收的审查结论继续？"
+        options = [
+            "重派被拒收/缺失的任务重新审查后继续（推荐）",
+            "按已接收的审查结论继续（放弃被拒收/缺失的条目）",
+            "暂停或终止该任务",
+        ]
+    else:
+        gate = explicit_gate or {}
+        nested = gate.get("human_gate") if isinstance(gate.get("human_gate"), Mapping) else {}
+        reason = str(
+            nested.get("reason")
+            or nested.get("question")
+            or gate.get("notification")
+            or gate.get("summary")
+            or "审查员要求人工介入后才能继续。"
+        )
+        question = str(nested.get("question") or "请给出继续方向。")
+        options = [str(item) for item in nested.get("options") or [] if str(item)] or [
+            "按要求重派相应角色",
+            "按现有结论继续",
+            "暂停或终止该任务",
+        ]
+    return {
+        "reason": reason,
+        "question": question,
+        "options": options,
+        "details": details,
+    }
 
 
 def aggregate_task_review_results(
@@ -643,15 +731,23 @@ def aggregate_task_review_results(
         if not job_id:
             try:
                 job_id = queue.job_for_item(group_id, item_id).review_job_id
-            except ValueError:
-                rejected.append({"group_id": group_id, "item_id": item_id, "reason": "TASK_REVIEW_JOB_UNKNOWN"})
-                continue
+            except (ValueError, ReviewQueueError):
+                # The agent may reference an item with a group id that does not
+                # match the dispatched job (for example a zero-padded variant).
+                # Fall back to the item id, which is unique per revision, so the
+                # result is reconciled and rejected as an identity mismatch
+                # instead of aborting the whole node join.
+                try:
+                    job_id = queue.job_for_item("", item_id).review_job_id
+                except (ValueError, ReviewQueueError):
+                    rejected.append({"group_id": group_id, "item_id": item_id, "reason": "TASK_REVIEW_JOB_UNKNOWN"})
+                    continue
         job = known_jobs.get(job_id)
         if job is None:
-            rejected.append({"review_job_id": job_id, "reason": "TASK_REVIEW_JOB_UNKNOWN"})
+            rejected.append({"review_job_id": job_id, "group_id": group_id, "item_id": item_id, "reason": "TASK_REVIEW_JOB_UNKNOWN"})
             continue
         if job_id in by_job:
-            rejected.append({"review_job_id": job_id, "reason": "TASK_REVIEW_DUPLICATE_RESULT"})
+            rejected.append({"review_job_id": job_id, "group_id": group_id, "item_id": item_id, "reason": "TASK_REVIEW_DUPLICATE_RESULT"})
             continue
         if (
             str(body.get("revision_id") or "") != revision
@@ -662,10 +758,16 @@ def aggregate_task_review_results(
             or str(body.get("reviewed_task_hash") or "") != job.task_hash
             or str(body.get("reviewed_dependency_hash") or "") != job.dependency_hash
         ):
-            rejected.append({"review_job_id": job_id, "reason": "TASK_REVIEW_RESULT_IDENTITY_MISMATCH"})
+            rejected.append({
+                "review_job_id": job_id,
+                "group_id": group_id,
+                "item_id": item_id,
+                "reason": "TASK_REVIEW_RESULT_IDENTITY_MISMATCH",
+                "mismatch": _task_review_identity_mismatch(body, job, revision, plan_hash),
+            })
             continue
         if job.status != "COMPLETED":
-            rejected.append({"review_job_id": job_id, "reason": "TASK_REVIEW_RESULT_FOR_NONCOMPLETED_JOB"})
+            rejected.append({"review_job_id": job_id, "group_id": group_id, "item_id": item_id, "reason": "TASK_REVIEW_RESULT_FOR_NONCOMPLETED_JOB"})
             continue
         by_job[job_id] = copy.deepcopy(body)
 
@@ -811,6 +913,23 @@ def aggregate_task_review_results(
     }
     for field in ("questions_for_analyst", "missing_evidence", "required_change", "remaining_blockers"):
         output[field] = union_records(*[review.get(field) for review in by_job.values()])
+    if action == "HUMAN_GATE":
+        rejected_job_ids = {
+            str(entry.get("review_job_id") or "")
+            for entry in rejected
+            if entry.get("review_job_id")
+        }
+        output["human_gate_request"] = _task_review_human_gate(
+            complete=complete,
+            total=len(queue.jobs),
+            accepted=len(by_job),
+            rejected=rejected,
+            missing_job_ids=sorted(completed_job_ids - set(by_job) - rejected_job_ids),
+            explicit_gate=next(
+                (body for body in by_job.values() if body.get("action") == "HUMAN_GATE"),
+                None,
+            ),
+        )
     return output
 
 

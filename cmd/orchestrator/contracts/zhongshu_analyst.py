@@ -22,10 +22,40 @@ _REQUIREMENT = object_schema(
     },
     required=("requirement_id", "statement", "source", "priority", "scope", "kind", "acceptance_signal"),
 )
+# Models often describe evidence relevance with a risk-flavoured synonym or a
+# typo instead of the exact enum.  Canonicalize rather than reject the whole
+# worker reply (a rejection stalls the Analyst fan-out for the phase timeout).
+_DECISION_RELEVANCE_ALIASES = {
+    "performance": "risk",
+    "compatibility": "risk",
+    "regression": "risk",
+    "safety": "risk",
+    "security": "risk",
+    "reliability": "risk",
+    "stability": "risk",
+    "robustness": "risk",
+    "unknown": "risk",
+    "unknowns": "risk",
+    "uncertainty": "risk",
+    "conflict": "risk",
+    "conflicts": "risk",
+    "depencency": "dependency",
+    "dependancy": "dependency",
+    "dependencies": "dependency",
+    "scope": "boundary",
+    "boundaries": "boundary",
+    "completeness": "coverage",
+    "verification": "acceptance",
+    "verify": "acceptance",
+}
 _EVIDENCE_UPDATE = object_schema(
     {
         "evidence_id": string(), "requirement_id": string(),
-        "decision_relevance": string(enum=("boundary", "coverage", "dependency", "acceptance", "risk")),
+        "decision_relevance": string(
+            enum=("boundary", "coverage", "dependency", "acceptance", "risk"),
+            aliases=_DECISION_RELEVANCE_ALIASES,
+            fallback="coverage",
+        ),
         "source": string(), "conclusion": string(), "unknowns": array(),
     },
     required=("evidence_id", "requirement_id", "decision_relevance", "source", "conclusion"),
@@ -70,7 +100,8 @@ CONTRACT = make_contract(
     prompt_rules=(
         "Collect evidence only; do not create or group implementation tasks.",
         "task_proposals, candidate_items, and candidate_groups must always be empty; Solver is the only task-graph producer.",
-        "Every evidence update must include decision_relevance from the contract enum.",
+        "Every evidence update must include decision_relevance, exactly one of: "
+        "boundary, coverage, dependency, acceptance, risk.",
         "Return the complete envelope even when an array is empty.",
     ),
     example_overrides={

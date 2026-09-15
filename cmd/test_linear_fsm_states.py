@@ -6,7 +6,8 @@ from orchestrator.domain.context import ProgressState, TaskIdentity, WorkflowCon
 from orchestrator.domain.decisions import StateDecision
 from orchestrator.domain.errors import InvariantViolation
 from orchestrator.domain.events import DomainEvent
-from orchestrator.domain.states import StateRegistry
+from orchestrator.domain.policies.prompts import build_prompt
+from orchestrator.domain.states import StateRegistry, ZhongshuSolverState
 from orchestrator.domain.transitions import BUSINESS_STATES, SYSTEM_STATES
 
 
@@ -57,6 +58,37 @@ class LinearStateMatrixTests(unittest.TestCase):
                 self.context("ZHONGSHU_ANALYST"),
                 DomainEvent("APPROVE_CRITIC", "task-1", 0, {}, "now"),
             )
+
+
+class PromptTargetStateTests(unittest.TestCase):
+    """The dispatched prompt must name the target state, not the source state."""
+
+    def test_prompt_names_dispatch_target_not_source(self) -> None:
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("ZHONGSHU_CRITIC", 6, "2026-09-14T00:00:00Z"),
+        )
+        prompt = build_prompt(context, target_state="ZHONGSHU_SOLVER")
+        self.assertEqual(prompt.state, "ZHONGSHU_SOLVER")
+        self.assertEqual(prompt.role, "review-solver")
+        self.assertIn("State: ZHONGSHU_SOLVER", prompt.content)
+        self.assertNotIn("State: ZHONGSHU_CRITIC", prompt.content)
+
+    def test_prompt_defaults_to_current_state(self) -> None:
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("ZHONGSHU_ANALYST", 1, "2026-09-14T00:00:00Z"),
+        )
+        self.assertIn("State: ZHONGSHU_ANALYST", build_prompt(context).content)
+
+    def test_solver_dispatch_prompt_uses_solver_state(self) -> None:
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("ZHONGSHU_CRITIC", 6, "2026-09-14T00:00:00Z"),
+        )
+        effect = ZhongshuSolverState._dispatch_effect(context, "ZHONGSHU_SOLVER")
+        self.assertIn("State: ZHONGSHU_SOLVER", effect.payload["prompt_ref"])
+        self.assertNotIn("State: ZHONGSHU_CRITIC", effect.payload["prompt_ref"])
 
 
 if __name__ == "__main__":

@@ -13,6 +13,13 @@ from .event_inbox import effect_result_event
 from .repository import EffectRecord, EffectResult, WorkflowRepository
 
 
+# A non-JSON agent reply is normalized to this synthetic action (see
+# ``adapters.py``).  It is not a domain action, so a single-agent dispatch must
+# never surface it as a completed event: no FSM state accepts it.  It is
+# translated into a retryable failure so the workflow can re-ask the agent.
+UNSTRUCTURED_REPLY_EVENT = "__UNSTRUCTURED_REPLY__"
+
+
 class EffectRunner(Protocol):
     """Executes exactly one external operation for an effect request."""
 
@@ -142,6 +149,40 @@ class EffectManager:
                     cause_type="EffectOutcome",
                 )
                 return EffectResult(effect.effect_id, effect.task_id, "FAILED", failure)
+            if (
+                outcome.status == "SUCCEEDED"
+                and outcome.event_name == UNSTRUCTURED_REPLY_EVENT
+            ):
+                failure = FailureRecord(
+                    failure_id=uuid.uuid4().hex,
+                    stage="agent_result",
+                    owner_component=effect.request.effect_type,
+                    task_id=effect.task_id,
+                    state=effect.state,
+                    sequence=effect.sequence,
+                    node_run_id=None,
+                    worker_id=None,
+                    effect_id=effect.effect_id,
+                    error_code="AGENT_REPLY_UNSTRUCTURED",
+                    retryable=True,
+                    message="agent reply was not the required JSON result contract",
+                    cause_type="AgentReply",
+                )
+                return EffectResult(
+                    effect.effect_id,
+                    effect.task_id,
+                    "FAILED",
+                    failure,
+                    "FAIL",
+                    {
+                        "error_code": failure.error_code,
+                        "reason": failure.message,
+                        "retryable": True,
+                    },
+                    outcome.request_id,
+                    outcome.operation_id,
+                    outcome.deadline_at,
+                )
             return EffectResult(
                 effect.effect_id,
                 effect.task_id,
@@ -174,4 +215,10 @@ class EffectManager:
         return replace(failure, cause_type=type(error).__name__)
 
 
-__all__ = ["EffectManager", "EffectOutcome", "EffectRunner", "EffectRunnerNotFound"]
+__all__ = [
+    "EffectManager",
+    "EffectOutcome",
+    "EffectRunner",
+    "EffectRunnerNotFound",
+    "UNSTRUCTURED_REPLY_EVENT",
+]

@@ -657,7 +657,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runs-root", default=os.environ.get("ORCHESTRATOR_RUNS_ROOT", "runs"))
     parser.add_argument("--poll-interval", type=float, default=float(os.environ.get("POLL_INTERVAL_SEC", "8")))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("PHASE_TIMEOUT_SEC", "900")))
+    parser.add_argument(
+        "--no-external-notifications",
+        action="store_true",
+        help=(
+            "Test mode: suppress every outbound Feishu/webhook message so runs "
+            "can be exercised without notifying a real chat."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.no_external_notifications:
+        # Must be set before the app wires its notification port.
+        os.environ["NEXUS_TEST_NO_EXTERNAL_NOTIFICATIONS"] = "1"
     multica = MulticaCliAdapter(Path(args.runs_root) / "transport")
 
     try:

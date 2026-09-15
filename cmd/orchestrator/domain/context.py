@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 
 from .findings import Finding
-from .errors import FailureRecord
+from .errors import FailureRecord, InvariantViolation
 
 
 @dataclass(frozen=True)
@@ -249,6 +249,111 @@ class ReviewUpdate:
     plan: dict[str, object] | None = None
 
 
+def apply_review_update(
+    current: ReviewState | None,
+    update: ReviewUpdate | None,
+) -> ReviewState | None:
+    """Return the review aggregate as it will look after ``update`` is applied.
+
+    The reducer uses this to commit a decision.  State handlers reuse it to
+    project the *post-transition* review into the dispatch effect, so an
+    outgoing agent prompt can observe findings produced by the very event being
+    handled (for example the Critic's verdict that the Solver must revise).
+    """
+
+    if update is None:
+        return current
+    revision_id = update.revision_id or (current.revision_id if current else "")
+    if not revision_id:
+        raise InvariantViolation("review update requires revision_id")
+    return ReviewState(
+        revision_id=revision_id,
+        active_group_id=(
+            update.active_group_id
+            if update.active_group_id is not None
+            else current.active_group_id if current else None
+        ),
+        active_item_id=(
+            update.active_item_id
+            if update.active_item_id is not None
+            else current.active_item_id if current else None
+        ),
+        findings=(
+            update.findings
+            if update.findings is not None
+            else current.findings if current else ()
+        ),
+        zhongshu_revision_round=(
+            update.zhongshu_revision_round
+            if update.zhongshu_revision_round is not None
+            else current.zhongshu_revision_round if current else 0
+        ),
+        max_zhongshu_revision_rounds=(
+            current.max_zhongshu_revision_rounds if current else 8
+        ),
+        freeze_check_attempt=(
+            update.freeze_check_attempt
+            if update.freeze_check_attempt is not None
+            else current.freeze_check_attempt if current else 0
+        ),
+        max_freeze_check_attempts=(
+            current.max_freeze_check_attempts if current else 2
+        ),
+        item_revision_round=(current.item_revision_round if current else 0),
+        max_item_revision_rounds=(current.max_item_revision_rounds if current else 3),
+        last_reply_fingerprint=(
+            update.last_reply_fingerprint
+            if update.last_reply_fingerprint is not None
+            else current.last_reply_fingerprint if current else ""
+        ),
+        plan_ref=(
+            update.plan_ref
+            if update.plan_ref is not None
+            else current.plan_ref if current else None
+        ),
+        plan_hash=(
+            update.plan_hash
+            if update.plan_hash is not None
+            else current.plan_hash if current else None
+        ),
+        task_graph_ref=(
+            update.task_graph_ref
+            if update.task_graph_ref is not None
+            else current.task_graph_ref if current else None
+        ),
+        task_items=(
+            update.task_items
+            if update.task_items is not None
+            else current.task_items if current else ()
+        ),
+        task_groups=(
+            update.task_groups
+            if update.task_groups is not None
+            else current.task_groups if current else ()
+        ),
+        completed_item_ids=(
+            update.completed_item_ids
+            if update.completed_item_ids is not None
+            else current.completed_item_ids if current else ()
+        ),
+        task_review_ledger=(
+            update.task_review_ledger
+            if update.task_review_ledger is not None
+            else current.task_review_ledger if current else ()
+        ),
+        requirements=(
+            update.requirements
+            if update.requirements is not None
+            else current.requirements if current else ()
+        ),
+        plan=(
+            dict(update.plan)
+            if update.plan is not None
+            else current.plan if current else None
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class DeliveryUpdate:
     """Typed changes to the delivery aggregate."""
@@ -424,7 +529,7 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
     if gate_value is not None and not isinstance(gate_value, Mapping):
         raise ValueError("context.human_gate must be null or an object")
     human_gate = (
-        _context_part(gate_value, "human_gate", HumanGateState)
+        _context_part(value, "human_gate", HumanGateState)
         if isinstance(gate_value, Mapping)
         else None
     )

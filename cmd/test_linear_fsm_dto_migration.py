@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 import unittest
 
 from orchestrator.domain.context import (
     AuditState,
     DeliveryState,
+    HumanGateState,
     ParallelState,
     ProgressState,
     RecoveryState,
@@ -86,6 +87,23 @@ class ImmutableContextMigrationTests(unittest.TestCase):
         self.assertEqual(restored.review.findings[0].identity_key(), ("g-1", "i-1", "f-1"))
         self.assertEqual(restored.delivery.dispatch_operation_id, "run-1")
         self.assertEqual(restored.parallel.menxia_snapshot_ref, "artifact-menxia")
+
+    def test_context_round_trip_preserves_pending_human_gate(self) -> None:
+        context = replace(
+            self.context(),
+            human_gate=HumanGateState(
+                decision_id="task-1:human-gate:11",
+                reason_code="NODE_COMPLETED",
+                resume_state="ZHONGSHU_CRITIC",
+            ),
+        )
+        restored = context_from_dto(context_to_dto(context))
+        self.assertEqual(restored.human_gate, context.human_gate)
+
+    def test_context_accepts_null_human_gate(self) -> None:
+        context = self.context()
+        self.assertIsNone(context.human_gate)
+        self.assertIsNone(context_from_dto(context_to_dto(context)).human_gate)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ ACTION_LABELS = {
     "REVISE_ITEM": "当前条目需要修订",
     "HUMAN_GATE": "需要人工决策",
     "HUMAN_DECISION_RECEIVED": "已收到人工决策",
+    "RETRY_RESUMED": "系统自动重试",
     "DONE": "任务已完成",
 }
 
@@ -51,6 +52,7 @@ PRESENTATION_EVENTS = frozenset(
         "AGENT_REPLY_CONTRACT_REJECTED",
         "LOCAL_VALIDATION_PASSED",
         "HUMAN_DECISION_RECEIVED",
+        "RETRY_RESUMED",
         "HEARTBEAT",
         "ZHONGSHU_FANOUT_STARTED",
         "ZHONGSHU_WORKER_RETRY",
@@ -119,10 +121,21 @@ def build_notification(
         answer = payload.get("answer") or payload.get("selected")
         if answer:
             lines.append(f"选择：{_brief(answer, 180)}")
+    elif event_name == "RETRY_RESUMED":
+        failure = context.recovery.last_failure
+        reason = str(getattr(failure, "error_code", "") or "")
+        if reason:
+            lines.append(f"重试原因：{reason}")
+        lines.append(
+            f"重试次数：{context.recovery.retry_count}/{context.recovery.max_retries}"
+        )
     elif event_name == "DONE" or state == "DONE":
         _append_payload(lines, payload, "final_delivery")
         lines.append("方案已完成；不代表代码已实现或测试已执行。")
     else:
+        gate_lines = _human_gate_lines(payload)
+        if gate_lines:
+            lines.extend(gate_lines)
         for field in ("notification", "summary", "confirmed_facts", "missing_evidence", "questions_for_solver"):
             _append_payload(lines, payload, field)
         progress = _review_progress_lines(state, event_name, payload, context)
@@ -173,7 +186,7 @@ class DirectNotificationEmitter:
         after: WorkflowContext,
     ) -> tuple[str, ...]:
         notifications: list[tuple[str, str, WorkflowContext, DomainEvent]] = []
-        event_name = _presentation_event_name(event)
+        event_name = _presentation_event_name(event, before.progression.state)
         if event_name:
             notifications.append((event_name, "event", before, event))
         if before.progression.state != after.progression.state:
@@ -215,13 +228,18 @@ class DirectNotificationEmitter:
         return tuple(sent)
 
 
-def _presentation_event_name(event: DomainEvent) -> str | None:
+def _presentation_event_name(event: DomainEvent, from_state: str = "") -> str | None:
     if event.name in PRESENTATION_EVENTS:
         return event.name
     if event.name == "FAIL":
         return "AGENT_REPLY_REJECTED"
     if event.name == "RESUME":
-        return "HUMAN_DECISION_RECEIVED"
+        # Only a resume from a state that actually waits for a person is a human
+        # decision.  RETRY_WAIT (and PERSISTENCE_DEGRADED) are resumed
+        # automatically by the runner, so labelling those "已收到人工决策" is wrong.
+        if from_state in {"HUMAN_GATE", "BLOCKED"}:
+            return "HUMAN_DECISION_RECEIVED"
+        return "RETRY_RESUMED"
     if event.name == "NODE_COMPLETED":
         payload = event.payload if isinstance(event.payload, Mapping) else {}
         return "AGENT_REPLY_ACCEPTED" if payload.get("action") else "ZHONGSHU_FANIN_COMPLETED"
@@ -249,6 +267,34 @@ _REVIEW_PROGRESS_STATES = frozenset(
         "MENXIA_GROUP_GATE",
     }
 )
+
+
+def _human_gate_lines(payload: Mapping[str, object]) -> list[str]:
+    """Render the structured human-gate reason and decision as a short block."""
+
+    gate = payload.get("human_gate_request")
+    if not isinstance(gate, Mapping):
+        # Backward compatibility for payloads persisted before the field was
+        # renamed away from the FSM's ``context.human_gate``.
+        gate = payload.get("human_gate")
+    if not isinstance(gate, Mapping) or not gate:
+        return []
+    lines: list[str] = []
+    reason = str(gate.get("reason") or "").strip()
+    if reason:
+        lines.append(f"人工门原因：{_brief(reason, 320)}")
+    question = str(gate.get("question") or "").strip()
+    if question:
+        lines.append(f"需要你决策：{_brief(question, 320)}")
+    options = [str(item) for item in gate.get("options") or [] if str(item)]
+    for index, option in enumerate(options, 1):
+        lines.append(f"  {index}) {_brief(option, 160)}")
+    details = [str(item) for item in gate.get("details") or [] if str(item)]
+    if details:
+        lines.append("具体问题：")
+        for detail in details[:6]:
+            lines.append(f"  - {_brief(detail, 200)}")
+    return lines
 
 
 def _review_progress_lines(
@@ -290,6 +336,7 @@ def _review_progress_lines(
         return _menxia_progress_lines(review, item_ids)
 
     lines: list[str] = []
+    labels = _item_labels(items)
     if item_ids and scoped_blocking:
         passed = [item_id for item_id in item_ids if item_id not in blocked_set]
         lines.append(
@@ -304,12 +351,10 @@ def _review_progress_lines(
             details += " …"
         lines.append(f"未通过：{details}")
         if passed:
-            shown = " ".join(passed[:12])
-            if len(passed) > 12:
-                shown += " …"
-            lines.append(f"通过：{shown}")
+            lines.append(f"通过：{_item_list(passed, labels)}")
     elif item_ids and not blocking:
         lines.append(f"任务级审查：全部通过（{len(item_ids)} 项）")
+        lines.append(f"通过：{_item_list(item_ids, labels)}")
     elif item_ids:
         lines.append(f"任务级审查：{len(item_ids)} 项均未标注任务归属")
 
@@ -383,6 +428,28 @@ def _progress_items(review: object) -> list[object]:
         items,
         key=lambda item: (getattr(item, "order", 0), getattr(item, "item_id", "")),
     )
+
+
+def _item_labels(items: list[object]) -> dict[str, str]:
+    """Map item_id to a human-readable ``item_id（title）`` label."""
+
+    labels: dict[str, str] = {}
+    for item in items:
+        item_id = str(getattr(item, "item_id", "") or "")
+        if not item_id:
+            continue
+        title = str(getattr(item, "title", "") or "").strip()
+        labels[item_id] = f"{item_id}（{_brief(title, 48)}）" if title else item_id
+    return labels
+
+
+def _item_list(
+    item_ids: list[str], labels: Mapping[str, str], limit: int = 8
+) -> str:
+    shown = "、".join(labels.get(item_id, item_id) for item_id in item_ids[:limit])
+    if len(item_ids) > limit:
+        shown += " …"
+    return shown
 
 
 def _finding_severity(finding: object) -> str:

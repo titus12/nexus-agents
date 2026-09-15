@@ -12,6 +12,7 @@ from typing import Any
 from .structured_output import (
     STRUCTURED_OUTPUT_PROTOCOL,
     fill_role_defaults,
+    normalize_role_payload,
     validate_role_result_shape,
 )
 
@@ -107,6 +108,7 @@ def write_agent_result_file(
         normalized["structured_output_protocol"] = STRUCTURED_OUTPUT_PROTOCOL
         normalized["structured_output_schema_hash"] = expected_schema_hash
     fill_role_defaults(normalized, phase=phase, role=role, state=expected_state)
+    normalize_role_payload(normalized, phase=phase, role=role, state=expected_state)
     if not normalized.get("action"):
         raise AgentResultFileError("inline result action is missing")
     _validate_structured_shape(

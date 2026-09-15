@@ -8,11 +8,12 @@ from ..domain.context import (
     AuditState,
     DeliveryState,
     HumanGateState,
-    ProgressState,
     ParallelState,
+    ProgressState,
     RecoveryState,
     ReviewState,
     WorkflowContext,
+    apply_review_update,
 )
 from ..domain.decisions import ContextUpdate, StateDecision
 from ..domain.errors import InvariantViolation
@@ -193,97 +194,7 @@ class LinearContextReducer:
 
     @staticmethod
     def _review(current: ReviewState | None, update: ContextUpdate) -> ReviewState | None:
-        if update.review is None:
-            return current
-        revision_id = update.review.revision_id or (current.revision_id if current else "")
-        if not revision_id:
-            raise InvariantViolation("review update requires revision_id")
-        return ReviewState(
-            revision_id=revision_id,
-            active_group_id=(
-                update.review.active_group_id
-                if update.review.active_group_id is not None
-                else current.active_group_id if current else None
-            ),
-            active_item_id=(
-                update.review.active_item_id
-                if update.review.active_item_id is not None
-                else current.active_item_id if current else None
-            ),
-            findings=(
-                update.review.findings
-                if update.review.findings is not None
-                else current.findings if current else ()
-            ),
-            zhongshu_revision_round=(
-                update.review.zhongshu_revision_round
-                if update.review.zhongshu_revision_round is not None
-                else current.zhongshu_revision_round if current else 0
-            ),
-            max_zhongshu_revision_rounds=(
-                current.max_zhongshu_revision_rounds if current else 8
-            ),
-            freeze_check_attempt=(
-                update.review.freeze_check_attempt
-                if update.review.freeze_check_attempt is not None
-                else current.freeze_check_attempt if current else 0
-            ),
-            max_freeze_check_attempts=(
-                current.max_freeze_check_attempts if current else 2
-            ),
-            item_revision_round=(current.item_revision_round if current else 0),
-            max_item_revision_rounds=(current.max_item_revision_rounds if current else 3),
-            last_reply_fingerprint=(
-                update.review.last_reply_fingerprint
-                if update.review.last_reply_fingerprint is not None
-                else current.last_reply_fingerprint if current else ""
-            ),
-            plan_ref=(
-                update.review.plan_ref
-                if update.review.plan_ref is not None
-                else current.plan_ref if current else None
-            ),
-            plan_hash=(
-                update.review.plan_hash
-                if update.review.plan_hash is not None
-                else current.plan_hash if current else None
-            ),
-            task_graph_ref=(
-                update.review.task_graph_ref
-                if update.review.task_graph_ref is not None
-                else current.task_graph_ref if current else None
-            ),
-            task_items=(
-                update.review.task_items
-                if update.review.task_items is not None
-                else current.task_items if current else ()
-            ),
-            task_groups=(
-                update.review.task_groups
-                if update.review.task_groups is not None
-                else current.task_groups if current else ()
-            ),
-            completed_item_ids=(
-                update.review.completed_item_ids
-                if update.review.completed_item_ids is not None
-                else current.completed_item_ids if current else ()
-            ),
-            task_review_ledger=(
-                update.review.task_review_ledger
-                if update.review.task_review_ledger is not None
-                else current.task_review_ledger if current else ()
-            ),
-            requirements=(
-                update.review.requirements
-                if update.review.requirements is not None
-                else current.requirements if current else ()
-            ),
-            plan=(
-                dict(update.review.plan)
-                if update.review.plan is not None
-                else current.plan if current else None
-            ),
-        )
+        return apply_review_update(current, update.review)
 
     @staticmethod
     def _human_gate(current: HumanGateState | None, update: ContextUpdate) -> HumanGateState | None:

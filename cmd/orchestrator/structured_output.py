@@ -11,6 +11,7 @@ from .contracts import all_contracts, contract_for_state
 from .contracts.common import (
     STRUCTURED_OUTPUT_PROTOCOL,
     PhaseContract,
+    coerce_enum_values,
     empty_payload,
     validate_schema,
 )
@@ -274,6 +275,21 @@ def fill_role_defaults(
         if key not in payload:
             payload[key] = copy.deepcopy(template.get(key))
     return payload
+
+
+def normalize_role_payload(
+    payload: dict[str, Any],
+    *,
+    phase: str,
+    role: str,
+    state: str = "",
+) -> dict[str, Any]:
+    """Canonicalize tolerant enum fields before contract validation."""
+
+    contract = _contract_for(phase, role, state=state)
+    if contract is None:
+        return payload
+    return coerce_enum_values(payload, contract.schema)
 
 
 def validate_role_result_shape(

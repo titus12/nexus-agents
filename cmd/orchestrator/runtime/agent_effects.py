@@ -18,7 +18,7 @@ from ..domain.decisions import EffectRequest
 from ..domain.errors import FailureRecord, LeaseLostError, TransportError
 from ..domain.policies.parallel import aggregate_zhongshu_workers
 from ..transport import RawTransportReply, ReplyBinding, ReplyNormalizer
-from .effects import EffectOutcome
+from .effects import EffectOutcome, UNSTRUCTURED_REPLY_EVENT
 from .ports import (
     AdmissionKey,
     AgentDispatchRequest,
@@ -595,7 +595,7 @@ class AgentNodeWorkerRunner:
         )
 
 
-_UNSTRUCTURED_REPLY_ACTION = "__UNSTRUCTURED_REPLY__"
+_UNSTRUCTURED_REPLY_ACTION = UNSTRUCTURED_REPLY_EVENT
 
 
 def _is_unstructured_reply(result: WorkerResult) -> bool:
@@ -843,6 +843,7 @@ class AgentNodeJoiner:
 
     def _join_task_review(self, results, worker_payloads, partial_reviews=()):
         from ..zhongshu_review import aggregate_task_review_results
+        from ..zhongshu_review_queue import ReviewQueueError
 
         try:
             report = aggregate_task_review_results(
@@ -851,7 +852,7 @@ class AgentNodeJoiner:
                 self._task_review_queue,
                 worker_payloads,
             )
-        except ValueError as error:
+        except (ValueError, ReviewQueueError) as error:
             aggregate: dict[str, object] = {"action": "FAIL"}
             if partial_reviews:
                 # Even when fan-in is rejected, keep the per-task verdicts we
@@ -893,6 +894,79 @@ class AgentNodeJoiner:
             report.get("affected_item_ids"),
             report.get("active_p0_p1_finding_ids"),
         )
+        rejected = report.get("rejected_reviews") or []
+        for entry in rejected:
+            logger.warning(
+                "NODE_TASK_REVIEW_REJECTED node_run_id=%s review_job_id=%s "
+                "group_id=%s item_id=%s reason=%s mismatch=%s",
+                self._node_run_id,
+                entry.get("review_job_id") or "",
+                entry.get("group_id") or "",
+                entry.get("item_id") or "",
+                entry.get("reason") or "",
+                entry.get("mismatch") or "",
+            )
+        accepted_ids = {
+            str(item.get("review_job_id") or "")
+            for item in report.get("task_reviews") or []
+            if item.get("review_job_id")
+        }
+        rejected_ids = {
+            str(entry.get("review_job_id") or "")
+            for entry in rejected
+            if entry.get("review_job_id")
+        }
+        queue = self._task_review_queue
+        if queue is not None:
+            completed_ids = {
+                job.review_job_id
+                for job in getattr(queue, "jobs", ())
+                if getattr(job, "status", "") == "COMPLETED"
+            }
+            for missing_id in sorted(completed_ids - accepted_ids - rejected_ids):
+                logger.warning(
+                    "NODE_TASK_REVIEW_UNBOUND node_run_id=%s review_job_id=%s "
+                    "reason=%s",
+                    self._node_run_id,
+                    missing_id,
+                    "COMPLETED_JOB_WITHOUT_RESULT",
+                )
+        if rejected and not report.get("task_review_complete"):
+            # One or more workers replied with a contract-valid envelope that is
+            # not a usable per-task verdict (bad identity/format).  That is an
+            # execution-integrity slip, not a content disagreement, so re-ask the
+            # affected workers on a bounded retry instead of escalating straight
+            # to a human gate.  The accepted verdicts ride along so the retry
+            # only re-dispatches the tasks still missing.
+            logger.warning(
+                "NODE_TASK_REVIEW_RESULT_INVALID node_run_id=%s rejected=%s",
+                self._node_run_id,
+                len(rejected),
+            )
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate={
+                    "action": "FAIL",
+                    "task_reviews": report.get("task_reviews") or [],
+                },
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:NODE_TASK_REVIEW_RESULT_INVALID",
+                    stage="node_join",
+                    owner_component="zhongshu_task_review_fan_in",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=None,
+                    effect_id=None,
+                    error_code="NODE_TASK_REVIEW_RESULT_INVALID",
+                    retryable=True,
+                    message="one or more task-review replies were unusable",
+                    cause_type="FanInValidation",
+                ),
+            )
         return NodeResult(self._node_run_id, "SUCCEEDED", results, aggregate=report)
 
 

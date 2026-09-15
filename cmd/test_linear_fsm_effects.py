@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError
 
 from orchestrator.domain.decisions import EffectRequest
 from orchestrator.domain.errors import InvariantViolation, TransportError
-from orchestrator.runtime.effects import EffectManager, EffectRunnerNotFound
+from orchestrator.runtime.effects import EffectManager, EffectOutcome, EffectRunnerNotFound
 from orchestrator.runtime.node_effects import NodeEffectRunner
 from orchestrator.runtime.nodes import NodeResult
 from orchestrator.runtime.ports import (
@@ -111,6 +111,27 @@ class EffectManagerTests(unittest.TestCase):
         self.assertEqual(failure.error_code, "TRANSPORT_ERROR")
         self.assertEqual(failure.message, "gateway unavailable")
         self.assertEqual(repository.results, list(results))
+
+    def test_unstructured_agent_reply_is_a_retryable_node_failure(self) -> None:
+        repository = _Repository((_effect(),))
+
+        class _OutcomeRunner:
+            def run_once(self, request: EffectRequest) -> EffectOutcome:
+                return EffectOutcome(
+                    status="SUCCEEDED",
+                    event_name="__UNSTRUCTURED_REPLY__",
+                    event_payload={"action": "__UNSTRUCTURED_REPLY__"},
+                    request_id=request.idempotency_key,
+                )
+
+        result = EffectManager(repository, {"dispatch": _OutcomeRunner()}).execute_pending("task-1")[0]
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertEqual(result.event_name, "FAIL")
+        self.assertTrue(result.event_payload["retryable"])
+        assert result.failure is not None
+        self.assertEqual(result.failure.error_code, "AGENT_REPLY_UNSTRUCTURED")
+        self.assertTrue(result.failure.retryable)
 
     def test_unknown_runner_is_explicit_and_effect_stays_unstarted(self) -> None:
         repository = _Repository((_effect(effect_type="missing"),))
