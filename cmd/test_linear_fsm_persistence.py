@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -23,13 +24,11 @@ from orchestrator.runtime.repository import (
 
 class JournalFirstRepositoryTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._temp_root = Path(__file__).parent / "test-runs"
-        self._temp_root.mkdir(parents=True, exist_ok=True)
-        # Windows test sandboxes may deny chmod/rmtree on temporary folders.
-        # Use a unique workspace-local directory and leave it for the existing
-        # test-artifact cleanup convention instead of hanging in teardown.
-        self.root = self._temp_root / f"repo-{uuid.uuid4().hex}"
-        self.root.mkdir(parents=True, exist_ok=True)
+        # A unique workspace-local directory would accumulate unbounded artifacts
+        # in the source tree, so use an auto-cleaned temporary root instead.
+        self._temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
         self.repository = JsonWorkflowRepository(self.root)
         self.before = self.snapshot("REQUEST_INTAKE", 0, 0)
         self.after = self.snapshot("ZHONGSHU_ANALYST", 1, 1)
@@ -147,7 +146,7 @@ class JournalFirstRepositoryTests(unittest.TestCase):
     def test_persistence_degraded_context_round_trips_resume_state(self) -> None:
         degraded = self.snapshot("PERSISTENCE_DEGRADED", 1, 1)
         repository = JsonWorkflowRepository(
-            self._temp_root / f"repo-degraded-{uuid.uuid4().hex}"
+            self.root / f"repo-degraded-{uuid.uuid4().hex}"
         )
         repository.initialize(degraded)
 

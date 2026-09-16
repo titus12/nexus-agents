@@ -7,11 +7,16 @@ import json
 import logging
 
 from .domain.context import WorkflowContext
+from .domain.errors import is_infrastructure_failure
 from .domain.events import DomainEvent
+from .domain.policies.solver_plan import is_retryable_solver_reply_error
 from .runtime.ports import NotificationPort, NotificationRequest
 
 
 logger = logging.getLogger("review_orchestrator_fsm")
+
+# Reply slips charged to the dedicated reply budget (see RecoveryState).
+_REPLY_RETRY_ERROR_CODES = ("NODE_TASK_REVIEW_RESULT_INVALID",)
 
 ROLE_NAMES = {
     "ZHONGSHU_ANALYST": "分析师",
@@ -126,9 +131,7 @@ def build_notification(
         reason = str(getattr(failure, "error_code", "") or "")
         if reason:
             lines.append(f"重试原因：{reason}")
-        lines.append(
-            f"重试次数：{context.recovery.retry_count}/{context.recovery.max_retries}"
-        )
+        lines.append(f"重试次数：{_retry_budget(context)}")
     elif event_name == "DONE" or state == "DONE":
         _append_payload(lines, payload, "final_delivery")
         lines.append("方案已完成；不代表代码已实现或测试已执行。")
@@ -136,6 +139,10 @@ def build_notification(
         gate_lines = _human_gate_lines(payload)
         if gate_lines:
             lines.extend(gate_lines)
+        elif state == "HUMAN_GATE" and context.human_gate is not None:
+            reason_code = str(context.human_gate.reason_code or "").strip()
+            if reason_code:
+                lines.append(f"人工处理原因：{_brief(reason_code, 120)}")
         for field in ("notification", "summary", "confirmed_facts", "missing_evidence", "questions_for_solver"):
             _append_payload(lines, payload, field)
         progress = _review_progress_lines(state, event_name, payload, context)
@@ -545,6 +552,25 @@ def _append_payload(lines: list[str], payload: Mapping[str, object], name: str) 
 def _brief(value: object, limit: int) -> str:
     text = str(value).replace("\r", " ").strip()
     return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
+
+
+def _retry_budget(context: WorkflowContext) -> str:
+    """Report the counter the failed attempt was actually charged to.
+
+    Recovery keeps a budget per failure class (convergence, infrastructure,
+    reply).  Showing only the convergence counter after an infrastructure or
+    reply retry reads as "0/3" and hides that a retry really happened.
+    """
+
+    recovery = context.recovery
+    code = str(getattr(recovery.last_failure, "error_code", "") or "")
+    if code in _REPLY_RETRY_ERROR_CODES or is_retryable_solver_reply_error(code):
+        used, cap = recovery.reply_retry_count, recovery.max_reply_retries
+    elif is_infrastructure_failure(code):
+        used, cap = recovery.external_retry_count, recovery.max_external_retries
+    else:
+        used, cap = recovery.retry_count, recovery.max_retries
+    return f"{used}/{cap}"
 
 
 def _legacy_context(task_id: str, state: str, value: object) -> WorkflowContext:

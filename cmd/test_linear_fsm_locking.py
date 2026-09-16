@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 import unittest
 import uuid
@@ -13,8 +14,9 @@ from orchestrator.runtime.lock_adapter import TaskLockAdapter
 
 class TaskLockTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.root = Path(__file__).parent / "test-runs" / f"lock-{uuid.uuid4().hex}"
-        self.root.mkdir(parents=True, exist_ok=True)
+        self._temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
 
     def test_live_owner_cannot_be_reclaimed(self) -> None:
         first = TaskLock(self.root / "task.lock")

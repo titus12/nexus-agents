@@ -26,11 +26,22 @@ _FINDING_STATUSES = {
 
 
 def normalize_finding_status(status: Any = None, decision: Any = None) -> str:
+    """Return the lifecycle status of one finding observation.
+
+    An explicit close decision wins over a bare ``status=OPEN`` echo: workers
+    routinely emit the default ``OPEN`` together with ``decision=RESOLVED`` or
+    ``decision=ACCEPTED_RISK``, and reading the echo would keep a finding the
+    Critic just closed (or explicitly accepted) blocking the freeze forever.
+    """
+
     raw_status = str(status or "").strip().upper()
-    if raw_status in _FINDING_STATUSES:
-        return raw_status
     raw_decision = str(decision or "").strip().upper()
-    return _CRITIC_DECISION_STATUS.get(raw_decision, "OPEN")
+    mapped = _CRITIC_DECISION_STATUS.get(raw_decision)
+    if raw_status in _FINDING_STATUSES:
+        if raw_status == "OPEN" and mapped is not None and mapped != "OPEN":
+            return mapped
+        return raw_status
+    return mapped or "OPEN"
 
 
 @dataclass(frozen=True)
@@ -45,6 +56,9 @@ class Finding:
     current_phase: str = ""
     parent_finding_id: str | None = None
     revision_round: int = 0
+    # Consecutive Critic rounds this finding has been re-raised unchanged.  A
+    # high value means the Solver revision loop is not converging on it.
+    stuck_rounds: int = 0
     resolution: str | None = None
     supporting_evidence: tuple[str, ...] = ()
     verification: tuple[str, ...] = ()
@@ -79,6 +93,10 @@ class Finding:
         data["scope"] = str(data.get("scope") or "").strip()
         for name in ("category", "target", "claim", "required_action", "impact"):
             data[name] = str(data.get(name) or "").strip()
+        try:
+            data["stuck_rounds"] = max(0, int(data.get("stuck_rounds") or 0))
+        except (TypeError, ValueError):
+            data["stuck_rounds"] = 0
         for name in ("supporting_evidence", "verification", "related_item_ids"):
             raw = data.get(name, ())
             if isinstance(raw, str) or raw is None:

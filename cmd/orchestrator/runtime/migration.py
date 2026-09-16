@@ -158,6 +158,7 @@ def legacy_dto_to_snapshot(
             last_failure=_failure_from_legacy(value.get("last_error"), identity, state, sequence),
             no_progress_count=_int(value, "no_progress_count", 0),
             max_no_progress=_int(value, "max_no_progress", 3),
+            max_stuck_finding_rounds=_int(value, "max_stuck_finding_rounds", 3),
         ),
         review=ReviewState(
             revision_id=revision_id,

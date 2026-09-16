@@ -39,11 +39,14 @@ presented as an Agent write target.
 
 For result-file requests, the dispatch instruction will tell the Agent to:
 
-1. Write the complete business JSON to relative `result.json` in its current
-   workspace if a file is needed.
-2. Prefer returning the complete JSON object inline in the issue comment.
-3. Use a compact pointer only when necessary, using the actual local result path
-   and retaining the file until the response has been emitted.
+1. Write exactly one complete business JSON object to relative `result.json` in
+   its current workspace.
+2. For `result_file` mode, do not return the business JSON or a transport-only
+   envelope inline. After the file is durable, return one compact
+   `nexus-agent-result-ref-v1` pointer containing the exact `task_id`,
+   `request_id`, and actual local `result.json` path.
+3. Do not return `./result.json`, Markdown, or a second business result, and
+   retain the file until the response has been emitted.
 4. Never attempt to write the Orchestrator's D: canonical path.
 
 The result JSON continues to carry the exact transport fields from the bundle:
@@ -52,13 +55,16 @@ The result JSON continues to carry the exact transport fields from the bundle:
 
 ### 2. Inline result ingestion
 
-The Multica adapter will accept a complete Agent JSON object for a request whose
-structured output mode is `result_file`. It will apply the existing request and
-thread correlation checks, then persist the validated object through the
+The Multica adapter keeps inline parsing for compatibility, but it will persist
+an inline object only after the complete role contract has been validated. A
+transport-only envelope, partial role object, or pointer-shaped object cannot
+become the canonical result. It will apply the existing request and thread
+correlation checks, then persist the validated object through the
 Orchestrator-owned result writer.
 
-The inline result path is authoritative because it survives remote workspace
-cleanup. The inline byte limit remains bounded by `INLINE_RESULT_MAX_BYTES`.
+The file bridge is authoritative for new `result_file` prompts because it
+preserves the complete business object in the Agent workspace. The inline byte
+limit remains bounded by `INLINE_RESULT_MAX_BYTES` for compatibility.
 
 ### 3. Same-host remote pointer bridge
 
@@ -95,10 +101,12 @@ The adapter bridges the file only when exactly one matching candidate exists.
 It rejects zero candidates as missing and rejects multiple candidates as
 ambiguous; it never guesses between workspaces or scans outside the configured
 root. The selected file then passes the same phase, role, state, protocol,
-schema, and request validation as a pointer before being persisted to the D:
-canonical result path. Discovery is attempted only after the remote run is
-reported completed, so a partially-written local file is not consumed while
-the Agent is still running.
+schema, request, and complete role-contract validation as a pointer before being
+persisted to the D: canonical result path. Discovery is attempted only after
+the remote run is reported completed, so a partially-written local file is not
+consumed while the Agent is still running. An existing D: file is eligible for
+recovery only when it passes that same complete validation; an incomplete
+transport envelope must not mask a valid remote candidate.
 
 ### 5. Error and race behavior
 
@@ -108,6 +116,8 @@ the Agent is still running.
 - If the Agent returns inline JSON, no remote file lookup is required.
 - A malformed, oversized, cross-request, cross-task, wrong-schema, or wrong-role
   inline result is rejected and does not overwrite the canonical artifact.
+- A remote run reported as `failed` is terminal and is routed to the normal
+  rejection/retry path; it is never treated as an indefinite wait.
 - Canonical writes use the existing temporary-file-plus-`os.replace` flow.
 
 ### 6. Observability
@@ -136,6 +146,10 @@ Add focused regression coverage for:
 - rejecting a pointer outside the Multica workspaces root;
 - rejecting a remote path that is not `workdir\result.json`;
 - preserving existing canonical D: pointer behavior and cross-worker rejection.
+- rejecting a transport-only inline envelope while recovering the complete
+  remote `workdir\result.json`;
+- treating a terminal remote `failed` status as a failure event instead of
+  polling forever.
 
 Run the focused transport tests and the repository's Python orchestrator test
 suite. Do not stop or rebind the active Nexus service; tests must remain local
@@ -144,7 +158,8 @@ and filesystem-scoped.
 ## Rollout
 
 The change is backward-compatible at the Orchestrator boundary. Existing
-canonical result files and legacy non-structured replies are unaffected. The
-new inline path is used for new structured-output prompts, while the remote
-pointer bridge provides a compatibility window for Agents that still follow the
-older pointer instruction.
+complete canonical result files and legacy non-structured replies are
+unaffected. New structured-output prompts use the local-file plus explicit
+pointer contract; validated inline objects and constrained remote discovery
+remain compatibility paths. Incomplete canonical envelopes are rejected rather
+than silently treated as business results.

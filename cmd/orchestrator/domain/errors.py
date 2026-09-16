@@ -61,6 +61,28 @@ class DomainError(Exception):
         self.failure = failure
 
 
+# Failures raised by the agent/transport runtime being unavailable or failing to
+# deliver a result, rather than by the *content* of a reply.  They are retried on
+# a dedicated budget (``external_retry_count``) so a flaky backend cannot consume
+# the budget that guards plan-convergence revisions.
+INFRASTRUCTURE_FAILURE_CODES = frozenset(
+    {
+        "REMOTE_RUN_FAILED",
+        "AGENT_RESULT_MISSING",
+        "AGENT_REPLY_UNSTRUCTURED",
+        "AGENT_TIMEOUT",
+        "WORKER_TIMEOUT",
+        "TRANSPORT_ERROR",
+    }
+)
+
+
+def is_infrastructure_failure(error_code: object) -> bool:
+    """True when a failure code describes an agent/transport runtime problem."""
+
+    return str(error_code or "").strip().upper() in INFRASTRUCTURE_FAILURE_CODES
+
+
 class TransportError(DomainError):
     error_code = "TRANSPORT_ERROR"
 
@@ -148,6 +170,7 @@ __all__ = [
     "FailureRecord",
     "HumanGateDeliveryError",
     "ArtifactError",
+    "INFRASTRUCTURE_FAILURE_CODES",
     "InvariantViolation",
     "LeaseLostError",
     "PostCommitLeaseReleaseError",
@@ -157,4 +180,5 @@ __all__ = [
     "RemoteRunFailed",
     "TransportError",
     "WorkerTimeoutError",
+    "is_infrastructure_failure",
 ]

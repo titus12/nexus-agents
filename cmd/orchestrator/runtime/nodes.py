@@ -16,10 +16,26 @@ import time
 from typing import Callable, Protocol, Sequence
 import uuid
 
-from ..domain.errors import FailureRecord, InvariantViolation
+from ..domain.errors import (
+    FailureRecord,
+    InvariantViolation,
+    is_infrastructure_failure,
+)
 
 
 logger = logging.getLogger("review_orchestrator_fsm")
+
+
+# One node run used to fail outright when a single binding hit an agent/transport
+# error, so the whole batch (including already-reviewed items) was re-dispatched
+# and paid the flaky-backend tax again.  A bounded per-binding retry keeps the
+# successful siblings and re-asks only the binding that failed.
+INFRASTRUCTURE_WORKER_ATTEMPTS = 2
+INFRASTRUCTURE_WORKER_BACKOFF_SECONDS = 3.0
+
+
+def _worker_retry_sleep(seconds: float) -> None:
+    time.sleep(seconds)
 
 
 @dataclass(frozen=True)
@@ -223,7 +239,43 @@ def _validate_node(node: ReviewNode, context: NodeContext) -> None:
             )
 
 
+def _infrastructure_failure(result: WorkerResult) -> bool:
+    """True when a worker failed for an agent/transport reason (not content)."""
+
+    failure = result.failure
+    return (
+        result.status == "FAILED"
+        and failure is not None
+        and bool(getattr(failure, "retryable", False))
+        and is_infrastructure_failure(getattr(failure, "error_code", ""))
+    )
+
+
 def _run_worker(
+    runner: WorkerRunner,
+    binding: WorkerBinding,
+    context: NodeContext,
+) -> WorkerResult:
+    result = _run_worker_once(runner, binding, context)
+    for attempt in range(2, INFRASTRUCTURE_WORKER_ATTEMPTS + 1):
+        if not _infrastructure_failure(result):
+            break
+        logger.warning(
+            "NODE_WORKER_RETRY task_id=%s node_run_id=%s worker_id=%s "
+            "attempt=%s/%s error_code=%s",
+            context.task_id,
+            context.node_run_id,
+            binding.worker_id,
+            attempt,
+            INFRASTRUCTURE_WORKER_ATTEMPTS,
+            str(getattr(result.failure, "error_code", "")),
+        )
+        _worker_retry_sleep(INFRASTRUCTURE_WORKER_BACKOFF_SECONDS)
+        result = _run_worker_once(runner, binding, context)
+    return result
+
+
+def _run_worker_once(
     runner: WorkerRunner,
     binding: WorkerBinding,
     context: NodeContext,
@@ -327,6 +379,8 @@ def _join_results(
 
 __all__ = [
     "ConcurrentNodeExecutor",
+    "INFRASTRUCTURE_WORKER_ATTEMPTS",
+    "INFRASTRUCTURE_WORKER_BACKOFF_SECONDS",
     "NodeContext",
     "NodeExecutor",
     "NodeJoiner",

@@ -1,5 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import tempfile
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -8,6 +9,11 @@ from orchestrator.transport.external import AgentRequest
 
 
 class TerminalRunStatusTests(TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._temporary.cleanup)
+        self.log_dir = self._temporary.name
+
     def request(self) -> AgentRequest:
         return AgentRequest(
             task_id="task-1",
@@ -23,7 +29,7 @@ class TerminalRunStatusTests(TestCase):
         )
 
     def test_failed_run_without_comment_ids_is_terminal(self) -> None:
-        adapter = MulticaCliAdapter("test-terminal-status")
+        adapter = MulticaCliAdapter(self.log_dir)
         failed_run = {
             "agent_id": "agent-analyst",
             "created_at": "2026-09-10T02:36:04Z",
@@ -36,7 +42,7 @@ class TerminalRunStatusTests(TestCase):
             self.assertEqual(adapter.get_run_status(self.request()), "failed")
 
     def test_ambiguous_fallback_does_not_claim_another_run(self) -> None:
-        adapter = MulticaCliAdapter("test-terminal-status-ambiguous")
+        adapter = MulticaCliAdapter(self.log_dir)
         runs = [
             {
                 "agent_id": "agent-analyst",
@@ -57,3 +63,4 @@ if __name__ == "__main__":
     import unittest
 
     unittest.main()
+

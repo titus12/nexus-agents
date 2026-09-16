@@ -43,6 +43,40 @@ def review_job_id(revision_id: str, group_id: str, item_id: str) -> str:
     return f"zhongshu:{revision_id}:{group_id}:{item_id}"
 
 
+def _surface_text(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _surface_list(value: object) -> list[str]:
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_surface_text(item) for item in value if _surface_text(item)]
+    text = _surface_text(value)
+    return [text] if text else []
+
+
+def review_surface(item: Mapping[str, Any], *, group_item_ids: Iterable[str] = ()) -> dict[str, Any]:
+    """Project an item onto exactly the fields a Critic capsule exposes.
+
+    The hash of this projection decides whether a task must be re-reviewed, so
+    it must exclude everything the Critic never sees (Solver rationale, benefit,
+    tradeoffs, unknowns, risks).  Whitespace and collection order are normalized
+    so formatting-only edits do not invalidate a prior approval.
+    """
+
+    return {
+        "item_id": _surface_text(item.get("item_id") or item.get("task_key")),
+        "group_id": _surface_text(item.get("group_id")),
+        "group_item_ids": sorted({_surface_text(v) for v in group_item_ids if _surface_text(v)}),
+        "title": _surface_text(item.get("title")),
+        "objective": _surface_text(item.get("objective")),
+        "dependencies": sorted(_surface_list(item.get("dependencies"))),
+        "source_requirement_ids": sorted(
+            _surface_list(item.get("source_requirement_ids") or item.get("requirement_ids"))
+        ),
+        "acceptance_signals": _surface_list(item.get("acceptance_signals") or item.get("acceptance")),
+    }
+
+
 @dataclass(frozen=True)
 class ReviewJob:
     review_job_id: str
@@ -154,7 +188,18 @@ def build_review_jobs(
     if not revision:
         raise ReviewQueueError("revision_id is required")
     records = flatten_plan_items(plan)
-    task_hashes = {record["item_id"]: canonical_hash(record["raw"]) for record in records}
+    group_members: dict[str, list[str]] = {}
+    for record in records:
+        group_members.setdefault(str(record["group_id"]), []).append(str(record["item_id"]))
+    task_hashes = {
+        record["item_id"]: canonical_hash(
+            review_surface(
+                record["raw"],
+                group_item_ids=group_members.get(str(record["group_id"]), []),
+            )
+        )
+        for record in records
+    }
     jobs: list[ReviewJob] = []
     for record in records:
         item_id = record["item_id"]

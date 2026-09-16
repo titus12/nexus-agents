@@ -302,6 +302,34 @@ def _resolved(observation: dict[str, Any]) -> bool:
     return normalize_finding_status(observation.get("status"), observation.get("decision")) == "RESOLVED"
 
 
+# The statuses that still hold work open.  ``DEFERRED``/``WONT_FIX`` are the
+# Critic's explicit "accepted, follow up later" decisions, so a P1 recorded that
+# way must not keep blocking the freeze forever.
+_ACTIVE_FINDING_STATUSES = frozenset(
+    {"OPEN", "ASSIGNED_TO_ANALYST", "ASSIGNED_TO_SOLVER", "IN_REVIEW", "REOPENED"}
+)
+
+
+def _active(observation: dict[str, Any]) -> bool:
+    return (
+        normalize_finding_status(
+            observation.get("status"), observation.get("decision")
+        )
+        in _ACTIVE_FINDING_STATUSES
+    )
+
+
+def _blocking_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the findings that still block a freeze: open P0/P1 only."""
+
+    return [
+        item
+        for item in findings
+        if _active(item)
+        and str(item.get("severity") or "P2").strip().upper() in {"P0", "P1"}
+    ]
+
+
 def _resolution_basis(observation: dict[str, Any]) -> bool:
     return any(observation.get(key) for key in (
         "resolution", "response", "verification", "evidence_ids", "basis_evidence",
@@ -319,14 +347,19 @@ def _finding_text(value: Any) -> str:
 def finding_semantic_key(finding: dict[str, Any]) -> str:
     """Return a worker-independent key for the same underlying finding.
 
-    The raw finding ID is deliberately excluded when substantive identity is
-    available: Critic workers are allowed to namespace IDs independently.
-    Scope, category, claim and required action are retained so unrelated
-    findings are not merged merely because their prose is similar.
+    The raw finding ID and the free-text ``claim`` are deliberately excluded.
+    Critic workers namespace their IDs independently and re-word the same issue
+    every round, so keying on either aspect mints a brand-new ledger entry (and
+    a new canonical ID) for an issue that is already recorded.  That churn grows
+    the ledger without bound, keeps superseded findings active, and resets the
+    per-finding stall counter, so the convergence loop can never retire
+    anything.  Scope, category, target, and the affected references are the
+    structural identity a task-scoped review actually reasons about.
+
+    A finding with no structural anchor at all falls back to its raw ID rather
+    than being merged with every other anonymous observation.
     """
-    claim = _finding_text(
-        finding.get("claim") or finding.get("description") or finding.get("title")
-    )
+
     target = finding.get("target") or finding.get("item_id") or finding.get("requirement_id") or finding.get("field")
     affected_items = finding.get("affected_item_ids") or finding.get("item_ids") or []
     affected_requirements = finding.get("affected_requirement_ids") or finding.get("requirement_ids") or []
@@ -338,10 +371,14 @@ def finding_semantic_key(finding: dict[str, Any]) -> str:
         "target": _finding_text(target or "global"),
         "affected_item_ids": sorted(_finding_text(item) for item in affected_items) if isinstance(affected_items, list) else [_finding_text(affected_items)],
         "affected_requirement_ids": sorted(_finding_text(item) for item in affected_requirements) if isinstance(affected_requirements, list) else [_finding_text(affected_requirements)],
-        "claim": claim,
-        "required_action": _finding_text(finding.get("required_action") or finding.get("required_change")),
     }
-    if not claim and not identity["required_action"]:
+    if (
+        identity["item_id"] in ("", "global")
+        and identity["target"] in ("", "global")
+        and identity["category"] in ("", "general")
+        and not identity["affected_item_ids"]
+        and not identity["affected_requirement_ids"]
+    ):
         raw_id = _finding_text(finding.get("finding_id") or finding.get("id"))
         identity = {"raw_finding_id": raw_id}
     return hashlib.sha256(
@@ -479,11 +516,29 @@ def consolidate_finding_observations(
             for item in values
             if _resolved(item) and _resolution_basis(item)
         }
-        open_values = [item for item in values if not _resolved(item)]
+        open_values = [item for item in values if _active(item)]
+        accepted_values = [
+            item
+            for item in values
+            if normalize_finding_status(item.get("status"), item.get("decision"))
+            in {"DEFERRED", "WONT_FIX"}
+        ]
         closed = len(resolved_by) >= quorum and not open_values
         if old and _resolved(old) and not open_values:
             closed = True
-        canonical["status"] = canonical["decision"] = "RESOLVED" if closed else "OPEN"
+        if closed:
+            canonical["status"] = canonical["decision"] = "RESOLVED"
+        elif accepted_values and not open_values:
+            # Every observation is an explicit accept/defer decision.  Keep that
+            # decision on the ledger instead of demoting it to OPEN: it stops
+            # blocking the freeze while staying visible as a follow-up risk.
+            status = normalize_finding_status(
+                accepted_values[0].get("status"),
+                accepted_values[0].get("decision"),
+            )
+            canonical["status"] = canonical["decision"] = status
+        else:
+            canonical["status"] = canonical["decision"] = "OPEN"
         if closed:
             canonical["resolution"] = "; ".join(
                 str(item.get("resolution") or item.get("response") or item.get("evidence_ids") or "")
@@ -582,7 +637,7 @@ def aggregate_reviews(
     )
 
     findings = [ledger[key] for key in sorted(ledger)]
-    blocking = [item for item in findings if not _resolved(item) and item.get("severity") in {"P0", "P1"}]
+    blocking = _blocking_findings(findings)
     actions = {review["action"] for review in accepted}
     approvals = sum(review["action"] == "APPROVE_FREEZE" for review in accepted)
     if "HUMAN_GATE" in actions:
@@ -821,10 +876,7 @@ def aggregate_task_review_results(
         quorum=1,
     )
     findings = [ledger[key] for key in sorted(ledger)]
-    blocking = [
-        item for item in findings
-        if not _resolved(item) and str(item.get("severity") or "P2").upper() in {"P0", "P1"}
-    ]
+    blocking = _blocking_findings(findings)
     queue_counts = queue.counts()
     completed_job_ids = {
         job.review_job_id for job in queue.jobs if job.status == "COMPLETED"

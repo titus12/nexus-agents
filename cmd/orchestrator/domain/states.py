@@ -31,24 +31,31 @@ from .context import (
     apply_review_update,
 )
 from .decisions import ContextUpdate, EffectRequest, StateDecision
-from .errors import FailureRecord, InvariantViolation
+from .errors import FailureRecord, InvariantViolation, is_infrastructure_failure
 from .events import DomainEvent, TransitionRequest
 from .policies.solver_plan import (
     is_retryable_solver_reply_error,
     materialize_solver_reply,
+    normalize_solver_finding_ids,
     solver_batch_coverage_error,
     solver_revision_response_error,
     structural_integrity_errors,
 )
 from .policies.zhongshu import (
+    APPROVAL_ACTIONS,
     FREEZE_RETRY_ACTIONS,
     REVISION_ACTIONS,
     active_blocker_count,
+    age_unresolved_findings,
+    approved_item_ids,
     blocker_fingerprint,
     freeze_retry_allowed,
     merge_findings,
     revision_allowed,
     revision_made_progress,
+    stalled_item_ids,
+    stuck_blockers,
+    unapproved_item_ids,
 )
 from .policies.prompts import build_prompt
 from .transitions import ALL_STATES, BUSINESS_STATES, SYSTEM_STATES, TransitionRegistry
@@ -177,6 +184,15 @@ class _ConcreteWorkflowState:
                     < context.recovery.max_reply_retries
                     else "HUMAN_GATE"
                 )
+            elif is_infrastructure_failure(_failure_error_code(event.payload)):
+                # The agent/transport runtime failed (remote run error, missing
+                # result, timeout).  Retry on the external budget so backend
+                # flakiness cannot exhaust the plan-convergence retries.
+                if (
+                    context.recovery.external_retry_count
+                    < context.recovery.max_external_retries
+                ):
+                    action = "RETRY"
             elif context.recovery.retry_count < context.recovery.max_retries:
                 action = "RETRY"
         if action not in self.supported_actions and action not in {"FAIL", "CANCEL"}:
@@ -276,6 +292,11 @@ class _ConcreteWorkflowState:
             ):
                 recovery = RecoveryUpdate(
                     reply_retry_count=context.recovery.reply_retry_count + 1,
+                    last_failure=failure,
+                )
+            elif failure is not None and is_infrastructure_failure(failure.error_code):
+                recovery = RecoveryUpdate(
+                    external_retry_count=context.recovery.external_retry_count + 1,
                     last_failure=failure,
                 )
             else:
@@ -813,6 +834,37 @@ class _ConcreteWorkflowState:
             ),
         )
 
+    def _human_gate_decision(
+        self,
+        context: WorkflowContext,
+        event: DomainEvent,
+        reason: str,
+    ) -> StateDecision:
+        """Hand the workflow to an operator with an explicit reason code."""
+
+        decision = self._transition_decision(context, event, action="HUMAN_GATE")
+        human_gate = decision.update.human_gate
+        if human_gate is not None:
+            human_gate = replace(human_gate, reason_code=reason)
+        return replace(
+            decision,
+            transition=TransitionRequest(action="HUMAN_GATE", reason_code=reason),
+            update=replace(
+                decision.update,
+                human_gate=human_gate,
+                recovery=RecoveryUpdate(blocked_reason=reason),
+            ),
+        )
+
+    def _stuck_finding_decision(
+        self,
+        context: WorkflowContext,
+        event: DomainEvent,
+    ) -> StateDecision:
+        """Escalate a finding the Solver loop cannot resolve to a human."""
+
+        return self._human_gate_decision(context, event, self.stuck_finding_reason)
+
     def _require_current_state(self, context: WorkflowContext) -> None:
         current_state = context.progression.state
         if current_state != self.name:
@@ -871,6 +923,10 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
                 if review is not None
                 else []
             )
+            # Canonicalize the reply's finding ids once, before any policy reads
+            # it, so an abbreviated-but-unambiguous id is still matched by the
+            # coverage check and by the revision scope.
+            payload = normalize_solver_finding_ids(payload, active_ids)
             error = solver_revision_response_error(
                 active_ids,
                 review is not None and isinstance(review.plan, Mapping),
@@ -881,7 +937,9 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
             materialized: dict[str, object] | None = None
             if not error:
                 materialized, error = materialize_solver_reply(
-                    payload, review.plan if review is not None else None
+                    payload,
+                    review.plan if review is not None else None,
+                    editable_item_ids=_revision_editable_item_ids(review, payload),
                 )
             if not error and materialized is not None:
                 integrity_errors = structural_integrity_errors(materialized)
@@ -892,7 +950,8 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
             if error:
                 if (
                     is_retryable_solver_reply_error(error)
-                    and context.recovery.retry_count < context.recovery.max_retries
+                    and context.recovery.reply_retry_count
+                    < context.recovery.max_reply_retries
                 ):
                     return self._retry_solver_reply(context, event, error)
                 logger.warning(
@@ -944,15 +1003,18 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
 
         ``RETRY`` parks the task in the internal ``RETRY_WAIT`` state, which the
         runner auto-resumes to the recorded ``resume_state`` (this state), so a
-        fresh Solver dispatch is issued without involving a human.
+        fresh Solver dispatch is issued without involving a human.  The attempt
+        is charged to the dedicated reply budget (shared with the Critic's
+        unusable-reply path) so a run of protocol slips cannot spend the
+        plan-convergence retries a real content disagreement still needs.
         """
 
         logger.warning(
             "ZHONGSHU_SOLVER_REPLY_RETRY task_id=%s error=%s retry=%s/%s",
             context.identity.task_id,
             error,
-            context.recovery.retry_count + 1,
-            context.recovery.max_retries,
+            context.recovery.reply_retry_count + 1,
+            context.recovery.max_reply_retries,
         )
         decision = self._transition_decision(context, event, action="RETRY")
         failure = FailureRecord(
@@ -978,7 +1040,7 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
             update=replace(
                 decision.update,
                 recovery=RecoveryUpdate(
-                    retry_count=context.recovery.retry_count + 1,
+                    reply_retry_count=context.recovery.reply_retry_count + 1,
                     last_failure=failure,
                 ),
             ),
@@ -994,11 +1056,43 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
     )
     exhausted_reason = "ZHONGSHU_REVISION_BUDGET_EXHAUSTED"
     no_progress_reason = "ZHONGSHU_NO_PROGRESS"
+    stuck_finding_reason = "ZHONGSHU_STUCK_FINDING"
+    freeze_incomplete_reason = "ZHONGSHU_FREEZE_INCOMPLETE"
+    item_stalled_reason = "ZHONGSHU_ITEM_STALLED"
 
     def handle(self, context: WorkflowContext, event: DomainEvent) -> StateDecision:
         self._require_current_state(context)
         self._require_event_task(context, event)
         action = self._event_action(event)
+        if event.name != "TIMEOUT" and action in APPROVAL_ACTIONS:
+            decision = self._transition_decision(context, event, action=action)
+            pending = unapproved_item_ids(
+                self._ledger_after(context, decision),
+                self._expected_item_ids(context, decision),
+            )
+            if not pending:
+                return decision
+            # A review round re-reviews only the tasks that are unapproved or
+            # whose content changed, so this round's verdicts can be a strict
+            # subset of the graph.  Freezing on that subset would release
+            # unreviewed work to Menxia, so the freeze is held back.
+            blockers = active_blocker_count(self._findings_after(context, decision))
+            if not blockers:
+                logger.warning(
+                    "ZHONGSHU_FREEZE_INCOMPLETE task_id=%s pending_items=%s",
+                    context.identity.task_id,
+                    list(pending),
+                )
+                return self._human_gate_decision(
+                    context, event, self.freeze_incomplete_reason
+                )
+            logger.warning(
+                "ZHONGSHU_APPROVAL_HELD task_id=%s pending_items=%s blockers=%s",
+                context.identity.task_id,
+                list(pending),
+                blockers,
+            )
+            action = "REQUEST_SOLVER_REVISION"
         if event.name != "TIMEOUT" and action in REVISION_ACTIONS:
             if not revision_allowed(context.review):
                 # The bounded Zhongshu revision budget is spent.  A further
@@ -1015,6 +1109,60 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                     else context.review.findings
                 )
                 blockers = active_blocker_count(merged_findings)
+                ledger = self._ledger_after(context, decision)
+                pending = unapproved_item_ids(
+                    ledger, self._expected_item_ids(context, decision)
+                )
+                if ledger and not pending and blockers == 0:
+                    # The aggregate asked for another revision, but every
+                    # reviewed task is already approved and no blocker survives
+                    # the merge: there is nothing left to revise, so freeze
+                    # instead of spending a revision round on a no-op.  An
+                    # empty ledger is not evidence of approval, so this only
+                    # applies once per-task verdicts exist.
+                    logger.warning(
+                        "ZHONGSHU_FREEZE_WITHOUT_REVISION task_id=%s action=%s",
+                        context.identity.task_id,
+                        action,
+                    )
+                    return self._transition_decision(
+                        context, event, action="APPROVE_CRITIC"
+                    )
+                stalled = stalled_item_ids(
+                    ledger,
+                    (
+                        context.review.max_item_revision_rounds
+                        if context.review is not None
+                        else 0
+                    ),
+                )
+                if stalled:
+                    # One task has been rejected for too many consecutive rounds.
+                    # More graph-level rounds would only hide it: hand the
+                    # specific task to a human with an explicit reason.
+                    logger.warning(
+                        "ZHONGSHU_ITEM_STALLED task_id=%s items=%s rounds=%s",
+                        context.identity.task_id,
+                        list(stalled),
+                        context.review.max_item_revision_rounds,
+                    )
+                    return self._human_gate_decision(
+                        context, event, self.item_stalled_reason
+                    )
+                stuck = stuck_blockers(
+                    merged_findings, context.recovery.max_stuck_finding_rounds
+                )
+                if stuck:
+                    # The same finding survived several Solver revisions.  More
+                    # rounds are not evidence of convergence, so stop and hand
+                    # the unresolved finding to a human with an explicit reason.
+                    logger.warning(
+                        "ZHONGSHU_STUCK_FINDING task_id=%s rounds=%s findings=%s",
+                        context.identity.task_id,
+                        context.recovery.max_stuck_finding_rounds,
+                        [str(getattr(item, "finding_id", "")) for item in stuck],
+                    )
+                    return self._stuck_finding_decision(context, event)
                 made_progress = revision_made_progress(
                     context.review.last_reply_fingerprint, blockers
                 )
@@ -1048,6 +1196,54 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                 )
             return decision
         return super().handle(context, event)
+
+    def _ledger_after(
+        self,
+        context: WorkflowContext,
+        decision: StateDecision,
+    ) -> tuple[ReviewTaskRecord, ...]:
+        """Folded task ledger the decision would persist, or the current one."""
+
+        review_update = decision.update.review
+        ledger = (
+            review_update.task_review_ledger
+            if review_update is not None
+            else None
+        )
+        if ledger is not None:
+            return tuple(ledger)
+        return tuple(context.review.task_review_ledger) if context.review else ()
+
+    def _findings_after(
+        self,
+        context: WorkflowContext,
+        decision: StateDecision,
+    ) -> tuple[object, ...]:
+        """Merged findings the decision would persist, or the current ones."""
+
+        review_update = decision.update.review
+        findings = review_update.findings if review_update is not None else None
+        if findings is not None:
+            return tuple(findings)
+        return tuple(context.review.findings) if context.review else ()
+
+    def _expected_item_ids(
+        self,
+        context: WorkflowContext,
+        decision: StateDecision,
+    ) -> tuple[str, ...]:
+        """Tasks the current reviewed graph contains, for coverage checks."""
+
+        review_update = decision.update.review
+        items = review_update.task_items if review_update is not None else None
+        if items is None:
+            items = context.review.task_items if context.review else ()
+        result: list[str] = []
+        for item in items or ():
+            item_id = str(getattr(item, "item_id", "") or "").strip()
+            if item_id:
+                result.append(item_id)
+        return tuple(dict.fromkeys(result))
 
 
 class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
@@ -1321,6 +1517,52 @@ def _task_review_bindings(
     return bindings
 
 
+def _revision_editable_item_ids(
+    review: object,
+    payload: Mapping[str, object],
+) -> set[str] | None:
+    """Items a scoped revision may change: owners of its selected findings.
+
+    Tasks the Critic already approved are subtracted from the scope so a later
+    revision cannot silently rewrite accepted work: rewriting it changes the
+    review surface, drops the approval, and forces the Critic to re-review (and
+    re-find) work that had already passed.
+
+    Returning ``None`` means the reply is not treated as a scoped revision
+    (initial run, no active plan, or no declared finding batch), which keeps the
+    full-plan materialization path.  An empty set is a *valid* scope meaning no
+    task may change; it is not the same as ``None``.
+    """
+
+    if review is None or not isinstance(getattr(review, "plan", None), Mapping):
+        return None
+    batch = payload.get("finding_batch")
+    if not isinstance(batch, Mapping):
+        return None
+    selected = batch.get("selected_finding_ids")
+    if not isinstance(selected, list):
+        return None
+    selected_ids = {str(value).strip() for value in selected if str(value).strip()}
+    if not selected_ids:
+        return None
+    scope: set[str] = set()
+    for finding in getattr(review, "findings", ()) or ():
+        finding_id = str(getattr(finding, "finding_id", "") or "")
+        if finding_id not in selected_ids:
+            continue
+        item_id = str(getattr(finding, "item_id", "") or "").strip()
+        if not item_id:
+            item_id = str(getattr(finding, "target", "") or "").strip().split("/")[-1]
+        if item_id:
+            scope.add(item_id)
+    if not scope:
+        return None
+    scope.difference_update(
+        approved_item_ids(getattr(review, "task_review_ledger", ()) or ())
+    )
+    return scope
+
+
 def _select_review_jobs(
     jobs: object,
     review: object,
@@ -1353,34 +1595,40 @@ def _merge_and_close_findings(
     """Merge findings and close those owned by a task the Critic approved."""
 
     merged = merge_findings(existing, incoming)
-    if not isinstance(task_reviews, list) or not task_reviews:
-        return merged
-    approved = {
-        str(entry.get("item_id"))
-        for entry in task_reviews
-        if isinstance(entry, Mapping)
-        and str(entry.get("action") or "") == "TASK_APPROVED"
-        and entry.get("item_id")
-    }
-    if not approved:
-        return merged
-    return tuple(
-        replace(
-            finding,
-            status="RESOLVED",
-            resolution=finding.resolution or "task approved in review",
-        )
-        if (finding.active and finding.item_id in approved)
-        else finding
-        for finding in merged
-    )
+    if isinstance(task_reviews, list) and task_reviews:
+        approved = {
+            str(entry.get("item_id"))
+            for entry in task_reviews
+            if isinstance(entry, Mapping)
+            and str(entry.get("action") or "") == "TASK_APPROVED"
+            and entry.get("item_id")
+        }
+        if approved:
+            merged = tuple(
+                replace(
+                    finding,
+                    status="RESOLVED",
+                    resolution=finding.resolution or "task approved in review",
+                )
+                if (finding.active and finding.item_id in approved)
+                else finding
+                for finding in merged
+            )
+    return age_unresolved_findings(existing, merged, incoming)
 
 
 def _task_review_ledger_update(
     context: WorkflowContext,
     payload: Mapping[str, object],
 ) -> tuple[ReviewTaskRecord, ...] | None:
-    """Fold one round of per-task Critic verdicts into the review ledger."""
+    """Fold one round of per-task Critic verdicts into the review ledger.
+
+    Approval is a ratchet: a task the Critic already accepted stays accepted
+    while its reviewed content and dependency endpoints hash the same.  Without
+    it a later round that re-dispatches the same task can demote an approval on
+    a differently-worded but content-identical verdict, so the graph oscillates
+    between APPROVED and CHANGES_REQUIRED and never reaches the freeze.
+    """
 
     raw = payload.get("task_reviews")
     if not isinstance(raw, list) or not raw:
@@ -1399,11 +1647,33 @@ def _task_review_ledger_update(
         if not item_id:
             continue
         action = str(entry.get("action") or "")
+        task_hash = str(entry.get("reviewed_task_hash") or "")
+        dependency_hash = str(entry.get("reviewed_dependency_hash") or "")
+        previous = current.get(item_id)
+        if (
+            previous is not None
+            and previous.status == "APPROVED"
+            and previous.task_hash == task_hash
+            and previous.dependency_hash == dependency_hash
+        ):
+            logger.info(
+                "ZHONGSHU_TASK_APPROVAL_HELD task_id=%s item_id=%s action=%s",
+                context.identity.task_id,
+                item_id,
+                action,
+            )
+            continue
+        approved = action == "TASK_APPROVED"
         current[item_id] = ReviewTaskRecord(
             item_id=item_id,
-            task_hash=str(entry.get("reviewed_task_hash") or ""),
-            dependency_hash=str(entry.get("reviewed_dependency_hash") or ""),
-            status=("APPROVED" if action == "TASK_APPROVED" else "CHANGES_REQUIRED"),
+            task_hash=task_hash,
+            dependency_hash=dependency_hash,
+            status=("APPROVED" if approved else "CHANGES_REQUIRED"),
+            changes_rounds=(
+                0
+                if approved
+                else (previous.changes_rounds + 1 if previous is not None else 1)
+            ),
         )
         updated = True
     return tuple(current.values()) if updated else None

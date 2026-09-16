@@ -108,6 +108,9 @@ class RecoveryState:
     last_failure: FailureRecord | None = None
     no_progress_count: int = 0
     max_no_progress: int = 3
+    # Consecutive Critic rounds one finding may stay open before the loop is
+    # escalated to a human (0 disables the escalation).
+    max_stuck_finding_rounds: int = 3
 
 
 @dataclass(frozen=True)
@@ -201,13 +204,16 @@ class ReviewTaskRecord:
 
     The record lets the orchestrator re-review only the tasks whose content or
     dependency endpoints changed since the previous revision, instead of the
-    whole graph on every convergence round.
+    whole graph on every convergence round.  ``changes_rounds`` counts the
+    consecutive rounds the task kept coming back as ``CHANGES_REQUIRED``, which
+    is the per-task stall signal.
     """
 
     item_id: str
     task_hash: str = ""
     dependency_hash: str = ""
     status: str = "PENDING"
+    changes_rounds: int = 0
 
 
 @dataclass(frozen=True)
@@ -729,6 +735,7 @@ def _task_review_ledger_from_dto(value: object) -> tuple[ReviewTaskRecord, ...]:
                 task_hash=str(item.get("task_hash") or ""),
                 dependency_hash=str(item.get("dependency_hash") or ""),
                 status=str(item.get("status") or "PENDING"),
+                changes_rounds=max(0, int(item.get("changes_rounds") or 0)),
             )
         )
     return tuple(result)
