@@ -69,7 +69,6 @@ INFRASTRUCTURE_FAILURE_CODES = frozenset(
     {
         "REMOTE_RUN_FAILED",
         "AGENT_RESULT_MISSING",
-        "AGENT_REPLY_UNSTRUCTURED",
         "AGENT_TIMEOUT",
         "WORKER_TIMEOUT",
         "TRANSPORT_ERROR",
@@ -81,6 +80,41 @@ def is_infrastructure_failure(error_code: object) -> bool:
     """True when a failure code describes an agent/transport runtime problem."""
 
     return str(error_code or "").strip().upper() in INFRASTRUCTURE_FAILURE_CODES
+
+
+# A reply the agent did deliver but the orchestrator cannot use: the document is
+# malformed or violates the reply shape.  The remedy is to ask the agent again
+# for one well-formed reply, so these are charged to the dedicated reply budget
+# (``reply_retry_count``) rather than to the runtime budget.  Sharing the runtime
+# budget with provider outages starved this class: a syntax slip then failed the
+# whole run because an unrelated backend failure had already spent it.
+REPLY_FAILURE_CODES = frozenset(
+    {
+        "AGENT_REPLY_UNSTRUCTURED",
+        "AGENT_REPLY_CONTRACT_REJECTED",
+    }
+)
+
+
+# Synthetic actions used to carry "the agent answered, but the reply was unusable"
+# from the transport boundary into the effect layer.  No FSM state accepts them:
+# the effect layer translates each into a reply-shape failure so the workflow
+# re-asks the agent instead of reporting a missing result.  They live here, next
+# to the failure taxonomy, so both ``adapters`` and ``runtime.effects`` can import
+# them without creating an import cycle.
+#
+# ``UNSTRUCTURED`` is a body that is not the required JSON contract at all;
+# ``CONTRACT_REJECTED`` is well-formed JSON that the role validator refused (wrong
+# shape, wrong ids, wrong mode).  Keeping them apart lets operators tell a model
+# formatting slip from a contract disagreement.
+UNSTRUCTURED_REPLY_EVENT = "__UNSTRUCTURED_REPLY__"
+CONTRACT_REJECTED_EVENT = "__CONTRACT_REJECTED__"
+
+
+def is_reply_failure(error_code: object) -> bool:
+    """True when a failure code describes an unusable agent reply body."""
+
+    return str(error_code or "").strip().upper() in REPLY_FAILURE_CODES
 
 
 class TransportError(DomainError):
@@ -175,10 +209,14 @@ __all__ = [
     "LeaseLostError",
     "PostCommitLeaseReleaseError",
     "PersistenceError",
+    "REPLY_FAILURE_CODES",
     "ReplyBindingError",
     "ReplyValidationError",
     "RemoteRunFailed",
     "TransportError",
+    "UNSTRUCTURED_REPLY_EVENT",
+    "CONTRACT_REJECTED_EVENT",
     "WorkerTimeoutError",
     "is_infrastructure_failure",
+    "is_reply_failure",
 ]

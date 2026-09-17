@@ -15,10 +15,16 @@ import time
 from typing import Callable
 
 from ..domain.decisions import EffectRequest
-from ..domain.errors import FailureRecord, LeaseLostError, TransportError
+from ..domain.errors import (
+    CONTRACT_REJECTED_EVENT,
+    FailureRecord,
+    LeaseLostError,
+    TransportError,
+    UNSTRUCTURED_REPLY_EVENT,
+)
 from ..domain.policies.parallel import aggregate_zhongshu_workers
 from ..transport import RawTransportReply, ReplyBinding, ReplyNormalizer
-from .effects import EffectOutcome, UNSTRUCTURED_REPLY_EVENT
+from .effects import EffectOutcome
 from .ports import (
     AdmissionKey,
     AgentDispatchRequest,
@@ -528,9 +534,14 @@ class AgentNodeWorkerRunner:
         self._runner = runner
 
     def run(self, binding: WorkerBinding, context: NodeContext) -> WorkerResult:
+        attempt = max(1, int(getattr(binding, "attempt", 1) or 1))
+        request_id = _attempt_request_id(binding.request_id, attempt)
+        dispatch_context = dict(binding.dispatch_context or {})
+        if attempt > 1:
+            dispatch_context["dispatch_attempt"] = attempt
         payload = {
             "issue_id": binding.issue_id or context.issue_id,
-            "request_id": binding.request_id,
+            "request_id": request_id,
             "agent_id": binding.agent_id,
             "role": binding.role,
             "phase": binding.phase,
@@ -544,14 +555,14 @@ class AgentNodeWorkerRunner:
             "plan_hash": context.plan_hash,
             "prompt_ref": binding.prompt_ref or context.prompt_ref,
         }
-        if binding.dispatch_context:
-            payload["dispatch_context"] = dict(binding.dispatch_context)
+        if dispatch_context:
+            payload["dispatch_context"] = dispatch_context
         if binding.fanout_parent_id:
             payload["fanout_parent_id"] = binding.fanout_parent_id
             payload["fanout_title"] = binding.fanout_title
         logger.info(
             "AGENT_WORKER_BOUND task_id=%s node_run_id=%s worker_id=%s "
-            "group_id=%s item_id=%s dispatch_mode=%s prompt_chars=%s",
+            "group_id=%s item_id=%s dispatch_mode=%s prompt_chars=%s attempt=%s",
             context.task_id,
             context.node_run_id,
             binding.worker_id,
@@ -559,12 +570,13 @@ class AgentNodeWorkerRunner:
             payload.get("item_id") or "",
             str(binding.dispatch_context.get("zhongshu_dispatch_mode") or ""),
             len(str(payload.get("prompt_ref") or "")),
+            attempt,
         )
         request = EffectRequest(
-            effect_id=f"worker:{context.node_run_id}:{binding.worker_id}",
+            effect_id=_attempt_effect_id(context.node_run_id, binding.worker_id, attempt),
             effect_type="agent_dispatch",
             task_id=context.task_id,
-            idempotency_key=binding.request_id,
+            idempotency_key=request_id,
             payload=payload,
         )
         outcome = self._runner.run_once(request)
@@ -596,27 +608,66 @@ class AgentNodeWorkerRunner:
 
 
 _UNSTRUCTURED_REPLY_ACTION = UNSTRUCTURED_REPLY_EVENT
+_CONTRACT_REJECTED_ACTION = CONTRACT_REJECTED_EVENT
+
+_REPLY_ACTION_FAILURES = {
+    _UNSTRUCTURED_REPLY_ACTION: (
+        "AGENT_REPLY_UNSTRUCTURED",
+        "agent worker returned an unstructured reply instead of "
+        "the required JSON result contract",
+    ),
+    _CONTRACT_REJECTED_ACTION: (
+        "AGENT_REPLY_CONTRACT_REJECTED",
+        "agent worker reply violated the role result contract",
+    ),
+}
 
 
-def _is_unstructured_reply(result: WorkerResult) -> bool:
-    """True when a worker result is the transport's non-JSON placeholder.
+def _rejected_reply_code(result: WorkerResult) -> tuple[str, str] | None:
+    """Return the reply-shape failure a delivered-but-unusable result implies.
 
-    Multica promotes a lone non-JSON reply to a synthetic result whose
-    ``action`` is ``__UNSTRUCTURED_REPLY__`` (see ``adapters.py``).  That
-    sentinel is not a domain action: the worker failed to produce the required
-    JSON contract.  Letting it into the fan-in action set made one unstructured
-    worker collide with its peers' real actions and produced a non-retryable
-    ``NODE_ACTION_CONFLICT``.  It is handled here as a retryable worker failure
-    instead.
+    A transport reports such a reply with a synthetic action (see ``adapters``).
+    Letting the sentinel into the fan-in action set made a worker collide with its
+    peers' real actions and produced a non-retryable ``NODE_ACTION_CONFLICT``; it
+    is handled here as a retryable reply-shape failure instead, so the workflow
+    re-asks the agent rather than reporting a missing result.
     """
 
     payload = result.result_payload
     if not isinstance(payload, Mapping):
-        return False
-    return str(payload.get("action") or "") == _UNSTRUCTURED_REPLY_ACTION
+        return None
+    action = str(payload.get("action") or "")
+    mapped = _REPLY_ACTION_FAILURES.get(action)
+    if mapped is None:
+        return None
+    error_code, default_message = mapped
+    reason = str(payload.get("contract_rejection") or "")
+    return error_code, f"{default_message}: {reason}" if reason else default_message
+
+
+def _is_unstructured_reply(result: WorkerResult) -> bool:
+    """True when a worker result is a transport placeholder, not a domain action."""
+
+    return _rejected_reply_code(result) is not None
 
 
 _TASK_REVIEW_ACTIONS = {"TASK_APPROVED", "TASK_CHANGES_REQUIRED"}
+
+
+def _attempt_request_id(request_id: str, attempt: int) -> str:
+    """Scope a worker request id to its dispatch attempt.
+
+    The attempt suffix is the only thing that makes a node-level worker retry a
+    *new* external request; without it the transport's idempotency lookup
+    returns the finished run and the retry can only poll a drained run.
+    """
+
+    return request_id if attempt <= 1 else f"{request_id}:attempt-{attempt}"
+
+
+def _attempt_effect_id(node_run_id: str, worker_id: str, attempt: int) -> str:
+    effect_id = f"worker:{node_run_id}:{worker_id}"
+    return effect_id if attempt <= 1 else f"{effect_id}:attempt-{attempt}"
 
 
 def _partial_task_reviews(
@@ -698,6 +749,11 @@ class AgentNodeJoiner:
                     None,
                 )
                 if unstructured is not None:
+                    error_code, message = _rejected_reply_code(unstructured) or (
+                        "AGENT_REPLY_UNSTRUCTURED",
+                        "agent worker returned an unstructured reply instead of "
+                        "the required JSON result contract",
+                    )
                     failure = FailureRecord(
                         failure_id=f"{self._node_run_id}:NODE_UNSTRUCTURED_REPLY",
                         stage="node_join",
@@ -708,12 +764,9 @@ class AgentNodeJoiner:
                         node_run_id=self._node_run_id,
                         worker_id=unstructured.worker_id,
                         effect_id=None,
-                        error_code="AGENT_REPLY_UNSTRUCTURED",
+                        error_code=error_code,
                         retryable=True,
-                        message=(
-                            "agent worker returned an unstructured reply instead of "
-                            "the required JSON result contract"
-                        ),
+                        message=message,
                         cause_type="WorkerResult",
                     )
                 else:

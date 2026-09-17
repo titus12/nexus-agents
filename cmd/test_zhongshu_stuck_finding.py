@@ -99,6 +99,7 @@ class ZhongshuStuckFindingTests(unittest.TestCase):
         findings: tuple[Finding, ...],
         *,
         max_stuck_finding_rounds: int = 3,
+        attempted_finding_ids: tuple[str, ...] | None = None,
     ) -> WorkflowContext:
         return WorkflowContext(
             identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
@@ -112,6 +113,7 @@ class ZhongshuStuckFindingTests(unittest.TestCase):
                 zhongshu_revision_round=2,
                 max_zhongshu_revision_rounds=8,
                 plan_hash="plan-hash",
+                attempted_finding_ids=attempted_finding_ids,
             ),
         )
 
@@ -180,6 +182,50 @@ class ZhongshuStuckFindingTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.transition.action, "REQUEST_SOLVER_REVISION")
+
+    def test_finding_outside_the_batch_does_not_age(self) -> None:
+        # The batch dictated to the Solver never picked f-1, so the Critic
+        # re-raising it must not push it towards the stuck escalation.
+        context = self._context(
+            (_finding("f-1", stuck_rounds=2),),
+            attempted_finding_ids=("f-other",),
+        )
+        event = DomainEvent(
+            "NODE_COMPLETED",
+            "task-1",
+            6,
+            {
+                "action": "REQUEST_SOLVER_REVISION",
+                "findings": [_finding_payload(_finding("f-1"))],
+            },
+            "2026-09-13T00:00:00Z",
+        )
+
+        decision = self.state.handle(context, event)
+
+        self.assertEqual(decision.transition.action, "REQUEST_SOLVER_REVISION")
+        self.assertEqual(decision.update.review.findings[0].stuck_rounds, 2)
+
+    def test_batched_finding_still_ages_to_the_gate(self) -> None:
+        context = self._context(
+            (_finding("f-1", stuck_rounds=2),),
+            attempted_finding_ids=("f-1",),
+        )
+        event = DomainEvent(
+            "NODE_COMPLETED",
+            "task-1",
+            6,
+            {
+                "action": "REQUEST_SOLVER_REVISION",
+                "findings": [_finding_payload(_finding("f-1"))],
+            },
+            "2026-09-13T00:00:00Z",
+        )
+
+        decision = self.state.handle(context, event)
+
+        self.assertEqual(decision.transition.action, "HUMAN_GATE")
+        self.assertEqual(decision.transition.reason_code, "ZHONGSHU_STUCK_FINDING")
 
 
 if __name__ == "__main__":

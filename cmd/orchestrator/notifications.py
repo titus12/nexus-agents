@@ -7,7 +7,7 @@ import json
 import logging
 
 from .domain.context import WorkflowContext
-from .domain.errors import is_infrastructure_failure
+from .domain.errors import is_infrastructure_failure, is_reply_failure
 from .domain.events import DomainEvent
 from .domain.policies.solver_plan import is_retryable_solver_reply_error
 from .runtime.ports import NotificationPort, NotificationRequest
@@ -564,7 +564,11 @@ def _retry_budget(context: WorkflowContext) -> str:
 
     recovery = context.recovery
     code = str(getattr(recovery.last_failure, "error_code", "") or "")
-    if code in _REPLY_RETRY_ERROR_CODES or is_retryable_solver_reply_error(code):
+    if (
+        code in _REPLY_RETRY_ERROR_CODES
+        or is_reply_failure(code)
+        or is_retryable_solver_reply_error(code)
+    ):
         used, cap = recovery.reply_retry_count, recovery.max_reply_retries
     elif is_infrastructure_failure(code):
         used, cap = recovery.external_retry_count, recovery.max_external_retries

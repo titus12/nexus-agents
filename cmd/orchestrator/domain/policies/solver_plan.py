@@ -59,6 +59,9 @@ _RETRYABLE_SOLVER_REPLY_PREFIXES = (
     # Re-ask the Solver rather than blocking the task for a human.
     "SOLVER_FINDING_BATCH_COVERAGE_INCOMPLETE:",
     "SOLVER_FINDING_BATCH_OVERLAP:",
+    # A blocker the Solver pushed into the deferred remainder is a shape slip
+    # too: the graph cannot freeze while an active P0/P1 is not being worked on.
+    "SOLVER_BATCH_MISMATCH:",
 )
 
 
@@ -239,6 +242,8 @@ def normalize_solver_finding_ids(
 def solver_batch_coverage_error(
     active_finding_ids: Sequence[object],
     payload: Mapping[str, object],
+    *,
+    expected_batch: tuple[Sequence[object], Sequence[object]] | None = None,
 ) -> str:
     """Validate the bounded finding batch against the active finding set.
 
@@ -247,6 +252,13 @@ def solver_batch_coverage_error(
     schema validator keeps ownership of malformed shapes.  Submitted ids are
     resolved onto the active ids first, so an abbreviated but unambiguous id
     counts as covered rather than as both missing and unknown.
+
+    ``expected_batch`` is the ``(selected, remaining)`` batch the orchestrator
+    dictated for this round.  Because the orchestrator owns the selection (it
+    knows severity, owning item and the freeze policy), the reply only has to
+    echo it: re-planning the partition is a shape slip the agent is asked to
+    fix.  That replaces the old "never defer a P0/P1" rule, which made the task
+    unsatisfiable whenever the active blockers exceeded the per-round cap.
     """
 
     batch = payload.get("finding_batch")
@@ -269,6 +281,21 @@ def solver_batch_coverage_error(
             "SOLVER_FINDING_BATCH_COVERAGE_INCOMPLETE:"
             f"missing={missing},unknown={unknown}"
         )
+    if expected_batch is not None:
+        expected_selected, expected_remaining = expected_batch
+        want_selected = set(
+            _dedupe(resolve_finding_ids(expected_selected, active_finding_ids))
+        )
+        want_remaining = set(
+            _dedupe(resolve_finding_ids(expected_remaining, active_finding_ids))
+        )
+        if selected_ids != want_selected or remaining_ids != want_remaining:
+            return (
+                "SOLVER_BATCH_MISMATCH:"
+                f"expected_selected={sorted(want_selected)},"
+                f"expected_remaining={len(want_remaining)},"
+                f"actual_selected={sorted(selected_ids)}"
+            )
     return ""
 
 

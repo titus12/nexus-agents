@@ -105,6 +105,30 @@ class ImmutableContextMigrationTests(unittest.TestCase):
         self.assertIsNone(context.human_gate)
         self.assertIsNone(context_from_dto(context_to_dto(context)).human_gate)
 
+    def test_context_round_trip_preserves_attempted_finding_ids(self) -> None:
+        batched = replace(
+            self.context(),
+            review=replace(
+                self.context().review,
+                attempted_finding_ids=("finding-000008", "finding-000006"),
+            ),
+        )
+        restored = context_from_dto(context_to_dto(batched))
+        self.assertEqual(
+            restored.review.attempted_finding_ids,
+            ("finding-000008", "finding-000006"),
+        )
+
+    def test_context_round_trip_keeps_absent_attempted_finding_ids_null(self) -> None:
+        # Snapshots written before the fair stuck counter have no key at all;
+        # they must deserialize to None (legacy count-every-round behaviour).
+        dto = context_to_dto(self.context())
+        del dto["review"]["attempted_finding_ids"]
+
+        restored = context_from_dto(dto)
+
+        self.assertIsNone(restored.review.attempted_finding_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

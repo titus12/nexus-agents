@@ -1,4 +1,4 @@
-"""Pure concrete state objects for the linear workflow.
+﻿"""Pure concrete state objects for the linear workflow.
 
 The objects in this module are domain policies only.  They create typed
 ``StateDecision`` values and never perform I/O, persistence, transport, or
@@ -8,7 +8,7 @@ typed ports after the decision has been durably committed.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 import logging
 from types import MappingProxyType
@@ -16,6 +16,7 @@ from typing import ClassVar, Protocol, runtime_checkable
 
 from ..zhongshu_parallel import canonical_plan_hash
 from ..zhongshu_review_queue import build_review_jobs, structural_gate
+from ..zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
 from .context import (
     DeliveryUpdate,
     HumanGateUpdate,
@@ -31,34 +32,37 @@ from .context import (
     apply_review_update,
 )
 from .decisions import ContextUpdate, EffectRequest, StateDecision
-from .errors import FailureRecord, InvariantViolation, is_infrastructure_failure
-from .events import DomainEvent, TransitionRequest
-from .policies.solver_plan import (
-    is_retryable_solver_reply_error,
-    materialize_solver_reply,
-    normalize_solver_finding_ids,
-    solver_batch_coverage_error,
-    solver_revision_response_error,
-    structural_integrity_errors,
+from .errors import (
+    FailureRecord,
+    InvariantViolation,
+    is_infrastructure_failure,
+    is_reply_failure,
 )
+from .events import DomainEvent, TransitionRequest
+from .policies.solver_plan import is_retryable_solver_reply_error
 from .policies.zhongshu import (
     APPROVAL_ACTIONS,
     FREEZE_RETRY_ACTIONS,
     REVISION_ACTIONS,
-    active_blocker_count,
     age_unresolved_findings,
-    approved_item_ids,
     blocker_fingerprint,
     freeze_retry_allowed,
     merge_findings,
     revision_allowed,
-    revision_made_progress,
-    stalled_item_ids,
-    stuck_blockers,
-    unapproved_item_ids,
 )
 from .policies.prompts import build_prompt
 from .transitions import ALL_STATES, BUSINESS_STATES, SYSTEM_STATES, TransitionRegistry
+from .zhongshu import (
+    GateVerdict,
+    SolverStage,
+    build_solver_dispatch,
+    evaluate_gate,
+    fold_round,
+    mark_followups,
+    plan_artifact_effect,
+    process_solver_reply,
+)
+from .zhongshu.solver import revision_scope as _revision_editable_item_ids
 
 
 def _finding_payload(finding: object) -> dict[str, object]:
@@ -95,6 +99,22 @@ def _failure_error_code(payload: Mapping[str, object]) -> str:
     if isinstance(raw, Mapping):
         return str(raw.get("error_code") or "")
     return str(payload.get("error_code") or "")
+
+
+def _failure_budget(error_code: object) -> str:
+    """Return the retry budget that pays for one retryable failure.
+
+    Routing and accounting both read this so they cannot disagree about which
+    counter a retry charged; keeping them separate let a reply failure be routed
+    to one budget while incrementing another.
+    """
+
+    code = str(error_code or "").strip()
+    if code == _TASK_REVIEW_RESULT_INVALID or is_reply_failure(code):
+        return "reply"
+    if is_infrastructure_failure(code):
+        return "external"
+    return "convergence"
 
 
 _ROLE_BY_STATE: dict[str, tuple[str, str]] = {
@@ -173,18 +193,23 @@ class _ConcreteWorkflowState:
             and isinstance(event.payload, Mapping)
             and bool(event.payload.get("retryable"))
         ):
-            if _failure_error_code(event.payload) == _TASK_REVIEW_RESULT_INVALID:
-                # A worker's reply was unusable (format/identity), not a real
-                # content disagreement.  Re-ask it on a dedicated, bounded budget
-                # so a single bad reply does not escalate straight to a human,
-                # while still refusing to loop forever.
+            error_code = _failure_error_code(event.payload)
+            budget = _failure_budget(error_code)
+            if budget == "reply":
+                # A worker's or the agent's reply was unusable (format/shape),
+                # not a real content disagreement.  Re-ask it on a dedicated,
+                # bounded budget so a single bad reply does not escalate straight
+                # to a human, while still refusing to loop forever.  Keeping this
+                # off the runtime budget matters: an unrelated backend outage can
+                # drain that budget first, and a reply syntax slip must still get
+                # its own retry instead of failing the whole run.
                 action = (
                     "RETRY"
                     if context.recovery.reply_retry_count
                     < context.recovery.max_reply_retries
                     else "HUMAN_GATE"
                 )
-            elif is_infrastructure_failure(_failure_error_code(event.payload)):
+            elif budget == "external":
                 # The agent/transport runtime failed (remote run error, missing
                 # result, timeout).  Retry on the external budget so backend
                 # flakiness cannot exhaust the plan-convergence retries.
@@ -286,15 +311,15 @@ class _ConcreteWorkflowState:
                 if update.recovery is not None
                 else self._failure_from_payload(context, payload)
             )
-            if (
-                failure is not None
-                and failure.error_code == _TASK_REVIEW_RESULT_INVALID
-            ):
+            budget = _failure_budget(
+                failure.error_code if failure is not None else ""
+            )
+            if budget == "reply":
                 recovery = RecoveryUpdate(
                     reply_retry_count=context.recovery.reply_retry_count + 1,
                     last_failure=failure,
                 )
-            elif failure is not None and is_infrastructure_failure(failure.error_code):
+            elif budget == "external":
                 recovery = RecoveryUpdate(
                     external_retry_count=context.recovery.external_retry_count + 1,
                     last_failure=failure,
@@ -547,7 +572,12 @@ class _ConcreteWorkflowState:
                 else context.review.active_item_id if context.review else None
             ),
             findings=_merge_and_close_findings(
-                existing, findings, payload.get("task_reviews")
+                existing,
+                findings,
+                payload.get("task_reviews"),
+                attempted_finding_ids=(
+                    context.review.attempted_finding_ids if context.review else None
+                ),
             ),
             plan_ref=str(plan_ref) if plan_ref else None,
             plan_hash=_resolve_plan_hash(payload),
@@ -556,6 +586,8 @@ class _ConcreteWorkflowState:
             task_items=task_items,
             task_groups=task_groups,
             completed_item_ids=tuple(completed),
+            attempted_item_ids=_attempted_item_ids(existing, payload),
+            attempted_finding_ids=_attempted_finding_ids(payload, existing),
             requirements=requirements,
         )
 
@@ -747,6 +779,18 @@ class _ConcreteWorkflowState:
                 payload=payload,
             )
         agent_id = f"{phase.lower()}-{role.split('-')[-1]}"
+        if target == "ZHONGSHU_SOLVER":
+            # The Solver's two input channels are built in the zhongshu
+            # package, one builder per stage; the stage is decided by the
+            # transition edge, not by payload shape.
+            return build_solver_dispatch(
+                context,
+                request_id=request_id,
+                prompt=prompt,
+                revision_id=revision_id,
+                plan_hash=plan_hash,
+                next_item=next_item,
+            )
         payload: dict[str, object] = {
             "issue_id": context.identity.issue_id,
             "request_id": request_id,
@@ -763,29 +807,6 @@ class _ConcreteWorkflowState:
             "group_id": next_item.group_id if next_item else None,
             "item_id": next_item.item_id if next_item else None,
         }
-        if target == "ZHONGSHU_SOLVER" and context.review is not None:
-            # The Solver can only converge if it is told which findings the
-            # Critic still considers blocking, and (on a revision) the exact
-            # plan it must patch.  Without this the agent re-emits the same
-            # plan every round and the review never closes.
-            active = tuple(
-                finding for finding in context.review.findings if finding.active
-            )
-            current_plan = context.review.plan
-            has_plan = isinstance(current_plan, Mapping)
-            payload["dispatch_context"] = {
-                "zhongshu_dispatch_mode": "solver_revision",
-                "solver_revision_mode": has_plan,
-                "has_current_plan": has_plan,
-                "solver_revision_round": context.review.zhongshu_revision_round,
-                "focus_finding_ids": [finding.finding_id for finding in active],
-                "active_findings": [
-                    _finding_payload(finding) for finding in active
-                ],
-                "current_formal_plan": dict(current_plan) if has_plan else None,
-                "current_plan_ref": context.review.plan_ref or "",
-                "current_plan_hash": context.review.plan_hash or "",
-            }
         return EffectRequest(
             effect_id=f"dispatch:{request_id}",
             effect_type="agent_dispatch",
@@ -917,76 +938,45 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         plan_effect: EffectRequest | None = None
         if event.name != "TIMEOUT" and action == "READY_FOR_CRITIC":
             payload = dict(event.payload) if isinstance(event.payload, Mapping) else {}
-            review = context.review
-            active_ids = (
-                [finding.finding_id for finding in review.findings if finding.active]
-                if review is not None
-                else []
-            )
-            # Canonicalize the reply's finding ids once, before any policy reads
-            # it, so an abbreviated-but-unambiguous id is still matched by the
-            # coverage check and by the revision scope.
-            payload = normalize_solver_finding_ids(payload, active_ids)
-            error = solver_revision_response_error(
-                active_ids,
-                review is not None and isinstance(review.plan, Mapping),
-                payload,
-            )
-            if not error:
-                error = solver_batch_coverage_error(active_ids, payload)
-            materialized: dict[str, object] | None = None
-            if not error:
-                materialized, error = materialize_solver_reply(
-                    payload,
-                    review.plan if review is not None else None,
-                    editable_item_ids=_revision_editable_item_ids(review, payload),
-                )
-            if not error and materialized is not None:
-                integrity_errors = structural_integrity_errors(materialized)
-                if integrity_errors:
-                    error = "SOLVER_PLAN_STRUCTURE_INVALID:" + ";".join(
-                        integrity_errors[:10]
-                    )
-            if error:
+            # Stage routing lives in the zhongshu package: the formalize
+            # (Analyst) and revise (Critic) channels validate and materialize
+            # through separate logic classes.
+            outcome = process_solver_reply(payload, context.review)
+            if outcome.error:
                 if (
-                    is_retryable_solver_reply_error(error)
+                    is_retryable_solver_reply_error(outcome.error)
                     and context.recovery.reply_retry_count
                     < context.recovery.max_reply_retries
                 ):
-                    return self._retry_solver_reply(context, event, error)
+                    return self._retry_solver_reply(context, event, outcome.error)
                 logger.warning(
                     "ZHONGSHU_SOLVER_REVISION_REJECTED task_id=%s error=%s",
                     context.identity.task_id,
-                    error,
+                    outcome.error,
                 )
                 return self._blocked_decision(context, event, self.invalid_reason)
-            if materialized is not None:
+            if outcome.materialized is not None:
                 # Replace the reply with the orchestrator-owned full plan so
                 # the review projection, plan hash, and next revision all use
                 # the materialized graph rather than a raw patch.
                 clean_payload = {
                     key: value
-                    for key, value in payload.items()
+                    for key, value in outcome.payload.items()
                     if key not in {"plan_hash", "reviewed_plan_hash"}
                 }
                 event = replace(
                     event,
-                    payload={**clean_payload, "plan": materialized, "changes": []},
-                )
-                sequence = context.progression.sequence
-                plan_effect = EffectRequest(
-                    effect_id=f"plan:{context.identity.task_id}:{sequence + 1}",
-                    effect_type="plan_artifact",
-                    task_id=context.identity.task_id,
-                    idempotency_key=(
-                        f"{context.identity.task_id}:policy-plan:{sequence + 1}"
-                    ),
                     payload={
-                        "plan": materialized,
-                        "plan_hash": canonical_plan_hash(materialized),
-                        "revision_id": str(payload.get("revision_id") or ""),
-                        "sequence": sequence,
+                        **clean_payload,
+                        "plan": outcome.materialized,
+                        "changes": [],
                     },
+                )
+                plan_effect = plan_artifact_effect(
+                    context.identity.task_id,
+                    context.progression.sequence,
+                    outcome.materialized,
+                    str(outcome.payload.get("revision_id") or ""),
                 )
         decision = super().handle(context, event)
         if plan_effect is not None:
@@ -1059,6 +1049,7 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
     stuck_finding_reason = "ZHONGSHU_STUCK_FINDING"
     freeze_incomplete_reason = "ZHONGSHU_FREEZE_INCOMPLETE"
     item_stalled_reason = "ZHONGSHU_ITEM_STALLED"
+    followup_reason = "ZHONGSHU_FREEZE_WITH_FOLLOWUPS"
 
     def handle(self, context: WorkflowContext, event: DomainEvent) -> StateDecision:
         self._require_current_state(context)
@@ -1066,18 +1057,15 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
         action = self._event_action(event)
         if event.name != "TIMEOUT" and action in APPROVAL_ACTIONS:
             decision = self._transition_decision(context, event, action=action)
-            pending = unapproved_item_ids(
-                self._ledger_after(context, decision),
-                self._expected_item_ids(context, decision),
-            )
+            round_after = self._round_after(context, decision)
+            pending = round_after.unapproved_item_ids
             if not pending:
                 return decision
             # A review round re-reviews only the tasks that are unapproved or
             # whose content changed, so this round's verdicts can be a strict
             # subset of the graph.  Freezing on that subset would release
             # unreviewed work to Menxia, so the freeze is held back.
-            blockers = active_blocker_count(self._findings_after(context, decision))
-            if not blockers:
+            if not round_after.active_blockers:
                 logger.warning(
                     "ZHONGSHU_FREEZE_INCOMPLETE task_id=%s pending_items=%s",
                     context.identity.task_id,
@@ -1090,7 +1078,7 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                 "ZHONGSHU_APPROVAL_HELD task_id=%s pending_items=%s blockers=%s",
                 context.identity.task_id,
                 list(pending),
-                blockers,
+                round_after.active_blockers,
             )
             action = "REQUEST_SOLVER_REVISION"
         if event.name != "TIMEOUT" and action in REVISION_ACTIONS:
@@ -1102,81 +1090,13 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                 return self._blocked_decision(context, event, self.exhausted_reason)
             decision = self._transition_decision(context, event, action=action)
             if context.review is not None:
-                merged_findings = (
-                    decision.update.review.findings
-                    if decision.update.review is not None
-                    and decision.update.review.findings is not None
-                    else context.review.findings
+                round_after = self._round_after(context, decision)
+                verdict = self._gate_verdict(context, round_after)
+                gate_decision = self._apply_gate_verdict(
+                    context, event, decision, round_after, verdict, action
                 )
-                blockers = active_blocker_count(merged_findings)
-                ledger = self._ledger_after(context, decision)
-                pending = unapproved_item_ids(
-                    ledger, self._expected_item_ids(context, decision)
-                )
-                if ledger and not pending and blockers == 0:
-                    # The aggregate asked for another revision, but every
-                    # reviewed task is already approved and no blocker survives
-                    # the merge: there is nothing left to revise, so freeze
-                    # instead of spending a revision round on a no-op.  An
-                    # empty ledger is not evidence of approval, so this only
-                    # applies once per-task verdicts exist.
-                    logger.warning(
-                        "ZHONGSHU_FREEZE_WITHOUT_REVISION task_id=%s action=%s",
-                        context.identity.task_id,
-                        action,
-                    )
-                    return self._transition_decision(
-                        context, event, action="APPROVE_CRITIC"
-                    )
-                stalled = stalled_item_ids(
-                    ledger,
-                    (
-                        context.review.max_item_revision_rounds
-                        if context.review is not None
-                        else 0
-                    ),
-                )
-                if stalled:
-                    # One task has been rejected for too many consecutive rounds.
-                    # More graph-level rounds would only hide it: hand the
-                    # specific task to a human with an explicit reason.
-                    logger.warning(
-                        "ZHONGSHU_ITEM_STALLED task_id=%s items=%s rounds=%s",
-                        context.identity.task_id,
-                        list(stalled),
-                        context.review.max_item_revision_rounds,
-                    )
-                    return self._human_gate_decision(
-                        context, event, self.item_stalled_reason
-                    )
-                stuck = stuck_blockers(
-                    merged_findings, context.recovery.max_stuck_finding_rounds
-                )
-                if stuck:
-                    # The same finding survived several Solver revisions.  More
-                    # rounds are not evidence of convergence, so stop and hand
-                    # the unresolved finding to a human with an explicit reason.
-                    logger.warning(
-                        "ZHONGSHU_STUCK_FINDING task_id=%s rounds=%s findings=%s",
-                        context.identity.task_id,
-                        context.recovery.max_stuck_finding_rounds,
-                        [str(getattr(item, "finding_id", "")) for item in stuck],
-                    )
-                    return self._stuck_finding_decision(context, event)
-                made_progress = revision_made_progress(
-                    context.review.last_reply_fingerprint, blockers
-                )
-                no_progress = (
-                    0
-                    if made_progress
-                    else context.recovery.no_progress_count + 1
-                )
-                if no_progress >= context.recovery.max_no_progress:
-                    # Repeated rounds stopped reducing active P0/P1 blockers:
-                    # this is a stall, not convergence.
-                    return self._blocked_decision(
-                        context, event, self.no_progress_reason
-                    )
+                if gate_decision is not None:
+                    return gate_decision
                 review_update = decision.update.review
                 if review_update is None:
                     review_update = ReviewUpdate(revision_id=context.review.revision_id)
@@ -1189,62 +1109,149 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                             zhongshu_revision_round=(
                                 context.review.zhongshu_revision_round + 1
                             ),
-                            last_reply_fingerprint=blocker_fingerprint(blockers),
+                            last_reply_fingerprint=blocker_fingerprint(
+                                round_after.active_blockers
+                            ),
                         ),
-                        recovery=RecoveryUpdate(no_progress_count=no_progress),
+                        recovery=RecoveryUpdate(
+                            no_progress_count=verdict.no_progress_count
+                        ),
                     ),
                 )
             return decision
         return super().handle(context, event)
 
-    def _ledger_after(
-        self,
-        context: WorkflowContext,
-        decision: StateDecision,
-    ) -> tuple[ReviewTaskRecord, ...]:
-        """Folded task ledger the decision would persist, or the current one."""
+    def _round_after(self, context: WorkflowContext, decision: StateDecision):
+        """Aggregated round the decision would persist (see ``zhongshu.critic``)."""
 
         review_update = decision.update.review
         ledger = (
             review_update.task_review_ledger
-            if review_update is not None
-            else None
+            if review_update is not None and review_update.task_review_ledger is not None
+            else (tuple(context.review.task_review_ledger) if context.review else ())
         )
-        if ledger is not None:
-            return tuple(ledger)
-        return tuple(context.review.task_review_ledger) if context.review else ()
+        findings = (
+            review_update.findings
+            if review_update is not None and review_update.findings is not None
+            else (tuple(context.review.findings) if context.review else ())
+        )
+        items = (
+            review_update.task_items
+            if review_update is not None and review_update.task_items is not None
+            else (context.review.task_items if context.review else ())
+        )
+        expected = tuple(
+            dict.fromkeys(
+                str(getattr(item, "item_id", "") or "").strip()
+                for item in items or ()
+                if str(getattr(item, "item_id", "") or "").strip()
+            )
+        )
+        return fold_round(
+            ledger=ledger,
+            findings=findings,
+            expected_item_ids=expected,
+            max_item_rounds=(
+                context.review.max_item_revision_rounds if context.review else 0
+            ),
+        )
 
-    def _findings_after(
+    def _gate_verdict(self, context: WorkflowContext, round_after) -> GateVerdict:
+        return evaluate_gate(
+            round_after,
+            revision_allowed=True,
+            previous_fingerprint=(
+                context.review.last_reply_fingerprint if context.review else None
+            ),
+            no_progress_count=context.recovery.no_progress_count,
+            max_no_progress=context.recovery.max_no_progress,
+            max_stuck_rounds=context.recovery.max_stuck_finding_rounds,
+        )
+
+    def _apply_gate_verdict(
         self,
         context: WorkflowContext,
+        event: DomainEvent,
         decision: StateDecision,
-    ) -> tuple[object, ...]:
-        """Merged findings the decision would persist, or the current ones."""
+        round_after,
+        verdict: GateVerdict,
+        action: str,
+    ) -> StateDecision | None:
+        """Render the gate verdict; ``None`` means the round proceeds."""
 
-        review_update = decision.update.review
-        findings = review_update.findings if review_update is not None else None
-        if findings is not None:
-            return tuple(findings)
-        return tuple(context.review.findings) if context.review else ()
-
-    def _expected_item_ids(
-        self,
-        context: WorkflowContext,
-        decision: StateDecision,
-    ) -> tuple[str, ...]:
-        """Tasks the current reviewed graph contains, for coverage checks."""
-
-        review_update = decision.update.review
-        items = review_update.task_items if review_update is not None else None
-        if items is None:
-            items = context.review.task_items if context.review else ()
-        result: list[str] = []
-        for item in items or ():
-            item_id = str(getattr(item, "item_id", "") or "").strip()
-            if item_id:
-                result.append(item_id)
-        return tuple(dict.fromkeys(result))
-
+        if verdict.deferred_followup_unreviewed:
+            logger.warning(
+                "ZHONGSHU_FREEZE_WITH_FOLLOWUPS_DEFERRED task_id=%s unreviewed=%s",
+                context.identity.task_id,
+                list(verdict.deferred_followup_unreviewed),
+            )
+        if verdict.action == "APPROVE_CRITIC":
+            # The aggregate asked for another revision, but every reviewed task
+            # is already approved and no blocker survives the merge: there is
+            # nothing left to revise, so freeze instead of spending a revision
+            # round on a no-op.  An empty ledger is not evidence of approval,
+            # so this only applies once per-task verdicts exist.
+            logger.warning(
+                "ZHONGSHU_FREEZE_WITHOUT_REVISION task_id=%s action=%s",
+                context.identity.task_id,
+                action,
+            )
+            return self._transition_decision(context, event, action="APPROVE_CRITIC")
+        if verdict.action == "FREEZE_WITH_FOLLOWUPS":
+            logger.warning(
+                "ZHONGSHU_FREEZE_WITH_FOLLOWUPS task_id=%s p1_followups=%s",
+                context.identity.task_id,
+                list(verdict.followup_finding_ids),
+            )
+            freeze = self._transition_decision(context, event, action="APPROVE_CRITIC")
+            review_update = freeze.update.review
+            if review_update is None:
+                review_update = ReviewUpdate(
+                    revision_id=context.review.revision_id if context.review else ""
+                )
+            return replace(
+                freeze,
+                transition=TransitionRequest(
+                    action="APPROVE_CRITIC", reason_code=self.followup_reason
+                ),
+                update=replace(
+                    freeze.update,
+                    review=replace(
+                        review_update,
+                        findings=mark_followups(
+                            round_after.findings,
+                            verdict.followup_finding_ids,
+                            "冻结时接受为跟进项：预算内未收敛的 P1",
+                        ),
+                    ),
+                ),
+            )
+        if verdict.action == "HUMAN_GATE":
+            if verdict.reason_code == "ZHONGSHU_STUCK_FINDING":
+                # The same finding survived several Solver revisions.  More
+                # rounds are not evidence of convergence, so stop and hand
+                # the unresolved finding to a human with an explicit reason.
+                logger.warning(
+                    "ZHONGSHU_STUCK_FINDING task_id=%s rounds=%s findings=%s",
+                    context.identity.task_id,
+                    context.recovery.max_stuck_finding_rounds,
+                    list(verdict.stuck_finding_ids),
+                )
+                return self._stuck_finding_decision(context, event)
+            # One task has been rejected for too many consecutive rounds while
+            # the graph is otherwise progressing.  More graph-level rounds
+            # would only hide it: hand the specific task to a human with an
+            # explicit reason.
+            logger.warning(
+                "ZHONGSHU_ITEM_STALLED task_id=%s items=%s rounds=%s",
+                context.identity.task_id,
+                list(round_after.stalled_item_ids),
+                context.review.max_item_revision_rounds if context.review else 0,
+            )
+            return self._human_gate_decision(context, event, self.item_stalled_reason)
+        if verdict.action == "BLOCKED":
+            return self._blocked_decision(context, event, verdict.reason_code)
+        return None
 
 class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
     name = "ZHONGSHU_FREEZE_CHECK"
@@ -1517,52 +1524,6 @@ def _task_review_bindings(
     return bindings
 
 
-def _revision_editable_item_ids(
-    review: object,
-    payload: Mapping[str, object],
-) -> set[str] | None:
-    """Items a scoped revision may change: owners of its selected findings.
-
-    Tasks the Critic already approved are subtracted from the scope so a later
-    revision cannot silently rewrite accepted work: rewriting it changes the
-    review surface, drops the approval, and forces the Critic to re-review (and
-    re-find) work that had already passed.
-
-    Returning ``None`` means the reply is not treated as a scoped revision
-    (initial run, no active plan, or no declared finding batch), which keeps the
-    full-plan materialization path.  An empty set is a *valid* scope meaning no
-    task may change; it is not the same as ``None``.
-    """
-
-    if review is None or not isinstance(getattr(review, "plan", None), Mapping):
-        return None
-    batch = payload.get("finding_batch")
-    if not isinstance(batch, Mapping):
-        return None
-    selected = batch.get("selected_finding_ids")
-    if not isinstance(selected, list):
-        return None
-    selected_ids = {str(value).strip() for value in selected if str(value).strip()}
-    if not selected_ids:
-        return None
-    scope: set[str] = set()
-    for finding in getattr(review, "findings", ()) or ():
-        finding_id = str(getattr(finding, "finding_id", "") or "")
-        if finding_id not in selected_ids:
-            continue
-        item_id = str(getattr(finding, "item_id", "") or "").strip()
-        if not item_id:
-            item_id = str(getattr(finding, "target", "") or "").strip().split("/")[-1]
-        if item_id:
-            scope.add(item_id)
-    if not scope:
-        return None
-    scope.difference_update(
-        approved_item_ids(getattr(review, "task_review_ledger", ()) or ())
-    )
-    return scope
-
-
 def _select_review_jobs(
     jobs: object,
     review: object,
@@ -1591,6 +1552,8 @@ def _merge_and_close_findings(
     existing: tuple[object, ...],
     incoming: tuple[object, ...],
     task_reviews: object,
+    *,
+    attempted_finding_ids: Iterable[str] | None = None,
 ) -> tuple[object, ...]:
     """Merge findings and close those owned by a task the Critic approved."""
 
@@ -1614,7 +1577,89 @@ def _merge_and_close_findings(
                 else finding
                 for finding in merged
             )
-    return age_unresolved_findings(existing, merged, incoming)
+    return age_unresolved_findings(
+        existing,
+        merged,
+        incoming,
+        attempted_finding_ids=attempted_finding_ids,
+    )
+
+
+def _attempted_finding_ids(
+    payload: Mapping[str, object],
+    existing: tuple[object, ...],
+) -> tuple[str, ...] | None:
+    """Findings the Solver was actually asked to resolve, for fair stuck counting.
+
+    A revision was dictated a batch, so its echo names exactly the findings the
+    round attempted.  A full re-plan (no batch) had a chance at every active
+    finding.  ``None`` — payloads without Solver output — keeps the previously
+    recorded attempt instead of pretending the round changed it.
+    """
+
+    batch = payload.get("finding_batch")
+    if isinstance(batch, Mapping):
+        selected = batch.get("selected_finding_ids")
+        if isinstance(selected, list):
+            return tuple(
+                dict.fromkeys(
+                    str(value).strip() for value in selected if str(value).strip()
+                )
+            )
+        return None
+    if payload.get("plan") is not None or payload.get("task_graph") is not None:
+        return (
+            tuple(
+                dict.fromkeys(
+                    str(getattr(finding, "finding_id", "") or "").strip()
+                    for finding in existing or ()
+                    if getattr(finding, "active", False)
+                    and str(getattr(finding, "finding_id", "") or "").strip()
+                )
+            )
+            or None
+        )
+    return None
+
+
+def _attempted_item_ids(
+    findings: tuple[object, ...],
+    payload: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    """Items a Solver revision was actually asked to fix.
+
+    Taken from the revision's bounded finding batch: the Critic can only fairly
+    count a rejection against a task the Solver was given a chance to repair.
+    Returns ``None`` when the reply carries no batch, leaving the previously
+    recorded attempt untouched instead of pretending nothing was attempted.
+    """
+
+    batch = payload.get("finding_batch")
+    if not isinstance(batch, Mapping):
+        return None
+    selected = batch.get("selected_finding_ids")
+    if not isinstance(selected, list):
+        return None
+    selected_ids = {str(value).strip() for value in selected if str(value).strip()}
+    if not selected_ids:
+        return ()
+    item_of: dict[str, str] = {}
+    for finding in findings or ():
+        finding_id = str(getattr(finding, "finding_id", "") or "")
+        if not finding_id:
+            continue
+        item_id = str(getattr(finding, "item_id", "") or "").strip()
+        if not item_id:
+            item_id = str(getattr(finding, "target", "") or "").strip().split("/")[-1]
+        if item_id:
+            item_of[finding_id] = item_id
+    return tuple(
+        dict.fromkeys(
+            item_of[finding_id]
+            for finding_id in sorted(selected_ids)
+            if item_of.get(finding_id)
+        )
+    )
 
 
 def _task_review_ledger_update(
@@ -1628,6 +1673,11 @@ def _task_review_ledger_update(
     it a later round that re-dispatches the same task can demote an approval on
     a differently-worded but content-identical verdict, so the graph oscillates
     between APPROVED and CHANGES_REQUIRED and never reaches the freeze.
+
+    The rejection counter only advances for tasks the Solver's last bounded
+    finding batch actually asked to fix.  A batch covers part of the graph, so
+    counting every verdict would let a task that was deferred to a later batch
+    burn its stall budget while the Solver was never asked to touch it.
     """
 
     raw = payload.get("task_reviews")
@@ -1638,6 +1688,13 @@ def _task_review_ledger_update(
         for record in (
             context.review.task_review_ledger if context.review else ()
         )
+    }
+    attempted = {
+        str(item).strip()
+        for item in (
+            context.review.attempted_item_ids if context.review else ()
+        )
+        if str(item).strip()
     }
     updated = False
     for entry in raw:
@@ -1664,16 +1721,27 @@ def _task_review_ledger_update(
             )
             continue
         approved = action == "TASK_APPROVED"
+        # An unknown attempt set (legacy state, or a round with no batch) keeps
+        # the historical behaviour of counting every rejection.
+        counted = not attempted or item_id in attempted
+        if approved:
+            rounds = 0
+        elif counted:
+            rounds = previous.changes_rounds + 1 if previous is not None else 1
+        else:
+            rounds = previous.changes_rounds if previous is not None else 0
+            logger.info(
+                "ZHONGSHU_TASK_STALL_DEFERRED task_id=%s item_id=%s rounds=%s",
+                context.identity.task_id,
+                item_id,
+                rounds,
+            )
         current[item_id] = ReviewTaskRecord(
             item_id=item_id,
             task_hash=task_hash,
             dependency_hash=dependency_hash,
             status=("APPROVED" if approved else "CHANGES_REQUIRED"),
-            changes_rounds=(
-                0
-                if approved
-                else (previous.changes_rounds + 1 if previous is not None else 1)
-            ),
+            changes_rounds=rounds,
         )
         updated = True
     return tuple(current.values()) if updated else None
@@ -1888,3 +1956,5 @@ __all__ = [
     "ZhongshuFreezeCheckState",
     "ZhongshuSolverState",
 ]
+
+

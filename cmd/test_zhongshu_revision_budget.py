@@ -204,9 +204,9 @@ class ZhongshuNoProgressTests(unittest.TestCase):
         self.assertEqual(decision.update.recovery.no_progress_count, 0)
         self.assertEqual(decision.update.review.last_reply_fingerprint, "blockers=1")
 
-    def test_repeated_blocker_count_blocks_after_budget(self) -> None:
+    def test_repeated_p0_blocker_blocks_after_budget(self) -> None:
         context = self._context(
-            (_finding("f-1"),), fingerprint="blockers=1", no_progress=2
+            (_finding("f-1", severity="P0"),), fingerprint="blockers=1", no_progress=2
         )
         decision = self.state.handle(context, _event("REQUEST_SOLVER_REVISION"))
 
@@ -217,6 +217,21 @@ class ZhongshuNoProgressTests(unittest.TestCase):
         )
         after = self.reducer.apply(self._snapshot(context), decision)
         self.assertEqual(after.context.progression.state, "BLOCKED")
+
+    def test_repeated_p1_blocker_freezes_with_followups(self) -> None:
+        context = self._context(
+            (_finding("f-1"),), fingerprint="blockers=1", no_progress=2
+        )
+        decision = self.state.handle(context, _event("REQUEST_SOLVER_REVISION"))
+
+        self.assertEqual(decision.transition.action, "APPROVE_CRITIC")
+        self.assertEqual(
+            decision.transition.reason_code, "ZHONGSHU_FREEZE_WITH_FOLLOWUPS"
+        )
+        after = self.reducer.apply(self._snapshot(context), decision)
+        self.assertEqual(after.context.progression.state, "ZHONGSHU_FREEZE_CHECK")
+        (finding,) = after.context.review.findings
+        self.assertEqual(finding.status, "DEFERRED")
 
     def test_fewer_blockers_resets_no_progress_counter(self) -> None:
         context = self._context(
@@ -355,6 +370,9 @@ class ZhongshuTaskReviewInvalidRetryTests(unittest.TestCase):
         self.assertEqual(decision.transition.action, "HUMAN_GATE")
 
     def test_transient_failure_still_uses_the_shared_retry_budget(self) -> None:
+        # A *content* failure (the reply parsed, but its meaning was wrong) shares
+        # the convergence budget.  Reply-shape failures have their own code (see
+        # the reply-budget tests above), so this case must not use one of those.
         context = self._context(retry=0)
         event = DomainEvent(
             "FAIL",
@@ -373,7 +391,7 @@ class ZhongshuTaskReviewInvalidRetryTests(unittest.TestCase):
                     "node_run_id": "node:task-1:ZHONGSHU_CRITIC:6",
                     "worker_id": "worker-01",
                     "effect_id": None,
-                    "error_code": "AGENT_REPLY_CONTRACT_REJECTED",
+                    "error_code": "SOLVER_CHANGE_OP_UNKNOWN",
                     "retryable": True,
                     "message": "missing",
                     "cause_type": "ReplyValidationError",

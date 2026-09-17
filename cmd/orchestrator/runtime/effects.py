@@ -8,16 +8,32 @@ from typing import Protocol
 import uuid
 
 from ..domain.decisions import EffectRequest
-from ..domain.errors import DomainError, FailureRecord, InvariantViolation
+from ..domain.errors import (
+    CONTRACT_REJECTED_EVENT,
+    DomainError,
+    FailureRecord,
+    InvariantViolation,
+    UNSTRUCTURED_REPLY_EVENT,
+)
 from .event_inbox import effect_result_event
 from .repository import EffectRecord, EffectResult, WorkflowRepository
 
 
-# A non-JSON agent reply is normalized to this synthetic action (see
-# ``adapters.py``).  It is not a domain action, so a single-agent dispatch must
-# never surface it as a completed event: no FSM state accepts it.  It is
-# translated into a retryable failure so the workflow can re-ask the agent.
-UNSTRUCTURED_REPLY_EVENT = "__UNSTRUCTURED_REPLY__"
+# Synthetic actions a transport may use for a delivered-but-unusable reply: a body
+# that is not the required JSON contract at all, or JSON that the role validator
+# refused.  Neither is a domain action, so a dispatch must never surface either as
+# a completed event; both become a retryable reply-shape failure so the workflow
+# re-asks the agent instead of reporting a missing result.
+REPLY_EVENT_FAILURES = {
+    UNSTRUCTURED_REPLY_EVENT: (
+        "AGENT_REPLY_UNSTRUCTURED",
+        "agent reply was not the required JSON result contract",
+    ),
+    CONTRACT_REJECTED_EVENT: (
+        "AGENT_REPLY_CONTRACT_REJECTED",
+        "agent reply violated the role result contract",
+    ),
+}
 
 
 class EffectRunner(Protocol):
@@ -151,8 +167,13 @@ class EffectManager:
                 return EffectResult(effect.effect_id, effect.task_id, "FAILED", failure)
             if (
                 outcome.status == "SUCCEEDED"
-                and outcome.event_name == UNSTRUCTURED_REPLY_EVENT
+                and outcome.event_name in REPLY_EVENT_FAILURES
             ):
+                error_code, default_message = REPLY_EVENT_FAILURES[outcome.event_name]
+                reason = ""
+                if isinstance(outcome.event_payload, Mapping):
+                    reason = str(outcome.event_payload.get("contract_rejection") or "")
+                message = f"{default_message}: {reason}" if reason else default_message
                 failure = FailureRecord(
                     failure_id=uuid.uuid4().hex,
                     stage="agent_result",
@@ -163,9 +184,9 @@ class EffectManager:
                     node_run_id=None,
                     worker_id=None,
                     effect_id=effect.effect_id,
-                    error_code="AGENT_REPLY_UNSTRUCTURED",
+                    error_code=error_code,
                     retryable=True,
-                    message="agent reply was not the required JSON result contract",
+                    message=message,
                     cause_type="AgentReply",
                 )
                 return EffectResult(
@@ -220,5 +241,7 @@ __all__ = [
     "EffectOutcome",
     "EffectRunner",
     "EffectRunnerNotFound",
+    "CONTRACT_REJECTED_EVENT",
+    "REPLY_EVENT_FAILURES",
     "UNSTRUCTURED_REPLY_EVENT",
 ]

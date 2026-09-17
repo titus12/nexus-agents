@@ -1,4 +1,4 @@
-"""Pure role and review policies for the immutable workflow domain."""
+﻿"""Pure role and review policies for the immutable workflow domain."""
 
 from .menxia import findings_for_scope, validate_scope
 from .parallel import aggregate_zhongshu_workers
@@ -9,7 +9,9 @@ from .zhongshu import (
     FREEZE_RETRY_ACTIONS,
     REVISION_ACTIONS,
     active_blocker_count,
+    active_blocker_ids,
     active_findings,
+    active_findings_by_severity,
     approved_item_ids,
     blocker_fingerprint,
     freeze_retry_allowed,
@@ -28,7 +30,9 @@ __all__ = [
     "PromptSpec",
     "REVISION_ACTIONS",
     "active_blocker_count",
+    "active_blocker_ids",
     "active_findings",
+    "active_findings_by_severity",
     "aggregate_zhongshu_workers",
     "approved_item_ids",
     "blocker_fingerprint",
@@ -44,3 +48,7 @@ __all__ = [
     "unapproved_item_ids",
     "validate_scope",
 ]
+
+
+
+

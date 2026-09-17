@@ -42,7 +42,7 @@ class MulticaDispatchAssignmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             adapter = self._adapter(directory)
 
-            def fake_run(*args):
+            def fake_run(*args, cwd=None):
                 calls.append(args)
                 if args[:2] == ("issue", "runs"):
                     return {"runs": [{"id": "run-before"}]}
@@ -67,11 +67,14 @@ class MulticaDispatchAssignmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             adapter = self._adapter(directory)
 
-            def fake_run(*args):
+            def fake_run(*args, cwd=None):
                 if args[:2] == ("issue", "runs"):
                     return {"runs": []}
                 if args[:2] == ("issue", "comment") and "--content-file" in args:
                     path = Path(args[args.index("--content-file") + 1])
+                    if not path.is_absolute():
+                        # The CLI runs from the adapter's scratch directory.
+                        path = adapter.log_dir / path
                     captured["content"] = path.read_text(encoding="utf-8")
                 return {"id": "comment-1"}
 

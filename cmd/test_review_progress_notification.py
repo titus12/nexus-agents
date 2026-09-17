@@ -154,6 +154,18 @@ class RetryBudgetNotificationTests(unittest.TestCase):
         )
         self.assertIn("重试次数：2/3", text)
 
+    def test_unusable_reply_reports_the_reply_budget(self) -> None:
+        text = self._text(
+            RecoveryState(
+                reply_retry_count=2,
+                max_reply_retries=3,
+                external_retry_count=3,
+                max_external_retries=3,
+                last_failure=self._failure("AGENT_REPLY_UNSTRUCTURED"),
+            )
+        )
+        self.assertIn("重试次数：2/3", text)
+
     def test_content_retry_reports_the_convergence_budget(self) -> None:
         text = self._text(
             RecoveryState(

@@ -7,6 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator.adapters import MulticaCliAdapter
+from orchestrator.structured_output import (
+    build_structured_output_spec,
+    role_result_template,
+)
 from orchestrator.transport.external import AgentRequest
 
 
@@ -141,6 +145,109 @@ class InlineResultPollTests(unittest.TestCase):
                 messages = adapter.poll(request)
 
             self.assertEqual(messages, [])
+
+
+class SolverRevisionReplyPollTests(unittest.TestCase):
+    """A delivered-but-unusable reply must never look like a missing result.
+
+    Production incident: the Solver answered a revision with the mode its own
+    Skill documents (``..._READ_ONLY_RESUME``) while the dispatch advertised the
+    initial mode.  The reply was rejected and dropped without a counter, so the
+    effect reported ``AGENT_RESULT_MISSING`` and burned the infrastructure retry
+    budget three times before failing the task.
+    """
+
+    INITIAL = "TASK_GRAPH_FORMALIZATION_READ_ONLY"
+    RESUME = "TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME"
+    FOREIGN = "REVIEW_ONE_TASK"
+
+    def _spec(self):
+        spec = build_structured_output_spec(
+            "ZHONGSHU", "review-solver", {"active_runtime_state": "ZHONGSHU_SOLVER"}
+        )
+        assert spec is not None
+        return spec
+
+    def _request(self, spec) -> AgentRequest:
+        return AgentRequest(
+            task_id="task-rev",
+            issue_id="SER-1208",
+            request_id="req-rev",
+            agent_id="solver-agent",
+            role="review-solver",
+            phase="ZHONGSHU",
+            prompt="short prompt",
+            idempotency_key="key-rev",
+            target_state="ZHONGSHU_SOLVER",
+            structured_output=spec.to_dict(),
+            context={},
+        )
+
+    def _payload(self, spec, mode: str) -> dict:
+        return role_result_template(
+            "ZHONGSHU",
+            "review-solver",
+            task_id="task-rev",
+            request_id="req-rev",
+            state="ZHONGSHU_SOLVER",
+            role_mode=mode,
+            schema_hash=spec.schema_hash,
+            action="READY_FOR_CRITIC",
+        )
+
+    def _poll(self, mode: str):
+        spec = self._spec()
+        request = self._request(spec)
+        payload = self._payload(spec, mode)
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = MulticaCliAdapter(Path(temporary) / "transport")
+            with patch.object(
+                adapter,
+                "_run_with_read_retry",
+                return_value=[{
+                    "id": "solver-reply",
+                    "author_id": "solver-agent",
+                    "created_at": "2026-09-16T10:51:27Z",
+                    "content": json.dumps(payload, ensure_ascii=False),
+                }],
+            ):
+                return adapter.poll(request)
+
+    def test_revision_mode_reply_is_delivered_as_a_valid_result(self) -> None:
+        messages = self._poll(self.RESUME)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].payload["action"], "READY_FOR_CRITIC")
+        self.assertEqual(messages[0].payload["mode"], self.RESUME)
+
+    def test_undeclared_mode_reply_becomes_a_reply_shape_failure(self) -> None:
+        messages = self._poll(self.FOREIGN)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].payload["action"], "__CONTRACT_REJECTED__")
+        self.assertIn("role mode mismatch", messages[0].payload["contract_rejection"])
+
+    def test_rejected_result_file_becomes_a_reply_shape_failure(self) -> None:
+        """A file the agent wrote but the validator refused is not a missing result."""
+
+        spec = self._spec()
+        request = self._request(spec)
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = MulticaCliAdapter(Path(temporary) / "transport")
+            result_path = adapter.prompt_bundle_builder.result_path(
+                "task-rev", "req-rev"
+            )
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(
+                json.dumps(self._payload(spec, self.FOREIGN)),
+                encoding="utf-8",
+            )
+            with patch.object(adapter, "_run_with_read_retry", return_value=[]):
+                messages = adapter.poll(request)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].payload["action"], "__CONTRACT_REJECTED__")
+        self.assertIn("role mode mismatch", messages[0].payload["contract_rejection"])
 
 
 if __name__ == "__main__":

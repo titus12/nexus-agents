@@ -1,4 +1,4 @@
-"""One-time conversion of legacy JSON state into a New runtime snapshot.
+﻿"""One-time conversion of legacy JSON state into a New runtime snapshot.
 
 The converter accepts an untyped persisted mapping only.  The removed mutable
 context class is intentionally not imported here, so the new runtime has no
@@ -176,7 +176,7 @@ def legacy_dto_to_snapshot(
             freeze_check_attempt=_int(value, "freeze_check_attempt", 0),
             max_freeze_check_attempts=_int(value, "max_freeze_check_attempts", 2),
             item_revision_round=_int(value, "item_revision_round", 0),
-            max_item_revision_rounds=_int(value, "max_item_revision_rounds", 3),
+            max_item_revision_rounds=_int(value, "max_item_revision_rounds", 5),
             last_reply_fingerprint=str(value.get("last_reply_fingerprint") or ""),
             plan_ref=request_payload_ref if task_items else None,
             plan_hash=queue_plan_hash,
@@ -476,3 +476,4 @@ def _now() -> str:
 
 
 __all__ = ["legacy_dto_to_snapshot"]
+

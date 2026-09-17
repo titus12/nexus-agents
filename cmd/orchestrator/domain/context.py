@@ -1,4 +1,4 @@
-"""Immutable aggregates that represent the workflow's durable domain state."""
+﻿"""Immutable aggregates that represent the workflow's durable domain state."""
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ class ReviewState:
     freeze_check_attempt: int = 0
     max_freeze_check_attempts: int = 2
     item_revision_round: int = 0
-    max_item_revision_rounds: int = 3
+    max_item_revision_rounds: int = 5
     last_reply_fingerprint: str = ""
     plan_ref: str | None = None
     plan_hash: str | None = None
@@ -135,6 +135,19 @@ class ReviewState:
     task_groups: tuple[ReviewTaskGroup, ...] = ()
     completed_item_ids: tuple[str, ...] = ()
     task_review_ledger: tuple[ReviewTaskRecord, ...] = ()
+    # Items the latest Solver revision was actually asked to fix, taken from its
+    # bounded finding batch.  The per-item stall counter only advances for these,
+    # so a task the Solver legitimately deferred to a later batch cannot be
+    # escalated for rejections it never had a chance to address.
+    attempted_item_ids: tuple[str, ...] = ()
+    # Finding ids the latest Solver round was actually asked to resolve: the
+    # batch echo for a revision, every active finding after a full re-plan.
+    # ``None`` means no Solver round has folded yet, so the finding-level
+    # stuck counter keeps its legacy count-every-round behaviour.  The stuck
+    # counter only advances for these ids, mirroring the per-item stall rule:
+    # a finding the batch never picked cannot be escalated for rounds it had
+    # no chance to fix.
+    attempted_finding_ids: tuple[str, ...] | None = None
     requirements: tuple[dict[str, object], ...] = ()
     # The orchestrator-owned canonical task graph.  It is the base the Solver
     # patches with bounded ``changes`` and the source of the plan hash.
@@ -251,6 +264,8 @@ class ReviewUpdate:
     task_groups: tuple[ReviewTaskGroup, ...] | None = None
     completed_item_ids: tuple[str, ...] | None = None
     task_review_ledger: tuple[ReviewTaskRecord, ...] | None = None
+    attempted_item_ids: tuple[str, ...] | None = None
+    attempted_finding_ids: tuple[str, ...] | None = None
     requirements: tuple[dict[str, object], ...] | None = None
     plan: dict[str, object] | None = None
 
@@ -306,7 +321,7 @@ def apply_review_update(
             current.max_freeze_check_attempts if current else 2
         ),
         item_revision_round=(current.item_revision_round if current else 0),
-        max_item_revision_rounds=(current.max_item_revision_rounds if current else 3),
+        max_item_revision_rounds=(current.max_item_revision_rounds if current else 5),
         last_reply_fingerprint=(
             update.last_reply_fingerprint
             if update.last_reply_fingerprint is not None
@@ -346,6 +361,16 @@ def apply_review_update(
             update.task_review_ledger
             if update.task_review_ledger is not None
             else current.task_review_ledger if current else ()
+        ),
+        attempted_item_ids=(
+            update.attempted_item_ids
+            if update.attempted_item_ids is not None
+            else current.attempted_item_ids if current else ()
+        ),
+        attempted_finding_ids=(
+            update.attempted_finding_ids
+            if update.attempted_finding_ids is not None
+            else current.attempted_finding_ids if current else None
         ),
         requirements=(
             update.requirements
@@ -440,6 +465,12 @@ def context_to_dto(context: WorkflowContext) -> dict[str, object]:
         review["task_items"] = [asdict(item) for item in context.review.task_items]
         review["task_groups"] = [asdict(group) for group in context.review.task_groups]
         review["completed_item_ids"] = list(context.review.completed_item_ids)
+        review["attempted_item_ids"] = list(context.review.attempted_item_ids)
+        review["attempted_finding_ids"] = (
+            list(context.review.attempted_finding_ids)
+            if context.review.attempted_finding_ids is not None
+            else None
+        )
         review["task_review_ledger"] = [
             asdict(record) for record in context.review.task_review_ledger
         ]
@@ -508,6 +539,7 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
         requirements = tuple(
             dict(item) for item in requirements_value if isinstance(item, Mapping)
         )
+        raw_attempted_findings = review_value.get("attempted_finding_ids")
         review = ReviewState(
             revision_id=str(review_value.get("revision_id") or ""),
             active_group_id=review_value.get("active_group_id"),
@@ -518,7 +550,7 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             freeze_check_attempt=int(review_value.get("freeze_check_attempt", 0)),
             max_freeze_check_attempts=int(review_value.get("max_freeze_check_attempts", 2)),
             item_revision_round=int(review_value.get("item_revision_round", 0)),
-            max_item_revision_rounds=int(review_value.get("max_item_revision_rounds", 3)),
+            max_item_revision_rounds=int(review_value.get("max_item_revision_rounds", 5)),
             last_reply_fingerprint=str(review_value.get("last_reply_fingerprint") or ""),
             plan_ref=review_value.get("plan_ref"),
             plan_hash=review_value.get("plan_hash"),
@@ -527,6 +559,14 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             task_groups=task_groups,
             completed_item_ids=completed_item_ids,
             task_review_ledger=task_review_ledger,
+            attempted_item_ids=_completed_item_ids_from_dto(
+                review_value.get("attempted_item_ids", [])
+            ),
+            attempted_finding_ids=(
+                tuple(str(value) for value in raw_attempted_findings)
+                if isinstance(raw_attempted_findings, list)
+                else None
+            ),
             requirements=requirements,
             plan=_plan_from_dto(review_value.get("plan")),
         )
@@ -766,3 +806,4 @@ __all__ = [
     "context_from_dto",
     "context_to_dto",
 ]
+

@@ -843,6 +843,27 @@ def aggregate_task_review_results(
         if worker_id:
             worker_ids.add(worker_id)
         action = str(body.get("action") or "")
+        item_findings = [
+            copy.deepcopy(item)
+            for item in body.get("findings") or []
+            if isinstance(item, dict)
+        ]
+        item_blockers = _blocking_findings(item_findings)
+        if action == "TASK_APPROVED" and item_blockers:
+            # The contract allows TASK_APPROVED only without an active P0/P1, and
+            # the aggregate treats any active P0/P1 as blocking.  Accepting both
+            # at once recorded the task as approved while its own finding kept the
+            # graph blocked, so the revision request pointed at a task the
+            # approval ratchet had already locked.  The finding is the stronger
+            # signal: keep the task open and let the Solver address it.
+            logger.warning(
+                "TASK_REVIEW_APPROVAL_HELD_FOR_BLOCKER review_job_id=%s item_id=%s "
+                "findings=%s",
+                job.review_job_id,
+                job.item_id,
+                [str(item.get("finding_id") or "") for item in item_blockers],
+            )
+            action = "TASK_CHANGES_REQUIRED"
         actions.add(action)
         task_reviews.append({
             "review_job_id": job.review_job_id,
@@ -855,14 +876,11 @@ def aggregate_task_review_results(
             "review_checks": copy.deepcopy(body.get("review_checks") or {}),
             "finding_ids": sorted({
                 str(item.get("finding_id") or item.get("id"))
-                for item in body.get("findings") or []
-                if isinstance(item, dict) and (item.get("finding_id") or item.get("id"))
+                for item in item_findings
+                if (item.get("finding_id") or item.get("id"))
             }),
         })
-        for raw_finding in body.get("findings") or []:
-            if not isinstance(raw_finding, dict):
-                continue
-            finding = copy.deepcopy(raw_finding)
+        for finding in item_findings:
             finding["group_id"] = job.group_id
             finding["item_id"] = job.item_id
             finding.setdefault("scope", "item")

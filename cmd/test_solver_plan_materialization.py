@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import replace
+import copy
 import unittest
 
 from orchestrator.domain.context import (
@@ -69,10 +70,10 @@ def _plan() -> dict[str, object]:
     }
 
 
-def _finding(finding_id: str, item_id: str = "item-1") -> Finding:
+def _finding(finding_id: str, item_id: str = "item-1", severity: str = "P1") -> Finding:
     return Finding(
         finding_id=finding_id,
-        severity="P1",
+        severity=severity,
         status="OPEN",
         group_id="group-1",
         item_id=item_id,
@@ -501,25 +502,44 @@ class SolverStateMaterializationTests(unittest.TestCase):
         self.assertEqual(decision.transition.action, "RETRY")
         self.assertEqual(decision.update.recovery.reply_retry_count, 1)
 
+    def _wide_review(self):
+        """One finding per item across seven items: the cap defers the last one."""
+
+        plan = {
+            "requirements": [],
+            "items": [_item(f"item-{index}") for index in range(1, 8)],
+            "groups": [{"group_id": "group-1", "item_ids": [f"item-{i}" for i in range(1, 8)]}],
+            "dependencies": [],
+            "scope": {},
+            "unknowns": [],
+            "risks": [],
+        }
+        findings = tuple(
+            _finding(f"f-{index}", f"item-{index}", "P1" if index == 1 else "P2")
+            for index in range(1, 8)
+        )
+        # The orchestrator's batch: items 1-6 selected, item-7 carried over.
+        return plan, findings, [f"f-{i}" for i in range(1, 7)], ["f-7"]
+
     def test_abbreviated_finding_ids_do_not_block_the_revision(self) -> None:
         """Replay of task-20260915-633b71: the Solver abbreviated hash ids."""
 
-        full_a = "finding-b141e6cfb253c123706e"
-        full_b = "finding-f9a314bfcf679d936cd6"
-        context = self._context(
-            _plan(),
-            (_finding(full_a, "item-1"), _finding(full_b, "item-2")),
-        )
-        revised = _plan()
+        plan, findings, selected, remaining = self._wide_review()
+        findings = (
+            replace(findings[0], finding_id="finding-b141e6cfb253c123706e"),
+        ) + findings[1:]
+        selected = ["finding-b141e6cf"] + selected[1:]
+        context = self._context(plan, findings)
+        revised = copy.deepcopy(plan)
         revised["items"][0]["objective"] = "Fixed"
-        revised["items"][1]["objective"] = "Reworded"
+        revised["items"][6]["objective"] = "Reworded"
         event = self._event(
             {
                 "action": "READY_FOR_CRITIC",
                 "plan": revised,
                 "finding_batch": {
-                    "selected_finding_ids": ["finding-b141e6cf"],
-                    "remaining_finding_ids": ["finding-f9a314bf"],
+                    "selected_finding_ids": selected,
+                    "remaining_finding_ids": remaining,
                 },
             }
         )
@@ -529,9 +549,10 @@ class SolverStateMaterializationTests(unittest.TestCase):
         by_id = {
             item["item_id"]: item for item in decision.update.review.plan["items"]
         }
-        # The abbreviated selected id must still scope the revision to item-1.
+        # The abbreviated selected id must still scope the revision to item-1,
+        # and the carried-over item-7 must stay untouched.
         self.assertEqual(by_id["item-1"]["objective"], "Fixed")
-        self.assertEqual(by_id["item-2"]["objective"], "Do one")
+        self.assertEqual(by_id["item-7"]["objective"], "Do one")
 
     def test_revision_that_ignores_active_findings_retries_solver(self) -> None:
         context = self._context(_plan(), (_finding("f-1"),))
@@ -590,19 +611,18 @@ class SolverStateMaterializationTests(unittest.TestCase):
         self.assertEqual(decision.update.review.plan["items"][0]["objective"], "Fixed")
 
     def test_scoped_revision_only_applies_selected_item_changes(self) -> None:
-        context = self._context(
-            _plan(), (_finding("f-1", "item-1"), _finding("f-2", "item-2"))
-        )
-        revised = _plan()
+        plan, findings, selected, remaining = self._wide_review()
+        context = self._context(plan, findings)
+        revised = copy.deepcopy(plan)
         revised["items"][0]["objective"] = "Fixed"
-        revised["items"][1]["objective"] = "Reworded"
+        revised["items"][6]["objective"] = "Reworded"
         event = self._event(
             {
                 "action": "READY_FOR_CRITIC",
                 "plan": revised,
                 "finding_batch": {
-                    "selected_finding_ids": ["f-1"],
-                    "remaining_finding_ids": ["f-2"],
+                    "selected_finding_ids": selected,
+                    "remaining_finding_ids": remaining,
                 },
             }
         )
@@ -613,7 +633,7 @@ class SolverStateMaterializationTests(unittest.TestCase):
             item["item_id"]: item for item in decision.update.review.plan["items"]
         }
         self.assertEqual(by_id["item-1"]["objective"], "Fixed")
-        self.assertEqual(by_id["item-2"]["objective"], "Do one")
+        self.assertEqual(by_id["item-7"]["objective"], "Do one")
 
     def test_retryable_reply_blocks_once_reply_budget_spent(self) -> None:
         context = replace(
@@ -693,6 +713,111 @@ class PlanArtifactRunnerTests(unittest.TestCase):
         outcome = PlanArtifactRunner(None).run_once(self._request(_plan()))
         self.assertEqual(outcome.status, "SUCCEEDED")
         self.assertIsNone(outcome.event_name)
+
+
+class SolverBatchDeferralTests(unittest.TestCase):
+    """The Orchestrator dictates the batch; the reply must echo it."""
+
+    @staticmethod
+    def _payload(selected, remaining):
+        return {
+            "finding_batch": {
+                "selected_finding_ids": list(selected),
+                "remaining_finding_ids": list(remaining),
+            }
+        }
+
+    def test_replanning_the_partition_is_reported(self) -> None:
+        error = solver_batch_coverage_error(
+            ["f-1", "f-2"],
+            self._payload(["f-1"], ["f-2"]),
+            expected_batch=(["f-1", "f-2"], []),
+        )
+
+        self.assertTrue(error.startswith("SOLVER_BATCH_MISMATCH"), error)
+        self.assertIn("f-1", error)
+
+    def test_echoing_the_dictated_batch_is_accepted(self) -> None:
+        error = solver_batch_coverage_error(
+            ["f-1", "f-2"],
+            self._payload(["f-1"], ["f-2"]),
+            expected_batch=(["f-1"], ["f-2"]),
+        )
+
+        self.assertEqual(error, "")
+
+    def test_overlap_and_missing_ids_keep_their_own_errors(self) -> None:
+        overlap = solver_batch_coverage_error(
+            ["f-1", "f-2"],
+            self._payload(["f-1", "f-2"], ["f-2"]),
+            expected_batch=(["f-1"], ["f-2"]),
+        )
+        self.assertTrue(overlap.startswith("SOLVER_FINDING_BATCH_OVERLAP"), overlap)
+
+        missing = solver_batch_coverage_error(
+            ["f-1", "f-2"],
+            self._payload(["f-1"], []),
+            expected_batch=(["f-1"], ["f-2"]),
+        )
+        self.assertTrue(
+            missing.startswith("SOLVER_FINDING_BATCH_COVERAGE_INCOMPLETE"), missing
+        )
+
+    def test_without_a_dictated_batch_only_shape_is_checked(self) -> None:
+        error = solver_batch_coverage_error(
+            ["f-1", "f-2"], self._payload(["f-1"], ["f-2"])
+        )
+
+        self.assertEqual(error, "")
+
+
+class DeferredBlockerRetryTests(unittest.TestCase):
+    """The Solver is re-asked for one more attempt on the reply budget."""
+
+    def setUp(self) -> None:
+        self.state = ZhongshuSolverState()
+
+    def test_replanned_batch_retries_on_the_reply_budget(self) -> None:
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("ZHONGSHU_SOLVER", 5, "2026-09-13T00:00:00Z"),
+            review=ReviewState(
+                revision_id="task-1:ZHONGSHU_ANALYST:2",
+                findings=(
+                    _finding("f-1", "item-1"),
+                    _finding("f-2", "item-2"),
+                ),
+                plan=_plan(),
+                plan_hash="plan-hash",
+            ),
+        )
+        event = DomainEvent(
+            "READY_FOR_CRITIC",
+            "task-1",
+            5,
+            {
+                "action": "READY_FOR_CRITIC",
+                "plan": _plan(),
+                "finding_batch": {
+                    "selected_finding_ids": ["f-1"],
+                    "remaining_finding_ids": ["f-2"],
+                },
+            },
+            "2026-09-13T00:00:00Z",
+        )
+
+        decision = self.state.handle(context, event)
+
+        self.assertEqual(decision.transition.action, "RETRY")
+        self.assertEqual(decision.update.recovery.reply_retry_count, 1)
+        self.assertIsNone(decision.update.recovery.retry_count)
+        self.assertIsNone(decision.update.recovery.external_retry_count)
+        self.assertTrue(
+            str(decision.update.recovery.last_failure.error_code).startswith(
+                "SOLVER_BATCH_MISMATCH"
+            ),
+            decision.update.recovery.last_failure.error_code,
+        )
 
 
 if __name__ == "__main__":

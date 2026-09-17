@@ -5,7 +5,7 @@ import copy
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .contracts import all_contracts, contract_for_state
 from .contracts.common import (
@@ -292,6 +292,23 @@ def normalize_role_payload(
     return coerce_enum_values(payload, contract.schema)
 
 
+def accepted_role_modes(expected: str, allowed: Sequence[str] = ()) -> frozenset[str]:
+    """Return the role modes an agent reply may legitimately declare.
+
+    A role contract can publish several modes (the Solver declares both the
+    initial ``..._READ_ONLY`` and the revision ``..._READ_ONLY_RESUME``).  The
+    dispatched mode tells the agent which one the orchestrator had in mind, but
+    a reply that used another *declared* mode is still a valid reply: which
+    materialization runs is decided by the reply content, not by the label.
+    Reading only the dispatched mode turned a legitimate revision reply into a
+    rejection that the pipeline reported as "no reply at all".
+    """
+
+    modes = {str(expected)} if str(expected or "") else set()
+    modes.update(str(item) for item in allowed if str(item or ""))
+    return frozenset(modes)
+
+
 def validate_role_result_shape(
     payload: dict[str, Any],
     *,
@@ -299,6 +316,7 @@ def validate_role_result_shape(
     role: str,
     state: str = "",
     role_mode: str = "",
+    allowed_role_modes: Sequence[str] = (),
     expected_schema_hash: str = "",
     schema: Mapping[str, Any] | None = None,
 ) -> str:
@@ -317,7 +335,8 @@ def validate_role_result_shape(
         return "STRUCTURED_ROLE_ROLE_MISMATCH"
     if state and str(payload.get("state") or "") != state:
         return "STRUCTURED_ROLE_STATE_MISMATCH"
-    if role_mode and str(payload.get("mode") or "") != role_mode:
+    supplied_mode = str(payload.get("mode") or "")
+    if supplied_mode and supplied_mode not in accepted_role_modes(role_mode, allowed_role_modes):
         return "STRUCTURED_ROLE_MODE_MISMATCH"
     if str(payload.get("structured_output_protocol") or "") != STRUCTURED_OUTPUT_PROTOCOL:
         return "STRUCTURED_ROLE_PROTOCOL_MISMATCH"

@@ -24,15 +24,14 @@ from .agent_result_file import (
     write_agent_result_file,
 )
 from .comment_feed import IncrementalCommentFeed, comment_order_key, timestamp_order_key
+from .domain.errors import CONTRACT_REJECTED_EVENT, UNSTRUCTURED_REPLY_EVENT
 from .structured_output import (
     role_mode_for,
     state_actions,
     stable_role_fields,
 )
-from .zhongshu_solver_contract import (
-    ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND,
-    ZHONGSHU_SOLVER_REQUIRED_ITEM_FIELDS,
-)
+from .domain.zhongshu import resolve_solver_stage, solver_contract_fragments
+from .zhongshu_solver_contract import ZHONGSHU_SOLVER_REQUIRED_ITEM_FIELDS
 
 logger = logging.getLogger("review_orchestrator_fsm")
 
@@ -103,6 +102,22 @@ from .transport.external import (
 
 class RequestLookupError(RuntimeError):
     """The external request index could not be queried safely."""
+
+
+def _declared_role_modes(structured_output: object) -> tuple[str, ...]:
+    """Role modes the dispatched role contract declares as legal.
+
+    A reply may legitimately use any declared mode (which materialization runs is
+    decided by the reply content), so the validators accept every declared mode
+    instead of only the one the orchestrator happened to dispatch.
+    """
+
+    if not isinstance(structured_output, dict):
+        return ()
+    modes = structured_output.get("role_modes")
+    if not isinstance(modes, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in modes if str(item or ""))
 
 
 class MulticaAdapter(Protocol):
@@ -357,7 +372,6 @@ class MulticaCliAdapter:
             "issue", "create",
             "--title", title,
             "--description-file", str(description_path),
-            "--allow-external-file",
             "--parent", parent,
             "--assignee-id", str(agent_id or ""),
         ]
@@ -365,7 +379,7 @@ class MulticaCliAdapter:
         if project_id:
             create_args += ["--project", project_id]
         create_args += ["--output", "json"]
-        value = self._run(*create_args)
+        value = self._run_with_local_file(create_args, "--description-file", description_path)
         child_id = _extract_issue_id(value)
         if not child_id:
             raise RuntimeError("issue create returned no child issue id")
@@ -496,6 +510,31 @@ class MulticaCliAdapter:
             and args[:2] in {("issue", "runs"), ("issue", "children")}
         )
 
+    def _run_with_local_file(
+        self, args: Sequence[str], file_flag: str, path: Path
+    ) -> object:
+        """Run a CLI command whose ``--xxx-file`` argument must be inside its CWD.
+
+        The multica CLI rejects file arguments that resolve outside the
+        subprocess working directory (a stale-shared-file safety check).  The
+        orchestrator's scratch files live in its own log directory, so the CLI
+        runs from there and the file is referenced by name; every file is
+        freshly written per request, which preserves the property the check
+        protects.
+        """
+
+        path = Path(path)
+        command = list(args)
+        replaced = False
+        for index, value in enumerate(command):
+            if value == file_flag:
+                command[index + 1] = path.name
+                replaced = True
+                break
+        if not replaced:
+            raise RuntimeError(f"{file_flag} is required for this command")
+        return self._run(*command, cwd=path.parent)
+
     def _run_with_read_retry(self, *args: str) -> object:
         attempts = self.cli_read_retries + 1
         for attempt in range(1, attempts + 1):
@@ -516,7 +555,7 @@ class MulticaCliAdapter:
                 time.sleep(backoff_seconds)
         raise AssertionError("unreachable")
 
-    def _run(self, *args: str) -> object:
+    def _run(self, *args: str, cwd: Path | None = None) -> object:
         command = ["multica", *args]
         started = time.monotonic()
         command_text = subprocess.list2cmdline(command)
@@ -526,10 +565,11 @@ class MulticaCliAdapter:
             else self.cli_timeout_seconds
         )
         logger.info(
-            "MULTICA_CLI_START command=%s timeout_seconds=%s operation=%s",
+            "MULTICA_CLI_START command=%s timeout_seconds=%s operation=%s cwd=%s",
             command_text,
             timeout_seconds,
             "read" if self._is_read_command(args) else "write",
+            cwd or "",
         )
         try:
             result = subprocess.run(
@@ -538,6 +578,7 @@ class MulticaCliAdapter:
                 text=True,
                 encoding="utf-8",
                 timeout=timeout_seconds,
+                cwd=str(cwd) if cwd else None,
             )
         except subprocess.TimeoutExpired as error:
             duration_ms = int((time.monotonic() - started) * 1000)
@@ -762,10 +803,14 @@ class MulticaCliAdapter:
             self._run("issue", "update", issue_id, "--assignee-id", request.agent_id, "--output", "json")
         path = self.log_dir / f"dispatch_{request.request_id.replace(':', '_')}.json"
         path.write_text(content, encoding="utf-8")
-        value = self._run(
-            "issue", "comment", "add", issue_id,
-            "--content-file", str(path),
-            "--output", "json",
+        value = self._run_with_local_file(
+            [
+                "issue", "comment", "add", issue_id,
+                "--content-file", str(path),
+                "--output", "json",
+            ],
+            "--content-file",
+            path,
         )
         external_id = ""
         if isinstance(value, dict):
@@ -887,7 +932,18 @@ class MulticaCliAdapter:
         )
         return resolved
 
-    def _recover_result_file(self, request: AgentRequest) -> ExternalMessage | None:
+    def _recover_result_file(
+        self,
+        request: AgentRequest,
+        rejections: list[str] | None = None,
+    ) -> ExternalMessage | None:
+        """Read the agent's result file, if it wrote one.
+
+        ``rejections`` collects the reason when the file exists but the role
+        validator refuses it.  The caller turns that into a reply-shape failure
+        instead of letting an unusable-but-delivered result look like a missing
+        one (which charged the reply to the infrastructure retry budget).
+        """
         result_path = self.prompt_bundle_builder.result_path(
             request.task_id,
             request.request_id,
@@ -923,6 +979,7 @@ class MulticaCliAdapter:
                     or (request.structured_output or {}).get("role_mode")
                     or ""
                 ),
+                allowed_role_modes=_declared_role_modes(request.structured_output),
                 allow_transport_backfill=True,
             )
         except AgentResultFileError as error:
@@ -934,6 +991,8 @@ class MulticaCliAdapter:
                 result_path,
                 str(error),
             )
+            if rejections is not None:
+                rejections.append(str(error))
             return None
         logger.info(
             "AGENT_REPLY_FILE_RECOVERED task_id=%s request_id=%s phase=%s role=%s "
@@ -996,6 +1055,7 @@ class MulticaCliAdapter:
                 or (request.structured_output or {}).get("role_mode")
                 or ""
             ),
+            allowed_role_modes=_declared_role_modes(request.structured_output),
         )
         return file_result.payload
 
@@ -1026,6 +1086,7 @@ class MulticaCliAdapter:
             result: list[ExternalMessage] = []
             supplemental_reports: list[str] = []
             unstructured_candidates: list[ExternalMessage] = []
+            rejected_candidates: list[ExternalMessage] = []
             inline_result_accepted = False
             stats = {
                 "author_mismatch": 0,
@@ -1034,6 +1095,7 @@ class MulticaCliAdapter:
                 "unstructured": 0,
                 "request_mismatch": 0,
                 "uncorrelated": 0,
+                "contract_rejected": 0,
             }
             ordered_comments = sorted(comments, key=comment_order_key)
             for comment in ordered_comments:
@@ -1179,7 +1241,7 @@ class MulticaCliAdapter:
                             ExternalMessage(
                                 author_id,
                                 {
-                                    "action": "__UNSTRUCTURED_REPLY__",
+                                    "action": UNSTRUCTURED_REPLY_EVENT,
                                     "task_id": request.task_id,
                                     "request_id": request.request_id,
                                     "role": request.role,
@@ -1292,6 +1354,7 @@ class MulticaCliAdapter:
                             comment_id,
                         )
                     except AgentResultFileError as error:
+                        stats["contract_rejected"] += 1
                         logger.warning(
                             "AGENT_INLINE_RESULT_REJECTED task_id=%s request_id=%s "
                             "phase=%s role=%s comment_id=%s reason=%s",
@@ -1301,6 +1364,35 @@ class MulticaCliAdapter:
                             request.role,
                             comment_id,
                             str(error),
+                        )
+                        # The agent did answer with valid JSON; only its document
+                        # was unusable.  Surface that as a reply-shape candidate so
+                        # the effect is reported as a reply contract failure (reply
+                        # retry budget) instead of "agent run completed without a
+                        # correlated result" (infrastructure retry budget).
+                        rejected_candidates.append(
+                            ExternalMessage(
+                                author_id,
+                                {
+                                    "action": CONTRACT_REJECTED_EVENT,
+                                    "task_id": request.task_id,
+                                    "request_id": request.request_id,
+                                    "role": request.role,
+                                    "phase": request.phase,
+                                    "response_source": "comment",
+                                    "contract_rejection": str(error),
+                                    "raw_reply": body[:500],
+                                    "raw_reply_truncated": len(body) > 500,
+                                    "raw_reply_chars": body_meta["chars"],
+                                    "raw_reply_bytes": body_meta["bytes"],
+                                    "raw_reply_sha256": body_meta["sha256"],
+                                    "structured_output_schema_hash": str(
+                                        (request.structured_output or {}).get("schema_hash") or ""
+                                    ),
+                                },
+                                comment_id,
+                                body,
+                            )
                         )
                         continue
                 payload["task_id"] = request.task_id
@@ -1314,6 +1406,7 @@ class MulticaCliAdapter:
                 unstructured_candidates,
                 stats,
                 len(ordered_comments),
+                rejected_candidates,
             )
 
         if request.dispatch_external_message_id:
@@ -1345,11 +1438,36 @@ class MulticaCliAdapter:
             unstructured_candidates,
             stats,
             comments_total,
+            rejected_candidates,
         ) = parse_comments(comments_from(thread_value))
         if not result:
-            recovered_file_message = self._recover_result_file(request)
+            file_rejections: list[str] = []
+            recovered_file_message = self._recover_result_file(
+                request, rejections=file_rejections
+            )
             if recovered_file_message is not None:
                 result = [recovered_file_message]
+            elif file_rejections:
+                stats["contract_rejected"] += 1
+                rejected_candidates.append(
+                    ExternalMessage(
+                        request.agent_id,
+                        {
+                            "action": CONTRACT_REJECTED_EVENT,
+                            "task_id": request.task_id,
+                            "request_id": request.request_id,
+                            "role": request.role,
+                            "phase": request.phase,
+                            "response_source": "result_file",
+                            "contract_rejection": file_rejections[-1],
+                            "structured_output_schema_hash": str(
+                                (request.structured_output or {}).get("schema_hash") or ""
+                            ),
+                        },
+                        f"file:{request.request_id}",
+                        "",
+                    )
+                )
         recovery_ids: set[str] = set()
 
         if (
@@ -1380,11 +1498,13 @@ class MulticaCliAdapter:
                 root_unstructured_candidates,
                 root_stats,
                 root_total,
+                root_rejected_candidates,
             ) = parse_comments(
                 root_comments,
                 require_explicit_binding=True,
             )
             unstructured_candidates = root_unstructured_candidates
+            rejected_candidates.extend(root_rejected_candidates)
             if root_result:
                 result = root_result
                 supplemental_reports.extend(root_supplemental)
@@ -1438,11 +1558,13 @@ class MulticaCliAdapter:
                     root_unstructured_candidates,
                     root_stats,
                     root_total,
+                    root_rejected_candidates,
                 ) = parse_comments(root_comments, recovery_ids)
                 comments_total += root_total
                 result = root_result
                 supplemental_reports.extend(root_supplemental)
                 unstructured_candidates.extend(root_unstructured_candidates)
+                rejected_candidates.extend(root_rejected_candidates)
                 for key, value_count in root_stats.items():
                     stats[key] += value_count
                 if result:
@@ -1477,6 +1599,19 @@ class MulticaCliAdapter:
                 candidate.external_id,
             )
 
+        if not result and rejected_candidates:
+            candidate = rejected_candidates[-1]
+            result = [candidate]
+            logger.warning(
+                "REPLY_CONTRACT_REJECTED_REPAIR_CANDIDATE issue_id=%s task_id=%s "
+                "request_id=%s external_id=%s reason=%s",
+                issue_id,
+                request.task_id,
+                request.request_id,
+                candidate.external_id,
+                candidate.payload.get("contract_rejection"),
+            )
+
         if supplemental_reports:
             for message in result:
                 message.payload["supplemental_reports"] = list(supplemental_reports)
@@ -1484,7 +1619,7 @@ class MulticaCliAdapter:
             "MULTICA_POLL_RESULT issue_id=%s task_id=%s request_id=%s comments_total=%s "
             "valid_replies=%s supplemental_reports=%s author_mismatch=%s "
             "dispatch_comment=%s stale=%s unstructured=%s request_mismatch=%s "
-            "correlation_ids=%s",
+            "contract_rejected=%s correlation_ids=%s",
             issue_id,
             request.task_id,
             request.request_id,
@@ -1496,13 +1631,14 @@ class MulticaCliAdapter:
             stats["stale"],
             stats["unstructured"],
             stats["request_mismatch"],
+            stats["contract_rejected"],
             sorted(recovery_ids),
         )
         logger.info(
             "AGENT_REPLY_CORRELATION_RESULT task_id=%s request_id=%s phase=%s role=%s "
             "dispatch_external_message_id=%s comments_total=%s valid_replies=%s "
             "unstructured=%s request_mismatch=%s uncorrelated=%s stale=%s "
-            "author_mismatch=%s correlation_ids=%s",
+            "author_mismatch=%s contract_rejected=%s correlation_ids=%s",
             request.task_id,
             request.request_id,
             request.phase,
@@ -1515,6 +1651,7 @@ class MulticaCliAdapter:
             stats["uncorrelated"],
             stats["stale"],
             stats["author_mismatch"],
+            stats["contract_rejected"],
             sorted(recovery_ids),
         )
         return result
@@ -1792,7 +1929,11 @@ class MulticaCliAdapter:
     def add_comment(self, issue_id: str, text: str) -> str:
         path = self.log_dir / f"fallback_{int(time.time() * 1000)}.md"
         path.write_text(text, encoding="utf-8")
-        value = self._run("issue", "comment", "add", issue_id, "--content-file", str(path), "--output", "json")
+        value = self._run_with_local_file(
+            ["issue", "comment", "add", issue_id, "--content-file", str(path), "--output", "json"],
+            "--content-file",
+            path,
+        )
         if isinstance(value, dict):
             return str(value.get("id") or value.get("comment_id") or value.get("comment", {}).get("id") or "")
         return ""
@@ -1814,7 +1955,7 @@ class MulticaCliAdapter:
             args.append("--allow-duplicate")
         if assignee_id:
             args += ["--assignee-id", assignee_id]
-        value = self._run(*args)
+        value = self._run_with_local_file(args, "--description-file", path)
         issue_id = value.get("id") if isinstance(value, dict) else None
         if not issue_id and isinstance(value, dict):
             issue_id = value.get("issue", {}).get("id")
@@ -2104,22 +2245,9 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "plan.items; do not emit groups[*].items or duplicate task objects. Empty "
             "unknowns and risks must be emitted as [] and parallelizable must be a boolean."
         )
-        contract["finding_batch_rule"] = (
-            "On revisions, select the orchestrator-provided focus_finding_ids. Each Finding is atomic "
-            f"and must be included in full; select no more than {ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND} "
-            "findings, return resolutions for selected IDs, and explicitly list all remaining IDs in finding_batch."
+        contract.update(
+            solver_contract_fragments(resolve_solver_stage(request.context))
         )
-        if request.context.get("solver_revision_mode") or request.context.get("has_current_plan"):
-            contract["required_by_action"] = {
-                # Revision accepts either bounded changes or a full plan when
-                # the requested topology cannot be represented by a patch.
-                # State validation enforces that one of them materializes.
-                "READY_FOR_CRITIC": ["action"],
-            }
-        else:
-            contract["required_by_action"] = {
-                "READY_FOR_CRITIC": ["action", "plan"],
-            }
     stable_fields = stable_role_fields(request.phase, request.role)
     if stable_fields and isinstance(request.structured_output, dict):
         target_state = str(

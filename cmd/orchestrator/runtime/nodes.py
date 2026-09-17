@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import itertools
 import logging
 import threading
@@ -53,6 +53,7 @@ class WorkerBinding:
     fanout_parent_id: str = ""
     fanout_title: str = ""
     dispatch_context: Mapping[str, object] = field(default_factory=dict)
+    attempt: int = 1
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,20 @@ def _infrastructure_failure(result: WorkerResult) -> bool:
     )
 
 
+def _retry_binding(binding: WorkerBinding, attempt: int) -> WorkerBinding:
+    """Give a per-binding retry its own dispatch identity.
+
+    Reusing the original request id kept the effect idempotent: the transport's
+    ``find_existing`` re-attached the retry to the run that had already ended
+    without a correlated result, so the retry could only re-poll a drained run
+    for the whole result window and then fail with the same error.  Scoping the
+    identity to the attempt forces a real re-ask (fresh prompt bundle, fresh
+    child run) while ``worker_id`` stays stable so fan-in still matches.
+    """
+
+    return replace(binding, attempt=attempt)
+
+
 def _run_worker(
     runner: WorkerRunner,
     binding: WorkerBinding,
@@ -271,7 +286,7 @@ def _run_worker(
             str(getattr(result.failure, "error_code", "")),
         )
         _worker_retry_sleep(INFRASTRUCTURE_WORKER_BACKOFF_SECONDS)
-        result = _run_worker_once(runner, binding, context)
+        result = _run_worker_once(runner, _retry_binding(binding, attempt), context)
     return result
 
 

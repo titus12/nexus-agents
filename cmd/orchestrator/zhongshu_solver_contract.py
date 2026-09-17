@@ -35,6 +35,19 @@ ZHONGSHU_SOLVER_FORBIDDEN_FIELDS = frozenset(
 # deterministic count; never truncate one Finding by character budget.
 ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND = 6
 
+# The single authoritative statement of who chooses the revision batch.  The
+# dispatcher renders this into the response contract, and the rules tuple below
+# references it rather than restating it, so the two can never drift apart (the
+# previous duplicate copies disagreed, and the stricter one was never delivered).
+ZHONGSHU_SOLVER_BATCH_RULE = (
+    "The orchestrator owns the revision batch. The request context carries "
+    "solver_batch with the selected_finding_ids for this round (at most "
+    f"{ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND} findings), the remaining_finding_ids it carries into the "
+    "next round, and the exact finding_batch to return. Return one "
+    "finding_resolution for every selected finding, echo finding_batch "
+    "unchanged, and do not add, drop, re-partition or reorder ids."
+)
+
 
 def zhongshu_solver_runtime_rules() -> tuple[str, ...]:
     return (
@@ -50,10 +63,11 @@ def zhongshu_solver_runtime_rules() -> tuple[str, ...]:
         "Return one formal task graph for Critic inside the fixed Solver role envelope; write it to result_path using a real JSON serializer. Do not emit implementation_proposal, file_changes, code_changes, interfaces, data_flow, migration, rollback, or function-level design.",
         "Do not modify files, claim implementation, claim tests passed, or return a final approval decision.",
         "On the initial READY_FOR_CRITIC run, put one complete formal plan in the fixed Solver envelope. When current_formal_plan is supplied for a revision, work on one bounded finding batch and return bounded changes (changes=[] is a valid no-op), one finding_resolution for each selected finding, and a finding_batch that explicitly partitions every active finding into selected_finding_ids and remaining_finding_ids. The orchestrator materializes and validates the complete plan and carries the declared remainder to the next round. Return a full plan only when an unsupported topology change requires it; finding_resolutions never replaces both plan and changes. Always emit all fixed Solver fields, including evidence_requests, using [] or null when unused.",
+        ZHONGSHU_SOLVER_BATCH_RULE,
         "Allowed revision changes are replace_item_fields, replace_group_items, replace_group_fields, and replace_plan_fields. Do not add or remove tasks or groups through an untyped free-form patch.",
         "For a full plan, groups MUST use item_ids as compact references to complete objects in plan.items; the orchestrator expands and validates them. Do not emit groups[*].items or duplicate task objects.",
         "Keep explicit unknown_requirement_ids and unknowns visible in the plan; unresolved requirements must not be converted into invented tasks.",
-        f"For every unresolved finding_resolution include owner_role (review-analyst, review-solver, human) and next_action. Request Analyst only for specific missing facts; grouping and topology are Solver work. Unknown ownership needs HUMAN_GATE, not repeated investigation. In finding_batch, select only from the orchestrator-provided focus_finding_ids (at most {ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND} complete findings); selected_finding_ids and remaining_finding_ids must be disjoint, contain only the listed active finding IDs, and together cover them exactly; never omit an ID silently.",
+        f"For every unresolved finding_resolution include owner_role (review-analyst, review-solver, human) and next_action. Request Analyst only for specific missing facts; grouping and topology are Solver work. Unknown ownership needs HUMAN_GATE, not repeated investigation. {ZHONGSHU_SOLVER_BATCH_RULE}",
         "The request context supplies active_findings (the Critic's current blocking findings) and focus_finding_ids. Address those findings in the plan and in finding_resolutions; do not return a plan identical to the reviewed one when blocking findings remain. If a finding cannot be resolved from the available evidence, route it to the correct owner (Analyst/human) or return HUMAN_GATE instead of repeating the same plan.",
         "Read the exact finding_id AND original claim before responding; never infer finding identity from ordering. Return response, changed_fields and evidence for resolutions.",
         "Define measurable future tasks without claiming the measurement or implementation is already complete. A request to review optimization opportunities does not authorize implementation.",

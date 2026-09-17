@@ -7,10 +7,11 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .structured_output import (
     STRUCTURED_OUTPUT_PROTOCOL,
+    accepted_role_modes,
     fill_role_defaults,
     normalize_role_payload,
     validate_role_result_shape,
@@ -39,6 +40,7 @@ def _validate_structured_shape(
     expected_schema_hash: str,
     expected_state: str,
     expected_role_mode: str,
+    allowed_role_modes: Sequence[str] = (),
 ) -> None:
     """Reject transport-only envelopes before they become canonical results."""
     if not expected_schema_hash:
@@ -49,6 +51,7 @@ def _validate_structured_shape(
         role=role,
         state=expected_state,
         role_mode=expected_role_mode,
+        allowed_role_modes=allowed_role_modes,
         expected_schema_hash=expected_schema_hash,
     )
     if error:
@@ -67,6 +70,7 @@ def write_agent_result_file(
     expected_schema_hash: str = "",
     expected_state: str = "",
     expected_role_mode: str = "",
+    allowed_role_modes: Sequence[str] = (),
 ) -> AgentResultFile:
     """Persist an Agent result under Orchestrator ownership, then validate it."""
     if not isinstance(payload, dict):
@@ -86,12 +90,26 @@ def write_agent_result_file(
         normalized["state"] = expected_state
     if expected_role_mode:
         supplied_mode = str(normalized.get("mode") or "")
-        if supplied_mode and supplied_mode != expected_role_mode:
+        if supplied_mode and supplied_mode not in accepted_role_modes(
+            expected_role_mode, allowed_role_modes
+        ):
             raise AgentResultFileError(
                 "inline result role mode mismatch: "
                 f"expected={expected_role_mode} actual={supplied_mode}"
             )
-        normalized["mode"] = expected_role_mode
+        if supplied_mode and supplied_mode != expected_role_mode:
+            logger.warning(
+                "INLINE_RESULT_ROLE_MODE_ACCEPTED task_id=%s request_id=%s "
+                "phase=%s role=%s dispatched_mode=%s supplied_mode=%s "
+                "reason=both_modes_declared_by_role",
+                task_id,
+                request_id,
+                phase,
+                role,
+                expected_role_mode,
+                supplied_mode,
+            )
+        normalized["mode"] = supplied_mode or expected_role_mode
     if expected_schema_hash:
         supplied_schema_hash = str(normalized.get("structured_output_schema_hash") or "")
         if supplied_schema_hash and supplied_schema_hash != expected_schema_hash:
@@ -118,6 +136,7 @@ def write_agent_result_file(
         expected_schema_hash=expected_schema_hash,
         expected_state=expected_state,
         expected_role_mode=expected_role_mode,
+        allowed_role_modes=allowed_role_modes,
     )
 
     path = Path(target_path).expanduser().resolve()
@@ -179,6 +198,7 @@ def write_agent_result_file(
         expected_schema_hash=expected_schema_hash,
         expected_state=expected_state,
         expected_role_mode=expected_role_mode,
+        allowed_role_modes=allowed_role_modes,
     )
     result.payload["result_source"] = "orchestrator_inline"
     logger.info(
@@ -214,6 +234,7 @@ def read_agent_result_file(
     expected_schema_hash: str = "",
     expected_state: str = "",
     expected_role_mode: str = "",
+    allowed_role_modes: Sequence[str] = (),
     allow_transport_backfill: bool = False,
 ) -> AgentResultFile:
     raw_path = str(reference.get("result_path") or "").strip()
@@ -293,7 +314,6 @@ def read_agent_result_file(
         "phase": phase,
         "state": expected_state,
         "role": role,
-        "mode": expected_role_mode,
         "structured_output_protocol": STRUCTURED_OUTPUT_PROTOCOL,
         "structured_output_schema_hash": expected_schema_hash,
     }
@@ -311,6 +331,36 @@ def read_agent_result_file(
             payload[field] = expected_text
             backfilled_fields.append(field)
 
+    # ``mode`` labels which formalization the agent used.  Several modes are
+    # declared for the role, and the reply content decides which one applies, so
+    # a declared-but-not-dispatched mode is accepted instead of failing a valid
+    # revision reply.
+    if expected_role_mode:
+        supplied_mode = str(payload.get("mode") or "")
+        if supplied_mode:
+            if supplied_mode not in accepted_role_modes(
+                expected_role_mode, allowed_role_modes
+            ):
+                raise AgentResultFileError(
+                    "result role mode mismatch: "
+                    f"expected={expected_role_mode} actual={supplied_mode}"
+                )
+            if supplied_mode != expected_role_mode:
+                logger.warning(
+                    "REPLY_FILE_ROLE_MODE_ACCEPTED task_id=%s request_id=%s "
+                    "phase=%s role=%s dispatched_mode=%s supplied_mode=%s "
+                    "reason=both_modes_declared_by_role",
+                    task_id,
+                    request_id,
+                    phase,
+                    role,
+                    expected_role_mode,
+                    supplied_mode,
+                )
+        elif allow_transport_backfill:
+            payload["mode"] = expected_role_mode
+            backfilled_fields.append("mode")
+
     if str(payload.get("task_id") or "") != task_id:
         raise AgentResultFileError("result task_id mismatch")
     if expected_schema_hash:
@@ -322,7 +372,9 @@ def read_agent_result_file(
             raise AgentResultFileError(
                 f"result state mismatch: expected={expected_state} actual={payload.get('state')}"
             )
-        if expected_role_mode and str(payload.get("mode") or "") != expected_role_mode:
+        if expected_role_mode and str(payload.get("mode") or "") not in accepted_role_modes(
+            expected_role_mode, allowed_role_modes
+        ):
             raise AgentResultFileError(
                 "result role mode mismatch: "
                 f"expected={expected_role_mode} actual={payload.get('mode')}"
@@ -374,6 +426,7 @@ def read_agent_result_file(
         expected_schema_hash=expected_schema_hash,
         expected_state=expected_state,
         expected_role_mode=expected_role_mode,
+        allowed_role_modes=allowed_role_modes,
     )
 
     payload["result_source"] = "file"

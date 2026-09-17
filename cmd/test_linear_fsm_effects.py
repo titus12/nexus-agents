@@ -133,6 +133,30 @@ class EffectManagerTests(unittest.TestCase):
         self.assertEqual(result.failure.error_code, "AGENT_REPLY_UNSTRUCTURED")
         self.assertTrue(result.failure.retryable)
 
+    def test_contract_rejected_agent_reply_is_its_own_retryable_failure(self) -> None:
+        repository = _Repository((_effect(),))
+
+        class _OutcomeRunner:
+            def run_once(self, request: EffectRequest) -> EffectOutcome:
+                return EffectOutcome(
+                    status="SUCCEEDED",
+                    event_name="__CONTRACT_REJECTED__",
+                    event_payload={
+                        "action": "__CONTRACT_REJECTED__",
+                        "contract_rejection": "inline result role mode mismatch",
+                    },
+                    request_id=request.idempotency_key,
+                )
+
+        result = EffectManager(repository, {"dispatch": _OutcomeRunner()}).execute_pending("task-1")[0]
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertTrue(result.event_payload["retryable"])
+        assert result.failure is not None
+        self.assertEqual(result.failure.error_code, "AGENT_REPLY_CONTRACT_REJECTED")
+        self.assertTrue(result.failure.retryable)
+        self.assertIn("inline result role mode mismatch", result.failure.message)
+
     def test_unknown_runner_is_explicit_and_effect_stays_unstarted(self) -> None:
         repository = _Repository((_effect(effect_type="missing"),))
 

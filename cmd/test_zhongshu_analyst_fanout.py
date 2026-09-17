@@ -40,7 +40,7 @@ class _FakeCli(MulticaCliAdapter):
             return {"id": args[2], "project_id": "proj-1"}
         raise AssertionError(f"unexpected read: {args}")
 
-    def _run(self, *args: str):
+    def _run(self, *args: str, cwd=None):
         self.calls.append(args)
         if args[:2] == ("issue", "create"):
             title = args[args.index("--title") + 1]

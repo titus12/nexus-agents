@@ -1,4 +1,4 @@
-"""Pure Zhongshu finding and revision rules."""
+﻿"""Pure Zhongshu finding and revision rules."""
 
 from __future__ import annotations
 
@@ -37,14 +37,55 @@ _ACTIVE_STATUSES = frozenset(
 _BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
 
 
+def _finding_identity(finding: object) -> str:
+    """Content identity of one finding observation.
+
+    Critic rounds may re-raise the same opinion under a different ``finding_id``
+    (abbreviated vs full id), which used to store two entries for one opinion
+    and let the twin waste a batch slot and double-count blockers.  A finding
+    with a ``canonical_key`` is identified by that content hash; only findings
+    without one fall back to the structural identity.
+    """
+
+    canonical = str(_finding_attr(finding, "canonical_key", "") or "").strip()
+    if canonical:
+        return f"content:{canonical}"
+    return "id:{0}|{1}|{2}".format(
+        str(_finding_attr(finding, "group_id", "") or ""),
+        str(_finding_attr(finding, "item_id", "") or ""),
+        str(_finding_attr(finding, "finding_id", "") or ""),
+    )
+
+
+def _same_finding_id(left: str, right: str) -> bool:
+    """Match a batch id against a stored id, tolerating abbreviated forms."""
+
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    return len(shorter) >= 16 and longer.startswith(shorter)
+
+
 def merge_findings(
     current: Iterable[Finding],
     incoming: Iterable[Finding | Mapping[str, object]],
 ) -> tuple[Finding, ...]:
-    merged = {finding.identity_key(): finding for finding in current}
-    for value in incoming:
+    """Fold incoming findings into the ledger, one entry per opinion.
+
+    Entries are keyed by content identity (see ``_finding_identity``), so a
+    re-raise under a different id form replaces the stored opinion instead of
+    duplicating it.  As before, the incoming observation wins: the latest
+    Critic output carries the current lifecycle status.
+    """
+
+    merged: dict[str, Finding] = {}
+    for finding in current or ():
+        merged[_finding_identity(finding)] = finding
+    for value in incoming or ():
         finding = value if isinstance(value, Finding) else Finding.from_dict(dict(value))
-        merged[finding.identity_key()] = finding
+        merged[_finding_identity(finding)] = finding
     return tuple(merged.values())
 
 
@@ -52,30 +93,61 @@ def age_unresolved_findings(
     previous: Iterable[Finding],
     merged: Iterable[Finding],
     observed: Iterable[Finding],
+    *,
+    attempted_finding_ids: Iterable[str] | None = None,
 ) -> tuple[Finding, ...]:
-    """Count consecutive rounds the Critic has re-raised the same finding.
+    """Count the rounds the Solver had a chance to fix a finding and failed.
 
     ``observed`` is this round's Critic output.  A finding that keeps coming
-    back with the same identity is not converging even while the Solver keeps
-    re-emitting the plan, so its ``stuck_rounds`` grows.  The counter resets as
-    soon as the finding is resolved, or as soon as the Critic stops re-raising
-    it (a finding the Critic dropped is no longer "observed").
+    back with the same identity is not converging, so its ``stuck_rounds``
+    grows; the counter resets as soon as the finding is resolved or the Critic
+    stops re-raising it.
+
+    ``attempted_finding_ids`` makes the counter fair: it is the batch the
+    Solver was actually dictated (or every active finding after a full
+    re-plan).  Only those findings age — a finding the batch never picked
+    keeps its count frozen instead of being escalated for rejections it never
+    had a chance to address.  ``None`` keeps the legacy count-every-round
+    behaviour for flows without a batch.
     """
 
-    prior = {finding.identity_key(): finding for finding in previous or ()}
-    observed_keys = {finding.identity_key() for finding in observed or ()}
+    prior = {_finding_identity(finding): finding for finding in previous or ()}
+    observed_keys = {_finding_identity(finding) for finding in observed or ()}
+    attempted: tuple[str, ...] | None = None
+    if attempted_finding_ids is not None:
+        attempted = tuple(
+            dict.fromkeys(
+                str(value).strip() for value in attempted_finding_ids if str(value).strip()
+            )
+        )
     result: list[Finding] = []
     for finding in merged:
-        key = finding.identity_key()
+        key = _finding_identity(finding)
         if key not in observed_keys:
             result.append(finding)
             continue
         earlier = prior.get(key)
         if finding.active and earlier is not None and earlier.active:
-            result.append(replace(finding, stuck_rounds=earlier.stuck_rounds + 1))
+            rounds = earlier.stuck_rounds
+            if attempted is None or _finding_was_attempted(finding, attempted):
+                result.append(replace(finding, stuck_rounds=rounds + 1))
+            else:
+                # The batch did not pick this finding: freeze its count so the
+                # incoming echo (which resets ``stuck_rounds`` to zero) cannot
+                # erase the history either.
+                result.append(replace(finding, stuck_rounds=rounds))
         else:
             result.append(replace(finding, stuck_rounds=0))
     return tuple(result)
+
+
+def _finding_was_attempted(finding: object, attempted: tuple[str, ...]) -> bool:
+    finding_id = str(_finding_attr(finding, "finding_id", "") or "").strip()
+    if not finding_id:
+        return False
+    if finding_id in attempted:
+        return True
+    return any(_same_finding_id(finding_id, value) for value in attempted)
 
 
 def stuck_blockers(
@@ -145,6 +217,24 @@ def active_blocker_count(findings: Iterable[object]) -> int:
     return total
 
 
+def active_blocker_ids(findings: Iterable[object]) -> tuple[str, ...]:
+    """Return the ids of the active P0/P1 findings.
+
+    A revision may defer non-blocking follow-ups, but every blocker must be in
+    the batch the Solver actually works on.
+    """
+
+    result: list[str] = []
+    for finding in findings or ():
+        status = str(_finding_attr(finding, "status", "") or "").strip().upper()
+        severity = str(_finding_attr(finding, "severity", "") or "").strip().upper()
+        if status in _ACTIVE_STATUSES and severity in _BLOCKING_SEVERITIES:
+            finding_id = str(_finding_attr(finding, "finding_id", "") or "").strip()
+            if finding_id:
+                result.append(finding_id)
+    return tuple(dict.fromkeys(result))
+
+
 def blocker_fingerprint(count: int) -> str:
     """Encode the current active-blocker count for the next round's comparison."""
 
@@ -205,6 +295,97 @@ def unapproved_item_ids(
     return tuple(dict.fromkeys(pending))
 
 
+def active_findings_by_severity(
+    findings: Iterable[object],
+    severities: Iterable[str],
+) -> tuple[object, ...]:
+    """Return the active findings whose severity is in ``severities``."""
+
+    wanted = {str(value).strip().upper() for value in severities}
+    return tuple(
+        finding
+        for finding in findings or ()
+        if str(_finding_attr(finding, "status", "") or "").strip().upper()
+        in _ACTIVE_STATUSES
+        and str(_finding_attr(finding, "severity", "") or "").strip().upper() in wanted
+    )
+
+
+_SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def _batch_sort_key(finding: object) -> tuple[int, int, str, str]:
+    severity = str(_finding_attr(finding, "severity", "") or "").strip().upper()
+    try:
+        stuck = int(_finding_attr(finding, "stuck_rounds", 0) or 0)
+    except (TypeError, ValueError):
+        stuck = 0
+    return (
+        _SEVERITY_RANK.get(severity, 9),
+        -stuck,
+        str(_finding_attr(finding, "item_id", "") or ""),
+        str(_finding_attr(finding, "finding_id", "") or ""),
+    )
+
+
+def select_solver_batch(
+    findings: Iterable[object],
+    max_findings: int,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Choose the bounded batch of findings the Solver must resolve this round.
+
+    The orchestrator owns this decision: it knows the severities, the owning
+    items and the freeze policy, while the Solver only has to resolve what it is
+    given.  Leaving the partition to the agent turned every revision into a
+    bookkeeping puzzle (select at most six of twenty, no overlap, exact
+    coverage) whose mechanical slips discarded the whole reply.
+
+    One finding per item is picked first so a round spreads across the graph,
+    then the remaining slots are filled by severity.  Within one severity,
+    findings the Solver already failed to resolve (higher ``stuck_rounds``)
+    come first, so a finding the Critic keeps re-raising cannot starve behind
+    newer opinions.  Returns ``(selected, remaining)``: disjoint, together
+    covering every active finding.
+    """
+
+    active = tuple(
+        finding
+        for finding in findings or ()
+        if str(_finding_attr(finding, "status", "") or "").strip().upper()
+        in _ACTIVE_STATUSES
+        and str(_finding_attr(finding, "finding_id", "") or "").strip()
+    )
+    ordered = sorted(active, key=_batch_sort_key)
+    cap = max(1, int(max_findings))
+    selected: list[str] = []
+    chosen: set[str] = set()
+    seen_items: set[str] = set()
+    for finding in ordered:
+        finding_id = str(_finding_attr(finding, "finding_id", "") or "").strip()
+        item_id = str(_finding_attr(finding, "item_id", "") or "").strip()
+        if item_id and item_id in seen_items:
+            continue
+        selected.append(finding_id)
+        chosen.add(finding_id)
+        seen_items.add(item_id)
+        if len(selected) >= cap:
+            break
+    for finding in ordered:
+        if len(selected) >= cap:
+            break
+        finding_id = str(_finding_attr(finding, "finding_id", "") or "").strip()
+        if finding_id in chosen:
+            continue
+        selected.append(finding_id)
+        chosen.add(finding_id)
+    remaining = [
+        str(_finding_attr(finding, "finding_id", "") or "").strip()
+        for finding in ordered
+        if str(_finding_attr(finding, "finding_id", "") or "").strip() not in chosen
+    ]
+    return tuple(selected), tuple(remaining)
+
+
 def approved_item_ids(ledger: Iterable[object]) -> tuple[str, ...]:
     """Return tasks whose latest Critic verdict is an approval."""
 
@@ -255,7 +436,9 @@ __all__ = [
     "FREEZE_RETRY_ACTIONS",
     "REVISION_ACTIONS",
     "active_blocker_count",
+    "active_blocker_ids",
     "active_findings",
+    "active_findings_by_severity",
     "age_unresolved_findings",
     "approved_item_ids",
     "blocker_fingerprint",
@@ -264,7 +447,10 @@ __all__ = [
     "parse_blocker_fingerprint",
     "revision_allowed",
     "revision_made_progress",
+    "select_solver_batch",
     "stalled_item_ids",
     "stuck_blockers",
     "unapproved_item_ids",
 ]
+
+

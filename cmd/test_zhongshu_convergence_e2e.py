@@ -279,5 +279,102 @@ class ZhongshuConvergenceEndToEndTests(unittest.TestCase):
         )
 
 
+class _StubbornBlockerMultica(_ConvergingMultica):
+    """One task is rejected on the same P1 every round, forever."""
+
+    def _reply_critic(self, request) -> None:
+        context = request.context
+        item_id = str(context.get("item_id") or "")
+        if item_id != "item-000002":
+            self._reply(request, {"action": "TASK_APPROVED", "item_id": item_id,
+                                  "group_id": str(context.get("group_id") or ""),
+                                  "reviewed_plan_hash": str(context.get("plan_hash") or ""),
+                                  "reviewed_task_hash": str(context.get("task_hash") or ""),
+                                  "reviewed_dependency_hash": str(context.get("dependency_hash") or ""),
+                                  "worker_id": request.request_id,
+                                  "findings": [],
+                                  "review_checks": {}})
+            return
+        self._reply(
+            request,
+            {
+                "action": "TASK_CHANGES_REQUIRED",
+                "reviewed_plan_hash": str(context.get("plan_hash") or ""),
+                "group_id": str(context.get("group_id") or ""),
+                "item_id": item_id,
+                "reviewed_task_hash": str(context.get("task_hash") or ""),
+                "reviewed_dependency_hash": str(context.get("dependency_hash") or ""),
+                "worker_id": request.request_id,
+                "findings": [
+                    {
+                        "finding_id": "finding-item2",
+                        "severity": "P1",
+                        "status": "OPEN",
+                        "category": "acceptance",
+                        "target": item_id,
+                        "claim": "the acceptance signal is still not observable",
+                        "required_action": "name an observable acceptance signal",
+                        "evidence_strength": "inference",
+                        "worker_id": "worker-critic",
+                        "item_id": item_id,
+                        "group_id": str(context.get("group_id") or ""),
+                    }
+                ],
+                "review_checks": {
+                    "requirement_coverage": [],
+                    "boundary": [],
+                    "dependencies": [],
+                    "acceptance": [],
+                    "risks": [],
+                },
+            },
+        )
+
+
+class StubbornBlockerIsFrozenWithFollowUpsTests(unittest.TestCase):
+    """A P1 the Critic never retracts must not end the run in a generic block.
+
+    This is the token-free validation of the bounded-acceptance policy: the
+    scripted Critic restates the same P1 every round, and the graph still
+    reaches DONE with the residual risk recorded instead of the run dying.
+    """
+
+    def _run(self) -> tuple[object, tuple]:
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = _StubbornBlockerMultica()
+            app = OrchestratorApp(
+                _context(),
+                root=directory,
+                multica=adapter,
+                poll_interval=0,
+                timeout_seconds=5,
+            )
+
+            self.assertTrue(app.run())
+            snapshot = app.repository.load("task-e2e")
+            dispatched = tuple(adapter.dispatched)
+        return snapshot, dispatched
+
+    def test_the_run_finishes_and_records_the_residual_p1(self) -> None:
+        snapshot, _ = self._run()
+
+        self.assertEqual(snapshot.context.progression.state, "DONE")
+        findings = {
+            str(finding.finding_id): finding
+            for finding in snapshot.context.review.findings
+        }
+        self.assertEqual(findings["finding-item2"].status, "DEFERRED")
+        ledger = {
+            record.item_id: record.status
+            for record in snapshot.context.review.task_review_ledger
+        }
+        # The task that was never rejected kept its approval while the stubborn
+        # one was carried as a follow-up.
+        self.assertEqual(ledger["item-000001"], "APPROVED")
+        self.assertGreaterEqual(
+            snapshot.context.review.zhongshu_revision_round, 3
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
