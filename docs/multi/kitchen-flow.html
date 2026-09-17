@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>后厨指南 · 用做菜看懂编排器</title>
+<style>
+  :root {
+    --bg: #fdf6ec;
+    --ink: #3d2c1e;
+    --muted: #8a6f57;
+    --card: #fffdf8;
+    --tomato: #d9534f;
+    --tomato-soft: #fdecea;
+    --amber: #e8a33d;
+    --amber-soft: #fdf3e0;
+    --basil: #5f8d4e;
+    --basil-soft: #edf5e9;
+    --plum: #7b5ea7;
+    --plum-soft: #f1ecf8;
+    --line: #ead9c2;
+    --shadow: 0 6px 18px rgba(93, 64, 28, .10);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    line-height: 1.65;
+    padding-bottom: 80px;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 20px; }
+
+  header.hero {
+    background: linear-gradient(135deg, #fbe3c2 0%, #fcd9c4 55%, #f8cfc9 100%);
+    border-bottom: 3px dashed var(--line);
+    padding: 46px 20px 38px;
+    text-align: center;
+  }
+  .hero h1 { font-size: 34px; letter-spacing: 2px; }
+  .hero .sub { color: var(--muted); margin-top: 10px; font-size: 16px; }
+  .hero .plate { font-size: 52px; display: block; margin-bottom: 8px; }
+  .hero .tags { margin-top: 16px; }
+  .hero .tags span {
+    display: inline-block; background: #fffdf8cc; border: 1px solid var(--line);
+    border-radius: 999px; padding: 4px 14px; margin: 4px; font-size: 13px; color: var(--muted);
+  }
+
+  section { margin-top: 52px; }
+  h2 {
+    font-size: 24px; display: flex; align-items: center; gap: 10px;
+    border-left: 6px solid var(--amber); padding-left: 14px; margin-bottom: 8px;
+  }
+  .h-sub { color: var(--muted); margin-bottom: 22px; padding-left: 20px; font-size: 14px; }
+
+  .grid { display: grid; gap: 16px; }
+  .grid.roles { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 18px 16px; box-shadow: var(--shadow); position: relative;
+  }
+  .card .emoji { font-size: 34px; }
+  .card h3 { font-size: 17px; margin: 8px 0 4px; }
+  .card .real { font-size: 12.5px; color: var(--plum); font-weight: 600; }
+  .card p { font-size: 13.5px; color: #5d4a38; margin-top: 6px; }
+  .card.t-tomato { border-top: 4px solid var(--tomato); }
+  .card.t-amber { border-top: 4px solid var(--amber); }
+  .card.t-basil { border-top: 4px solid var(--basil); }
+  .card.t-plum { border-top: 4px solid var(--plum); }
+
+  /* ---- stepper ---- */
+  .steps { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+  .step-btn {
+    border: 1px solid var(--line); background: #fff; color: var(--muted);
+    border-radius: 999px; padding: 6px 14px; cursor: pointer; font-size: 13.5px;
+    font-family: inherit; transition: all .15s;
+  }
+  .step-btn.active { background: var(--amber); border-color: var(--amber); color: #fff; font-weight: 700; }
+  .step-btn.done { background: var(--basil-soft); border-color: var(--basil); color: var(--basil); }
+  .panel {
+    display: none; background: var(--card); border: 1px solid var(--line);
+    border-radius: 16px; box-shadow: var(--shadow); padding: 26px 28px;
+  }
+  .panel.on { display: block; animation: fade .25s; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
+  .panel .stage { display: flex; gap: 24px; flex-wrap: wrap; }
+  .panel .kitchen { flex: 1.15; min-width: 280px; }
+  .panel .kitchen .big { font-size: 44px; }
+  .panel .kitchen h3 { font-size: 20px; margin: 6px 0 10px; }
+  .panel .kitchen p { font-size: 14.5px; color: #5d4a38; }
+  .panel .system { flex: 1; min-width: 260px; background: var(--plum-soft); border-radius: 12px; padding: 16px 18px; }
+  .panel .system h4 { font-size: 13px; color: var(--plum); margin-bottom: 8px; letter-spacing: 1px; }
+  .panel .system code {
+    display: block; background: #fff; border-radius: 8px; padding: 7px 12px;
+    margin: 6px 0; font-size: 12.5px; color: var(--plum); border: 1px solid #e3d9f2;
+    font-family: Consolas, monospace; word-break: break-all;
+  }
+  .panel .nav { margin-top: 18px; display: flex; justify-content: space-between; }
+  .panel .nav button {
+    border: none; background: var(--amber); color: #fff; border-radius: 10px;
+    padding: 9px 22px; font-size: 14px; cursor: pointer; font-family: inherit;
+  }
+  .panel .nav button:disabled { background: var(--line); cursor: default; }
+  .warn { background: var(--tomato-soft); border-radius: 10px; padding: 10px 14px; font-size: 13.5px; margin-top: 12px; }
+  .warn b { color: var(--tomato); }
+  .ok { background: var(--basil-soft); border-radius: 10px; padding: 10px 14px; font-size: 13.5px; margin-top: 12px; }
+  .ok b { color: var(--basil); }
+
+  /* ---- stove loop ---- */
+  .stove { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; margin: 26px 0 8px; }
+  .stove .node {
+    background: var(--card); border: 2px solid var(--line); border-radius: 16px;
+    padding: 16px 18px; text-align: center; min-width: 150px; box-shadow: var(--shadow);
+  }
+  .stove .node .e { font-size: 32px; }
+  .stove .node b { display: block; margin-top: 4px; }
+  .stove .node small { color: var(--muted); font-size: 12px; }
+  .stove .arr { font-size: 24px; color: var(--amber); font-weight: 700; }
+  .stove .back {
+    width: 100%; text-align: center; color: var(--tomato); font-size: 13.5px;
+    margin-top: 4px; letter-spacing: 1px;
+  }
+  .loop-box {
+    border: 2px dashed var(--tomato); border-radius: 18px; padding: 22px 20px 14px;
+    position: relative; background: #fffaf7;
+  }
+  .loop-box .tag {
+    position: absolute; top: -14px; left: 24px; background: var(--tomato);
+    color: #fff; border-radius: 999px; padding: 3px 16px; font-size: 13px; font-weight: 700;
+  }
+
+  /* ---- tables ---- */
+  table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); }
+  th { background: var(--amber-soft); color: var(--ink); font-size: 14px; text-align: left; }
+  th, td { padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+  td code { background: var(--plum-soft); color: var(--plum); border-radius: 6px; padding: 2px 8px; font-size: 12px; font-family: Consolas, monospace; }
+  tr:last-child td { border-bottom: none; }
+
+  /* ---- three boxes: data vs behavior ---- */
+  .triad { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .triad .card ul { margin: 8px 0 0 18px; font-size: 13.5px; color: #5d4a38; }
+  .triad .card li { margin: 4px 0; }
+
+  footer { text-align: center; color: var(--muted); font-size: 12.5px; margin-top: 64px; }
+  .kbd {
+    background: #fff; border: 1px solid var(--line); border-bottom-width: 3px;
+    border-radius: 6px; padding: 1px 8px; font-family: Consolas, monospace; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <span class="plate">🍳</span>
+  <h1>后厨指南 · 用做菜看懂编排器</h1>
+  <div class="sub">一份给人类的流程图解 —— 你的需求是一场宴席，AI 角色们是后厨团队</div>
+  <div class="tags">
+    <span>🀄 中书省 = 设计菜单</span>
+    <span>🚪 门下省 = 出餐执行</span>
+    <span>🔥 灶台 = 一道菜的修订小循环</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ============ 角色 ============ -->
+  <section>
+    <h2>👨‍👩‍👧‍👦 后厨人员一览</h2>
+    <div class="h-sub">每个 AI 角色只干一件事，像真正的后厨一样各司其职。</div>
+    <div class="grid roles">
+      <div class="card t-amber">
+        <div class="emoji">🥬</div>
+        <h3>配菜师</h3>
+        <div class="real">Analyst · 中书省</div>
+        <p>不做饭，只备料：翻冰箱、查库存、验食材新鲜度，写出<b>证据包</b>。三路采购同时出门（并行 3 个 worker）。</p>
+      </div>
+      <div class="card t-basil">
+        <div class="emoji">📋</div>
+        <h3>菜单设计师</h3>
+        <div class="real">Solver · 中书省</div>
+        <p>把订单变成<b>菜单</b>：整桌宴席分几道菜、每道菜的目标和验收标准、先做哪道（依赖图）。唯一有权写菜单的人。</p>
+      </div>
+      <div class="card t-tomato">
+        <div class="emoji">🍽️</div>
+        <h3>品菜师</h3>
+        <div class="real">Critic · 中书省</div>
+        <p>只试菜不做饭：逐道菜对照验收标准挑毛病，写出<b> finding（问题卡）</b>。说"咸了"必须给出证据。</p>
+      </div>
+      <div class="card t-tomato">
+        <div class="emoji">🔥</div>
+        <h3>灶台厨师</h3>
+        <div class="real">Solver worker · A2 新增</div>
+        <p>专职返工一道菜。刀具边界：只许碰自己那道菜。改完由品菜师复尝，直到出锅或火候用完。</p>
+      </div>
+      <div class="card t-plum">
+        <div class="emoji">🚪</div>
+        <h3>出餐口</h3>
+        <div class="real">Menxia · 门下省</div>
+        <p>菜单定稿后来到门下省：按菜单一道道真正开做、逐项验收、装盘上桌。当前是串行出餐。</p>
+      </div>
+      <div class="card t-plum">
+        <div class="emoji">🙋</div>
+        <h3>老板（你）</h3>
+        <div class="real">Human Gate</div>
+        <p>有些事只有老板能拍板：口味取向、预算取舍。后厨会停下来发飞书问你，答完继续开火。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 流程 stepper ============ -->
+  <section>
+    <h2>🎭 一场宴席的七道工序</h2>
+    <div class="h-sub">点击下方按钮逐步看：左边是厨房里发生的事，右边是系统里对应的真实动作。</div>
+    <div class="steps" id="stepBtns"></div>
+    <div id="panels"></div>
+  </section>
+
+  <!-- ============ 灶台 ============ -->
+  <section>
+    <h2>🔥 灶台特写：一道菜的返工小循环</h2>
+    <div class="h-sub">品菜师和灶台厨师在同一个灶台轮班，直到这道菜出锅 —— 不再让全后厨陪一道菜返工。</div>
+    <div class="loop-box">
+      <span class="tag">一道菜 · 一个灶台 · 最多回炉 5 次</span>
+      <div class="stove">
+        <div class="node"><div class="e">🍽️</div><b>品菜师初审</b><small>按验收标准挑毛病<br>写问题卡</small></div>
+        <div class="arr">→</div>
+        <div class="node"><div class="e">🔥</div><b>灶台厨师改菜</b><small>只动这一道菜<br>逐条回应问题卡</small></div>
+        <div class="arr">→</div>
+        <div class="node"><div class="e">🍽️</div><b>换一位品菜师复尝</b><small>防"自己改自己过"</small></div>
+      </div>
+      <div class="back">↑ &nbsp;不合格就再来一轮（火候预算内）&nbsp; ↑</div>
+      <div class="stove">
+        <div class="node" style="border-color: var(--basil);"><div class="e">✅</div><b>出锅</b><small>复尝通过 → 上传菜口</small></div>
+        <div class="arr">／</div>
+        <div class="node" style="border-color: var(--tomato);"><div class="e">🙋</div><b>找老板</b><small>火候用完仍有分歧<br>带完整争论记录上报</small></div>
+      </div>
+    </div>
+    <div class="grid" style="margin-top: 20px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));">
+      <div class="card t-amber"><h3>🔪 刀具边界</h3><p>灶台厨师只许改自己那道菜，派工单上写明 <code>editable: items:item-X</code>，越界改刀会被系统当场没收。</p></div>
+      <div class="card t-amber"><h3>🧾 食材清单</h3><p>上灶前声明这道菜用什么料（任务、问题卡、证据切片、验收标准）。清单随小票存档，事后可查"这道菜当时用了哪些料"。</p></div>
+      <div class="card t-amber"><h3>👨‍🍳 主厨终检</h3><p>所有灶台出锅后，合并回整桌菜单并做结构检查——有人把依赖画成环？当场打回，不进下一道工序。</p></div>
+      <div class="card t-amber"><h3>📖 分单表</h3><p>每道菜在厨房大屏上有一行状态：待审 / 改稿中 / 已出锅 / 待老板。这就是 <code>item_workflows</code>。</p></div>
+    </div>
+  </section>
+
+  <!-- ============ 后厨规矩 ============ -->
+  <section>
+    <h2>📜 后厨规矩（治理机制对照表）</h2>
+    <div class="h-sub">左边的厨房规则，全部对应右边真实存在的系统机制。</div>
+    <table>
+      <tr><th style="width:30%">厨房规矩</th><th style="width:28%">系统机制</th><th>为什么需要它（真实教训）</th></tr>
+      <tr><td>🧾 上灶前报食材清单</td><td><code>DispatchEnvelope</code></td><td>以前厨师每次搬整个厨房，谁也说不清这道菜用了哪些料。现在派工单声明食材，小票可审计。</td></tr>
+      <tr><td>📏 菜品验收要可打分</td><td><code>验收规范 7 条</code></td><td>以前"确认优化了"这种话没法验。现在必须写：单位、来源、取证方法，测不到的标 UNKNOWN。</td></tr>
+      <tr><td>✍️ 盖了章的菜不重审</td><td><code>审批 ratchet</code></td><td>配方没变的菜反复重审，会让全桌永远开不了席。批准过的菜，内容没变就保持通过。</td></tr>
+      <tr><td>🌡️ 火候预算</td><td><code>各级轮次预算</code></td><td>一道菜最多回炉 5 次、全席最多 8 轮、重问回复 3 次——防止一口锅烧到天亮。</td></tr>
+      <tr><td>📓 一个意见一本账</td><td><code>Finding 内容身份去重</code></td><td>同一条意见曾被记成两条（长短编号各一份），白占一个灶台名额。</td></tr>
+      <tr><td>🧾 小票留档</td><td><code>prompt bundle + manifest</code></td><td>每次派工的完整食材包和清单都按哈希存档，事后能复盘任何一道菜。</td></tr>
+      <tr><td>🤫 丢料必须喊出来</td><td><code>零静默丢弃</code></td><td>以前回复不合规会被悄悄扔掉、只报"食材没了"。现在丢什么、为什么丢，全部记录在案。</td></tr>
+      <tr><td>🍚 生熟分开、账实分离</td><td><code>数据与行为解耦</code></td><td>食材（数据）入库存档，厨师（行为）无状态按清单取料——厨师离职菜谱还在。</td></tr>
+    </table>
+  </section>
+
+  <!-- ============ 数据 vs 行为 ============ -->
+  <section>
+    <h2>🥗 做菜哲学：食材、厨师与菜谱</h2>
+    <div class="h-sub">这是整个 A2 架构的灵魂：数据与行为解耦。</div>
+    <div class="triad">
+      <div class="card t-basil">
+        <div class="emoji">🥬</div>
+        <h3>食材 = 数据</h3>
+        <ul>
+          <li><b>入库食材</b>（持久）：菜单、问题台账、证据包、分单表</li>
+          <li><b>现切食材</b>（按单切片）：某道菜的证据、某道菜的问题</li>
+          <li><b>临时调料</b>（一次性）：本轮批次、重试提醒</li>
+        </ul>
+      </div>
+      <div class="card t-tomato">
+        <div class="emoji">👨‍🍳</div>
+        <h3>厨师 = 行为</h3>
+        <ul>
+          <li>无状态：不带 private 冰箱，只按清单取料</li>
+          <li>手艺固定：审查、修订、备料各自是独立手艺</li>
+          <li>产出成品：裁决卡、菜品修订、证据包——格式固定</li>
+        </ul>
+      </div>
+      <div class="card t-plum">
+        <div class="emoji">📜</div>
+        <h3>菜谱 = 绑定声明</h3>
+        <ul>
+          <li>这道菜用什么食材（ingredients）</li>
+          <li>动哪些刀具（tools / 刀具边界）</li>
+          <li>端出什么成品（product + 验收 schema）</li>
+        </ul>
+      </div>
+    </div>
+    <div class="ok"><b>厨房大屏：</b>整桌宴席的实时进度在 <code>workflow-state.json</code> —— 现在做到第几道、每道菜回炉几次、谁被送上老板桌，一眼可查。</div>
+  </section>
+
+  <!-- ============ 事故对照 ============ -->
+  <section>
+    <h2>🚨 后厨事故复盘（都是真事）</h2>
+    <div class="h-sub">三次实测跑出来的真实问题，以及现在的防呆措施。</div>
+    <table>
+      <tr><th style="width:36%">事故现场</th><th>防呆措施</th></tr>
+      <tr><td>品菜师齐喊"要补料"，但料其实就在冰箱里 —— 白跑一轮采购（12 分钟）</td><td>派工单现在直接<b>附上该菜的食材切片</b>（item_evidence），并写明"用现成的料裁决"。</td></tr>
+      <tr><td>灶台厨师说"这得老板定"连说两次，被当成哑巴亏</td><td>新规矩：灶台上只说"要改"，需要老板的事写进问题卡，由系统统一安排面谈。</td></tr>
+      <tr><td>灶台厨师把菜单依赖画成一个环</td><td>主厨终检当场发现（结构门），打回并告诉它环在哪。</td></tr>
+      <tr><td>同一条意见记了两本账，白占灶台名额</td><td>按内容身份（canonical_key）记账：一个意见一本账。</td></tr>
+      <tr><td>一条意见三轮没人修，最后才发现它根本没被派过工</td><td>卡住的菜自动插队（stuck 优先派工）+ 只有派过工的菜才计火候（公平计数）。</td></tr>
+      <tr><td>采购员半路晕倒（供应商故障），第三路料的缺口没人知道</td><td>派工单标注 <code>evidence_gaps</code>：哪几路采购没回来，明明白白。</td></tr>
+      <tr><td>品菜师 4 个人挤一个灶口，8 道菜试了 19 分钟</td><td>灶口扩到 4 个（宽度 4），9 道菜 11.6 分钟。</td></tr>
+    </table>
+  </section>
+
+  <footer>
+    🍳 后厨指南 · 对应实现：<code>cmd/orchestrator</code>（编排器）+ <code>docs/multi/</code>（角色 skill 源）· A2 方案见 <code>docs/multi/plans/2026-09-17-item-workflow.md</code><br>
+    中书省 = Zhongshu（规划审查）· 门下省 = Menxia（执行）· 默认关闭灶台模式，设 <span class="kbd">ZHONGSHU_ITEM_WORKFLOW_ENABLED=1</span> 开启
+  </footer>
+</div>
+
+<script>
+  const steps = [
+    {
+      emoji: "🧾", title: "第 1 道 · 接单",
+      kitchen: "老板递来宴席订单：<b>“帮我审查一下编排器还有没有优化空间”</b>。配菜长先做一件事：把大白话订单翻译成<b>标准订单</b>——每条需求有编号、优先级、范围和验收标准，不许有歧义。",
+      system: ["<code>ZHONGSHU_ANALYST:1（requirement_contract 模式）</code>", "<code>产出 → requirements 契约（req-000001…）</code>", "<code>派工带 [Acceptance standard] 验收规范</code>"]
+    },
+    {
+      emoji: "🥬", title: "第 2 道 · 备料",
+      kitchen: "三路采购同时出门：一路查代码事实、一路查设计文档、一路查运行证据。回来汇总成<b>证据包</b>。有一路采购员半路晕倒（供应商故障）？重试两次，实在不行标注缺口，绝不让缺口悄悄溜走。",
+      system: ["<code>ZHONGSHU_ANALYST:2/4/7 · 3 路并行（fanout 子 issue）</code>", "<code>汇总 → ReviewState.evidence_packet</code>", "<code>失败 → NODE_WORKER_RETRY（最多 2 次）</code>"]
+    },
+    {
+      emoji: "📋", title: "第 3 道 · 开菜单",
+      kitchen: "菜单设计师上岗：把证据包变成<b>正式菜单</b>——每道菜（任务）有目标、来源、依赖、验收标准；先做哪道后做哪道画成依赖图（不许画成环）。菜单设计师是唯一能写菜单的人。",
+      system: ["<code>ZHONGSHU_SOLVER:5（formalize）</code>", "<code>物化 → PLAN_ARTIFACT_WRITTEN + plan_hash</code>", "<code>结构门：structural_issues=0</code>"]
+    },
+    {
+      emoji: "🍽️", title: "第 4 道 · 试菜",
+      kitchen: "品菜师团队逐道菜试吃：每道菜一个审查工单，按验收标准对照食材证据。通过盖章，不通过开问题卡。多道菜同时试（4 个灶口滚动开工），<b>通过过的菜不重复试</b>。",
+      system: ["<code>ZHONGSHU_CRITIC:N · task_review 节点（jobs=N，宽度 4）</code>", "<code>每工单附带：任务胶囊+证据切片+验收标准</code>", "<code>裁决只有两种：TASK_APPROVED / TASK_CHANGES_REQUIRED</code>"]
+    },
+    {
+      emoji: "🔥", title: "第 5 道 · 回灶（修订循环）",
+      kitchen: "有菜不合格？开灶台返工：这道菜派一个专职厨师，食材和问题卡都备齐，改完换人复尝。关键变化——<b>以前全后厨陪一道菜返工，现在每道菜有自己的灶台，并行开工</b>。菜单其他部分纹丝不动。",
+      system: ["<code>REVISE 边 → item_revise 节点（每争议项 1 个 worker）</code>", "<code>合并 → NODE_ITEM_REVISION_MERGED + 新 plan_hash</code>", "<code>主厨终检：structural_gate（含依赖环检查）</code>"]
+    },
+    {
+      emoji: "🙋", title: "第 6 道 · 找老板（如需）",
+      kitchen: "三种情况会停下来找老板：口味取向没人能替你定；一道菜回炉 5 次还有分歧；预算烧完了还有硬分歧。后厨会把完整争论记录摆上桌，老板拍板后继续。",
+      system: ["<code>HUMAN_GATE（ZHONGSHU_ITEM_STALLED / ZHONGSHU_STUCK_FINDING）</code>", "<code>resume_state 已记录，飞书回复决策即恢复</code>"]
+    },
+    {
+      emoji: "🚪", title: "第 7 道 · 定稿出餐",
+      kitchen: "全桌菜通过 → 菜单<b>定稿冻结</b>（有人还想改已盖章的菜？系统拦住）。菜单移交出餐口：门下省按依赖顺序一道道真正开做，每道配菜师验料、厨师细化、品菜师把关，做完上桌。",
+      system: ["<code>ZHONGSHU_FREEZE_CHECK → MENXIA_ITEM_SOLVER/ANALYST/CRITIC</code>", "<code>MENXIA_GROUP_GATE 组级汇总</code>", "<code>全部完成 → DONE 🎉</code>"]
+    },
+  ];
+
+  const btns = document.getElementById("stepBtns");
+  const panels = document.getElementById("panels");
+  let current = 0;
+
+  steps.forEach((s, i) => {
+    const b = document.createElement("button");
+    b.className = "step-btn";
+    b.textContent = s.title;
+    b.onclick = () => show(i);
+    btns.appendChild(b);
+
+    const p = document.createElement("div");
+    p.className = "panel";
+    p.innerHTML = `
+      <div class="stage">
+        <div class="kitchen">
+          <div class="big">${s.emoji}</div>
+          <h3>${s.title.replace(/^第 \d+ 道 · /, "")}</h3>
+          <p>${s.kitchen}</p>
+        </div>
+        <div class="system">
+          <h4>🖥️ 系统里正在发生</h4>
+          ${s.system.map(c => `<code>${c}</code>`).join("")}
+        </div>
+      </div>
+      <div class="nav">
+        <button onclick="show(${i - 1})" ${i === 0 ? "disabled" : ""}>← 上一道</button>
+        <button onclick="show(${i + 1})" ${i === steps.length - 1 ? "disabled" : ""}>下一道 →</button>
+      </div>`;
+    panels.appendChild(p);
+  });
+
+  function show(i) {
+    current = Math.max(0, Math.min(steps.length - 1, i));
+    document.querySelectorAll(".panel").forEach((p, idx) => p.classList.toggle("on", idx === current));
+    document.querySelectorAll(".step-btn").forEach((b, idx) => {
+      b.classList.toggle("active", idx === current);
+      b.classList.toggle("done", idx < current);
+    });
+  }
+  show(0);
+</script>
+
+</body>
+</html>
