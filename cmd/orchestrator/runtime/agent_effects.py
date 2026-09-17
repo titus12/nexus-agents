@@ -1043,7 +1043,9 @@ class AgentNodeJoiner:
             materialize_item_patch,
             merge_item_patches,
         )
+        from ..domain.policies.solver_plan import structural_integrity_errors
         from ..zhongshu_parallel import canonical_plan_hash
+        from ..zhongshu_review_queue import structural_gate
 
         patches = []
         for payload in worker_payloads:
@@ -1124,6 +1126,42 @@ class AgentNodeJoiner:
                     error_code="NODE_ITEM_REVISION_INVALID",
                     retryable=False,
                     message=error,
+                    cause_type="ItemRevisionJoin",
+                ),
+            )
+        # The chef's consistency check: before the merged plan goes back to the
+        # FSM, run the same shape and structural gates a Solver reply would
+        # face — a worker patch must not introduce a dependency cycle or break
+        # the graph shape.  Failure names the gate issues so the re-ask knows
+        # exactly what to fix.
+        integrity = structural_integrity_errors(merged)
+        gate_issues = structural_gate(merged)
+        problems = integrity + list(gate_issues)
+        if problems:
+            logger.warning(
+                "NODE_ITEM_REVISION_STRUCTURE_INVALID node_run_id=%s issues=%s",
+                self._node_run_id,
+                problems[:6],
+            )
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate={"action": "FAIL"},
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:ITEM_REVISION_STRUCTURE_INVALID",
+                    stage="node_join",
+                    owner_component="agent_node_joiner",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=None,
+                    effect_id=None,
+                    error_code="NODE_ITEM_REVISION_INVALID",
+                    retryable=True,
+                    message="merged plan failed the structural gate: "
+                    + ";".join(problems[:6]),
                     cause_type="ItemRevisionJoin",
                 ),
             )

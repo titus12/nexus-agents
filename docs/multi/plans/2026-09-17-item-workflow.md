@@ -101,10 +101,16 @@ menxia_parallel 设计文档（闸门模式与本方案的特性开关同构）�
 - 开关 `zhongshu.item_workflow_enabled`（env `ZHONGSHU_ITEM_WORKFLOW_ENABLED`，默认 off）。
 - scripted e2e：test_zhongshu_item_workflow_e2e.py（拒绝→灶台修订→复审批准→DONE）。
 
-### Phase 4 — 主厨一致性 + 切换（1-2 天）
-- 跨菜一致性校验单元。
-- 特性开关 `ZHONGSHU_ITEM_WORKFLOW_ENABLED`（默认 off，脚本测试开启）。
-- 全量回归 + 真实 A/B 一次。
+### Phase 4 — 主厨一致性 + 切换（1-2 天）【已完成】
+- joiner 合并后跑 `structural_integrity_errors` + `structural_gate`（含
+  DEPENDENCY_CYCLE）：违反 → `NODE_ITEM_REVISION_INVALID`（reply 预算，可重试，
+  带门禁问题清单作为 retry feedback）。
+- 配置参数全层对齐：global=6 / per_task=6 / analyst=3 / critic=4 /
+  lease_ttl=1020（代码默认 = env 默认 = context 层）。
+- 开关 `zhongshu.item_workflow_enabled`（env `ZHONGSHU_ITEM_WORKFLOW_ENABLED`，默认 off）。
+- 真实 A/B：下次测试设 `ZHONGSHU_ITEM_WORKFLOW_ENABLED=1`，对比争议项收敛轮数与墙钟。
+- 维护规则：skill 源 = docs/multi/runtime/*.md，改完必须同步 multica 服务端
+  （`multica skill update <id> --content-file`），两条通道内容需逐字节一致。
 
 ## 6. 风险与对策
 

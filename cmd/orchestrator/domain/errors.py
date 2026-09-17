@@ -92,6 +92,11 @@ REPLY_FAILURE_CODES = frozenset(
     {
         "AGENT_REPLY_UNSTRUCTURED",
         "AGENT_REPLY_CONTRACT_REJECTED",
+        # A2/P3: an item-revision worker returned a patch the joiner refused
+        # (identity/field violations, or a merged plan that fails the
+        # structural gate).  Same remedy: re-ask on the reply budget with the
+        # rejection restated as retry feedback.
+        "NODE_ITEM_REVISION_INVALID",
     }
 )
 

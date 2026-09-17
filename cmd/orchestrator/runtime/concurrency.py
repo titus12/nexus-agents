@@ -17,11 +17,13 @@ logger = logging.getLogger("review_orchestrator_fsm")
 
 @dataclass(frozen=True)
 class ConcurrencyLimits:
+    # Code defaults mirror the env defaults bound in app.py so every layer
+    # agrees (they used to disagree: per_task 3 vs 6, ttl 900 vs 1020).
     global_max: int = 6
-    per_task_max: int = 3
+    per_task_max: int = 6
     analyst_max: int = 3
     critic_max: int = 4
-    lease_ttl_seconds: int = 900
+    lease_ttl_seconds: int = 1020
 
     def validate(self) -> None:
         for name in (

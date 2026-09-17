@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import unittest
 
+from orchestrator.domain.errors import is_reply_failure
 from orchestrator.domain.context import (
     ItemWorkflow,
     ParallelState,
@@ -13,6 +14,7 @@ from orchestrator.domain.context import (
     TaskIdentity,
     WorkflowContext,
 )
+from orchestrator.runtime.concurrency import ConcurrencyLimits
 from orchestrator.domain.events import DomainEvent
 from orchestrator.domain.findings import Finding
 from orchestrator.domain.policies.item_revise import (
@@ -140,14 +142,17 @@ class JoinItemReviseTests(unittest.TestCase):
             for index, payload in enumerate(payloads, start=1)
         )
 
-    def test_two_patches_merge_into_one_revised_plan(self) -> None:
-        joiner = AgentNodeJoiner(
+    def _joiner(self, base_plan: dict | None = None) -> AgentNodeJoiner:
+        return AgentNodeJoiner(
             "node-1",
             task_id="task-1",
             state="ZHONGSHU_SOLVER",
             dispatch_mode="item_revise",
-            base_plan=_plan(),
+            base_plan=_plan() if base_plan is None else base_plan,
         )
+
+    def test_two_patches_merge_into_one_revised_plan(self) -> None:
+        joiner = self._joiner()
 
         result = joiner.join(
             self._results(
@@ -170,13 +175,7 @@ class JoinItemReviseTests(unittest.TestCase):
         )
 
     def test_invalid_patch_fails_retryable(self) -> None:
-        joiner = AgentNodeJoiner(
-            "node-1",
-            task_id="task-1",
-            state="ZHONGSHU_SOLVER",
-            dispatch_mode="item_revise",
-            base_plan=_plan(),
-        )
+        joiner = self._joiner()
         bad = _patch_payload("item-000001")
         bad["item"]["item_id"] = "item-000002"
 
@@ -185,6 +184,38 @@ class JoinItemReviseTests(unittest.TestCase):
         self.assertEqual(result.status, "FAILED")
         self.assertEqual(result.failure.error_code, "NODE_ITEM_REVISION_INVALID")
         self.assertTrue(result.failure.retryable)
+
+    def test_chef_check_rejects_a_dependency_cycle_introduced_by_patches(self) -> None:
+        # Two workers each point their item at the other: the merged graph has
+        # a dependency cycle, so the joiner must bounce the node back before
+        # the FSM ever sees the plan.
+        cycle_a = _patch_payload("item-000001")
+        cycle_a["item"]["dependencies"] = ["item-000002"]
+        cycle_b = _patch_payload("item-000002")
+        cycle_b["item"]["dependencies"] = ["item-000001"]
+
+        result = self._joiner().join(self._results(cycle_a, cycle_b))
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertEqual(result.failure.error_code, "NODE_ITEM_REVISION_INVALID")
+        self.assertTrue(result.failure.retryable)
+        self.assertIn("DEPENDENCY_CYCLE", result.failure.message)
+
+    def test_item_revision_failures_charge_the_reply_budget(self) -> None:
+        self.assertTrue(is_reply_failure("NODE_ITEM_REVISION_INVALID"))
+
+
+class ConcurrencyParameterTests(unittest.TestCase):
+    """Every config layer agrees on the same numbers (the audit's finding)."""
+
+    def test_code_defaults_match_the_env_defaults(self) -> None:
+        limits = ConcurrencyLimits()
+
+        self.assertEqual(limits.global_max, 6)
+        self.assertEqual(limits.per_task_max, 6)
+        self.assertEqual(limits.analyst_max, 3)
+        self.assertEqual(limits.critic_max, 4)
+        self.assertEqual(limits.lease_ttl_seconds, 1020)
 
 
 class ItemReviseBindingTests(unittest.TestCase):
