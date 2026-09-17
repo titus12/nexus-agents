@@ -9,7 +9,7 @@ typed ports after the decision has been durably committed.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import asdict, replace
 import logging
 from types import MappingProxyType
 from typing import ClassVar, Protocol, runtime_checkable
@@ -718,6 +718,7 @@ class _ConcreteWorkflowState:
                         "sequence": context.progression.sequence,
                         "dispatch_mode": "task_review",
                         "bindings": task_bindings,
+                        "previous_review": _previous_review_snapshot(context),
                         "group_id": None,
                         "item_id": None,
                     },
@@ -1709,6 +1710,26 @@ def _item_revise_bindings(
             }
         )
     return bindings or None
+
+
+def _previous_review_snapshot(context: WorkflowContext) -> dict[str, object] | None:
+    """Dispatch-time snapshot of the prior review for the Critic fan-in.
+
+    The join needs the previous round's findings and task-review rows to
+    (a) stop worker-local finding ids from colliding with the ids the last
+    round already stored and (b) explain why an approved task re-entered the
+    contested set.  The snapshot is taken when the dispatch effect is built,
+    so the fan-in sees exactly what the reviewed round started from.
+    """
+
+    review = context.review
+    if review is None:
+        return None
+    findings = [asdict(finding) for finding in review.findings]
+    ledger = [asdict(record) for record in review.task_review_ledger]
+    if not findings and not ledger:
+        return None
+    return {"findings": findings, "task_review_ledger": ledger}
 
 
 def _task_review_bindings(

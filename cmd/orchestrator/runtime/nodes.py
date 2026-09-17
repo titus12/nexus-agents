@@ -74,6 +74,9 @@ class NodeContext:
     # A2/P3 item-revise nodes: the dispatch-time plan the joiner merges
     # worker patches onto.
     base_plan: object | None = None
+    # Task-review nodes: the dispatch-time snapshot of the prior round's
+    # findings and task-review ledger, consumed by the fan-in aggregate.
+    previous_review: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)

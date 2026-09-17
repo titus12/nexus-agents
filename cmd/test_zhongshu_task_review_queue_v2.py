@@ -213,6 +213,140 @@ class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
         self.assertEqual(structural_gate(_plan()), [])
 
 
+    def test_previous_ledger_keeps_reraised_opinion_and_renumbers_collision(self) -> None:
+        # Round 2 worker ids are worker-local: an id the last round already
+        # stored must keep pointing at the old opinion, and a different opinion
+        # reusing that id must be renumbered instead of storing two records
+        # with one id.
+        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        first, second = queue.jobs[0], queue.jobs[1]
+        for job in queue.jobs:
+            claimed = queue.claim_next(f"slot-{job.item_id}")
+            assert claimed is not None
+            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
+        previous = {
+            "findings": [
+                {
+                    "finding_id": "finding-000001",
+                    "severity": "P1",
+                    "status": "OPEN",
+                    "group_id": first.group_id,
+                    "item_id": first.item_id,
+                    "category": "evidence",
+                    "target": first.item_id,
+                    "claim": "第一轮的旧意见",
+                    "stuck_rounds": 1,
+                },
+            ],
+        }
+        re_raise = _result(first, "TASK_CHANGES_REQUIRED", queue.plan_hash)
+        re_raise["findings"] = [
+            {
+                "finding_id": "finding-000009",
+                "severity": "P1",
+                "group_id": first.group_id,
+                "item_id": first.item_id,
+                "category": "evidence",
+                "target": first.item_id,
+                "claim": "同一意见换了措辞",
+            },
+        ]
+        collision = _result(second, "TASK_CHANGES_REQUIRED", queue.plan_hash)
+        collision["findings"] = [
+            {
+                "finding_id": "finding-000001",
+                "severity": "P1",
+                "group_id": second.group_id,
+                "item_id": second.item_id,
+                "category": "evidence",
+                "target": second.item_id,
+                "claim": "另一个条目上的全新意见，复用了同一个本地编号",
+            },
+        ]
+        rest = [
+            _result(job, "TASK_APPROVED", queue.plan_hash)
+            for job in queue.jobs[2:]
+        ]
+        report = aggregate_task_review_results(
+            queue.revision_id,
+            queue.plan_hash,
+            queue,
+            [re_raise, collision] + rest,
+            previous=previous,
+        )
+        output_ids = [finding["finding_id"] for finding in report["findings"]]
+        self.assertEqual(len(output_ids), len(set(output_ids)))
+        kept = next(
+            finding
+            for finding in report["findings"]
+            if finding["item_id"] == first.item_id
+        )
+        self.assertEqual(kept["finding_id"], "finding-000001")
+        renumbered = next(
+            finding
+            for finding in report["findings"]
+            if finding["item_id"] == second.item_id
+        )
+        self.assertNotEqual(renumbered["finding_id"], "finding-000001")
+        self.assertTrue(renumbered["finding_id"].startswith("finding-"))
+
+    def test_regression_reasons_explain_recontested_tasks(self) -> None:
+        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        job_dep, job_content, job_rereview, job_new = queue.jobs[:4]
+        for job in queue.jobs:
+            claimed = queue.claim_next(f"slot-{job.item_id}")
+            assert claimed is not None
+            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
+        previous = {
+            "task_review_ledger": [
+                {
+                    "item_id": job_dep.item_id,
+                    "status": "APPROVED",
+                    "task_hash": job_dep.task_hash,
+                    "dependency_hash": "upstream-old-hash",
+                },
+                {
+                    "item_id": job_content.item_id,
+                    "status": "APPROVED",
+                    "task_hash": "content-old-hash",
+                    "dependency_hash": job_content.dependency_hash,
+                },
+                {
+                    "item_id": job_rereview.item_id,
+                    "status": "APPROVED",
+                    "task_hash": job_rereview.task_hash,
+                    "dependency_hash": job_rereview.dependency_hash,
+                },
+                {
+                    "item_id": job_new.item_id,
+                    "status": "CHANGES_REQUIRED",
+                    "task_hash": job_new.task_hash,
+                    "dependency_hash": job_new.dependency_hash,
+                },
+            ],
+        }
+        results = [
+            _result(job_dep, "TASK_CHANGES_REQUIRED", queue.plan_hash),
+            _result(job_content, "TASK_CHANGES_REQUIRED", queue.plan_hash),
+            _result(job_rereview, "TASK_CHANGES_REQUIRED", queue.plan_hash),
+            _result(job_new, "TASK_CHANGES_REQUIRED", queue.plan_hash),
+        ] + [
+            _result(job, "TASK_APPROVED", queue.plan_hash)
+            for job in queue.jobs[4:]
+        ]
+        report = aggregate_task_review_results(
+            queue.revision_id, queue.plan_hash, queue, results, previous=previous
+        )
+        self.assertEqual(
+            report["affected_item_reasons"],
+            {
+                job_dep.item_id: "dependency_changed",
+                job_content.item_id: "content_changed",
+                job_rereview.item_id: "re_reviewed",
+            },
+        )
+
+
 def _result(job, action: str, plan_hash: str) -> dict:
     return {
         "action": action,

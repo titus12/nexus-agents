@@ -81,6 +81,11 @@ class NodeEffectRunner:
                 if isinstance(payload.get("current_formal_plan"), Mapping)
                 else None
             ),
+            previous_review=(
+                payload.get("previous_review")
+                if isinstance(payload.get("previous_review"), Mapping)
+                else None
+            ),
         )
         executor = (
             self._executor_factory(node, context)

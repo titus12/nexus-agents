@@ -385,6 +385,39 @@ class ReviewProgressNotificationTests(unittest.TestCase):
             text,
         )
 
+    def test_regression_reasons_annotate_the_failed_items(self) -> None:
+        payload = {
+            "action": "REQUEST_SOLVER_REVISION",
+            "affected_item_reasons": {
+                "item-000002": "dependency_changed",
+                "item-000007": "content_changed",
+            },
+            "findings": [
+                {"finding_id": "f-1", "severity": "P1", "item_id": "item-000002",
+                 "group_id": "group-000001", "status": "OPEN", "claim": "证据缺失",
+                 "owner_role": "review-solver"},
+                {"finding_id": "f-2", "severity": "P1", "item_id": "item-000007",
+                 "group_id": "group-000002", "status": "OPEN", "claim": "验收信号不可核验",
+                 "owner_role": "review-solver"},
+            ],
+        }
+        text = build_notification(
+            "ZHONGSHU_CRITIC",
+            "AGENT_REPLY_ACCEPTED",
+            _event(payload),
+            _context("ZHONGSHU_CRITIC", _review()),
+        )
+        self.assertIn(
+            "未通过：item-000002（P1,规划师，依赖变更重审）、"
+            "item-000007（P1,规划师，内容更新后重审）",
+            text,
+        )
+        self.assertIn(
+            "上轮已通过、本轮重新确认：item-000002（依赖变更重审）、"
+            "item-000007（内容更新后重审）",
+            text,
+        )
+
     def test_menxia_item_shows_active_item_and_completion(self) -> None:
         review = _review(active_item_id="item-000002", active_group_id="group-000001", completed=("item-000001",))
         text = build_notification(

@@ -268,6 +268,11 @@ def _presentation_event_name(event: DomainEvent, from_state: str = "") -> str | 
 
 _BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
 _RESOLVED_FINDING_STATUSES = frozenset({"RESOLVED", "WONT_FIX", "DEFERRED"})
+_AFFECTED_REASON_LABELS = {
+    "content_changed": "内容更新后重审",
+    "dependency_changed": "依赖变更重审",
+    "re_reviewed": "重新审查",
+}
 _OWNER_LABELS = {
     "review-solver": "规划师",
     "review-analyst": "分析师",
@@ -510,6 +515,7 @@ def _review_progress_lines(
 
     lines: list[str] = []
     labels = _item_labels(items)
+    reasons = _affected_reason_map(payload)
     if item_ids and scoped_blocking:
         passed = [item_id for item_id in item_ids if item_id not in blocked_set]
         lines.append(
@@ -517,7 +523,13 @@ def _review_progress_lines(
             f"未通过 {len(blocked_items)}"
         )
         details = "、".join(
-            f"{item_id}（{_blocked_label(scoped_blocking, item_id)}）"
+            f"{item_id}（{_blocked_label(scoped_blocking, item_id)}"
+            + (
+                f"，{_AFFECTED_REASON_LABELS[reasons[item_id]]}"
+                if item_id in reasons and reasons[item_id] in _AFFECTED_REASON_LABELS
+                else ""
+            )
+            + "）"
             for item_id in blocked_items[:8]
         )
         if len(blocked_items) > 8:
@@ -525,6 +537,13 @@ def _review_progress_lines(
         lines.append(f"未通过：{details}")
         if passed:
             lines.append(f"通过：{_item_list(passed, labels)}")
+        reverified = [
+            f"{item_id}（{_AFFECTED_REASON_LABELS[reasons[item_id]]}）"
+            for item_id in blocked_items[:6]
+            if item_id in reasons and reasons[item_id] in _AFFECTED_REASON_LABELS
+        ]
+        if reverified:
+            lines.append("上轮已通过、本轮重新确认：" + "、".join(reverified))
     elif item_ids and not blocking:
         lines.append(f"任务级审查：全部通过（{len(item_ids)} 项）")
         lines.append(f"通过：{_item_list(item_ids, labels)}")
@@ -561,6 +580,13 @@ def _severity_counts(findings: list[object]) -> str:
         severity = _finding_severity(finding) or "?"
         counts[severity] = counts.get(severity, 0) + 1
     return "、".join(f"{severity}×{counts[severity]}" for severity in sorted(counts))
+
+
+def _affected_reason_map(payload: Mapping[str, object]) -> dict[str, str]:
+    raw = payload.get("affected_item_reasons")
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(key): str(value) for key, value in raw.items()}
 
 
 def _finding_detail(finding: object) -> str:

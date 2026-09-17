@@ -345,6 +345,7 @@ class OrchestratorApp:
                 canonical_requirements=node_context.canonical_requirements,
                 dispatch_mode=node_context.dispatch_mode,
                 base_plan=node_context.base_plan,
+                previous_review=node_context.previous_review,
             ),
             max_workers=max_workers,
             on_worker_complete=on_worker_complete,

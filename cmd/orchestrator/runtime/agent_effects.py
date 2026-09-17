@@ -719,6 +719,7 @@ class AgentNodeJoiner:
         canonical_requirements: tuple[dict[str, object], ...] = (),
         dispatch_mode: str = "",
         base_plan: object | None = None,
+        previous_review: object | None = None,
     ) -> None:
         self._node_run_id = node_run_id
         self._task_id = task_id
@@ -730,6 +731,11 @@ class AgentNodeJoiner:
         self._canonical_requirements = canonical_requirements
         self._dispatch_mode = dispatch_mode
         self._base_plan = base_plan
+        self._previous_review = (
+            dict(previous_review)
+            if isinstance(previous_review, Mapping)
+            else None
+        )
 
     def join(self, results: tuple[WorkerResult, ...]):
         failed = [
@@ -911,6 +917,7 @@ class AgentNodeJoiner:
                 self._plan_hash,
                 self._task_review_queue,
                 worker_payloads,
+                previous=self._previous_review,
             )
         except (ValueError, ReviewQueueError) as error:
             aggregate: dict[str, object] = {"action": "FAIL"}
@@ -945,13 +952,14 @@ class AgentNodeJoiner:
             report["action"] = "APPROVE_CRITIC"
         logger.info(
             "NODE_TASK_REVIEW_FANIN node_run_id=%s action=%s complete=%s "
-            "completed=%s/%s affected_items=%s active_blockers=%s",
+            "completed=%s/%s affected_items=%s reverified_items=%s active_blockers=%s",
             self._node_run_id,
             report.get("action"),
             report.get("task_review_complete"),
             report.get("completed_task_count"),
             report.get("total_task_count"),
             report.get("affected_item_ids"),
+            sorted(report.get("affected_item_reasons") or {}),
             report.get("active_p0_p1_finding_ids"),
         )
         rejected = report.get("rejected_reviews") or []

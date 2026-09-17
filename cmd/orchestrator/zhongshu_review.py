@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from .domain.findings import normalize_finding_status
@@ -763,6 +764,45 @@ def _task_review_human_gate(
     }
 
 
+def _affected_item_reasons(
+    task_reviews: list[dict[str, Any]],
+    previous: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Explain why a previously approved task is contested again.
+
+    A task the Critic approved re-enters the revision set either because its
+    own content changed (the Solver rewrote it) or because a dependency it
+    points at changed, which invalidates the approval ratchet by design.  The
+    notification layer uses these codes so an approval-count drop reads as a
+    deliberate re-verification instead of an unexplained regression.
+    """
+
+    prior_ledger = {
+        str(row.get("item_id") or ""): row
+        for row in ((previous or {}).get("task_review_ledger") or [])
+        if isinstance(row, Mapping) and str(row.get("item_id") or "")
+    }
+    reasons: dict[str, str] = {}
+    for entry in task_reviews:
+        if entry.get("action") == "TASK_APPROVED":
+            continue
+        item_id = str(entry.get("item_id") or "")
+        prior = prior_ledger.get(item_id)
+        if not prior or str(prior.get("status") or "") != "APPROVED":
+            continue
+        prior_task_hash = str(prior.get("task_hash") or "")
+        reviewed_task_hash = str(entry.get("reviewed_task_hash") or "")
+        prior_dependency_hash = str(prior.get("dependency_hash") or "")
+        reviewed_dependency_hash = str(entry.get("reviewed_dependency_hash") or "")
+        if prior_task_hash != reviewed_task_hash:
+            reasons[item_id] = "content_changed"
+        elif prior_dependency_hash != reviewed_dependency_hash:
+            reasons[item_id] = "dependency_changed"
+        else:
+            reasons[item_id] = "re_reviewed"
+    return reasons
+
+
 def aggregate_task_review_results(
     revision: str,
     plan_hash: str,
@@ -935,6 +975,7 @@ def aggregate_task_review_results(
         for item in affected_reviews
         if item.get("group_id")
     })
+    affected_item_reasons = _affected_item_reasons(task_reviews, previous)
     failed_task_ids = [
         job.item_id for job in queue.jobs if job.status == "HUMAN_GATE"
     ]
@@ -972,6 +1013,7 @@ def aggregate_task_review_results(
         "task_queue_counts": queue_counts,
         "active_p0_p1_finding_ids": [item["finding_id"] for item in blocking],
         "affected_item_ids": affected_item_ids,
+        "affected_item_reasons": affected_item_reasons,
         "affected_group_ids": affected_group_ids,
         "failed_task_ids": failed_task_ids,
         "retryable_task_ids": retryable_task_ids,
