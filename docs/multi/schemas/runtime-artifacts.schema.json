@@ -1,0 +1,539 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus-agents.local/schemas/multi/runtime-artifacts.schema.json",
+  "title": "Multi-Agent Review Runtime Artifacts",
+  "oneOf": [
+    { "$ref": "#/$defs/evidencePacket" },
+    { "$ref": "#/$defs/frozenPlan" },
+    { "$ref": "#/$defs/findingPacket" },
+    { "$ref": "#/$defs/reviewAmendment" },
+    { "$ref": "#/$defs/itemReviewDecision" },
+    { "$ref": "#/$defs/groupReviewDecision" },
+    { "$ref": "#/$defs/humanGate" },
+    { "$ref": "#/$defs/taskState" }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z]+(?:-[a-z]+)*-[0-9]{6}$"
+    },
+    "artifactEnvelope": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "artifact_type",
+        "artifact_id",
+        "task_id",
+        "revision",
+        "created_at",
+        "created_by",
+        "skill_lock_hash",
+        "payload"
+      ],
+      "properties": {
+        "schema_version": { "const": "2.1" },
+        "artifact_type": { "type": "string", "minLength": 1 },
+        "artifact_id": { "$ref": "#/$defs/id" },
+        "task_id": { "$ref": "#/$defs/id" },
+        "plan_id": {
+          "anyOf": [
+            { "$ref": "#/$defs/id" },
+            { "type": "null" }
+          ]
+        },
+        "plan_version": {
+          "anyOf": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "null" }
+          ]
+        },
+        "group_id": {
+          "anyOf": [
+            { "$ref": "#/$defs/id" },
+            { "type": "null" }
+          ]
+        },
+        "item_id": {
+          "anyOf": [
+            { "$ref": "#/$defs/id" },
+            { "type": "null" }
+          ]
+        },
+        "revision": { "type": "integer", "minimum": 1 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "created_by": {
+          "enum": [
+            "orchestrator",
+            "review-analyst",
+            "review-solver",
+            "review-critic",
+            "human"
+          ]
+        },
+        "skill_lock_hash": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "evidenceItem": {
+      "type": "object",
+      "required": [
+        "evidence_id",
+        "kind",
+        "statement",
+        "source",
+        "retrieved_at",
+        "confidence"
+      ],
+      "properties": {
+        "evidence_id": { "$ref": "#/$defs/id" },
+        "kind": {
+          "enum": [
+            "code",
+            "local_doc",
+            "official_doc",
+            "command",
+            "test",
+            "log",
+            "user_statement",
+            "measurement"
+          ]
+        },
+        "statement": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "source_version": { "type": ["string", "null"] },
+        "retrieved_at": { "type": "string", "format": "date-time" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "supports": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "finding_id",
+        "scope",
+        "severity",
+        "category",
+        "claim",
+        "impact",
+        "required_resolution",
+        "owner",
+        "status"
+      ],
+      "properties": {
+        "finding_id": { "$ref": "#/$defs/id" },
+        "scope": { "enum": ["plan", "group", "item"] },
+        "severity": { "enum": ["P0", "P1", "P2", "P3"] },
+        "category": {
+          "enum": [
+            "requirement",
+            "evidence",
+            "logic",
+            "architecture",
+            "reuse",
+            "performance",
+            "resource",
+            "gc",
+            "security",
+            "compatibility",
+            "testability",
+            "operations"
+          ]
+        },
+        "claim": { "type": "string", "minLength": 1 },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "impact": { "type": "string", "minLength": 1 },
+        "required_resolution": { "type": "string", "minLength": 1 },
+        "owner": {
+          "enum": [
+            "review-analyst",
+            "review-solver",
+            "review-critic",
+            "human"
+          ]
+        },
+        "status": {
+          "enum": [
+            "open",
+            "accepted",
+            "rejected_with_evidence",
+            "resolved",
+            "needs_human",
+            "deferred"
+          ]
+        },
+        "resolution_artifact_id": {
+          "anyOf": [
+            { "$ref": "#/$defs/id" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "score": {
+      "type": "object",
+      "required": [
+        "requirement_coverage",
+        "evidence_sufficiency",
+        "architecture_reuse",
+        "performance_resource_gc",
+        "compatibility",
+        "testability_operations",
+        "security_risk",
+        "total"
+      ],
+      "properties": {
+        "requirement_coverage": { "type": "number", "minimum": 0, "maximum": 2 },
+        "evidence_sufficiency": { "type": "number", "minimum": 0, "maximum": 2 },
+        "architecture_reuse": { "type": "number", "minimum": 0, "maximum": 1.5 },
+        "performance_resource_gc": { "type": "number", "minimum": 0, "maximum": 1.5 },
+        "compatibility": { "type": "number", "minimum": 0, "maximum": 1.5 },
+        "testability_operations": { "type": "number", "minimum": 0, "maximum": 1 },
+        "security_risk": { "type": "number", "minimum": 0, "maximum": 0.5 },
+        "total": { "type": "number", "minimum": 0, "maximum": 10 }
+      },
+      "additionalProperties": false
+    },
+    "evidencePacket": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactEnvelope" },
+        {
+          "properties": {
+            "artifact_type": { "const": "EvidencePacket" },
+            "payload": {
+              "type": "object",
+              "required": [
+                "project_type",
+                "task_type",
+                "facts",
+                "inferences",
+                "assumptions",
+                "unknowns"
+              ],
+              "properties": {
+                "project_type": {
+                  "enum": ["go", "dotnet", "unity", "multi_project", "unknown"]
+                },
+                "task_type": {
+                  "enum": ["review", "bugfix", "feature", "refactor", "test", "unknown"]
+                },
+                "facts": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/evidenceItem" }
+                },
+                "inferences": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "assumptions": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "unknowns": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      ]
+    },
+    "frozenPlan": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactEnvelope" },
+        {
+          "properties": {
+            "artifact_type": { "const": "FrozenPlan" },
+            "payload": {
+              "type": "object",
+              "required": [
+                "plan_id",
+                "version",
+                "content_hash",
+                "groups",
+                "evidence_snapshot_ids",
+                "skill_lock_hash",
+                "frozen_at"
+              ],
+              "properties": {
+                "plan_id": { "$ref": "#/$defs/id" },
+                "version": { "type": "integer", "minimum": 1 },
+                "content_hash": { "type": "string", "pattern": "^sha256:" },
+                "groups": { "type": "array", "minItems": 1 },
+                "evidence_snapshot_ids": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/id" },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "skill_lock_hash": { "type": "string", "pattern": "^sha256:" },
+                "frozen_at": { "type": "string", "format": "date-time" }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      ]
+    },
+    "findingPacket": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactEnvelope" },
+        {
+          "properties": {
+            "artifact_type": { "const": "FindingPacket" },
+            "payload": {
+              "type": "object",
+              "required": ["findings"],
+              "properties": {
+                "findings": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/finding" }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "reviewAmendment": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactEnvelope" },
+        {
+          "properties": {
+            "artifact_type": { "const": "ReviewAmendment" },
+            "payload": {
+              "type": "object",
+              "required": [
+                "amendment_id",
+                "operation",
+                "target_ids",
+                "reason",
+                "invalidates"
+              ],
+              "properties": {
+                "amendment_id": { "$ref": "#/$defs/id" },
+                "operation": {
+                  "enum": [
+                    "UPDATE_ITEM",
+                    "SPLIT_ITEM",
+                    "MERGE_ITEMS",
+                    "REMOVE_ITEM",
+                    "UPDATE_DEPENDENCY",
+                    "UPDATE_GROUP"
+                  ]
+                },
+                "target_ids": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/id" },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "replacement_items": { "type": "array" },
+                "reason": { "type": "string", "minLength": 1 },
+                "finding_ids": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/id" },
+                  "uniqueItems": true
+                },
+                "invalidates": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/id" },
+                  "uniqueItems": true
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "itemReviewDecision": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactEnvelope" },
+        {
+          "properties": {
+            "artifact_type": { "const": "ItemReviewDecision" },
+            "payload": {
+              "type": "object",
+              "required": ["score", "decision", "findings"],
+              "properties": {
+                "score": { "$ref": "#/$defs/score" },
+                "decision": {
+                  "enum": [
+                    "APPROVE_ITEM",
+                    "REVISE_ITEM",
+                    "SPLIT_ITEM",
+                    "MERGE_ITEM",
+                    "REMOVE_ITEM",
+                    "HUMAN_GATE",
+                    "BLOCKED"
+                  ]
+                },
+                "findings": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/finding" }
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      ]
+    },
+    "groupReviewDecision": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactEnvelope" },
+        {
+          "properties": {
+            "artifact_type": { "const": "GroupReviewDecision" },
+            "payload": {
+              "type": "object",
+              "required": ["score", "decision", "item_review_ids"],
+              "properties": {
+                "score": { "$ref": "#/$defs/score" },
+                "decision": {
+                  "enum": [
+                    "APPROVE_GROUP",
+                    "REVISE_GROUP",
+                    "HUMAN_GATE",
+                    "BLOCKED"
+                  ]
+                },
+                "item_review_ids": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/id" },
+                  "minItems": 1,
+                  "uniqueItems": true
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      ]
+    },
+    "humanGate": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactEnvelope" },
+        {
+          "properties": {
+            "artifact_type": { "const": "HumanGate" },
+            "payload": {
+              "type": "object",
+              "required": [
+                "decision_id",
+                "question",
+                "options",
+                "required_actor_ids",
+                "status"
+              ],
+              "properties": {
+                "decision_id": { "$ref": "#/$defs/id" },
+                "question": { "type": "string", "minLength": 1 },
+                "options": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "object",
+                    "required": ["id", "label", "impact"],
+                    "properties": {
+                      "id": { "type": "string", "pattern": "^[A-Z]$" },
+                      "label": { "type": "string", "minLength": 1 },
+                      "impact": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required_actor_ids": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "status": { "enum": ["open", "answered", "expired", "cancelled"] },
+                "expires_at": { "type": ["string", "null"], "format": "date-time" },
+                "consumed_message_id": { "type": ["string", "null"] }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      ]
+    },
+    "taskState": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactEnvelope" },
+        {
+          "properties": {
+            "artifact_type": { "const": "TaskState" },
+            "payload": {
+              "type": "object",
+              "required": [
+                "workflow_state",
+                "global_revision_round",
+                "agent_call_count",
+                "updated_at"
+              ],
+              "properties": {
+                "workflow_state": {
+                  "enum": [
+                    "REQUEST_INTAKE",
+                    "PROJECT_ROUTING",
+                    "ZHONGSHU_ANALYST",
+                    "ZHONGSHU_SOLVER",
+                    "ZHONGSHU_CRITIC",
+                    "ZHONGSHU_FREEZE_CHECK",
+                    "ZHONGSHU_PLAN_FROZEN",
+                    "MENXIA_GROUP_START",
+                    "MENXIA_ITEM_ANALYST",
+                    "MENXIA_ITEM_SOLVER",
+                    "MENXIA_ITEM_CRITIC",
+                    "MENXIA_ITEM_REVISION",
+                    "MENXIA_GROUP_GATE",
+                    "WAITING_HUMAN",
+                    "FINALIZE",
+                    "DONE",
+                    "BLOCKED"
+                  ]
+                },
+                "global_revision_round": { "type": "integer", "minimum": 0, "maximum": 15 },
+                "zhongshu_revision_round": { "type": "integer", "minimum": 0, "maximum": 5 },
+                "group_revision_round": { "type": "integer", "minimum": 0, "maximum": 5 },
+                "item_revision_round": { "type": "integer", "minimum": 0, "maximum": 3 },
+                "agent_call_count": { "type": "integer", "minimum": 0 },
+                "active_decision_id": {
+                  "anyOf": [
+                    { "$ref": "#/$defs/id" },
+                    { "type": "null" }
+                  ]
+                },
+                "updated_at": { "type": "string", "format": "date-time" }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      ]
+    }
+  }
+}
