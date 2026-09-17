@@ -71,6 +71,9 @@ class NodeContext:
     dispatch_mode: str = ""
     review_queue: object | None = None
     canonical_requirements: tuple[dict[str, object], ...] = ()
+    # A2/P3 item-revise nodes: the dispatch-time plan the joiner merges
+    # worker patches onto.
+    base_plan: object | None = None
 
 
 @dataclass(frozen=True)

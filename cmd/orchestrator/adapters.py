@@ -2015,6 +2015,28 @@ def _response_contract_for(request: AgentRequest) -> dict:
                 "items, candidate groups, or implementation details."
             )
     elif request.phase == "ZHONGSHU" and request.role == "review-solver":
+        if str(request.context.get("zhongshu_dispatch_mode") or "") == "item_revise":
+            optional.extend([
+                "item", "finding_resolutions", "evidence_ids", "unknowns", "risks",
+            ])
+            allowed_actions = ["READY_FOR_CRITIC", "BLOCKED"]
+            required_by_action = {
+                "READY_FOR_CRITIC": ["action", "item", "finding_resolutions"],
+            }
+            instruction = (
+                "You are the item-scoped Zhongshu Solver. Revise exactly the "
+                "assigned item so every listed finding is addressed; keep "
+                "item_id and group_id unchanged and return the patched item "
+                "object plus one finding_resolution per finding. Do not touch "
+                "other items or return a full plan."
+            )
+            return {
+                "contract_id": "nexus.zhongshu.item_solver.v1",
+                "allowed_actions": allowed_actions,
+                "required_by_action": required_by_action,
+                "optional_fields": optional,
+                "instruction": instruction,
+            }
         optional.extend([
             "plan",
             "changes",

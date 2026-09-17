@@ -76,6 +76,11 @@ class NodeEffectRunner:
             dispatch_mode=dispatch_mode,
             review_queue=review_queue,
             canonical_requirements=canonical_requirements,
+            base_plan=(
+                payload.get("current_formal_plan")
+                if isinstance(payload.get("current_formal_plan"), Mapping)
+                else None
+            ),
         )
         executor = (
             self._executor_factory(node, context)

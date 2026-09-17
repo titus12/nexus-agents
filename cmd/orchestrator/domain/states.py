@@ -64,8 +64,14 @@ from .zhongshu import (
     mark_followups,
     plan_artifact_effect,
     process_solver_reply,
+    resolve_dispatch_stage,
 )
 from .zhongshu.solver import revision_scope as _revision_editable_item_ids
+from .policies.item_revise import (
+    contested_item_ids,
+    item_findings,
+    plan_item,
+)
 
 
 def _finding_payload(finding: object) -> dict[str, object]:
@@ -818,6 +824,51 @@ class _ConcreteWorkflowState:
             )
         agent_id = f"{phase.lower()}-{role.split('-')[-1]}"
         if target == "ZHONGSHU_SOLVER":
+            # A2/P3: with the item workflow enabled, a revision edge fans one
+            # Solver worker out per contested item instead of routing the
+            # whole batch through the single writer.  Formalization stays
+            # single-writer, and the flag keeps the legacy path available.
+            if (
+                context.parallel is not None
+                and context.parallel.zhongshu.item_workflow_enabled
+                and resolve_dispatch_stage(context.progression.state)
+                is SolverStage.REVISE
+            ):
+                item_bindings = _item_revise_bindings(
+                    context, revision_id, plan_hash, effective_review
+                )
+                if item_bindings:
+                    return EffectRequest(
+                        effect_id=f"node:{request_id}",
+                        effect_type="node_dispatch",
+                        task_id=context.identity.task_id,
+                        idempotency_key=request_id,
+                        payload_ref=context.request.payload_ref,
+                        payload={
+                            "issue_id": context.identity.issue_id,
+                            "request_id": request_id,
+                            "phase": phase,
+                            "role": role,
+                            "target_state": target,
+                            "state": target,
+                            "node_run_id": f"node:{request_id}",
+                            "prompt_ref": prompt.content,
+                            "request_payload_ref": context.request.payload_ref or "",
+                            "revision_id": revision_id,
+                            "plan_hash": plan_hash,
+                            "sequence": context.progression.sequence,
+                            "dispatch_mode": "item_revise",
+                            "bindings": item_bindings,
+                            "current_formal_plan": (
+                                dict(context.review.plan)
+                                if context.review is not None
+                                and isinstance(context.review.plan, Mapping)
+                                else None
+                            ),
+                            "group_id": None,
+                            "item_id": None,
+                        },
+                    )
             # The Solver's two input channels are built in the zhongshu
             # package, one builder per stage; the stage is decided by the
             # transition edge, not by payload shape.
@@ -974,7 +1025,30 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         self._require_event_task(context, event)
         action = self._event_action(event)
         plan_effect: EffectRequest | None = None
-        if event.name != "TIMEOUT" and action == "READY_FOR_CRITIC":
+        if (
+            event.name == "NODE_COMPLETED"
+            and action == "READY_FOR_CRITIC"
+            and isinstance(event.payload, Mapping)
+            and isinstance(event.payload.get("plan"), Mapping)
+        ):
+            # A2/P3 item-revise node: the joiner already materialized and
+            # merged the per-item patches, so the reply validator must not
+            # re-run; persist the merged plan and hash the artifact.
+            payload = dict(event.payload)
+            event = replace(
+                event,
+                payload={
+                    **payload,
+                    "changes": [],
+                },
+            )
+            plan_effect = plan_artifact_effect(
+                context.identity.task_id,
+                context.progression.sequence,
+                payload["plan"],
+                str(payload.get("revision_id") or ""),
+            )
+        elif event.name != "TIMEOUT" and action == "READY_FOR_CRITIC":
             payload = dict(event.payload) if isinstance(event.payload, Mapping) else {}
             # Stage routing lives in the zhongshu package: the formalize
             # (Analyst) and revise (Critic) channels validate and materialize
@@ -1514,6 +1588,127 @@ def _item_evidence_context(
     )
     lens_gaps = max(0, expected_lenses - len(lens_workers)) if expected_lenses else 0
     return {"records": records, "lens_workers": lens_workers, "lens_gaps": lens_gaps}
+
+
+def _item_revise_capsule(
+    item: Mapping[str, object],
+    findings: tuple[dict[str, object], ...],
+) -> str:
+    """Instruction capsule for one item-scoped Solver worker (A2/P3)."""
+
+    item_id = str(item.get("item_id") or "")
+    lines = [
+        f"Item revision job: {item_id} in group {item.get('group_id') or '-'}.",
+        f"Title: {item.get('title') or ''}",
+        f"Objective: {item.get('objective') or ''}",
+    ]
+    dependencies = item.get("dependencies") or []
+    if dependencies:
+        lines.append(f"Dependencies: {', '.join(str(value) for value in dependencies)}")
+    if findings:
+        lines.append(f"Resolve these {len(findings)} findings for this item:")
+        for finding in findings:
+            demand = (
+                str(finding.get("required_action") or "")
+                or str(finding.get("claim") or "")
+            )
+            lines.append(
+                f"- {finding.get('finding_id')} "
+                f"[{finding.get('severity')}] {' '.join(demand.split())[:220]}"
+            )
+    lines.append(
+        "Rewrite only this item so every finding is addressed; keep item_id and "
+        "group_id unchanged, and rewrite acceptance signals observably (per-item "
+        "verifiable, explicit units, cited evidence sources, UNKNOWN for runtime "
+        "facts). Return the patched item object plus one finding_resolution per "
+        "finding; do not touch other items."
+    )
+    return "\n".join(lines)
+
+
+def _item_revise_bindings(
+    context: WorkflowContext,
+    revision_id: str,
+    plan_hash: str,
+    review_override: object | None = None,
+) -> list[dict[str, object]] | None:
+    """One Solver binding per contested item for the item-revise node."""
+
+    review = review_override if review_override is not None else context.review
+    if review is None:
+        return None
+    contested = contested_item_ids(review.task_review_ledger)
+    if not contested:
+        return None
+    expected_lenses = (
+        context.parallel.zhongshu.analyst_default_workers
+        if context.parallel is not None
+        else 0
+    )
+    base_request_id = f"{context.identity.task_id}:ZHONGSHU_SOLVER:{context.progression.sequence + 1}"
+    bindings: list[dict[str, object]] = []
+    for index, item_id in enumerate(contested, start=1):
+        item = plan_item(review.plan, item_id)
+        if item is None:
+            continue
+        findings = item_findings(review.findings, item_id)
+        evidence = _item_evidence_context(
+            review,
+            type(
+                "ItemShim",
+                (),
+                {
+                    "item_id": item_id,
+                    "source_requirement_ids": tuple(
+                        str(value) for value in (item.get("source_requirement_ids") or ())
+                    ),
+                },
+            )(),
+            expected_lenses,
+        )
+        bindings.append(
+            {
+                "worker_id": f"zhongshu_solver-worker-{index:02d}",
+                "agent_id": f"zhongshu-solver-{index:02d}",
+                "task_id": context.identity.task_id,
+                "request_id": f"{base_request_id}:worker-{index:02d}",
+                "role": "review-solver",
+                "phase": "ZHONGSHU",
+                "group_id": str(item.get("group_id") or ""),
+                "item_id": item_id,
+                "prompt_ref": _item_revise_capsule(item, findings),
+                "dispatch_context": {
+                    "zhongshu_dispatch_mode": "item_revise",
+                    "revision_id": revision_id,
+                    "plan_hash": plan_hash,
+                    "group_id": str(item.get("group_id") or ""),
+                    "item_id": item_id,
+                    "item": item,
+                    "item_findings": list(findings),
+                    "item_evidence": evidence["records"],
+                    "envelope": build_envelope(
+                        ingredients=[
+                            {"key": "review.plan", "source": "context.json",
+                             "lifetime": "persisted",
+                             "slice": f"item:{item_id}"},
+                            {"key": "review.findings", "source": "context.json",
+                             "lifetime": "persisted",
+                             "slice": f"item:{item_id}+active"},
+                            {"key": "review.item_evidence", "source": "context.json",
+                             "lifetime": "persisted",
+                             "slice": f"item:{item_id}"},
+                            {"key": "acceptance_standards", "source": "prompt.txt",
+                             "lifetime": "persisted"},
+                        ],
+                        tools={"editable": f"items:{item_id}",
+                               "contract": "nexus.zhongshu.item_solver.v1"},
+                        product={"type": "item_patch",
+                                 "contract": "nexus.zhongshu.item_solver.v1"},
+                    ),
+                },
+            }
+        )
+    return bindings or None
 
 
 def _task_review_bindings(

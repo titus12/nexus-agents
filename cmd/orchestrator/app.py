@@ -157,6 +157,23 @@ class OrchestratorApp:
             snapshot = self.repository.load(context.identity.task_id)
         else:
             snapshot = WorkflowSnapshot(context.identity.task_id, context, 0)
+            if os.environ.get("ZHONGSHU_ITEM_WORKFLOW_ENABLED", "").strip().lower() in {
+                "1", "true", "yes", "on"
+            }:
+                snapshot = WorkflowSnapshot(
+                    context.identity.task_id,
+                    replace(
+                        context,
+                        parallel=replace(
+                            context.parallel,
+                            zhongshu=replace(
+                                context.parallel.zhongshu,
+                                item_workflow_enabled=True,
+                            ),
+                        ),
+                    ),
+                    0,
+                )
             self.repository.initialize(snapshot)
         self.context = snapshot.context
         self.multica = multica or MulticaCliAdapter(self.root / "transport")
@@ -267,9 +284,20 @@ class OrchestratorApp:
             and pool_size == 1
             and child_supported
         )
-        fanout = fanout_analyst or fanout_critic
+        fanout_item_revise = (
+            node_context.state == "ZHONGSHU_SOLVER"
+            and node_context.dispatch_mode == "item_revise"
+            and total > 1
+            and pool_size == 1
+            and child_supported
+        )
+        fanout = fanout_analyst or fanout_critic or fanout_item_revise
         if fanout:
-            cap = total if fanout_analyst else self._critic_max_workers
+            cap = (
+                total
+                if (fanout_analyst or fanout_item_revise)
+                else self._critic_max_workers
+            )
             max_workers = min(self._node_max_workers, cap, total)
         else:
             max_workers = min(
@@ -315,6 +343,8 @@ class OrchestratorApp:
                 plan_hash=node_context.plan_hash,
                 task_review_queue=node_context.review_queue,
                 canonical_requirements=node_context.canonical_requirements,
+                dispatch_mode=node_context.dispatch_mode,
+                base_plan=node_context.base_plan,
             ),
             max_workers=max_workers,
             on_worker_complete=on_worker_complete,

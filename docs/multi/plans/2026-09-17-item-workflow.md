@@ -93,10 +93,13 @@ menxia_parallel 设计文档（闸门模式与本方案的特性开关同构）�
 - task_review fanin 折叠时写分单表：`policies/item_workflows.py` 的计数规则与
   ledger ratchet 同源（attempt 范围、预算耗尽 → ESCALATED）。
 
-### Phase 3 — ItemWorkflow 执行器（2-3 天，核心）
-- 灶台迷你循环（runtime 层，复用 admission/子 issue/结构校验/attempt 幂等）。
-- 大 FSM 收菜逻辑。
-- scripted e2e 验证（复用 test_zhongshu_convergence_e2e 模式，零 token）。
+### Phase 3 — ItemWorkflow 执行器（2-3 天，核心）【已完成：FSM 级灶台】
+- 实现取"大 FSM 状态对"拓扑：REVISE 边 + 开关开启时派 item_revise 节点
+  （每争议 item 一个 Solver binding），joiner 物化/合并 patch 并重算 plan_hash，
+  NODE_COMPLETED 携带合并后 plan 回 ZHONGSHU_SOLVER（跳过 reply 校验、写 plan artifact），
+  复审由 task_hash 变化自动触发。两班厨师 = 审查节点与 item 修订节点经大 FSM 交替。
+- 开关 `zhongshu.item_workflow_enabled`（env `ZHONGSHU_ITEM_WORKFLOW_ENABLED`，默认 off）。
+- scripted e2e：test_zhongshu_item_workflow_e2e.py（拒绝→灶台修订→复审批准→DONE）。
 
 ### Phase 4 — 主厨一致性 + 切换（1-2 天）
 - 跨菜一致性校验单元。

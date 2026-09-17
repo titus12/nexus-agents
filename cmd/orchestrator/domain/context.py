@@ -39,6 +39,10 @@ class ZhongshuParallelLimits:
     # (context=6, admission/env=3), which made the effective width ambiguous.
     critic_max_workers: int = 4
     critic_default_workers: int = 4
+    # A2/P3: revise contested items through parallel per-item Solver workers
+    # (one binding per contested item) instead of one single-writer revision.
+    # Default off; flipped by ZHONGSHU_ITEM_WORKFLOW_ENABLED.
+    item_workflow_enabled: bool = False
     global_max_workers: int = 6
     per_task_max_workers: int = 6
 

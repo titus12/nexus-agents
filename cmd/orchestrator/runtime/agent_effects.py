@@ -717,6 +717,8 @@ class AgentNodeJoiner:
         plan_hash: str = "",
         task_review_queue: object | None = None,
         canonical_requirements: tuple[dict[str, object], ...] = (),
+        dispatch_mode: str = "",
+        base_plan: object | None = None,
     ) -> None:
         self._node_run_id = node_run_id
         self._task_id = task_id
@@ -726,6 +728,8 @@ class AgentNodeJoiner:
         self._plan_hash = plan_hash
         self._task_review_queue = task_review_queue
         self._canonical_requirements = canonical_requirements
+        self._dispatch_mode = dispatch_mode
+        self._base_plan = base_plan
 
     def join(self, results: tuple[WorkerResult, ...]):
         failed = [
@@ -806,6 +810,9 @@ class AgentNodeJoiner:
         ]
         if self._task_review_queue is not None:
             return self._join_task_review(results, worker_payloads, partial_reviews)
+
+        if self._dispatch_mode == "item_revise":
+            return self._join_item_revise(results, worker_payloads)
 
         payloads = [
             result.result_payload
@@ -1021,6 +1028,124 @@ class AgentNodeJoiner:
                 ),
             )
         return NodeResult(self._node_run_id, "SUCCEEDED", results, aggregate=report)
+
+    def _join_item_revise(self, results, worker_payloads):
+        """Merge one-patch-per-item worker replies into the revised plan.
+
+        Every worker owns exactly one contested item and returns the patched
+        item object.  The joiner materializes each patch against its item id
+        (reply-shape failures charge the reply budget), merges them onto the
+        dispatch-time plan, and re-hashes the merged graph — the orchestrator
+        owns the plan, workers never mutate shared state.
+        """
+
+        from ..domain.policies.item_revise import (
+            materialize_item_patch,
+            merge_item_patches,
+        )
+        from ..zhongshu_parallel import canonical_plan_hash
+
+        patches = []
+        for payload in worker_payloads:
+            if str(payload.get("action") or "") != "READY_FOR_CRITIC":
+                return NodeResult(
+                    self._node_run_id,
+                    "FAILED",
+                    results,
+                    aggregate={"action": "FAIL"},
+                    failure=FailureRecord(
+                        failure_id=f"{self._node_run_id}:ITEM_REVISION_ACTION_INVALID",
+                        stage="node_join",
+                        owner_component="agent_node_joiner",
+                        task_id=self._task_id,
+                        state=self._state,
+                        sequence=self._sequence,
+                        node_run_id=self._node_run_id,
+                        worker_id=str(payload.get("worker_id") or ""),
+                        effect_id=None,
+                        error_code="NODE_ITEM_REVISION_INVALID",
+                        retryable=True,
+                        message=(
+                            "item-revision workers must return READY_FOR_CRITIC "
+                            f"with a patch, got {payload.get('action')!r}"
+                        ),
+                        cause_type="ItemRevisionJoin",
+                    ),
+                )
+            item_id = str(payload.get("item_id") or "")
+            patch, error = materialize_item_patch(payload, item_id)
+            if error:
+                logger.warning(
+                    "NODE_ITEM_REVISION_PATCH_INVALID node_run_id=%s item_id=%s "
+                    "error=%s",
+                    self._node_run_id,
+                    item_id,
+                    error,
+                )
+                return NodeResult(
+                    self._node_run_id,
+                    "FAILED",
+                    results,
+                    aggregate={"action": "FAIL"},
+                    failure=FailureRecord(
+                        failure_id=f"{self._node_run_id}:NODE_ITEM_REVISION_INVALID",
+                        stage="node_join",
+                        owner_component="agent_node_joiner",
+                        task_id=self._task_id,
+                        state=self._state,
+                        sequence=self._sequence,
+                        node_run_id=self._node_run_id,
+                        worker_id=str(payload.get("worker_id") or ""),
+                        effect_id=None,
+                        error_code="NODE_ITEM_REVISION_INVALID",
+                        retryable=True,
+                        message=error,
+                        cause_type="ItemRevisionJoin",
+                    ),
+                )
+            patches.append(patch)
+        merged, error = merge_item_patches(self._base_plan, patches)
+        if error:
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate={"action": "FAIL"},
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:ITEM_REVISION_MERGE_INVALID",
+                    stage="node_join",
+                    owner_component="agent_node_joiner",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=None,
+                    effect_id=None,
+                    error_code="NODE_ITEM_REVISION_INVALID",
+                    retryable=False,
+                    message=error,
+                    cause_type="ItemRevisionJoin",
+                ),
+            )
+        logger.info(
+            "NODE_ITEM_REVISION_MERGED node_run_id=%s items=%s",
+            self._node_run_id,
+            [patch.item_id for patch in patches],
+        )
+        return NodeResult(
+            self._node_run_id,
+            "SUCCEEDED",
+            results,
+            aggregate={
+                "action": "READY_FOR_CRITIC",
+                "plan": merged,
+                "plan_hash": canonical_plan_hash(merged),
+                "summary": (
+                    "item-scoped revision merged for "
+                    + ",".join(patch.item_id for patch in patches)
+                ),
+            },
+        )
 
 
 __all__ = ["AgentNodeJoiner", "AgentNodeWorkerRunner", "AgentWorkerRunner"]
