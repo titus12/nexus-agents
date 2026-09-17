@@ -89,6 +89,115 @@ class HumanGateReasonNotificationTests(unittest.TestCase):
         )
 
         self.assertIn("ZHONGSHU_STUCK_FINDING", text)
+        self.assertIn("规划师与审查员对同样的问题连续 3 轮未达成一致", text)
+        self.assertIn("怎么回复", text)
+        self.assertIn("--cancel task-1", text)
+
+
+class HumanGateReadableBlockTests(unittest.TestCase):
+    def _gate_context(self, review: ReviewState | None = None) -> WorkflowContext:
+        return WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("HUMAN_GATE", 13, "2026-09-11T00:00:00+00:00"),
+            request=RequestState(raw_request="审查 orchestrator 优化"),
+            human_gate=HumanGateState(
+                decision_id="task-1:human-gate:13",
+                reason_code="ZHONGSHU_STUCK_FINDING",
+                resume_state="ZHONGSHU_CRITIC",
+            ),
+            review=review,
+        )
+
+    def test_gate_renders_findings_as_bullets_not_raw_json(self) -> None:
+        review = ReviewState(
+            revision_id="rev-1",
+            zhongshu_revision_round=3,
+            max_zhongshu_revision_rounds=8,
+            findings=(
+                {
+                    "finding_id": "finding-000001",
+                    "category": "token_budget_and_context_safety",
+                    "item_id": "item-000003",
+                    "claim": "计划缺少按角色 token 预算与上下文窗口核算",
+                    "severity": "P1",
+                    "status": "OPEN",
+                    "owner_role": "review-solver",
+                },
+            ),  # type: ignore[arg-type]
+        )
+        text = build_notification(
+            "HUMAN_GATE",
+            "AGENT_REPLY_ACCEPTED",
+            _event({"action": "REQUEST_SOLVER_REVISION"}),
+            self._gate_context(review),
+        )
+
+        self.assertIn("需要人工决策：规划师与审查员对同样的问题连续 3 轮未达成一致", text)
+        self.assertIn("当前进度：已修订 3/8 轮", text)
+        self.assertIn("当前拦路的问题：", text)
+        self.assertIn("· [P1] item-000003：计划缺少按角色 token 预算", text)
+        self.assertNotIn('"finding_id"', text)
+        self.assertNotIn("missing_evidence：[", text)
+
+    def test_gate_renders_missing_evidence_as_bullets(self) -> None:
+        payload = {
+            "action": "REQUEST_SOLVER_REVISION",
+            "missing_evidence": [
+                {
+                    "owner_item_id": "item-000002",
+                    "needed": "next_menxia_item() 按 (order, item_id) 排序的代码实证",
+                },
+            ],
+        }
+        text = build_notification(
+            "HUMAN_GATE",
+            "AGENT_REPLY_ACCEPTED",
+            _event(payload),
+            self._gate_context(),
+        )
+
+        self.assertIn("缺少的证据：", text)
+        self.assertIn("· item-000002：next_menxia_item() 按 (order, item_id) 排序", text)
+        self.assertNotIn('missing_evidence：[{"owner_item_id"', text)
+
+    def test_structured_gate_request_keeps_question_and_adds_guidance(self) -> None:
+        payload = {
+            "action": "HUMAN_GATE",
+            "human_gate_request": {
+                "question": "请明确尚未解决的中书省审查分歧。",
+                "options": ["按审查员意见继续修订", "驳回该问题"],
+            },
+        }
+        text = build_notification(
+            "ZHONGSHU_CRITIC",
+            "AGENT_REPLY_ACCEPTED",
+            _event(payload),
+            _context("ZHONGSHU_CRITIC", None),
+        )
+
+        self.assertIn("需要你决策：请明确尚未解决的中书省审查分歧。", text)
+        self.assertIn("1) 按审查员意见继续修订", text)
+        self.assertIn("怎么回复", text)
+
+    def test_item_stalled_reason_names_the_items(self) -> None:
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("HUMAN_GATE", 9, "2026-09-11T00:00:00+00:00"),
+            request=RequestState(raw_request="审查 orchestrator 优化"),
+            human_gate=HumanGateState(
+                decision_id="task-1:human-gate:9",
+                reason_code="ZHONGSHU_ITEM_STALLED",
+                resume_state="ZHONGSHU_CRITIC",
+            ),
+        )
+        text = build_notification(
+            "HUMAN_GATE",
+            "HUMAN_GATE",
+            _event({"action": "HUMAN_GATE", "affected_item_ids": ["item-000006"]}),
+            context,
+        )
+
+        self.assertIn("item-000006 多轮修订仍未通过审查", text)
 
 
 class RetryBudgetNotificationTests(unittest.TestCase):

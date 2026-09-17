@@ -23,6 +23,7 @@ ROLE_NAMES = {
     "ZHONGSHU_SOLVER": "规划师",
     "ZHONGSHU_CRITIC": "审查员",
     "ZHONGSHU_FREEZE_CHECK": "审查员",
+    "HUMAN_GATE": "人工审批",
     "MENXIA_ITEM_SOLVER": "规划师",
     "MENXIA_ITEM_ANALYST": "分析师",
     "MENXIA_ITEM_CRITIC": "审查员",
@@ -108,6 +109,8 @@ def build_notification(
         label = "任务仍在运行"
     if event_name == "AGENT_REPLY_REJECTED":
         label = "Agent 回复需要修正"
+    if state == "HUMAN_GATE" and event_name != "HUMAN_DECISION_RECEIVED":
+        label = "需要人工决策"
 
     lines = [f"【{role}｜{label}】", f"任务：{context.identity.task_id}", f"状态：{state}"]
     if context.request.raw_request:
@@ -136,20 +139,28 @@ def build_notification(
         _append_payload(lines, payload, "final_delivery")
         lines.append("方案已完成；不代表代码已实现或测试已执行。")
     else:
-        gate_lines = _human_gate_lines(payload)
-        if gate_lines:
-            lines.extend(gate_lines)
-        elif state == "HUMAN_GATE" and context.human_gate is not None:
-            reason_code = str(context.human_gate.reason_code or "").strip()
-            if reason_code:
-                lines.append(f"人工处理原因：{_brief(reason_code, 120)}")
-        for field in ("notification", "summary", "confirmed_facts", "missing_evidence", "questions_for_solver"):
-            _append_payload(lines, payload, field)
-        progress = _review_progress_lines(state, event_name, payload, context)
-        if progress:
-            lines.extend(progress)
+        gate_block = _human_gate_block(state, payload, context)
+        if gate_block:
+            lines.extend(gate_block)
         else:
-            _append_payload(lines, payload, "findings")
+            for field in ("notification", "summary", "confirmed_facts", "questions_for_solver"):
+                _append_payload(lines, payload, field)
+            progress = _review_progress_lines(state, event_name, payload, context)
+            if progress:
+                lines.extend(progress)
+            else:
+                finding_lines = _finding_lines(payload, context)
+                if finding_lines:
+                    lines.append("待解决问题：")
+                    lines.extend(finding_lines)
+                else:
+                    _append_payload(lines, payload, "findings")
+            evidence_lines = _missing_evidence_lines(payload)
+            if evidence_lines:
+                lines.append("缺少的证据：")
+                lines.extend(evidence_lines)
+            else:
+                _append_payload(lines, payload, "missing_evidence")
 
     return _brief("\n".join(lines), limit)
 
@@ -302,6 +313,161 @@ def _human_gate_lines(payload: Mapping[str, object]) -> list[str]:
         for detail in details[:6]:
             lines.append(f"  - {_brief(detail, 200)}")
     return lines
+
+
+def _human_gate_block(
+    state: str,
+    payload: Mapping[str, object],
+    context: WorkflowContext,
+) -> list[str]:
+    """Readable escalation block: plain-language reason, blockers, decision ask.
+
+    The gate audience is a human who must decide in seconds, so this renders
+    the escalation in operator language instead of dumping raw JSON records.
+    """
+
+    structured = _human_gate_lines(payload)
+    if structured:
+        structured.extend(_human_decision_guidance(context.identity.task_id))
+        return structured
+    if state != "HUMAN_GATE":
+        return []
+    human_gate = context.human_gate
+    reason_code = (
+        str(getattr(human_gate, "reason_code", "") or "").strip()
+        if human_gate is not None
+        else ""
+    )
+    lines: list[str] = []
+    if reason_code:
+        lines.append(f"需要人工决策：{_human_reason_text(reason_code, payload, context)}")
+    progress = _gate_progress_line(context)
+    if progress:
+        lines.append(progress)
+    finding_lines = _finding_lines(payload, context)
+    if finding_lines:
+        lines.append("当前拦路的问题：")
+        lines.extend(finding_lines)
+    evidence_lines = _missing_evidence_lines(payload)
+    if evidence_lines:
+        lines.append("缺少的证据：")
+        lines.extend(evidence_lines)
+    if reason_code:
+        lines.append(f"（原因码：{reason_code}）")
+    lines.extend(_human_decision_guidance(context.identity.task_id))
+    return lines
+
+
+def _human_reason_text(
+    reason_code: str,
+    payload: Mapping[str, object],
+    context: WorkflowContext,
+) -> str:
+    """Translate a gate reason code into one operator-readable sentence."""
+
+    if reason_code == "ZHONGSHU_STUCK_FINDING":
+        rounds = context.recovery.max_stuck_finding_rounds
+        return (
+            f"规划师与审查员对同样的问题连续 {rounds} 轮未达成一致，"
+            "继续自动重试不会有进展"
+        )
+    if reason_code == "ZHONGSHU_ITEM_STALLED":
+        items = "、".join(
+            str(value) for value in (payload.get("affected_item_ids") or [])[:4]
+        )
+        rounds = context.review.max_item_revision_rounds if context.review else 0
+        scope = items or "部分任务"
+        if rounds:
+            return f"{scope} 连续 {rounds} 轮修订仍未通过审查"
+        return f"{scope} 多轮修订仍未通过审查"
+    if reason_code == "ZHONGSHU_REVISION_BUDGET_EXHAUSTED":
+        if context.review:
+            return (
+                f"整体修订轮数已达上限（{context.review.zhongshu_revision_round}"
+                f"/{context.review.max_zhongshu_revision_rounds}），仍有问题未解决"
+            )
+        return "整体修订轮数已达上限，仍有问题未解决"
+    return "系统自动处理已到边界，需要人工介入"
+
+
+def _gate_progress_line(context: WorkflowContext) -> str:
+    review = context.review
+    if review is None:
+        return ""
+    rounds = int(getattr(review, "zhongshu_revision_round", 0) or 0)
+    limit = int(getattr(review, "max_zhongshu_revision_rounds", 0) or 0)
+    findings = list(getattr(review, "findings", ()) or ())
+    open_count = sum(1 for finding in findings if _finding_active(finding))
+    return f"当前进度：已修订 {rounds}/{limit} 轮，未解决问题 {open_count} 个"
+
+
+def _finding_lines(
+    payload: Mapping[str, object],
+    context: WorkflowContext,
+    limit: int = 4,
+) -> list[str]:
+    """Render active findings as one readable bullet each; empty when none."""
+
+    raw = payload.get("findings")
+    if not (isinstance(raw, list) and raw):
+        review = getattr(context, "review", None)
+        raw = list(getattr(review, "findings", ()) or ()) if review is not None else []
+    active = [finding for finding in raw if _finding_active(finding)]
+    active.sort(
+        key=lambda finding: (
+            0 if _finding_severity(finding) in _BLOCKING_SEVERITIES else 1,
+            _finding_severity(finding),
+        )
+    )
+    lines: list[str] = []
+    for finding in active[:limit]:
+        severity = _finding_severity(finding)
+        item_id = _finding_item_id(finding)
+        claim = (
+            _finding_field(finding, "claim")
+            or _finding_field(finding, "required_action")
+            or _finding_field(finding, "target")
+        )
+        if not claim:
+            continue
+        prefix = f"[{severity}] " if severity else ""
+        location = f"{item_id}：" if item_id else ""
+        lines.append(f"· {prefix}{location}{_brief(claim, 120)}")
+    return lines
+
+
+def _missing_evidence_lines(
+    payload: Mapping[str, object],
+    limit: int = 3,
+) -> list[str]:
+    """Render missing-evidence records as readable bullets; empty when none."""
+
+    raw = payload.get("missing_evidence")
+    if not isinstance(raw, list):
+        return []
+    lines: list[str] = []
+    for record in raw:
+        if not isinstance(record, Mapping):
+            continue
+        needed = str(record.get("needed") or "").strip()
+        if not needed:
+            continue
+        owner = str(record.get("owner_item_id") or record.get("item_id") or "").strip()
+        location = f"{owner}：" if owner else ""
+        lines.append(f"· {location}{_brief(needed, 130)}")
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _human_decision_guidance(task_id: str) -> list[str]:
+    """Tell the operator exactly what a reply does and how to abort."""
+
+    return [
+        "怎么回复：直接回复本条消息任意内容 = 继续审查流程；"
+        f"如需终止任务：python cmd/review_orchestrator_v2.py --cancel {task_id}",
+        "提示：回复文字不会自动转达给 agent；要给出具体意见请到对应 multica issue 下评论。",
+    ]
 
 
 def _review_progress_lines(
