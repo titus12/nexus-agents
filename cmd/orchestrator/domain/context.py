@@ -34,8 +34,11 @@ class ZhongshuParallelLimits:
     enabled: bool = True
     analyst_max_workers: int = 3
     analyst_default_workers: int = 3
-    critic_max_workers: int = 6
-    critic_default_workers: int = 6
+    # Critic width.  Every layer (context defaults, admission defaults, env
+    # defaults) must agree on this cap; the values used to disagree
+    # (context=6, admission/env=3), which made the effective width ambiguous.
+    critic_max_workers: int = 4
+    critic_default_workers: int = 4
     global_max_workers: int = 6
     per_task_max_workers: int = 6
 
@@ -148,6 +151,16 @@ class ReviewState:
     # a finding the batch never picked cannot be escalated for rounds it had
     # no chance to fix.
     attempted_finding_ids: tuple[str, ...] | None = None
+    # The Analyst evidence packet (lens outputs merged per round).  It used to
+    # travel only between Analyst and Solver inside the ``plan`` field, so the
+    # task-review Critic judged every task with zero investigation context and
+    # requested evidence the run already had.  The task-review bindings slice
+    # this per item; ``None`` until the first lens round folds.
+    evidence_packet: dict[str, object] | None = None
+    # Per-item pipeline dispatch table (A2/P2).  Mirrors the ledger's verdicts
+    # as pipeline phases; the ItemWorkflow executor consumes it to know which
+    # stoves are open.  Empty until the first task-review round folds.
+    item_workflows: tuple[ItemWorkflow, ...] = ()
     requirements: tuple[dict[str, object], ...] = ()
     # The orchestrator-owned canonical task graph.  It is the base the Solver
     # patches with bounded ``changes`` and the source of the plan hash.
@@ -230,6 +243,58 @@ class ReviewTaskRecord:
 
 
 @dataclass(frozen=True)
+class ItemWorkflow:
+    """Per-item pipeline row for the Zhongshu revision workflow (A2/P2).
+
+    The authoritative verdict record stays in ``task_review_ledger``; this row
+    is the *dispatch table* the ItemWorkflow executor (A2/P3) consumes: which
+    items have open stoves, which phase each is in, how many item-local
+    revision rounds were consumed, and which findings the last review attached.
+
+    Phases: ``REVIEWING`` (verdict folded, first sight), ``REVISING`` (Solver
+    owes a patch), ``APPROVED`` (ratchet-consistent approval), ``ESCALATED``
+    (item-local stall budget spent, headed to a human gate).
+    """
+
+    item_id: str
+    group_id: str = ""
+    phase: str = "REVIEWING"
+    rounds: int = 0
+    last_verdict: str = ""
+    finding_ids: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ItemWorkflow":
+        if not isinstance(value, Mapping):
+            raise ValueError("item workflow must be an object")
+        item_id = str(value.get("item_id") or "").strip()
+        if not item_id:
+            raise ValueError("item workflow requires item_id")
+        try:
+            rounds = max(0, int(value.get("rounds") or 0))
+        except (TypeError, ValueError):
+            rounds = 0
+        finding_ids = value.get("finding_ids", ())
+        if isinstance(finding_ids, str) or finding_ids is None:
+            finding_ids = () if finding_ids is None else (str(finding_ids),)
+        elif isinstance(finding_ids, (list, tuple)):
+            finding_ids = tuple(str(item) for item in finding_ids)
+        else:
+            raise ValueError("item workflow finding_ids must be an array")
+        return cls(
+            item_id=item_id,
+            group_id=str(value.get("group_id") or "").strip(),
+            phase=str(value.get("phase") or "REVIEWING"),
+            rounds=rounds,
+            last_verdict=str(value.get("last_verdict") or ""),
+            finding_ids=tuple(finding_ids),
+        )
+
+
+@dataclass(frozen=True)
 class ProgressUpdate:
     """Typed changes to the progress aggregate."""
 
@@ -266,6 +331,8 @@ class ReviewUpdate:
     task_review_ledger: tuple[ReviewTaskRecord, ...] | None = None
     attempted_item_ids: tuple[str, ...] | None = None
     attempted_finding_ids: tuple[str, ...] | None = None
+    evidence_packet: dict[str, object] | None = None
+    item_workflows: tuple[ItemWorkflow, ...] | None = None
     requirements: tuple[dict[str, object], ...] | None = None
     plan: dict[str, object] | None = None
 
@@ -372,6 +439,16 @@ def apply_review_update(
             if update.attempted_finding_ids is not None
             else current.attempted_finding_ids if current else None
         ),
+        evidence_packet=(
+            update.evidence_packet
+            if update.evidence_packet is not None
+            else current.evidence_packet if current else None
+        ),
+        item_workflows=(
+            update.item_workflows
+            if update.item_workflows is not None
+            else current.item_workflows if current else ()
+        ),
         requirements=(
             update.requirements
             if update.requirements is not None
@@ -474,6 +551,9 @@ def context_to_dto(context: WorkflowContext) -> dict[str, object]:
         review["task_review_ledger"] = [
             asdict(record) for record in context.review.task_review_ledger
         ]
+        review["item_workflows"] = [
+            asdict(workflow) for workflow in context.review.item_workflows
+        ]
         review["requirements"] = [dict(item) for item in context.review.requirements]
     return {
         "identity": asdict(context.identity),
@@ -533,6 +613,14 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
         task_review_ledger = _task_review_ledger_from_dto(
             review_value.get("task_review_ledger", [])
         )
+        raw_item_workflows = review_value.get("item_workflows", [])
+        if not isinstance(raw_item_workflows, list):
+            raise ValueError("review.item_workflows must be an array")
+        item_workflows = tuple(
+            ItemWorkflow.from_dict(dict(item))
+            for item in raw_item_workflows
+            if isinstance(item, Mapping)
+        )
         requirements_value = review_value.get("requirements", [])
         if not isinstance(requirements_value, list):
             raise ValueError("review.requirements must be an array")
@@ -540,6 +628,7 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             dict(item) for item in requirements_value if isinstance(item, Mapping)
         )
         raw_attempted_findings = review_value.get("attempted_finding_ids")
+        raw_evidence_packet = review_value.get("evidence_packet")
         review = ReviewState(
             revision_id=str(review_value.get("revision_id") or ""),
             active_group_id=review_value.get("active_group_id"),
@@ -559,12 +648,18 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             task_groups=task_groups,
             completed_item_ids=completed_item_ids,
             task_review_ledger=task_review_ledger,
+            item_workflows=item_workflows,
             attempted_item_ids=_completed_item_ids_from_dto(
                 review_value.get("attempted_item_ids", [])
             ),
             attempted_finding_ids=(
                 tuple(str(value) for value in raw_attempted_findings)
                 if isinstance(raw_attempted_findings, list)
+                else None
+            ),
+            evidence_packet=(
+                dict(raw_evidence_packet)
+                if isinstance(raw_evidence_packet, Mapping)
                 else None
             ),
             requirements=requirements,

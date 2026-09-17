@@ -17,6 +17,8 @@ from typing import ClassVar, Protocol, runtime_checkable
 from ..zhongshu_parallel import canonical_plan_hash
 from ..zhongshu_review_queue import build_review_jobs, structural_gate
 from ..zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
+from ..acceptance_standards import acceptance_standard_hint
+from ..dispatch_envelope import build_envelope
 from .context import (
     DeliveryUpdate,
     HumanGateUpdate,
@@ -40,6 +42,7 @@ from .errors import (
 )
 from .events import DomainEvent, TransitionRequest
 from .policies.solver_plan import is_retryable_solver_reply_error
+from .policies.item_workflows import update_item_workflows
 from .policies.zhongshu import (
     APPROVAL_ACTIONS,
     FREEZE_RETRY_ACTIONS,
@@ -588,6 +591,21 @@ class _ConcreteWorkflowState:
             completed_item_ids=tuple(completed),
             attempted_item_ids=_attempted_item_ids(existing, payload),
             attempted_finding_ids=_attempted_finding_ids(payload, existing),
+            item_workflows=update_item_workflows(
+                context.review.item_workflows if context.review else (),
+                payload.get("task_reviews"),
+                attempted_item_ids=(
+                    context.review.attempted_item_ids if context.review else None
+                ),
+                max_rounds=(
+                    context.review.max_item_revision_rounds if context.review else 0
+                ),
+            ),
+            evidence_packet=(
+                dict(payload["evidence_packet"])
+                if isinstance(payload.get("evidence_packet"), Mapping)
+                else None
+            ),
             requirements=requirements,
         )
 
@@ -725,6 +743,15 @@ class _ConcreteWorkflowState:
                     "dispatch_context": {
                         "zhongshu_dispatch_mode": "requirement_contract",
                         "contract_mode": True,
+                        "envelope": build_envelope(
+                            ingredients=[
+                                {"key": "request.raw_request", "source": "prompt.txt",
+                                 "lifetime": "persisted"},
+                            ],
+                            tools={"editable": "none", "contract": "requirement_contract"},
+                            product={"type": "requirement_contract",
+                                     "contract": "requirement_contract"},
+                        ),
                     },
                     "group_id": None,
                     "item_id": None,
@@ -749,6 +776,17 @@ class _ConcreteWorkflowState:
                 if target == "ZHONGSHU_ANALYST" and contract_payload:
                     binding["dispatch_context"] = {
                         "requirement_contract": contract_payload,
+                        "envelope": build_envelope(
+                            ingredients=[
+                                {"key": "requirement_contract", "source": "context.json",
+                                 "lifetime": "persisted"},
+                                {"key": "request.raw_request", "source": "prompt.txt",
+                                 "lifetime": "persisted"},
+                            ],
+                            tools={"editable": "none", "contract": "evidence_lens"},
+                            product={"type": "evidence_updates",
+                                     "contract": "evidence_lens"},
+                        ),
                     }
                 bindings.append(binding)
             payload: dict[str, object] = {
@@ -1413,6 +1451,71 @@ class PersistenceDegradedState(_ConcreteWorkflowState):
         )
 
 
+_EVIDENCE_RECORD_FIELDS = (
+    "evidence_id", "requirement_id", "item_id", "decision_relevance",
+    "conclusion", "source", "confidence",
+)
+_EVIDENCE_TEXT_LIMITS = {"conclusion": 400, "source": 200}
+_MAX_ITEM_EVIDENCE_RECORDS = 8
+
+
+def _item_evidence_context(
+    review: object,
+    item: ReviewTaskItem | None,
+    expected_lenses: int,
+) -> dict[str, object]:
+    """Per-item slice of the Analyst evidence packet for one task-review job.
+
+    The task-review Critic used to judge tasks with no investigation context at
+    all, so whole rounds came back as ``REQUEST_ANALYST_EVIDENCE`` for evidence
+    the run already possessed.  The binding therefore carries the item's slice:
+    evidence records addressed to the item (or to one of its source
+    requirements), the lens workers that contributed, and a gap marker when
+    fewer lens workers delivered than were dispatched, so the Critic can weigh
+    coverage instead of re-requesting the missing investigation.
+    """
+
+    packet = getattr(review, "evidence_packet", None)
+    if not isinstance(packet, Mapping) or item is None:
+        return {"records": [], "lens_workers": [], "lens_gaps": 0}
+    records: list[dict[str, object]] = []
+    raw_updates = packet.get("evidence_updates")
+    if isinstance(raw_updates, list):
+        for value in raw_updates:
+            if not isinstance(value, Mapping):
+                continue
+            record_item = str(value.get("item_id") or "").strip()
+            requirement = str(value.get("requirement_id") or "").strip()
+            if record_item and record_item != item.item_id:
+                continue
+            if not record_item and requirement not in item.source_requirement_ids:
+                continue
+            record: dict[str, object] = {}
+            for key in _EVIDENCE_RECORD_FIELDS:
+                raw = value.get(key)
+                if raw in (None, "", [], {}):
+                    continue
+                if isinstance(raw, str):
+                    limit = _EVIDENCE_TEXT_LIMITS.get(key)
+                    record[key] = (
+                        " ".join(raw.split())[:limit] if limit else " ".join(raw.split())
+                    )
+                else:
+                    record[key] = raw
+            if record:
+                records.append(record)
+            if len(records) >= _MAX_ITEM_EVIDENCE_RECORDS:
+                break
+    worker_evidence = packet.get("worker_evidence")
+    lens_workers = (
+        sorted(str(key).strip() for key in worker_evidence if str(key).strip())
+        if isinstance(worker_evidence, Mapping)
+        else []
+    )
+    lens_gaps = max(0, expected_lenses - len(lens_workers)) if expected_lenses else 0
+    return {"records": records, "lens_workers": lens_workers, "lens_gaps": lens_gaps}
+
+
 def _task_review_bindings(
     context: WorkflowContext,
     revision_id: str,
@@ -1489,10 +1592,52 @@ def _task_review_bindings(
         if getattr(finding, "active", False) and getattr(finding, "item_id", ""):
             findings_by_item.setdefault(str(finding.item_id), []).append(finding)
     base_request_id = f"{context.identity.task_id}:ZHONGSHU_CRITIC:{context.progression.sequence + 1}"
+    expected_lenses = (
+        context.parallel.zhongshu.analyst_default_workers
+        if context.parallel is not None
+        else 0
+    )
     bindings: list[dict[str, object]] = []
     for index, job in enumerate(selected, start=1):
         item = item_by_id.get(job.item_id)
         group = group_by_id.get(job.group_id)
+        evidence = _item_evidence_context(review, item, expected_lenses)
+        dispatch_context = {
+            "zhongshu_dispatch_mode": "task_review",
+            "review_job_id": job.review_job_id,
+            "revision_id": revision,
+            "plan_hash": effective_plan_hash,
+            "group_id": job.group_id,
+            "item_id": job.item_id,
+            "task_hash": job.task_hash,
+            "dependency_hash": job.dependency_hash,
+            "structural_issues": issues,
+            "active_findings": [
+                _finding_payload(finding)
+                for finding in findings_by_item.get(job.item_id, [])
+            ],
+            "item_evidence": evidence["records"],
+            "envelope": build_envelope(
+                ingredients=[
+                    {"key": "task_capsule", "source": "prompt.txt", "lifetime": "persisted",
+                     "slice": f"job:{job.review_job_id}"},
+                    {"key": "review.item_evidence", "source": "context.json",
+                     "lifetime": "persisted", "slice": f"item:{job.item_id}"},
+                    {"key": "review.findings", "source": "context.json",
+                     "lifetime": "persisted", "slice": f"item:{job.item_id}+active"},
+                    {"key": "acceptance_standards", "source": "prompt.txt",
+                     "lifetime": "persisted"},
+                ],
+                tools={"editable": "none", "contract": "task_review"},
+                product={"type": "task_review_verdict", "contract": "task_review"},
+            ),
+        }
+        if evidence["lens_gaps"]:
+            dispatch_context["evidence_gaps"] = (
+                f"expected {expected_lenses} analyst lens workers but evidence "
+                f"covers {len(evidence['lens_workers'])}; coverage may be partial "
+                f"({', '.join(evidence['lens_workers']) or 'none'} delivered)"
+            )
         bindings.append(
             {
                 "worker_id": f"zhongshu_critic-worker-{index:02d}",
@@ -1503,22 +1648,10 @@ def _task_review_bindings(
                 "phase": "ZHONGSHU",
                 "group_id": job.group_id,
                 "item_id": job.item_id,
-                "prompt_ref": _task_capsule_text(job, item, group),
-                "dispatch_context": {
-                    "zhongshu_dispatch_mode": "task_review",
-                    "review_job_id": job.review_job_id,
-                    "revision_id": revision,
-                    "plan_hash": effective_plan_hash,
-                    "group_id": job.group_id,
-                    "item_id": job.item_id,
-                    "task_hash": job.task_hash,
-                    "dependency_hash": job.dependency_hash,
-                    "structural_issues": issues,
-                    "active_findings": [
-                        _finding_payload(finding)
-                        for finding in findings_by_item.get(job.item_id, [])
-                    ],
-                },
+                "prompt_ref": _task_capsule_text(
+                    job, item, group, evidence["records"]
+                ),
+                "dispatch_context": dispatch_context,
             }
         )
     return bindings
@@ -1751,6 +1884,7 @@ def _task_capsule_text(
     job: object,
     item: ReviewTaskItem | None,
     group: ReviewTaskGroup | None,
+    evidence_records: object = (),
 ) -> str:
     lines = [
         f"Review job: {getattr(job, 'review_job_id', '')}",
@@ -1774,6 +1908,14 @@ def _task_capsule_text(
             lines.append(
                 f"Acceptance signals: {'; '.join(item.acceptance_signals)}"
             )
+    records = list(evidence_records or ())
+    if records:
+        lines.append(
+            f"Investigation evidence ({len(records)} records) for this task is in "
+            "dispatch_context.item_evidence; base your verdict on it instead of "
+            "requesting evidence you already have."
+        )
+    lines.append(acceptance_standard_hint())
     lines.append(
         "Return TASK_APPROVED only when no active P0/P1 finding applies to this "
         "task; otherwise return TASK_CHANGES_REQUIRED with this task's item_id, "

@@ -20,7 +20,7 @@ class ConcurrencyLimits:
     global_max: int = 6
     per_task_max: int = 3
     analyst_max: int = 3
-    critic_max: int = 3
+    critic_max: int = 4
     lease_ttl_seconds: int = 900
 
     def validate(self) -> None:

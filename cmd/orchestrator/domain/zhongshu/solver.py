@@ -28,6 +28,7 @@ from ..policies.solver_plan import (
 from ..policies.zhongshu import approved_item_ids, select_solver_batch
 from ...zhongshu_parallel import canonical_plan_hash
 from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
+from ...dispatch_envelope import build_envelope
 from .stages import SolverStage, resolve_dispatch_stage, resolve_reply_stage
 
 # Fields a revising Solver needs per finding.  The full finding record carries
@@ -92,6 +93,31 @@ def revision_finding_payload(finding: object) -> dict[str, object]:
         finding  # type: ignore[arg-type]
     ) if isinstance(finding, Mapping) else {}
     return {key: record[key] for key in _REVISION_FINDING_FIELDS if key in record}
+
+
+def batch_item_scope(review: object, batch: SolverBatch) -> list[str]:
+    """Items the dictated batch may change, as declared in the dispatch envelope.
+
+    Mirrors :func:`revision_scope` (which recomputes the same boundary from the
+    reply's echoed batch), so the declared knife boundary and the enforced one
+    come from the same derivation.
+    """
+
+    selected = set(batch.selected_finding_ids)
+    scope: set[str] = set()
+    for finding in getattr(review, "findings", ()) or ():
+        finding_id = str(getattr(finding, "finding_id", "") or "")
+        if finding_id not in selected:
+            continue
+        item_id = str(getattr(finding, "item_id", "") or "").strip()
+        if not item_id:
+            item_id = str(getattr(finding, "target", "") or "").strip().split("/")[-1]
+        if item_id:
+            scope.add(item_id)
+    scope.difference_update(
+        approved_item_ids(getattr(review, "task_review_ledger", ()) or ())
+    )
+    return sorted(scope)
 
 
 def revision_scope(
@@ -299,6 +325,22 @@ def build_solver_dispatch(
     if stage is SolverStage.REVISE:
         batch = SolverBatch.for_findings(active, ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND)
         selected_ids = set(batch.selected_finding_ids)
+        scope_items = batch_item_scope(review, batch)
+        envelope = build_envelope(
+            ingredients=[
+                {"key": "review.plan", "source": "context.json", "lifetime": "persisted",
+                 "slice": "current_formal_plan"},
+                {"key": "review.findings", "source": "context.json", "lifetime": "persisted",
+                 "slice": "finding_batch.selected_finding_ids"},
+                {"key": "acceptance_standards", "source": "prompt.txt", "lifetime": "persisted"},
+                {"key": "retry_feedback", "source": "prompt.txt", "lifetime": "transient"},
+            ],
+            tools={
+                "editable": "items:" + (",".join(scope_items) or "none"),
+                "contract": "nexus.zhongshu.solver.v1",
+            },
+            product={"type": "solver_result", "contract": "nexus.zhongshu.solver.v1"},
+        )
         # Context trimming: the revising agent sees only this round's batch.
         # The orchestrator keeps the full findings and the full plan in its own
         # state; the reply is materialized against that, so nothing is lost.
@@ -318,6 +360,7 @@ def build_solver_dispatch(
             "current_formal_plan": dict(review.plan) if has_plan else None,
             "current_plan_ref": review.plan_ref or "" if review else "",
             "current_plan_hash": review.plan_hash or "" if review else "",
+            "envelope": envelope,
         }
     else:
         payload["dispatch_context"] = {
@@ -331,6 +374,16 @@ def build_solver_dispatch(
             "current_formal_plan": dict(review.plan) if has_plan else None,
             "current_plan_ref": review.plan_ref or "" if review else "",
             "current_plan_hash": review.plan_hash or "" if review else "",
+            "envelope": build_envelope(
+                ingredients=[
+                    {"key": "review.plan", "source": "context.json", "lifetime": "persisted",
+                     "slice": "current_formal_plan"},
+                    {"key": "acceptance_standards", "source": "prompt.txt", "lifetime": "persisted"},
+                    {"key": "retry_feedback", "source": "prompt.txt", "lifetime": "transient"},
+                ],
+                tools={"editable": "plan.full", "contract": "nexus.zhongshu.solver.v1"},
+                product={"type": "solver_result", "contract": "nexus.zhongshu.solver.v1"},
+            ),
         }
     return EffectRequest(
         effect_id=f"dispatch:{request_id}",

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from .dispatch_envelope import validate_envelope
+
 logger = logging.getLogger(__name__)
 
 
@@ -240,6 +242,24 @@ class PromptBundleBuilder:
             ),
             "files": [item.to_dict() for item in files],
         }
+        envelope_value = context_value.get("envelope")
+        if envelope_value is not None:
+            try:
+                manifest["envelope"] = validate_envelope(envelope_value)
+            except ValueError as error:
+                raise PromptBundleError(f"dispatch envelope invalid: {error}") from error
+            logger.info(
+                "PROMPT_BUNDLE_ENVELOPE task_id=%s request_id=%s role=%s "
+                "ingredients=%s tools=%s product=%s",
+                task_id,
+                request_id,
+                role,
+                len(manifest["envelope"]["ingredients"]),
+                str(manifest["envelope"]["tools"].get("editable") or ""),
+                str(manifest["envelope"]["product"].get("type") or ""),
+            )
+        else:
+            manifest["envelope"] = {}
         manifest_path = root / "manifest.json"
         _atomic_write_json(manifest_path, manifest)
         manifest_bytes = manifest_path.read_bytes()

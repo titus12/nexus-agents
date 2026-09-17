@@ -106,7 +106,10 @@ class LinearEntrypointTests(unittest.TestCase):
 
         self.assertEqual(snapshot.context.progression.state, "DONE")
         self.assertEqual(snapshot.context.progression.sequence, 10)
-        self.assertEqual(len(adapter.dispatched), 16)
+        # One generic Critic round at the unified width
+        # (critic_default_workers=4) plus the contract, lens, solver,
+        # freeze-check and Menxia dispatches.
+        self.assertEqual(len(adapter.dispatched), 14)
         self.assertTrue(all(request.request_id for request in adapter.dispatched))
 
 

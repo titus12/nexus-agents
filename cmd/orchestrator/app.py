@@ -180,7 +180,7 @@ class OrchestratorApp:
                 global_max=int(os.environ.get("GLOBAL_MAX_WORKERS", "6")),
                 per_task_max=int(os.environ.get("PER_TASK_MAX_WORKERS", "6")),
                 analyst_max=int(os.environ.get("ANALYST_MAX_WORKERS", "3")),
-                critic_max=int(os.environ.get("CRITIC_MAX_WORKERS", "3")),
+                critic_max=int(os.environ.get("CRITIC_MAX_WORKERS", "4")),
                 lease_ttl_seconds=int(os.environ.get("LEASE_TTL_SECONDS", "1020")),
             )
         )
@@ -210,7 +210,7 @@ class OrchestratorApp:
         )
         self._node_max_workers = max(1, int(os.environ.get("NODE_MAX_WORKERS", "6")))
         self._critic_max_workers = max(
-            1, int(os.environ.get("CRITIC_MAX_WORKERS", "3"))
+            1, int(os.environ.get("CRITIC_MAX_WORKERS", "4"))
         )
         logger.info(
             "AGENT_POOL_CONFIG node_max_workers=%s pools=%s",

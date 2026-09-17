@@ -9,6 +9,10 @@ from types import MappingProxyType
 
 from ..context import WorkflowContext
 from ..errors import is_reply_failure
+from ...acceptance_standards import (
+    acceptance_standard_applies_to,
+    acceptance_standard_block,
+)
 from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
 from .zhongshu import select_solver_batch
 
@@ -133,6 +137,14 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
     revision_task = (
         solver_revision_task(context) if state == "ZHONGSHU_SOLVER" else ""
     )
+    # The acceptance-quality standard rides with every producing dispatch, so
+    # acceptance signals are written observably the first time instead of
+    # being negotiated inside the Critic revision loop.
+    acceptance_block = (
+        "\n" + acceptance_standard_block()
+        if acceptance_standard_applies_to(state)
+        else ""
+    )
     content = (
         f"Task {context.identity.task_id}\n"
         f"State: {state}\n"
@@ -140,6 +152,7 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
         f"Current review finding count: {findings}\n"
         "Return exactly one complete structured result for the bound state."
         f"{revision_task}"
+        f"{acceptance_block}"
         f"{retry_feedback(context, state)}"
     )
     return PromptSpec(

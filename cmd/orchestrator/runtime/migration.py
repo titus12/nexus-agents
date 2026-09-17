@@ -407,8 +407,8 @@ def _zhongshu_limits(value: object) -> ZhongshuParallelLimits:
         enabled=bool(data.get("enabled", True)),
         analyst_max_workers=_positive_int(data, "analyst_max_workers", 3),
         analyst_default_workers=_positive_int(data, "analyst_default_workers", 3),
-        critic_max_workers=_positive_int(data, "critic_max_workers", 6),
-        critic_default_workers=_positive_int(data, "critic_default_workers", 6),
+        critic_max_workers=_positive_int(data, "critic_max_workers", 4),
+        critic_default_workers=_positive_int(data, "critic_default_workers", 4),
         global_max_workers=_positive_int(data, "global_max_workers", 6),
         per_task_max_workers=_positive_int(data, "per_task_max_workers", 6),
     )
