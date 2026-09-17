@@ -1,4 +1,6 @@
 .cache/
+__pycache__/
+*.py[cod]
 web/node_modules/
 web/.tmp-tests/
 web/tsconfig.tsbuildinfo
@@ -7,3 +9,8 @@ restart_local*.ps1
 .logs/
 .nexus/
 .nexus-agents/
+
+# Runtime artifacts: orchestrator logs, task state, run bundles.
+multica/
+runs/
+tmp/
