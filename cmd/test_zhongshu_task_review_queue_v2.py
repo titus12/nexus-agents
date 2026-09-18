@@ -11,6 +11,7 @@ from orchestrator.zhongshu_review_queue import (
     canonical_hash,
     structural_gate,
 )
+from orchestrator.domain.policies.zhongshu import merge_findings
 from orchestrator.domain.states import _task_graph_projection
 
 
@@ -289,6 +290,59 @@ class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
         )
         self.assertNotEqual(renumbered["finding_id"], "finding-000001")
         self.assertTrue(renumbered["finding_id"].startswith("finding-"))
+
+    def test_reworded_observation_reuses_the_stored_identity(self) -> None:
+        # A critic worker reuses the id it saw last round but re-words
+        # category/claim, which changes the semantic key.  The matched record
+        # must keep the stored canonical key so the ledger fold replaces the
+        # old record instead of accumulating live siblings under one id.
+        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        contested = queue.jobs[0]
+        for job in queue.jobs:
+            claimed = queue.claim_next(f"slot-{job.item_id}")
+            assert claimed is not None
+            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
+
+        def _round_result(category: str, claim: str) -> dict:
+            result = _result(contested, "TASK_CHANGES_REQUIRED", queue.plan_hash)
+            result["findings"] = [
+                {
+                    "finding_id": "finding-aaa1",
+                    "severity": "P1",
+                    "group_id": contested.group_id,
+                    "item_id": contested.item_id,
+                    "category": category,
+                    "target": contested.item_id,
+                    "claim": claim,
+                },
+            ]
+            return result
+
+        round1 = aggregate_task_review_results(
+            queue.revision_id,
+            queue.plan_hash,
+            queue,
+            [_round_result("evidence", "第一轮措辞")]
+            + [_result(job, "TASK_APPROVED", queue.plan_hash) for job in queue.jobs[1:]],
+        )
+        stored = round1["findings"]
+        self.assertEqual([finding["finding_id"] for finding in stored], ["finding-aaa1"])
+        stored_key = stored[0]["canonical_key"]
+
+        round2 = aggregate_task_review_results(
+            queue.revision_id,
+            queue.plan_hash,
+            queue,
+            [_round_result("acceptance", "第二轮换了措辞")]
+            + [_result(job, "TASK_APPROVED", queue.plan_hash) for job in queue.jobs[1:]],
+            previous={"findings": stored},
+        )
+        self.assertEqual([finding["finding_id"] for finding in round2["findings"]], ["finding-aaa1"])
+        self.assertEqual(round2["findings"][0]["canonical_key"], stored_key)
+
+        merged = merge_findings(stored, round2["findings"])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].finding_id, "finding-aaa1")
 
     def test_regression_reasons_explain_recontested_tasks(self) -> None:
         queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")

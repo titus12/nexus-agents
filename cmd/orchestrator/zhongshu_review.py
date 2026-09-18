@@ -485,7 +485,17 @@ def consolidate_finding_observations(
         used_canonical_ids.add(canonical_id)
         canonical = copy.deepcopy(old or values[0])
         canonical["finding_id"] = canonical_id
-        canonical["canonical_key"] = key
+        if old is not None:
+            # The observation matched a stored opinion: keep that opinion's
+            # canonical key so the ledger fold replaces the old record instead
+            # of minting a sibling.  Re-keying to this round's semantic key
+            # forked the identity whenever a worker re-worded category/target
+            # while reusing the previous finding id, and the same id then
+            # accumulated several live records across rounds.
+            preserved = str(old.get("canonical_key") or "").strip()
+            canonical["canonical_key"] = preserved or key
+        else:
+            canonical["canonical_key"] = key
         canonical["source_finding_ids"] = sorted(
             set(str(item).strip() for item in canonical.get("source_finding_ids") or [] if str(item).strip())
             | raw_ids
