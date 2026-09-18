@@ -354,5 +354,58 @@ class SolverStateDiscardGateTests(unittest.TestCase):
         self.assertEqual(pairs, [("item-000001", "req-001")])
 
 
+class SolverSignalGateRetryTests(unittest.TestCase):
+    """The acceptance-signal gate bounces to the Solver before blocking."""
+
+    def _unverifiable_plan(self) -> dict:
+        plan = _plan()
+        plan["items"][0]["acceptance_signals"] = [
+            "预期观测量：阶段切换间隙耗时减少 ≥30%"
+        ]
+        return plan
+
+    def _event(self, plan: dict) -> DomainEvent:
+        return DomainEvent(
+            "READY_FOR_CRITIC",
+            "task-1",
+            10,
+            {
+                "action": "READY_FOR_CRITIC",
+                "plan": plan,
+                "plan_hash": "new-hash",
+                "revision_id": "task-1:2",
+                "summary": "plan revision",
+            },
+            "2026-09-18T00:00:00Z",
+        )
+
+    def test_first_gate_rejection_retries_on_the_reply_budget(self) -> None:
+        context = _review_context()
+        decision = ZhongshuSolverState().handle(
+            context, self._event(self._unverifiable_plan())
+        )
+        self.assertEqual(decision.transition.action, "RETRY")
+        self.assertEqual(decision.update.recovery.reply_retry_count, 1)
+        self.assertIn(
+            "ACCEPTANCE_SIGNAL_UNVERIFIABLE:item-000001:0",
+            decision.update.recovery.last_failure.message,
+        )
+
+    def test_gate_rejection_blocks_after_the_reply_budget(self) -> None:
+        from dataclasses import replace as dc_replace
+
+        from orchestrator.domain.context import RecoveryState
+
+        base = _review_context()
+        context = dc_replace(
+            base,
+            recovery=RecoveryState(reply_retry_count=3, max_reply_retries=3),
+        )
+        decision = ZhongshuSolverState().handle(
+            context, self._event(self._unverifiable_plan())
+        )
+        self.assertEqual(decision.transition.action, "BLOCKED")
+
+
 if __name__ == "__main__":
     unittest.main()

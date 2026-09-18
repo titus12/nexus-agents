@@ -13,6 +13,7 @@ import copy
 from collections.abc import Iterable, Mapping, Sequence
 
 from ...zhongshu_review_queue import structural_gate
+from ..errors import SOLVER_STRUCTURE_REPLY_PREFIX
 
 
 CHANGE_OPS = frozenset(
@@ -45,6 +46,12 @@ _BLOCKING_STRUCTURAL_ISSUES = (
     "ACCEPTANCE_SIGNAL_UNVERIFIABLE",
 )
 
+# The error code the Solver state composes from blocking structural issues
+# (``SOLVER_PLAN_STRUCTURE_INVALID:<issue>;<issue>``).  The literal lives in
+# ``domain.errors`` so the retryability predicate and the reply-failure
+# taxonomy agree on it.
+_GATE_STRUCTURAL_ENTRY_PREFIX = "ACCEPTANCE_SIGNAL_UNVERIFIABLE"
+
 # Reply-shape errors the Solver can trivially reformulate on a fresh attempt.
 # These are mechanical protocol slips (e.g. sending both a plan and changes),
 # not evidence that the plan is wrong, so the orchestrator re-asks instead of
@@ -73,7 +80,20 @@ _RETRYABLE_SOLVER_REPLY_PREFIXES = (
 def is_retryable_solver_reply_error(error: str) -> bool:
     """True when a Solver reply error is a mechanical shape slip worth a retry."""
 
-    return any(str(error).startswith(prefix) for prefix in _RETRYABLE_SOLVER_REPLY_PREFIXES)
+    text = str(error)
+    # An acceptance-signal gate rejection is a one-line edit for the Solver
+    # (add the verification recipe or demote the claim), so the first gate
+    # rejection must bounce back on the reply budget instead of blocking the
+    # task for a human.  A structural error that mixes in a non-gate entry
+    # (dependency cycle, uncovered blocker) stays fatal: the feedback loop
+    # would not know which half the Solver can actually fix.
+    if text.startswith(SOLVER_STRUCTURE_REPLY_PREFIX + ":"):
+        entries = text.split(":", 1)[1].split(";")
+        return bool(entries) and all(
+            entry.strip().startswith(_GATE_STRUCTURAL_ENTRY_PREFIX)
+            for entry in entries
+        )
+    return any(text.startswith(prefix) for prefix in _RETRYABLE_SOLVER_REPLY_PREFIXES)
 
 
 def solver_revision_response_error(

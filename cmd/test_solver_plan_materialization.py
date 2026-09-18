@@ -189,6 +189,33 @@ class SolverPlanPolicyTests(unittest.TestCase):
         )
         self.assertFalse(is_retryable_solver_reply_error("TASK_REVIEW_RESULT_INVALID"))
 
+    def test_gate_rejection_is_retryable(self) -> None:
+        self.assertTrue(
+            is_retryable_solver_reply_error(
+                "SOLVER_PLAN_STRUCTURE_INVALID:"
+                "ACCEPTANCE_SIGNAL_UNVERIFIABLE:item-000008:0"
+            )
+        )
+
+    def test_mixed_structural_rejection_is_not_retryable(self) -> None:
+        self.assertFalse(
+            is_retryable_solver_reply_error(
+                "SOLVER_PLAN_STRUCTURE_INVALID:"
+                "ACCEPTANCE_SIGNAL_UNVERIFIABLE:item-1:0;DEPENDENCY_CYCLE"
+            )
+        )
+
+    def test_structural_rejection_is_a_reply_failure(self) -> None:
+        from orchestrator.domain.errors import is_reply_failure
+
+        self.assertTrue(
+            is_reply_failure(
+                "SOLVER_PLAN_STRUCTURE_INVALID:"
+                "ACCEPTANCE_SIGNAL_UNVERIFIABLE:item-000008:0"
+            )
+        )
+        self.assertFalse(is_reply_failure("SOLVER_PLAN_NOT_OBJECT"))
+
     def test_resolve_finding_ids_accepts_exact_and_unique_prefix(self) -> None:
         active = ["finding-000001", "finding-b141e6cfb253c123706e"]
         self.assertEqual(

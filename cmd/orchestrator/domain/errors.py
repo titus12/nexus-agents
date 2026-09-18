@@ -100,6 +100,13 @@ REPLY_FAILURE_CODES = frozenset(
     }
 )
 
+# A Solver reply that is well-formed JSON but fails the plan structural gate
+# (e.g. the acceptance-signal gate) is the same class of unusable reply: the
+# remedy is a re-ask on the reply budget with the rejection restated.  Kept as
+# a prefix (the code carries the issue list) and defined here, the leaf module,
+# so both the budget router and the retry-feedback gate can share it.
+SOLVER_STRUCTURE_REPLY_PREFIX = "SOLVER_PLAN_STRUCTURE_INVALID"
+
 
 # Synthetic actions used to carry "the agent answered, but the reply was unusable"
 # from the transport boundary into the effect layer.  No FSM state accepts them:
@@ -119,7 +126,8 @@ CONTRACT_REJECTED_EVENT = "__CONTRACT_REJECTED__"
 def is_reply_failure(error_code: object) -> bool:
     """True when a failure code describes an unusable agent reply body."""
 
-    return str(error_code or "").strip().upper() in REPLY_FAILURE_CODES
+    code = str(error_code or "").strip().upper()
+    return code in REPLY_FAILURE_CODES or code.startswith(SOLVER_STRUCTURE_REPLY_PREFIX)
 
 
 class TransportError(DomainError):
@@ -215,6 +223,7 @@ __all__ = [
     "PostCommitLeaseReleaseError",
     "PersistenceError",
     "REPLY_FAILURE_CODES",
+    "SOLVER_STRUCTURE_REPLY_PREFIX",
     "ReplyBindingError",
     "ReplyValidationError",
     "RemoteRunFailed",
