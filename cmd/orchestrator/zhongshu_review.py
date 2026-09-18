@@ -4,20 +4,24 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 from .domain.findings import normalize_finding_status
 from .zhongshu_review_queue import ReviewQueueError
 
+logger = logging.getLogger("review_orchestrator_fsm")
+
 CRITIC_ACTIONS = frozenset({
     "APPROVE_FREEZE", "REQUEST_SOLVER_REVISION", "REQUEST_REGROUP",
     "REQUEST_ANALYST_EVIDENCE", "HUMAN_GATE", "BLOCKED",
-    "TASK_APPROVED", "TASK_CHANGES_REQUIRED",
+    "TASK_APPROVED", "TASK_CHANGES_REQUIRED", "REQUEST_TASK_DISCARD",
 })
 TASK_CRITIC_ACTIONS = frozenset({
     "TASK_APPROVED", "TASK_CHANGES_REQUIRED",
     "REQUEST_ANALYST_EVIDENCE", "HUMAN_GATE", "BLOCKED",
+    "REQUEST_TASK_DISCARD",
 })
 ANALYST_ACTIONS = {
     "requirement_contract": frozenset({"REQUIREMENT_CONTRACT_READY", "HUMAN_GATE", "BLOCKED"}),
@@ -303,9 +307,10 @@ def _resolved(observation: dict[str, Any]) -> bool:
     return normalize_finding_status(observation.get("status"), observation.get("decision")) == "RESOLVED"
 
 
-# The statuses that still hold work open.  ``DEFERRED``/``WONT_FIX`` are the
-# Critic's explicit "accepted, follow up later" decisions, so a P1 recorded that
-# way must not keep blocking the freeze forever.
+# The statuses that still hold work open.  ``DEFERRED``/``WONT_FIX``/
+# ``WONT_VERIFY`` are the Critic's explicit "accepted, follow up later"
+# decisions, so a P1 recorded that way must not keep blocking the freeze
+# forever.
 _ACTIVE_FINDING_STATUSES = frozenset(
     {"OPEN", "ASSIGNED_TO_ANALYST", "ASSIGNED_TO_SOLVER", "IN_REVIEW", "REOPENED"}
 )
@@ -532,7 +537,7 @@ def consolidate_finding_observations(
             item
             for item in values
             if normalize_finding_status(item.get("status"), item.get("decision"))
-            in {"DEFERRED", "WONT_FIX"}
+            in {"DEFERRED", "WONT_FIX", "WONT_VERIFY"}
         ]
         closed = len(resolved_by) >= quorum and not open_values
         if old and _resolved(old) and not open_values:
@@ -912,6 +917,33 @@ def aggregate_task_review_results(
                 job.review_job_id,
                 job.item_id,
                 [str(item.get("finding_id") or "") for item in item_blockers],
+            )
+            action = "TASK_CHANGES_REQUIRED"
+        if action == "REQUEST_TASK_DISCARD":
+            # The Critic may recommend dropping a task ("not material to the
+            # review question"), but only as a recommendation routed through
+            # the Solver's re-plan.  The rationale must ride a finding so it
+            # uses the existing batch/ledger/notification pipeline instead of
+            # a silent scope change; "unverifiable" is a WONT_VERIFY reason,
+            # never a discard reason.
+            if not item_findings:
+                item_findings.append({
+                    "finding_id": f"finding-discard-{job.item_id}",
+                    "severity": "P1",
+                    "category": "task_discard",
+                    "claim": str(body.get("summary") or "品菜师建议丢弃该任务"),
+                    "required_action": (
+                        "规划师复核丢弃建议：确认该任务对本次审查问题不重要后，"
+                        "以完整计划移除该任务并把其需求标为 scope=out（含理由）；"
+                        "若任务应保留，则关闭相关 finding 并说明理由"
+                    ),
+                })
+            for finding in item_findings:
+                finding.setdefault("category", "task_discard")
+            logger.warning(
+                "TASK_DISCARD_RECOMMENDED review_job_id=%s item_id=%s",
+                job.review_job_id,
+                job.item_id,
             )
             action = "TASK_CHANGES_REQUIRED"
         actions.add(action)

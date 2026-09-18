@@ -28,7 +28,7 @@
 - 每条 finding 都要表达严重度、主张、处理状态、证据、归属和所需修改或补证问题。保留关联需求/任务信息；中书 finding 不越界使用门下省作用域。
 - 可以报告本轮观察或历史问题的显式复核结论。没有提及历史问题不等于关闭，它仍保留在全局台账。
 - 已解决时明确 status=RESOLVED，并给 resolution 或 response 和证据。Solver 自报解决不等于复核通过。
-- 已确认但决定不阻塞冻结时必须显式给出决策，不能只是改严重度或缄默：已解决用 status=RESOLVED，明确接受该风险并留作跟进用 decision=ACCEPTED_RISK 或 status=WONT_FIX/DEFERRED，并在 remaining_risk 说明跟进条件。这三种状态都不再构成冻结阻塞；未给出显式决策的 P0/P1 仍阻塞冻结。
+- 已确认但决定不阻塞冻结时必须显式给出决策，不能只是改严重度或缄默：已解决用 status=RESOLVED，明确接受该风险并留作跟进用 decision=ACCEPTED_RISK 或 status=WONT_FIX/DEFERRED；**运行时事实本轮内无法获得（无测量授权、无数据源）的声称用 decision=WONT_VERIFY 关闭，并把验证配方（五要素：测量对象含 file:line、具体命令/步骤、指标与单位、基线来源、预期观测量）写进 resolution**，同时在 remaining_risk 说明补测条件。这些状态都不再构成冻结阻塞；未给出显式决策的 P0/P1 仍阻塞冻结。
 - 同一问题的不同意见、证据和表述允许共存，不篡改别人的观察。至少两个有效 worker 明确确认解决且无未解决反证，Orchestrator 才关闭历史问题。
 - 已关闭的 P0/P1 不应继续以原严重度阻塞。未解决 P0/P1 阻止冻结；P2/P3 可作为显式跟进风险保留，但不得隐藏仍需处理的返工请求。
 
@@ -77,12 +77,25 @@ it does not compare whole-plan fingerprints in this mode.
 
 ### Action discipline in task-queue mode
 
-Only `TASK_APPROVED` and `TASK_CHANGES_REQUIRED` are valid actions in this
-mode; the general action menu above (冻结/补证/人审/阻塞类) belongs to legacy
-whole-plan mode and is rejected here. A human decision need is expressed as
-`TASK_CHANGES_REQUIRED` carrying a Finding whose claim names the user decision
-required — the Orchestrator escalates stalled items to a human gate itself, so
-a worker-level HUMAN_GATE action is redundant and contract-invalid.
+Valid actions in this mode are `TASK_APPROVED`, `TASK_CHANGES_REQUIRED`, and
+`REQUEST_TASK_DISCARD`; the general action menu above (冻结/补证/人审/阻塞类)
+belongs to legacy whole-plan mode and is rejected here. A human decision need
+is expressed as `TASK_CHANGES_REQUIRED` carrying a Finding whose claim names
+the user decision required — the Orchestrator escalates stalled items to a
+human gate itself, so a worker-level HUMAN_GATE action is redundant and
+contract-invalid.
+
+### Discard recommendations (REQUEST_TASK_DISCARD)
+
+丢弃建议是"这道菜不值得上桌"的**提议**，不是执行：Orchestrator 会把它折叠成
+task_discard finding 交规划师复核，规划师可删项（需求标 out-of-scope）也可保留。
+因此：
+
+- 只能基于"该任务对本次审查的问题不重要"，并论证三点：该任务服务哪条
+  requirement、为什么不关键、丢弃损失什么。论证写在 finding 的 claim 里。
+- **「不可验证」不是丢弃理由** —— 那是 WONT_VERIFY 路径（关闭声称 + 附验证配方）。
+- 携带该 finding（severity=P1，category=task_discard）后动作才有效；没有论证
+  的丢弃建议会被合成占位 finding 并照样进入规划师复核，不如自己写清楚。
 
 ### Evidence and standards in dispatch_context
 
@@ -94,6 +107,11 @@ a worker-level HUMAN_GATE action is redundant and contract-invalid.
 - The task capsule states the shared acceptance standard (per-item
   verifiability, measurement units, evidence sources, UNKNOWN rules). Judge
   acceptance signals against exactly that standard.
+- 配方评估：验收信号声称度量结论（百分比、提升/降低/缩短等对比）时，信号必须内嵌
+  「验证方法：」五要素——测量对象（含 file:line）、具体命令/步骤、指标与单位、
+  基线来源、预期观测量。**缺任何一项 → 打回并点名缺哪项**；五要素齐全 → 该声称
+  按"UNKNOWN-已挂方法"对待，用 decision=WONT_VERIFY 关闭并保留配方在 resolution，
+  不要再为"拿不到实测"反复打回。
 
 On restart, a persisted RUNNING lease is recovered with its original request
 and idempotency keys so the transport first queries the existing external

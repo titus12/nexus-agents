@@ -1026,6 +1026,7 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         self._require_event_task(context, event)
         action = self._event_action(event)
         plan_effect: EffectRequest | None = None
+        materialized_plan: Mapping[str, object] | None = None
         if (
             event.name == "NODE_COMPLETED"
             and action == "READY_FOR_CRITIC"
@@ -1043,6 +1044,7 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
                     "changes": [],
                 },
             )
+            materialized_plan = payload["plan"]
             plan_effect = plan_artifact_effect(
                 context.identity.task_id,
                 context.progression.sequence,
@@ -1085,6 +1087,7 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
                         "changes": [],
                     },
                 )
+                materialized_plan = outcome.materialized
                 plan_effect = plan_artifact_effect(
                     context.identity.task_id,
                     context.progression.sequence,
@@ -1094,6 +1097,23 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         decision = super().handle(context, event)
         if plan_effect is not None:
             decision = replace(decision, effects=(plan_effect, *decision.effects))
+        if decision.transition.action == "READY_FOR_CRITIC" and materialized_plan is not None:
+            removals = _must_requirement_removals(context, materialized_plan)
+            if removals:
+                # The Solver executed a discard recommendation against a task
+                # that covers a must-priority requirement.  The pruned plan is
+                # folded and persisted, but progress to the Critic waits for
+                # the operator: dropping part of what the user explicitly
+                # asked for is a scope decision, not a review verdict.
+                logger.warning(
+                    "ZHONGSHU_DISCARD_NEEDS_HUMAN task_id=%s removals=%s",
+                    context.identity.task_id,
+                    removals,
+                )
+                decision = self._human_gate_decision(
+                    context, event, "ZHONGSHU_DISCARD_NEEDS_HUMAN"
+                )
+                decision = replace(decision, effects=(plan_effect, *decision.effects))
         return decision
 
     def _retry_solver_reply(
@@ -2009,6 +2029,42 @@ def _attempted_item_ids(
             if item_of.get(finding_id)
         )
     )
+
+
+def _must_requirement_removals(
+    context: WorkflowContext,
+    graph: Mapping[str, object],
+) -> list[tuple[str, str]]:
+    """Return (item_id, requirement_id) for must-covered items the plan drops.
+
+    A discard recommendation executed by the Solver is a scope change.  When
+    the removed task covers a must-priority requirement — something the user
+    explicitly asked for — the removal must not reach the Critic unconfirmed.
+    """
+
+    review = context.review
+    if review is None or not isinstance(graph, Mapping):
+        return []
+    old_items = {item.item_id: item for item in review.task_items}
+    if not old_items:
+        return []
+    new_items, _ = _task_graph_projection(graph)
+    removed = sorted(set(old_items) - {item.item_id for item in new_items})
+    if not removed:
+        return []
+    requirements = {
+        str(req.get("requirement_id")): req
+        for req in (graph.get("requirements") or [])
+        if isinstance(req, Mapping) and req.get("requirement_id")
+    }
+    pairs: list[tuple[str, str]] = []
+    for item_id in removed:
+        old_item = old_items[item_id]
+        for requirement_id in old_item.source_requirement_ids:
+            requirement = requirements.get(str(requirement_id)) or {}
+            if str(requirement.get("priority") or "").strip().lower() == "must":
+                pairs.append((item_id, str(requirement_id)))
+    return pairs
 
 
 def _task_review_ledger_update(

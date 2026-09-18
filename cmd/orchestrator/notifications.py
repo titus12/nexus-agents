@@ -267,7 +267,7 @@ def _presentation_event_name(event: DomainEvent, from_state: str = "") -> str | 
 
 
 _BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
-_RESOLVED_FINDING_STATUSES = frozenset({"RESOLVED", "WONT_FIX", "DEFERRED"})
+_RESOLVED_FINDING_STATUSES = frozenset({"RESOLVED", "WONT_FIX", "DEFERRED", "WONT_VERIFY"})
 _AFFECTED_REASON_LABELS = {
     "content_changed": "内容更新后重审",
     "dependency_changed": "依赖变更重审",
@@ -370,6 +370,11 @@ def _human_reason_text(
 ) -> str:
     """Translate a gate reason code into one operator-readable sentence."""
 
+    if reason_code == "ZHONGSHU_DISCARD_NEEDS_HUMAN":
+        return (
+            "品菜师建议丢弃、规划师已复核并从计划中移除了覆盖 must 级需求的任务；"
+            "回复任意内容 = 确认丢弃并继续审查，如不同意请取消任务后重新发起"
+        )
     if reason_code == "ZHONGSHU_STUCK_FINDING":
         rounds = context.recovery.max_stuck_finding_rounds
         return (
@@ -435,7 +440,10 @@ def _finding_lines(
         )
         if not claim:
             continue
+        category = _finding_field(finding, "category")
         prefix = f"[{severity}] " if severity else ""
+        if category == "task_discard":
+            prefix += "品菜师建议丢弃 · "
         location = f"{item_id}：" if item_id else ""
         lines.append(f"· {prefix}{location}{_brief(claim, 120)}")
     return lines

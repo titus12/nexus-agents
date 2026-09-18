@@ -72,6 +72,15 @@ responsibilities.
 - 未改变的任务沿用 item_id；合并或拆分用 source_candidate_ids（如存在历史来源）明确对应来源，不能丢掉需求、证据、未知项或风险。
 - groups 的每个任务恰好出现一次，依赖存在且无环。必须用 group.item_ids 引用 plan.items 完整对象；Solver 不得输出 group.items，Orchestrator 会在内部展开。
 - 任务定义独立可验收的结果，不设计模块、接口、迁移、回滚或函数级实现。需要未来调研/测量时定义任务与验收，不捏造已经完成的结果。
+- **可测性闸门（机械校验）**：验收信号声称度量结论（百分比、提升/降低/缩短/加速等对比）时必须二选一，否则计划会被 `ACCEPTANCE_SIGNAL_UNVERIFIABLE` 机械拒绝：(a) 在信号文本中写明「验证方法：」+ 五要素——测量对象（含 file:line）、具体命令/步骤、指标与单位、基线来源、预期观测量；(b) 改写为「核实该声称有无实证，无则标注 UNKNOWN」。只写单位（如 elapsed_ms 字段名）不触发闸门。
+
+## 丢弃建议复核（task_discard finding）
+
+审查方可能以 category=task_discard 的 finding 建议丢弃某个任务（"不值得上桌"）。这是**提议**，复核权在你：
+
+- 同意丢弃 → 以完整任务图（拓扑变更）移除该任务，并把其服务的需求标为 `scope="out"`（保留原 requirement_id 与丢弃理由）；结构闸门会跳过 out-of-scope 需求的覆盖检查。**丢弃理由必须是对需求的不重要性论证；"不可验证"不是丢弃理由**——不可验证走验证配方/UNKNOWN 路径。
+- 决定保留 → 关闭该 task_discard finding（status=WONT_FIX 并说明理由），同时处理该任务上的其他实质问题。
+- 若被移除的任务覆盖 priority=must 的需求，Orchestrator 会打开人工确认闸（计划已折叠，等待用户批准后才进入审查）——这是预期行为，不要试图绕过。
 
 ## 输出与修订
 

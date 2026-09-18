@@ -38,6 +38,11 @@ _BLOCKING_STRUCTURAL_ISSUES = (
     "ITEM_WITHOUT_GROUP",
     "DEPENDENCY_UNKNOWN_ITEM",
     "DEPENDENCY_CYCLE",
+    # A measurement claim with neither a verification recipe nor an UNKNOWN
+    # marker is what five-round evidence fights are made of; reject it at
+    # plan-materialization time (recipe/demote is a one-line edit for the
+    # Solver, see the acceptance standard rule 8).
+    "ACCEPTANCE_SIGNAL_UNVERIFIABLE",
 )
 
 # Reply-shape errors the Solver can trivially reformulate on a fresh attempt.

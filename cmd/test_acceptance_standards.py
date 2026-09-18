@@ -29,13 +29,14 @@ def _context() -> WorkflowContext:
 class AcceptanceStandardBlockTests(unittest.TestCase):
     """The standard is single-sourced and shipped with the producing roles."""
 
-    def test_block_contains_the_seven_distilled_rules(self) -> None:
+    def test_block_contains_the_eight_distilled_rules(self) -> None:
         lines = acceptance_standard_block().strip().splitlines()
 
         self.assertEqual(len(lines), len(ZHONGSHU_ACCEPTANCE_CHECKLIST))
         self.assertIn("[Acceptance standard]", lines[0])
         numbered = [line for line in lines[1:] if line[:1].isdigit()]
-        self.assertEqual(len(numbered), 7)
+        self.assertEqual(len(numbered), 8)
+        self.assertIn("可测性闸门", acceptance_standard_block())
 
     def test_producing_states_carry_the_block(self) -> None:
         for state in ("ZHONGSHU_ANALYST", "ZHONGSHU_SOLVER"):

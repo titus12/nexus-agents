@@ -12,6 +12,10 @@ _CRITIC_DECISION_STATUS = {
     "WONT_FIX": "WONT_FIX",
     "DEFERRED": "DEFERRED",
     "ACCEPTED_RISK": "DEFERRED",
+    # The claim cannot be verified within this run (no authority to measure,
+    # no data source).  Closing with a verification recipe is convergence,
+    # not evasion: the recipe rides the resolution text as a follow-up.
+    "WONT_VERIFY": "WONT_VERIFY",
 }
 _FINDING_STATUSES = {
     "OPEN",
@@ -22,6 +26,7 @@ _FINDING_STATUSES = {
     "RESOLVED",
     "WONT_FIX",
     "DEFERRED",
+    "WONT_VERIFY",
 }
 
 
@@ -130,7 +135,7 @@ class Finding:
 
     @property
     def resolved(self) -> bool:
-        return self.status in {"RESOLVED", "WONT_FIX", "DEFERRED"}
+        return self.status in {"RESOLVED", "WONT_FIX", "DEFERRED", "WONT_VERIFY"}
 
 
 __all__ = ["Finding", "normalize_finding_status"]

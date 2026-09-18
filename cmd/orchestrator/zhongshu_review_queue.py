@@ -17,6 +17,8 @@ import threading
 import uuid
 from typing import Any, Iterable, Mapping
 
+from .acceptance_standards import acceptance_signal_gate
+
 
 PENDING = "PENDING"
 RUNNING = "RUNNING"
@@ -456,6 +458,16 @@ def structural_gate(plan: Mapping[str, Any]) -> list[str]:
         for item in (requirements or [])
         if isinstance(item, Mapping) and item.get("requirement_id")
     }
+    # A requirement the planner explicitly scoped out (with a reason) is no
+    # longer part of the deliverable: dropping its covering items is a legal
+    # discard, so the coverage check must not resurrect it.
+    out_of_scope = {
+        str(item.get("requirement_id"))
+        for item in (requirements or [])
+        if isinstance(item, Mapping)
+        and item.get("requirement_id")
+        and str(item.get("scope") or "").strip().lower() == "out"
+    }
     covered: set[str] = set()
     for record in records:
         raw = record["raw"]
@@ -467,7 +479,7 @@ def structural_gate(plan: Mapping[str, Any]) -> list[str]:
         if not sources:
             issues.append(f"ITEM_WITHOUT_SOURCE_REQUIREMENT:{record['item_id']}")
         covered.update(sources)
-    for requirement_id in sorted(known_requirements - covered):
+    for requirement_id in sorted(known_requirements - covered - out_of_scope):
         issues.append(f"REQUIREMENT_UNCOVERED:{requirement_id}")
 
     for record in records:
@@ -477,6 +489,7 @@ def structural_gate(plan: Mapping[str, Any]) -> list[str]:
 
     for cycle in _dependency_cycles(by_item):
         issues.append("DEPENDENCY_CYCLE:" + ",".join(cycle))
+    issues.extend(acceptance_signal_gate(plan))
     return issues
 
 
