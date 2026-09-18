@@ -12,8 +12,9 @@ from orchestrator.transport import RawTransportReply
 
 
 class _Transport:
-    def __init__(self, status: str = "COMPLETED") -> None:
+    def __init__(self, status: str = "COMPLETED", reply_count: int = 1) -> None:
         self.status_value = status
+        self.reply_count = reply_count
         self.dispatched = []
         self.polled = 0
 
@@ -26,15 +27,16 @@ class _Transport:
 
     def poll(self, request: PollRequest):
         self.polled += 1
-        return (
+        return tuple(
             RawTransportReply(
                 author_id="review-analyst",
-                external_message_id="reply-1",
+                external_message_id=f"reply-{index}",
                 request_id=request.request_id,
                 payload={"action": "READY_FOR_SOLVER"},
                 received_at="2026-09-10T00:00:00Z",
                 source="test",
-            ),
+            )
+            for index in range(self.reply_count)
         )
 
     def lookup(self, _operation_id):
@@ -98,8 +100,20 @@ class LinearParallelEffectTests(unittest.TestCase):
         self.assertEqual(outcome.event_payload["result_artifact_id"][:1], directory[:1])
         self.assertEqual(transport.polled, 1)
 
-    def test_remote_failed_is_terminal_even_without_polling_or_reply(self):
+    def test_failed_run_salvages_the_reply_delivered_before_the_error(self):
+        # Live evidence: the agent posts its structured contract reply and the
+        # model runtime errors seconds later; the work must not be discarded.
         transport = _Transport("FAILED")
+        runner = AgentWorkerRunner(transport, timeout_seconds=1)
+
+        outcome = runner.run_once(_request())
+
+        self.assertEqual(outcome.status, "SUCCEEDED")
+        self.assertEqual(outcome.event_name, "READY_FOR_SOLVER")
+        self.assertEqual(transport.polled, 1)
+
+    def test_failed_run_without_reply_stays_a_fast_failure(self):
+        transport = _Transport("FAILED", reply_count=0)
         runner = AgentWorkerRunner(transport, timeout_seconds=1)
 
         outcome = runner.run_once(_request())
@@ -108,7 +122,8 @@ class LinearParallelEffectTests(unittest.TestCase):
         self.assertEqual(outcome.event_name, "FAIL")
         self.assertIsNotNone(outcome.failure)
         self.assertEqual(outcome.failure.error_code, "REMOTE_RUN_FAILED")
-        self.assertEqual(transport.polled, 0)
+        # The salvage read is short-bounded, not the full result window.
+        self.assertLessEqual(transport.polled, 3)
         self.assertTrue(outcome.event_payload["retryable"])
 
     def test_timeout_failure_is_retryable_in_event_payload(self):

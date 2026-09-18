@@ -267,9 +267,18 @@ def _retry_binding(binding: WorkerBinding, attempt: int) -> WorkerBinding:
     for the whole result window and then fail with the same error.  Scoping the
     identity to the attempt forces a real re-ask (fresh prompt bundle, fresh
     child run) while ``worker_id`` stays stable so fan-in still matches.
+
+    Fan-out children need one more nudge: the child issue is found by
+    deterministic title, so reusing the title re-attached the retry to the
+    drained issue whose assignment run had already died.  Retitling the retry
+    makes ``ensure_child_issue`` create a fresh child issue, whose creation
+    fires the fresh assignment run.
     """
 
-    return replace(binding, attempt=attempt)
+    title = binding.fanout_title
+    if title and attempt > 1:
+        title = f"{title} (retry-{attempt})"
+    return replace(binding, attempt=attempt, fanout_title=title)
 
 
 def _run_worker(

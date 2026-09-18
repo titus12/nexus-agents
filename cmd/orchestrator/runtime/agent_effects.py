@@ -42,6 +42,12 @@ from .nodes import NodeResult
 
 logger = logging.getLogger("review_orchestrator_fsm")
 
+# A run that failed after the agent delivered its reply is salvaged with a
+# short bounded read: enough to cover comment-visibility lag around the
+# terminal error, small enough to keep a genuine failure fast.
+REMOTE_FAILURE_SALVAGE_POLLS = 3
+REMOTE_FAILURE_SALVAGE_INTERVAL = 2.0
+
 
 class AgentWorkerRunner:
     """Dispatch, observe, normalize, and archive one agent execution."""
@@ -226,6 +232,24 @@ class AgentWorkerRunner:
                     raise TransportError("agent transport returned an invalid run status")
                 last_status = status
                 if status.status == "FAILED":
+                    # The run can fail AFTER the agent delivered its structured
+                    # reply (observed live: the model runtime errored seconds
+                    # after the contract comment landed).  The work is done and
+                    # correlated by request id, so salvage the reply instead of
+                    # discarding it and re-running the whole dispatch.
+                    salvaged = self._salvage_replies(poll, deadline)
+                    if salvaged:
+                        logger.warning(
+                            "REMOTE_RUN_FAILED_REPLY_SALVAGED task_id=%s "
+                            "request_id=%s replies=%s remote_error=%r",
+                            request.task_id,
+                            poll.request_id,
+                            len(salvaged),
+                            status.error_message or "",
+                        )
+                        return self._completed_outcome(
+                            request, dispatch, receipt, poll, deadline_at, salvaged
+                        )
                     failure = self._remote_failure(request, status, receipt)
                     return EffectOutcome(
                         status="FAILED",
@@ -313,6 +337,19 @@ class AgentWorkerRunner:
                 deadline_at=deadline_at,
                 failure=failure,
             )
+        return self._completed_outcome(
+            request, dispatch, receipt, poll, deadline_at, replies
+        )
+
+    def _completed_outcome(
+        self,
+        request: EffectRequest,
+        dispatch: AgentDispatchRequest,
+        receipt: DispatchReceipt,
+        poll: PollRequest,
+        deadline_at: str,
+        replies: tuple[RawTransportReply, ...],
+    ) -> EffectOutcome:
         raw = replies[-1]
         if not isinstance(raw, RawTransportReply):
             raise TransportError("agent transport returned an invalid reply")
@@ -384,6 +421,26 @@ class AgentWorkerRunner:
                 break
             replies = tuple(self._transport.poll(poll))
         return replies
+
+    def _salvage_replies(
+        self,
+        poll: PollRequest,
+        deadline: float,
+    ) -> tuple[RawTransportReply, ...]:
+        """Short bounded read for a reply delivered before the run failed.
+
+        A genuinely failed run must stay a fast failure: this only tolerates
+        the few seconds of comment-visibility lag around the terminal error,
+        not the full result window.
+        """
+
+        for attempt in range(REMOTE_FAILURE_SALVAGE_POLLS):
+            replies = tuple(self._transport.poll(poll))
+            if replies:
+                return replies
+            if attempt + 1 < REMOTE_FAILURE_SALVAGE_POLLS and self._clock() < deadline:
+                time.sleep(REMOTE_FAILURE_SALVAGE_INTERVAL)
+        return ()
 
     def _complete_with_reply(
         self,

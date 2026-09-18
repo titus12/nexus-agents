@@ -263,6 +263,34 @@ class NodeWorkerRetryTests(unittest.TestCase):
         self.assertEqual(second.worker_id, first.worker_id)
         self.assertEqual(second.request_id, first.request_id)
 
+    def test_retry_retitles_fanout_children_for_a_fresh_assignment_run(self) -> None:
+        self.node = ReviewNode(
+            "node-1",
+            "ZHONGSHU",
+            (
+                WorkerBinding(
+                    worker_id="worker-a",
+                    agent_id="agent-a",
+                    task_id="task-1",
+                    request_id="request-a",
+                    role="review-critic",
+                    phase="ZHONGSHU",
+                    fanout_parent_id="parent-1",
+                    fanout_title="分析任务 worker-a",
+                ),
+            ),
+        )
+        runner = _FlakyRunner([True, False], "REMOTE_RUN_FAILED")
+
+        self._execute(runner)
+
+        first, second = runner.bindings
+        self.assertEqual(first.fanout_title, "分析任务 worker-a")
+        # A retitled child issue makes ensure_child_issue create a fresh issue
+        # whose creation fires the fresh assignment run; the drained original
+        # issue can no longer swallow the retry.
+        self.assertEqual(second.fanout_title, "分析任务 worker-a (retry-2)")
+
 
 class _DrainingTransport:
     """A transport whose first run ends without a correlated reply.
