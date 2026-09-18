@@ -563,13 +563,75 @@ class _ConcreteWorkflowState:
             )
         if completed_id and str(completed_id) not in completed:
             completed.append(str(completed_id))
+        # A discarded task leaves the plan.  Its leftovers must leave with it,
+        # or the stale ledger row keeps re-escalating ITEM_STALLED forever and
+        # its open findings keep the graph "blocked" for an item no job will
+        # ever review again.
+        discarded_items = _discarded_item_ids(context, task_items)
+        ledger_value = _task_review_ledger_update(context, payload)
+        if discarded_items:
+            if ledger_value is None:
+                ledger_value = (
+                    tuple(context.review.task_review_ledger) if context.review else ()
+                )
+            ledger_value = tuple(
+                record
+                for record in ledger_value
+                if record.item_id not in discarded_items
+            )
+        workflows_value = update_item_workflows(
+            context.review.item_workflows if context.review else (),
+            payload.get("task_reviews"),
+            attempted_item_ids=(
+                context.review.attempted_item_ids if context.review else None
+            ),
+            max_rounds=(
+                context.review.max_item_revision_rounds if context.review else 0
+            ),
+        )
+        if discarded_items:
+            if workflows_value is None:
+                workflows_value = (
+                    tuple(context.review.item_workflows) if context.review else ()
+                )
+            workflows_value = tuple(
+                workflow
+                for workflow in workflows_value
+                if workflow.item_id not in discarded_items
+            )
+        if discarded_items:
+            workflows_value = tuple(
+                workflow
+                for workflow in workflows_value
+                if workflow.item_id not in discarded_items
+            )
+        merged_findings = _merge_and_close_findings(
+            existing,
+            findings,
+            payload.get("task_reviews"),
+            attempted_finding_ids=(
+                context.review.attempted_finding_ids if context.review else None
+            ),
+        )
+        if discarded_items:
+            merged_findings = tuple(
+                replace(
+                    finding,
+                    status="WONT_FIX",
+                    resolution=finding.resolution
+                    or "task discarded from plan; requirement scoped out with rationale",
+                )
+                if (finding.active and finding.item_id in discarded_items)
+                else finding
+                for finding in merged_findings
+            )
         return ReviewUpdate(
             revision_id=(
                 str(payload.get("revision_id") or "")
                 or (context.review.revision_id if context.review else "")
                 or f"{context.identity.task_id}:{context.progression.sequence + 1}"
             ),
-            task_review_ledger=_task_review_ledger_update(context, payload),
+            task_review_ledger=ledger_value,
             active_group_id=(
                 str(payload["group_id"])
                 if payload.get("group_id")
@@ -580,14 +642,7 @@ class _ConcreteWorkflowState:
                 if payload.get("item_id")
                 else context.review.active_item_id if context.review else None
             ),
-            findings=_merge_and_close_findings(
-                existing,
-                findings,
-                payload.get("task_reviews"),
-                attempted_finding_ids=(
-                    context.review.attempted_finding_ids if context.review else None
-                ),
-            ),
+            findings=merged_findings,
             plan_ref=str(plan_ref) if plan_ref else None,
             plan_hash=_resolve_plan_hash(payload),
             plan=dict(plan) if isinstance(plan, Mapping) else None,
@@ -597,16 +652,7 @@ class _ConcreteWorkflowState:
             completed_item_ids=tuple(completed),
             attempted_item_ids=_attempted_item_ids(existing, payload),
             attempted_finding_ids=_attempted_finding_ids(payload, existing),
-            item_workflows=update_item_workflows(
-                context.review.item_workflows if context.review else (),
-                payload.get("task_reviews"),
-                attempted_item_ids=(
-                    context.review.attempted_item_ids if context.review else None
-                ),
-                max_rounds=(
-                    context.review.max_item_revision_rounds if context.review else 0
-                ),
-            ),
+            item_workflows=workflows_value,
             evidence_packet=(
                 dict(payload["evidence_packet"])
                 if isinstance(payload.get("evidence_packet"), Mapping)
@@ -2031,6 +2077,20 @@ def _attempted_item_ids(
     )
 
 
+def _discarded_item_ids(
+    context: WorkflowContext,
+    new_task_items: object,
+) -> frozenset[str]:
+    """Task items the new plan dropped relative to the current state."""
+
+    review = context.review
+    if review is None or not review.task_items or not new_task_items:
+        return frozenset()
+    old_ids = {item.item_id for item in review.task_items}
+    new_ids = {item.item_id for item in new_task_items}
+    return frozenset(old_ids - new_ids)
+
+
 def _must_requirement_removals(
     context: WorkflowContext,
     graph: Mapping[str, object],
@@ -2057,6 +2117,14 @@ def _must_requirement_removals(
         for req in (graph.get("requirements") or [])
         if isinstance(req, Mapping) and req.get("requirement_id")
     }
+    if not requirements:
+        # A revised graph may omit the requirement list; the authoritative
+        # priorities live in the review state.
+        requirements = {
+            str(req.get("requirement_id")): dict(req)
+            for req in (review.requirements or ())
+            if isinstance(req, Mapping) and req.get("requirement_id")
+        }
     pairs: list[tuple[str, str]] = []
     for item_id in removed:
         old_item = old_items[item_id]

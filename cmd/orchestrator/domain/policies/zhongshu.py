@@ -82,7 +82,12 @@ def merge_findings(
 
     merged: dict[str, Finding] = {}
     for finding in current or ():
-        merged[_finding_identity(finding)] = finding
+        value = (
+            finding
+            if isinstance(finding, Finding)
+            else Finding.from_dict(dict(finding))
+        )
+        merged[_finding_identity(value)] = value
     for value in incoming or ():
         finding = value if isinstance(value, Finding) else Finding.from_dict(dict(value))
         merged[_finding_identity(finding)] = finding

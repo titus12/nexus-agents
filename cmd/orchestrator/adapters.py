@@ -2241,7 +2241,12 @@ def _response_contract_for(request: AgentRequest) -> dict:
             else:
                 allowed_actions = sorted(
                     action for action in CRITIC_ACTIONS
-                    if action not in {"TASK_APPROVED", "TASK_CHANGES_REQUIRED"}
+                    if action not in {
+                        "TASK_APPROVED", "TASK_CHANGES_REQUIRED",
+                        # Discard is a task-scoped recommendation: the legacy
+                        # whole-plan FSM path has no folding for it.
+                        "REQUEST_TASK_DISCARD",
+                    }
                 )
                 required_by_action = {
                     action: ["action", "reviewed_plan_hash"] + (

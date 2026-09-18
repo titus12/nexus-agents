@@ -283,6 +283,76 @@ class SolverStateDiscardGateTests(unittest.TestCase):
         decision = state.handle(context, self._event(_plan(drop_item="item-000002")))
         self.assertEqual(decision.transition.action, "READY_FOR_CRITIC")
 
+    def test_discarded_item_leftovers_are_pruned(self) -> None:
+        from orchestrator.domain.context import ReviewTaskRecord
+
+        context = _review_context()
+        review = context.review
+        context = WorkflowContext(
+            identity=context.identity,
+            progression=context.progression,
+            request=context.request,
+            review=ReviewState(
+                revision_id=review.revision_id,
+                requirements=review.requirements,
+                task_items=review.task_items,
+                item_workflows=review.item_workflows,
+                task_review_ledger=(
+                    ReviewTaskRecord(
+                        item_id="item-000001",
+                        task_hash="h1",
+                        dependency_hash="d1",
+                        status="CHANGES_REQUIRED",
+                        changes_rounds=5,
+                    ),
+                    ReviewTaskRecord(
+                        item_id="item-000002",
+                        task_hash="h2",
+                        dependency_hash="d2",
+                        status="CHANGES_REQUIRED",
+                        changes_rounds=1,
+                    ),
+                ),
+                findings=(
+                    {
+                        "finding_id": "finding-a",
+                        "severity": "P1",
+                        "item_id": "item-000001",
+                        "group_id": "group-000001",
+                        "status": "OPEN",
+                        "claim": "旧任务的问题",
+                    },
+                    {
+                        "finding_id": "finding-b",
+                        "severity": "P1",
+                        "item_id": "item-000002",
+                        "group_id": "group-000001",
+                        "status": "OPEN",
+                        "claim": "保留任务的问题",
+                    },
+                ),  # type: ignore[arg-type]
+            ),
+        )
+        state = ZhongshuSolverState()
+        decision = state.handle(context, self._event(_plan(drop_item="item-000001")))
+        update = decision.update.review
+        ledger_ids = {record.item_id for record in update.task_review_ledger}
+        workflow_ids = {w.item_id for w in update.item_workflows}
+        self.assertNotIn("item-000001", ledger_ids)
+        self.assertNotIn("item-000001", workflow_ids)
+        self.assertIn("item-000002", ledger_ids)
+        closed = next(f for f in update.findings if f.finding_id == "finding-a")
+        self.assertEqual(closed.status, "WONT_FIX")
+        kept = next(f for f in update.findings if f.finding_id == "finding-b")
+        self.assertEqual(kept.status, "OPEN")
+
+    def test_removal_detection_falls_back_to_review_requirements(self) -> None:
+        context = _review_context()
+        plan = _plan(drop_item="item-000001")
+        del plan["requirements"]
+        pairs = _must_requirement_removals(context, plan)
+        self.assertEqual(pairs, [("item-000001", "req-001")])
+
 
 if __name__ == "__main__":
     unittest.main()
