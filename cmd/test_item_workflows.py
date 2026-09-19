@@ -92,6 +92,36 @@ class UpdateItemWorkflowsTests(unittest.TestCase):
         untouched = next(row for row in rows if row.item_id == "item-000001")
         self.assertEqual(untouched.phase, "APPROVED")
 
+    def test_failed_wave_records_verdict_without_spending_budget(self) -> None:
+        prior = (ItemWorkflow(item_id="item-000001", phase="REVISING", rounds=2),)
+
+        rows = update_item_workflows(
+            prior,
+            [
+                _entry("item-000001", "TASK_CHANGES_REQUIRED"),
+                _entry("item-000002", "TASK_CHANGES_REQUIRED"),
+            ],
+            attempted_item_ids=None, max_rounds=5, failed_round=True,
+        )
+
+        by_id = {row.item_id: row for row in rows}
+        self.assertEqual(by_id["item-000001"].rounds, 2)
+        self.assertEqual(by_id["item-000001"].phase, "REVISING")
+        self.assertEqual(by_id["item-000001"].last_verdict, "TASK_CHANGES_REQUIRED")
+        self.assertEqual(by_id["item-000002"].rounds, 0)
+        self.assertEqual(by_id["item-000002"].phase, "REVIEWING")
+
+    def test_failed_wave_approval_still_ratchets(self) -> None:
+        prior = (ItemWorkflow(item_id="item-000001", phase="REVISING", rounds=3),)
+
+        rows = update_item_workflows(
+            prior, [_entry("item-000001", "TASK_APPROVED")],
+            attempted_item_ids=None, max_rounds=5, failed_round=True,
+        )
+
+        self.assertEqual(rows[0].phase, "APPROVED")
+        self.assertEqual(rows[0].rounds, 0)
+
     def test_no_task_reviews_keeps_the_current_table(self) -> None:
         prior = (ItemWorkflow(item_id="item-000001"),)
 
@@ -165,6 +195,32 @@ class ReviewUpdateWiringTests(unittest.TestCase):
         phases = {row.item_id: row.phase for row in update.item_workflows}
         self.assertEqual(phases["item-000001"], "REVISING")
         self.assertEqual(phases["item-000002"], "APPROVED")
+
+    def test_failed_node_payload_folds_without_charging_rounds(self) -> None:
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("ZHONGSHU_CRITIC", 6, "2026-09-17T00:00:00Z"),
+            review=ReviewState(
+                revision_id="task-1:2",
+                item_workflows=(
+                    ItemWorkflow(item_id="item-000001", phase="REVISING", rounds=2),
+                ),
+            ),
+        )
+
+        update = _ConcreteWorkflowState._review_update(
+            context,
+            {
+                "action": "FAIL",
+                "task_reviews": [
+                    _entry("item-000001", "TASK_CHANGES_REQUIRED", "finding-000001"),
+                ],
+                "findings": [],
+            },
+        )
+
+        self.assertEqual(update.item_workflows[0].rounds, 2)
+        self.assertEqual(update.item_workflows[0].last_verdict, "TASK_CHANGES_REQUIRED")
 
     def test_solver_payload_keeps_the_current_table(self) -> None:
         context = WorkflowContext(

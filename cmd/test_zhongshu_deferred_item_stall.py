@@ -100,9 +100,9 @@ class DeferredItemDoesNotStallTests(unittest.TestCase):
             "reviewed_dependency_hash": "dh",
         }
 
-    def _rounds(self, context: WorkflowContext, *reviews: dict) -> dict[str, int]:
+    def _rounds(self, context: WorkflowContext, *reviews: dict, payload_action: str = "") -> dict[str, int]:
         update = _task_review_ledger_update(
-            context, {"task_reviews": list(reviews)}
+            context, {"task_reviews": list(reviews), "action": payload_action}
         )
         records = update if update is not None else context.review.task_review_ledger
         return {record.item_id: record.changes_rounds for record in records}
@@ -167,6 +167,63 @@ class DeferredItemDoesNotStallTests(unittest.TestCase):
         rounds = self._rounds(context, self._review("item-000007"))
 
         self.assertEqual(rounds["item-000007"], 0)
+
+    def test_failed_wave_folds_state_without_spending_budget(self) -> None:
+        # A protocol-failed wave (one worker's unusable reply) folds the
+        # surviving verdicts for state-keeping only: the retry re-reviews
+        # non-approved tasks and charges them then, so the slip must not
+        # double-spend other items' stall budget.
+        context = self._context(
+            ReviewTaskRecord(
+                item_id="item-000001",
+                status="CHANGES_REQUIRED",
+                task_hash="th",
+                dependency_hash="dh",
+                changes_rounds=2,
+            ),
+        )
+
+        update = _task_review_ledger_update(
+            context,
+            {
+                "action": "FAIL",
+                "task_reviews": [
+                    self._review("item-000001"),
+                    self._review("item-000009"),
+                ],
+            },
+        )
+
+        records = {record.item_id: record for record in update}
+        self.assertEqual(records["item-000001"].changes_rounds, 2)
+        self.assertEqual(records["item-000001"].status, "CHANGES_REQUIRED")
+        self.assertEqual(records["item-000009"].changes_rounds, 0)
+        self.assertEqual(records["item-000009"].status, "CHANGES_REQUIRED")
+
+    def test_failed_wave_approval_still_ratchets(self) -> None:
+        # The point of folding a failed wave is dispatch savings: an approved
+        # task must become ratchet-protected so the retry skips it.
+        context = self._context()
+
+        rounds = self._rounds(
+            context,
+            self._review("item-000009", action="TASK_APPROVED"),
+            payload_action="FAIL",
+        )
+
+        self.assertEqual(rounds["item-000009"], 0)
+        record = next(
+            record
+            for record in _task_review_ledger_update(
+                context,
+                {
+                    "action": "FAIL",
+                    "task_reviews": [self._review("item-000009", action="TASK_APPROVED")],
+                },
+            )
+            if record.item_id == "item-000009"
+        )
+        self.assertEqual(record.status, "APPROVED")
 
     def test_approval_still_resets_the_counter(self) -> None:
         context = self._context(

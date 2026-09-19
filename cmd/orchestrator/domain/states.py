@@ -588,6 +588,7 @@ class _ConcreteWorkflowState:
             max_rounds=(
                 context.review.max_item_revision_rounds if context.review else 0
             ),
+            failed_round=(str(payload.get("action") or "") == "FAIL"),
         )
         if discarded_items:
             if workflows_value is None:
@@ -2151,11 +2152,18 @@ def _task_review_ledger_update(
     finding batch actually asked to fix.  A batch covers part of the graph, so
     counting every verdict would let a task that was deferred to a later batch
     burn its stall budget while the Solver was never asked to touch it.
+
+    A protocol-failed wave (aggregate action ``FAIL``) records verdicts for
+    state-keeping only: the approval ratchet still lets the retry skip
+    re-dispatching approved tasks, but the retry re-reviews non-approved tasks
+    and charges them then -- so one worker's protocol slip must not spend
+    other items' stall budget twice.
     """
 
     raw = payload.get("task_reviews")
     if not isinstance(raw, list) or not raw:
         return None
+    failed_round = str(payload.get("action") or "") == "FAIL"
     current = {
         record.item_id: record
         for record in (
@@ -2199,6 +2207,18 @@ def _task_review_ledger_update(
         counted = not attempted or item_id in attempted
         if approved:
             rounds = 0
+        elif failed_round:
+            # The retry charges this task when its re-review joins cleanly;
+            # folding the failed wave must not double-spend the budget.
+            rounds = previous.changes_rounds if previous is not None else 0
+            logger.info(
+                "ZHONGSHU_TASK_REVIEW_FAILED_ROUND task_id=%s item_id=%s "
+                "rounds=%s verdict=%s",
+                context.identity.task_id,
+                item_id,
+                rounds,
+                action,
+            )
         elif counted:
             rounds = previous.changes_rounds + 1 if previous is not None else 1
         else:

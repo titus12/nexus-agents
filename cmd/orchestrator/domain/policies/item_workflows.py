@@ -24,15 +24,19 @@ def update_item_workflows(
     *,
     attempted_item_ids: Iterable[str] | None,
     max_rounds: int,
+    failed_round: bool = False,
 ) -> tuple[ItemWorkflow, ...] | None:
     """Fold one task-review round into the dispatch table.
 
     Rows are created on first sight and updated per the round's verdict.  The
     counting rule mirrors ``_task_review_ledger_update``: an unknown attempt
     set keeps the historical count-every-rejection behaviour, and a task the
-    Solver's batch never attempted does not consume its stall budget.  Returns
-    ``None`` when there is nothing to fold, so the caller keeps the current
-    table instead of pretending the round changed it.
+    Solver's batch never attempted does not consume its stall budget.  A
+    protocol-failed wave (``failed_round``) records verdicts for state-keeping
+    only -- the retry re-reviews non-approved tasks and charges them then, so
+    one worker's protocol slip must not spend other items' stall budget.
+    Returns ``None`` when there is nothing to fold, so the caller keeps the
+    current table instead of pretending the round changed it.
     """
 
     if not isinstance(task_reviews, list) or not task_reviews:
@@ -53,7 +57,7 @@ def update_item_workflows(
         action = str(entry.get("action") or "")
         previous = rows.get(item_id)
         approved = action == _APPROVED
-        counted = not attempted or item_id in attempted
+        counted = not failed_round and (not attempted or item_id in attempted)
         if approved:
             rounds = 0
             phase = "APPROVED"
