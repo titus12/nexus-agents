@@ -704,28 +704,36 @@ def aggregate_reviews(
     return output
 
 
-def _task_review_identity_mismatch(
+def _task_review_stamp_identity(
     body: dict[str, Any], job: Any, revision: str, plan_hash: str,
-) -> str:
-    """Name the first identity field that failed to match the queue job."""
+) -> list[dict[str, str]]:
+    """Stamp orchestrator-owned identity fields onto a review body.
 
-    checks = (
-        ("revision_id", str(body.get("revision_id") or ""), revision),
-        ("plan_hash", str(body.get("plan_hash") or ""), plan_hash),
-        ("reviewed_plan_hash", str(body.get("reviewed_plan_hash") or ""), plan_hash),
-        ("group_id", str(body.get("group_id") or ""), str(job.group_id)),
-        ("item_id", str(body.get("item_id") or ""), str(job.item_id)),
-        ("reviewed_task_hash", str(body.get("reviewed_task_hash") or ""), str(job.task_hash)),
-        (
-            "reviewed_dependency_hash",
-            str(body.get("reviewed_dependency_hash") or ""),
-            str(job.dependency_hash),
-        ),
+    The dispatch pins what the worker reviews, so the queue job is the only
+    authority for identity/hash fields: whatever the worker echoed is ignored
+    and overwritten.  A present-but-different echo is still reported so the
+    transcription slips stay visible (live incidents task-20260918-30ec74 and
+    task-20260919-61f195 both had workers echoing blank identity fields).
+    """
+
+    expected = (
+        ("review_job_id", str(job.review_job_id)),
+        ("revision_id", revision),
+        ("plan_revision_id", revision),
+        ("plan_hash", plan_hash),
+        ("reviewed_plan_hash", plan_hash),
+        ("group_id", str(job.group_id)),
+        ("item_id", str(job.item_id)),
+        ("reviewed_task_hash", str(job.task_hash)),
+        ("reviewed_dependency_hash", str(job.dependency_hash)),
     )
-    for field, actual, expected in checks:
-        if actual != expected:
-            return f"{field}:got={actual!r}:expected={expected!r}"
-    return ""
+    corrections: list[dict[str, str]] = []
+    for field, value in expected:
+        actual = str(body.get(field) or "")
+        if field in body and actual != value:
+            corrections.append({"field": field, "got": actual, "expected": value})
+        body[field] = value
+    return corrections
 
 
 def _task_review_human_gate(
@@ -836,6 +844,7 @@ def aggregate_task_review_results(
     """Aggregate one Critic result per task without a cross-task quorum."""
     by_job: dict[str, dict[str, Any]] = {}
     rejected: list[dict[str, Any]] = []
+    identity_corrections: list[dict[str, Any]] = []
     known_jobs = {job.review_job_id: job for job in queue.jobs}
     for raw in results:
         body = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
@@ -866,23 +875,21 @@ def aggregate_task_review_results(
         if job_id in by_job:
             rejected.append({"review_job_id": job_id, "group_id": group_id, "item_id": item_id, "reason": "TASK_REVIEW_DUPLICATE_RESULT"})
             continue
-        if (
-            str(body.get("revision_id") or "") != revision
-            or str(body.get("plan_hash") or "") != plan_hash
-            or str(body.get("reviewed_plan_hash") or "") != plan_hash
-            or str(body.get("group_id") or "") != job.group_id
-            or str(body.get("item_id") or "") != job.item_id
-            or str(body.get("reviewed_task_hash") or "") != job.task_hash
-            or str(body.get("reviewed_dependency_hash") or "") != job.dependency_hash
-        ):
-            rejected.append({
-                "review_job_id": job_id,
-                "group_id": group_id,
-                "item_id": item_id,
-                "reason": "TASK_REVIEW_RESULT_IDENTITY_MISMATCH",
-                "mismatch": _task_review_identity_mismatch(body, job, revision, plan_hash),
+        corrections = _task_review_stamp_identity(body, job, revision, plan_hash)
+        if corrections:
+            identity_corrections.append({
+                "review_job_id": job.review_job_id,
+                "group_id": job.group_id,
+                "item_id": job.item_id,
+                "corrections": corrections,
             })
-            continue
+            logger.warning(
+                "TASK_REVIEW_IDENTITY_ECHO_IGNORED review_job_id=%s item_id=%s "
+                "corrections=%s",
+                job.review_job_id,
+                job.item_id,
+                corrections,
+            )
         if job.status != "COMPLETED":
             rejected.append({"review_job_id": job_id, "group_id": group_id, "item_id": item_id, "reason": "TASK_REVIEW_RESULT_FOR_NONCOMPLETED_JOB"})
             continue
@@ -901,7 +908,7 @@ def aggregate_task_review_results(
         body = by_job.get(job.review_job_id)
         if body is None:
             continue
-        worker_id = str(body.get("worker_id") or job.worker_id or "")
+        worker_id = str(body.get("worker_id") or "")
         if worker_id:
             worker_ids.add(worker_id)
         action = str(body.get("action") or "")
@@ -1049,6 +1056,7 @@ def aggregate_task_review_results(
         "task_reviews": task_reviews,
         "worker_reviews": task_reviews,
         "rejected_reviews": rejected,
+        "identity_corrections": identity_corrections,
         "valid_worker_ids": sorted(worker_ids),
         "quorum": 1,
         "approval_count": task_approved,

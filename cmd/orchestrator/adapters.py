@@ -2083,8 +2083,6 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "grouping_review",
             "dependency_review",
             "risk_signals",
-            "plan_hash",
-            "reviewed_plan_hash",
             "findings",
             "next_actions",
             "remaining_blockers",
@@ -2096,8 +2094,6 @@ def _response_contract_for(request: AgentRequest) -> dict:
             optional.extend([
                 "group_id",
                 "item_id",
-                "reviewed_task_hash",
-                "reviewed_dependency_hash",
                 "review_checks",
                 "evidence_ids",
                 "unknowns",
@@ -2111,14 +2107,14 @@ def _response_contract_for(request: AgentRequest) -> dict:
             ]
             instruction = (
                 "You are the Zhongshu task Critic. Review only the assigned "
-                "group_id/item_id capsule. Return the exact revision and task hashes, "
-                "all review_checks, and task-scoped evidence-backed findings. Do not "
+                "group_id/item_id capsule. Do not echo revision ids, plan hashes "
+                "or task/dependency hashes (the orchestrator stamps them). Return "
+                "all review_checks and task-scoped evidence-backed findings. Do not "
                 "review or create findings for any other task, and do not design implementation."
             )
             required_by_action = {
                 action: [
-                    "action", "revision_id", "group_id", "item_id",
-                    "reviewed_task_hash", "reviewed_dependency_hash",
+                    "action", "group_id", "item_id",
                     "review_checks", "findings", "evidence_ids", "unknowns",
                 ]
                 for action in allowed_actions
@@ -2232,8 +2228,7 @@ def _response_contract_for(request: AgentRequest) -> dict:
                 allowed_actions = sorted(TASK_CRITIC_ACTIONS)
                 required_by_action = {
                     action: [
-                        "action", "revision_id", "group_id", "item_id",
-                        "reviewed_task_hash", "reviewed_dependency_hash",
+                        "action", "group_id", "item_id",
                         "review_checks", "findings", "evidence_ids", "unknowns",
                     ]
                     for action in allowed_actions

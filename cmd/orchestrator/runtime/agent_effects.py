@@ -730,11 +730,13 @@ def _attempt_effect_id(node_run_id: str, worker_id: str, attempt: int) -> str:
 def _partial_task_reviews(
     results: tuple[WorkerResult, ...],
     failed: list[WorkerResult],
+    binding_contexts: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     """Per-task verdicts from the workers that succeeded despite a node failure.
 
     Only the ledger-relevant identity/verdict fields are kept; re-reviewing an
-    approved task is the expensive part we want a retry to skip.
+    approved task is the expensive part we want a retry to skip.  The identity
+    fields come from the binding's dispatch record, not from the worker reply.
     """
 
     failed_ids = {result.worker_id for result in failed}
@@ -746,15 +748,24 @@ def _partial_task_reviews(
         if not isinstance(payload, Mapping):
             continue
         action = str(payload.get("action") or "")
-        item_id = str(payload.get("item_id") or "")
+        context = binding_contexts.get(result.worker_id) if binding_contexts else None
+        context = context if isinstance(context, Mapping) else None
+        item_id = str(
+            (context or {}).get("item_id") or payload.get("item_id") or ""
+        )
         if action not in _TASK_REVIEW_ACTIONS or not item_id:
             continue
         reviews.append(
             {
                 "item_id": item_id,
                 "action": action,
-                "reviewed_task_hash": payload.get("reviewed_task_hash"),
-                "reviewed_dependency_hash": payload.get("reviewed_dependency_hash"),
+                "reviewed_task_hash": (
+                    (context or {}).get("task_hash") or payload.get("reviewed_task_hash")
+                ),
+                "reviewed_dependency_hash": (
+                    (context or {}).get("dependency_hash")
+                    or payload.get("reviewed_dependency_hash")
+                ),
             }
         )
     return reviews
@@ -777,6 +788,7 @@ class AgentNodeJoiner:
         dispatch_mode: str = "",
         base_plan: object | None = None,
         previous_review: object | None = None,
+        binding_contexts: Mapping[str, Mapping[str, object]] | None = None,
     ) -> None:
         self._node_run_id = node_run_id
         self._task_id = task_id
@@ -793,6 +805,11 @@ class AgentNodeJoiner:
             if isinstance(previous_review, Mapping)
             else None
         )
+        self._binding_contexts: dict[str, dict[str, object]] = {
+            str(worker_id): dict(ctx)
+            for worker_id, ctx in (binding_contexts or {}).items()
+            if isinstance(ctx, Mapping)
+        }
 
     def join(self, results: tuple[WorkerResult, ...]):
         failed = [
@@ -804,7 +821,7 @@ class AgentNodeJoiner:
         # every failure exit can hand them to the FSM ledger and the retry only
         # has to re-dispatch the tasks that are still missing.
         partial_reviews = (
-            _partial_task_reviews(results, failed)
+            _partial_task_reviews(results, failed, self._binding_contexts)
             if self._task_review_queue is not None
             else []
         )
@@ -865,12 +882,18 @@ class AgentNodeJoiner:
                 failure=failure,
             )
 
-        worker_payloads = [
-            {**dict(payload), "worker_id": result.worker_id}
-            for result in results
-            for payload in (result.result_payload,)
-            if isinstance(payload, Mapping)
-        ]
+        worker_payloads = []
+        for result in results:
+            payload = result.result_payload
+            if not isinstance(payload, Mapping):
+                continue
+            merged = {**dict(payload), "worker_id": result.worker_id}
+            # The binding's dispatch record owns the routing key: the worker
+            # never needs to echo which job it reviewed.
+            context = self._binding_contexts.get(result.worker_id)
+            if context and context.get("review_job_id"):
+                merged["review_job_id"] = str(context["review_job_id"])
+            worker_payloads.append(merged)
         if self._task_review_queue is not None:
             return self._join_task_review(results, worker_payloads, partial_reviews)
 

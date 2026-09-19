@@ -15,11 +15,10 @@ _REVIEW_CHECKS = object_schema(
     required=("requirement_coverage", "boundary", "dependencies", "acceptance", "risks"),
 )
 FIELDS = {
-    "summary": string(), "review_summary": string(), "plan_hash": string(), "reviewed_plan_hash": string(),
-    "revision_id": string(), "plan_revision_id": string(), "worker_lens": string(), "findings": array(_FINDING),
+    "summary": string(), "review_summary": string(), "worker_lens": string(), "findings": array(_FINDING),
     "requirement_coverage": array(), "evidence_alignment": array(), "missing_evidence": array(), "required_change": array(),
     "remaining_blockers": array(), "questions_for_solver": array(), "questions_for_analyst": array(), "questions_for_user": array(),
-    "group_id": string(), "item_id": string(), "reviewed_task_hash": string(), "reviewed_dependency_hash": string(),
+    "group_id": string(), "item_id": string(),
     "review_checks": _REVIEW_CHECKS, "evidence_ids": array(string()), "unknowns": array(),
 }
 CONTRACT = make_contract(
@@ -27,6 +26,8 @@ CONTRACT = make_contract(
     modes=_MODES, actions=_ACTIONS, fields=FIELDS,
     prompt_rules=(
         "Review only the supplied graph or task.",
+        "Do not echo revision ids, plan hashes or task/dependency hashes: "
+        "the orchestrator stamps those fields from the dispatch record.",
         "Every finding must be traceable to an evidence-backed claim.",
         "A signal claiming a measured outcome must embed「验证方法：」with all five "
         "recipe elements (target with file:line, exact steps, metric+unit, baseline "

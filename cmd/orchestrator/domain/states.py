@@ -2258,8 +2258,9 @@ def _task_capsule_text(
     lines.append(acceptance_standard_hint())
     lines.append(
         "Return TASK_APPROVED only when no active P0/P1 finding applies to this "
-        "task; otherwise return TASK_CHANGES_REQUIRED with this task's item_id, "
-        "group_id, reviewed_task_hash, reviewed_dependency_hash and review_checks."
+        "task; otherwise return TASK_CHANGES_REQUIRED with review_checks and "
+        "task-scoped findings. Do not echo revision ids or hashes; the "
+        "orchestrator stamps them."
     )
     return "\n".join(lines)
 

@@ -346,6 +346,10 @@ class OrchestratorApp:
                 dispatch_mode=node_context.dispatch_mode,
                 base_plan=node_context.base_plan,
                 previous_review=node_context.previous_review,
+                binding_contexts={
+                    binding.worker_id: dict(binding.dispatch_context)
+                    for binding in node.bindings
+                },
             ),
             max_workers=max_workers,
             on_worker_complete=on_worker_complete,
