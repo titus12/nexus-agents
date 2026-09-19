@@ -72,6 +72,8 @@ class AcceptanceStandardHintTests(unittest.TestCase):
 
         self.assertIn("shared acceptance standard", capsule)
         self.assertIn("source_requirement_ids lineage", capsule)
+        self.assertIn("execution phase", capsule)
+        self.assertNotIn("five recipe elements", capsule)
 
 
 if __name__ == "__main__":

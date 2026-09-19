@@ -22,9 +22,9 @@ ZHONGSHU_ACCEPTANCE_CHECKLIST = (
     "6. 溯源闭合：每个 item 的 source_requirement_ids 必须能追溯到 requirement；无来源的项写明理由。",
     "7. 图文一致：文字中声明的依赖/前置必须体现在任务图 dependencies 中，或明确声明仅为参考信息。",
     "8. 可测性闸门：信号声称运行时度量结论（百分比、提升/降低/缩短/加速等对比）却无法在本轮内实测的，"
-    "必须二选一：(a) 在信号中写明「验证方法：」并给出五要素——测量对象（含 file:line）、具体命令/步骤、"
-    "指标与单位、基线来源、预期观测量；(b) 改写为「核实该声称有无实证，无则标注 UNKNOWN」。"
-    "两者都没有的信号会被机械闸门以 ACCEPTANCE_SIGNAL_UNVERIFIABLE 拒绝，不要让它流进审查循环。",
+    "必须标注 UNKNOWN 并列出补采信号，不得以方向性描述替代。若本轮内确实可实测，可写明「验证方法：」及"
+    "测量对象（含 file:line）、命令/步骤、指标与单位、基线来源、预期观测量。既无可行验证方法又未标注 "
+    "UNKNOWN 的信号会被机械闸门以 ACCEPTANCE_SIGNAL_UNVERIFIABLE 拒绝。",
 )
 
 # Signals asserting a measured *outcome* (comparison or ratio) need a recipe or
@@ -83,18 +83,27 @@ def acceptance_standard_applies_to(state: str) -> bool:
 
 
 def acceptance_standard_hint() -> str:
-    """Compact version for the per-task review capsule (judging role)."""
+    """Compact version for the per-task review capsule (judging role).
+
+    The task-list review audits requirement fit, observability, evidence
+    consistency, and lineage closure.  Demanding a five-element verification
+    recipe per signal made the Critic an execution-plan reviewer and stalled
+    real runs (task-20260919-c095db: same findings recurred for four rounds
+    while no measurement recipe was obtainable pre-execution); recipes belong
+    to the Menxia execution phase, so the review only requires an UNKNOWN
+    demotion for claims that cannot be measured this round.
+    """
 
     return (
         "Judge each acceptance_signal against the shared acceptance standard: "
-        "per-item verifiability, explicit measurement units, cited evidence "
-        "sources, UNKNOWN for unobtainable runtime facts, claims consistent "
-        "with evidence, and closed source_requirement_ids lineage.  A signal "
-        "claiming a measured outcome must either embed「验证方法：」with all "
-        "five recipe elements (target with file:line, exact steps, metric+"
-        "unit, baseline source, expected observation) or carry UNKNOWN; "
-        "close an unverifiable claim with decision=WONT_VERIFY instead of "
-        "keeping it blocking."
+        "per-item observability, explicit measurement units, cited evidence "
+        "sources, claims consistent with evidence, and closed "
+        "source_requirement_ids lineage.  A signal claiming a measured outcome "
+        "that cannot be measured this round must carry UNKNOWN with follow-up "
+        "signals; do NOT require a five-element verification recipe -- recipes "
+        "belong to the execution phase, not the task-list review.  Close an "
+        "unverifiable claim with decision=WONT_VERIFY instead of keeping it "
+        "blocking."
     )
 
 
