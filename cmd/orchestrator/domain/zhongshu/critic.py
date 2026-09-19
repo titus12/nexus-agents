@@ -107,7 +107,7 @@ def evaluate_gate(
 
     no_progress = (
         0
-        if revision_made_progress(previous_fingerprint, round.active_blockers)
+        if revision_made_progress(previous_fingerprint, round.findings)
         else no_progress_count + 1
     )
     deferred_followup_unreviewed: tuple[str, ...] = ()

@@ -1289,7 +1289,7 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                                 context.review.zhongshu_revision_round + 1
                             ),
                             last_reply_fingerprint=blocker_fingerprint(
-                                round_after.active_blockers
+                                round_after.findings
                             ),
                         ),
                         recovery=RecoveryUpdate(

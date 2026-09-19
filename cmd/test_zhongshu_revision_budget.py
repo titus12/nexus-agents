@@ -11,6 +11,10 @@ from orchestrator.domain.context import (
 )
 from orchestrator.domain.events import DomainEvent
 from orchestrator.domain.findings import Finding
+from orchestrator.domain.policies.zhongshu import (
+    blocker_fingerprint,
+    revision_made_progress,
+)
 from orchestrator.domain.states import (
     ZhongshuCriticState,
     ZhongshuFreezeCheckState,
@@ -197,16 +201,23 @@ class ZhongshuNoProgressTests(unittest.TestCase):
         return WorkflowSnapshot("task-1", context, 0)
 
     def test_first_observed_round_is_not_a_stall(self) -> None:
-        context = self._context((_finding("f-1"),))
+        findings = (_finding("f-1"),)
+        context = self._context(findings)
         decision = self.state.handle(context, _event("REQUEST_SOLVER_REVISION"))
 
         self.assertEqual(decision.transition.action, "REQUEST_SOLVER_REVISION")
         self.assertEqual(decision.update.recovery.no_progress_count, 0)
-        self.assertEqual(decision.update.review.last_reply_fingerprint, "blockers=1")
+        self.assertEqual(
+            decision.update.review.last_reply_fingerprint,
+            blocker_fingerprint(findings),
+        )
 
     def test_repeated_p0_blocker_blocks_after_budget(self) -> None:
+        findings = (_finding("f-1", severity="P0"),)
         context = self._context(
-            (_finding("f-1", severity="P0"),), fingerprint="blockers=1", no_progress=2
+            findings,
+            fingerprint=blocker_fingerprint(findings),
+            no_progress=2,
         )
         decision = self.state.handle(context, _event("REQUEST_SOLVER_REVISION"))
 
@@ -219,8 +230,11 @@ class ZhongshuNoProgressTests(unittest.TestCase):
         self.assertEqual(after.context.progression.state, "BLOCKED")
 
     def test_repeated_p1_blocker_freezes_with_followups(self) -> None:
+        findings = (_finding("f-1"),)
         context = self._context(
-            (_finding("f-1"),), fingerprint="blockers=1", no_progress=2
+            findings,
+            fingerprint=blocker_fingerprint(findings),
+            no_progress=2,
         )
         decision = self.state.handle(context, _event("REQUEST_SOLVER_REVISION"))
 
@@ -234,17 +248,83 @@ class ZhongshuNoProgressTests(unittest.TestCase):
         self.assertEqual(finding.status, "DEFERRED")
 
     def test_fewer_blockers_resets_no_progress_counter(self) -> None:
+        previous = (
+            _finding("f-1"),
+            _finding("f-2", item_id="item-000002"),
+            _finding("f-3", item_id="item-000003"),
+        )
+        current = (_finding("f-1"),)
         context = self._context(
-            (_finding("f-1"),), fingerprint="blockers=3", no_progress=2
+            current,
+            fingerprint=blocker_fingerprint(previous),
+            no_progress=2,
         )
         decision = self.state.handle(context, _event("REQUEST_SOLVER_REVISION"))
 
         self.assertEqual(decision.transition.action, "REQUEST_SOLVER_REVISION")
         self.assertEqual(decision.update.recovery.no_progress_count, 0)
-        self.assertEqual(decision.update.review.last_reply_fingerprint, "blockers=1")
+        self.assertEqual(
+            decision.update.review.last_reply_fingerprint,
+            blocker_fingerprint(current),
+        )
         after = self.reducer.apply(self._snapshot(context), decision)
         self.assertEqual(after.context.recovery.no_progress_count, 0)
-        self.assertEqual(after.context.review.last_reply_fingerprint, "blockers=1")
+        self.assertEqual(
+            after.context.review.last_reply_fingerprint,
+            blocker_fingerprint(current),
+        )
+
+    def test_blocker_swap_does_not_reset_no_progress(self) -> None:
+        # The count of blockers dipped 5->3->4->5 in live run
+        # task-20260918-30ec74 and every dip reset the no-progress detector.
+        # Set semantics: a swap (one resolved, one minted) is not progress.
+        first = _finding("f-1")
+        second = _finding("f-2", item_id="item-000002")
+        third = _finding("f-3", item_id="item-000003")
+        replacement = _finding("f-4", item_id="item-000004")
+
+        self.assertFalse(
+            revision_made_progress(
+                blocker_fingerprint((first, second)), (second, third)
+            )
+        )
+        self.assertFalse(
+            revision_made_progress(blocker_fingerprint((first,)), (first,))
+        )
+        self.assertFalse(
+            revision_made_progress(blocker_fingerprint((first,)), (first, second))
+        )
+        self.assertTrue(
+            revision_made_progress(
+                blocker_fingerprint((first, second)), (first,)
+            )
+        )
+        # Legacy count-only fingerprints cannot be compared as sets and start
+        # fair instead of misreading an old state as a stall.
+        self.assertTrue(revision_made_progress("blockers=3", (first,)))
+
+    def test_chronic_survivor_with_churn_exhausts_no_progress(self) -> None:
+        # 30ec74 replay: one chronic blocker survives while churn swaps
+        # satellites around it.  Under count semantics the dip reset the
+        # detector; under set semantics the run stops burning rounds.
+        chronic = _finding("f-1")
+        previous = (
+            chronic,
+            _finding("f-2", item_id="item-000002"),
+            _finding("f-3", item_id="item-000003"),
+        )
+        current = (chronic, _finding("f-4", item_id="item-000004"))
+        context = self._context(
+            current,
+            fingerprint=blocker_fingerprint(previous),
+            no_progress=2,
+        )
+        decision = self.state.handle(context, _event("REQUEST_SOLVER_REVISION"))
+
+        self.assertNotEqual(decision.transition.action, "REQUEST_SOLVER_REVISION")
+        self.assertEqual(
+            decision.transition.reason_code, "ZHONGSHU_FREEZE_WITH_FOLLOWUPS"
+        )
 
 
 class SolverContextTests(unittest.TestCase):

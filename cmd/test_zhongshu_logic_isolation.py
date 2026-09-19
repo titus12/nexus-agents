@@ -19,6 +19,7 @@ from orchestrator.domain.context import (
 )
 from orchestrator.domain.events import DomainEvent
 from orchestrator.domain.findings import Finding
+from orchestrator.domain.policies.zhongshu import blocker_fingerprint
 from orchestrator.domain.zhongshu import (
     SolverStage,
     evaluate_gate,
@@ -280,7 +281,7 @@ class CriticGateTests(unittest.TestCase):
         verdict = evaluate_gate(
             self._round((p1,), ledger=ledger),
             revision_allowed=True,
-            previous_fingerprint="blockers=1",
+            previous_fingerprint=blocker_fingerprint((p1,)),
             no_progress_count=2,
             max_no_progress=3,
             max_stuck_rounds=3,
@@ -292,7 +293,7 @@ class CriticGateTests(unittest.TestCase):
         verdict = evaluate_gate(
             self._round((p1,), ledger=ledger, expected=("item-001", "item-002")),
             revision_allowed=True,
-            previous_fingerprint="blockers=1",
+            previous_fingerprint=blocker_fingerprint((p1,)),
             no_progress_count=2,
             max_no_progress=3,
             max_stuck_rounds=3,

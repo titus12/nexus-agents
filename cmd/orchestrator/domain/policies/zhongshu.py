@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
+import hashlib
 
 from ..context import ReviewState
 from ..findings import Finding
@@ -240,32 +241,70 @@ def active_blocker_ids(findings: Iterable[object]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(result))
 
 
-def blocker_fingerprint(count: int) -> str:
-    """Encode the current active-blocker count for the next round's comparison."""
+def blocker_fingerprint(findings: Iterable[object]) -> str:
+    """Encode the active P0/P1 blocker SET for the next round's comparison.
 
-    return f"{_BLOCKER_FINGERPRINT_PREFIX}{int(count)}"
+    Counting blockers let an oscillating critic reset the no-progress detector
+    on every dip (live run task-20260918-30ec74: 5->3->4->4->5->3 counted as
+    progress four times), so the fingerprint is the identity of the surviving
+    blockers instead: only a genuine resolution -- the set strictly shrinking
+    -- counts as progress.  Identity follows ``_finding_identity`` (canonical
+    content key first), hashed to keep the persisted state compact.
+    """
+
+    return _BLOCKER_FINGERPRINT_PREFIX + ",".join(
+        sorted(
+            _blocker_identity_hash(finding)
+            for finding in _blocker_records(findings)
+        )
+    )
 
 
-def parse_blocker_fingerprint(value: str | None) -> int | None:
+def parse_blocker_fingerprint(value: str | None) -> frozenset[str] | None:
     if not value or not value.startswith(_BLOCKER_FINGERPRINT_PREFIX):
         return None
-    try:
-        return int(value[len(_BLOCKER_FINGERPRINT_PREFIX):])
-    except ValueError:
+    raw = value[len(_BLOCKER_FINGERPRINT_PREFIX):]
+    if raw.isdigit():
+        # Legacy count-only fingerprints cannot be compared as sets; treat
+        # them as a first observation so the next round starts fair.
         return None
+    return frozenset(token for token in raw.split(",") if token)
 
 
-def revision_made_progress(previous_fingerprint: str | None, active_blockers: int) -> bool:
-    """Progress means the active P0/P1 blocker count strictly decreased.
+def _blocker_records(findings: Iterable[object]) -> list[object]:
+    return [
+        finding
+        for finding in findings or ()
+        if str(_finding_attr(finding, "status", "") or "").strip().upper()
+        in _ACTIVE_STATUSES
+        and str(_finding_attr(finding, "severity", "") or "").strip().upper()
+        in _BLOCKING_SEVERITIES
+    ]
 
-    A missing previous fingerprint is the first observed round, which is not
-    counted as a stall.
+
+def _blocker_identity_hash(finding: object) -> str:
+    return hashlib.sha256(
+        _finding_identity(finding).encode("utf-8")
+    ).hexdigest()[:12]
+
+
+def revision_made_progress(previous_fingerprint: str | None, findings: Iterable[object]) -> bool:
+    """Progress means the blocker set strictly shrank.
+
+    Every blocker active last round must be resolved with no new blocker
+    replacing it: an identical set, a growing set, or a swap (one resolved,
+    one minted) all mean the chronic disagreement is still alive, so the
+    no-progress counter must keep aging.  A missing previous fingerprint is
+    the first observed round, which is not counted as a stall.
     """
 
     previous = parse_blocker_fingerprint(previous_fingerprint)
     if previous is None:
         return True
-    return active_blockers < previous
+    current = frozenset(
+        _blocker_identity_hash(finding) for finding in _blocker_records(findings)
+    )
+    return current < previous
 
 
 def unapproved_item_ids(
