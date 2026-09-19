@@ -736,6 +736,43 @@ def _task_review_stamp_identity(
     return corrections
 
 
+_BLOCKED_INPUT_CLAIM_MARKERS = (
+    "缺少",
+    "缺失",
+    "未提供",
+    "没有",
+    "missing",
+    "absent",
+    "lacks",
+    "not provided",
+)
+
+
+def _task_review_pseudo_blocked(body: dict[str, Any]) -> bool:
+    """Detect a BLOCKED verdict that is justified by a missing-input claim.
+
+    Live incident task-20260919-61f195: one critic returned BLOCKED because
+    it believed the dispatch lacked the capsule, the plan/revision/task
+    hashes and the evidence slice, while the queue job (built from the same
+    dispatch context) recorded every hash.  Such a perception slip must not
+    hijack the whole round, so the caller demotes it once the authoritative
+    job data proves the inputs were present.
+    """
+
+    for item in body.get("findings") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("category") or "").strip().lower() != "execution_integrity":
+            continue
+        text = " ".join(
+            str(item.get(field) or "")
+            for field in ("claim", "fact", "inference", "required_action")
+        ).lower()
+        if any(marker in text for marker in _BLOCKED_INPUT_CLAIM_MARKERS):
+            return True
+    return False
+
+
 def _task_review_human_gate(
     *,
     complete: bool,
@@ -845,6 +882,7 @@ def aggregate_task_review_results(
     by_job: dict[str, dict[str, Any]] = {}
     rejected: list[dict[str, Any]] = []
     identity_corrections: list[dict[str, Any]] = []
+    blocked_downgrades: list[dict[str, Any]] = []
     known_jobs = {job.review_job_id: job for job in queue.jobs}
     for raw in results:
         body = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
@@ -960,6 +998,30 @@ def aggregate_task_review_results(
                 job.item_id,
             )
             action = "TASK_CHANGES_REQUIRED"
+        if action == "BLOCKED" and job.task_hash and job.dependency_hash and _task_review_pseudo_blocked(body):
+            # A missing-input BLOCKED contradicted by the authoritative queue
+            # job is a perception slip: keep the finding (it still blocks the
+            # approval) but demote the verdict so the revision path acts.
+            pseudo_blocked_ids = sorted({
+                str(item.get("finding_id") or "")
+                for item in body.get("findings") or []
+                if isinstance(item, dict)
+                and str(item.get("category") or "").strip().lower() == "execution_integrity"
+            })
+            logger.warning(
+                "TASK_REVIEW_BLOCKED_DOWNGRADED review_job_id=%s item_id=%s "
+                "findings=%s",
+                job.review_job_id,
+                job.item_id,
+                pseudo_blocked_ids,
+            )
+            blocked_downgrades.append({
+                "review_job_id": job.review_job_id,
+                "group_id": job.group_id,
+                "item_id": job.item_id,
+                "finding_ids": pseudo_blocked_ids,
+            })
+            action = "TASK_CHANGES_REQUIRED"
         actions.add(action)
         task_reviews.append({
             "review_job_id": job.review_job_id,
@@ -1057,6 +1119,7 @@ def aggregate_task_review_results(
         "worker_reviews": task_reviews,
         "rejected_reviews": rejected,
         "identity_corrections": identity_corrections,
+        "blocked_downgrades": blocked_downgrades,
         "valid_worker_ids": sorted(worker_ids),
         "quorum": 1,
         "approval_count": task_approved,
