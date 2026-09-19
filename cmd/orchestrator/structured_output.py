@@ -129,8 +129,6 @@ def role_mode_for(
     if contract.state == "ZHONGSHU_ANALYST":
         if context.get("contract_mode") or str(context.get("zhongshu_dispatch_mode") or "") == "requirement_contract":
             return "REQUIREMENT_CONTRACT_ONLY"
-        if str(context.get("zhongshu_dispatch_mode") or "") == "evidence_supplement":
-            return "EVIDENCE_SUPPLEMENT"
         return "EVIDENCE_COLLECTION_READ_ONLY"
     if contract.state == "ZHONGSHU_SOLVER":
         return "TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME" if context.get("solver_resume_mode") else "TASK_GRAPH_FORMALIZATION_READ_ONLY"

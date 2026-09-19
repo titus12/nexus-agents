@@ -1997,11 +1997,6 @@ def _response_contract_for(request: AgentRequest) -> dict:
             required_by_action = {
                 "REQUIREMENT_CONTRACT_READY": ["action", "requirements"],
             }
-        elif dispatch_mode == "evidence_supplement":
-            optional.extend(["evidence_updates", "unknowns", "unknown_resolutions", "confirmed_facts", "risks"])
-            allowed_actions = ["EVIDENCE_SUPPLEMENT_READY", "HUMAN_GATE", "BLOCKED"]
-            required_by_action = {"EVIDENCE_SUPPLEMENT_READY": ["action", "evidence_updates"]}
-            instruction = "Only supplement the supplied evidence gaps. Preserve the current graph and requirement identities. Return targeted evidence_updates or explicit unknowns, not a new task graph."
         else:
             optional.extend([
                 "lens", "requirements", "evidence_updates", "confirmed_facts",

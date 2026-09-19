@@ -26,7 +26,6 @@ TASK_CRITIC_ACTIONS = frozenset({
 ANALYST_ACTIONS = {
     "requirement_contract": frozenset({"REQUIREMENT_CONTRACT_READY", "HUMAN_GATE", "BLOCKED"}),
     "evidence_collection": frozenset({"EVIDENCE_PACKET_READY", "HUMAN_GATE", "BLOCKED"}),
-    "evidence_supplement": frozenset({"EVIDENCE_SUPPLEMENT_READY", "HUMAN_GATE", "BLOCKED"}),
 }
 
 

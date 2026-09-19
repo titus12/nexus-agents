@@ -534,7 +534,7 @@ def validate_zhongshu_evidence_packet(
     stable result envelope, while task ownership belongs exclusively to Solver.
     """
     action = payload.get("action")
-    if action not in {"EVIDENCE_PACKET_READY", "EVIDENCE_SUPPLEMENT_READY"}:
+    if action != "EVIDENCE_PACKET_READY":
         return "ZHONGSHU_EVIDENCE_PACKET_ACTION_INVALID"
     if payload.get("phase") not in {None, "ZHONGSHU"}:
         return "ZHONGSHU_EVIDENCE_PACKET_PHASE_INVALID"

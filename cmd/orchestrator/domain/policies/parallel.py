@@ -37,7 +37,7 @@ def aggregate_zhongshu_workers(
     action = next(iter(actions))
 
     if state == "ZHONGSHU_ANALYST":
-        if action in {"EVIDENCE_PACKET_READY", "EVIDENCE_SUPPLEMENT_READY"}:
+        if action == "EVIDENCE_PACKET_READY":
             return merge_analyst_evidence(
                 task_id,
                 revision_id,

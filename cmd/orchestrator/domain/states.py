@@ -1068,7 +1068,7 @@ class ZhongshuAnalystState(_ConcreteWorkflowState):
     name = "ZHONGSHU_ANALYST"
     supported_actions = (
         "READY_FOR_SOLVER", "EVIDENCE_PACKET_READY", "REQUIREMENT_CONTRACT_READY",
-        "EVIDENCE_SUPPLEMENT_READY", "HUMAN_GATE", "BLOCKED", "RETRY", "OPEN_HUMAN_GATE",
+        "HUMAN_GATE", "BLOCKED", "RETRY", "OPEN_HUMAN_GATE",
     )
 
 
