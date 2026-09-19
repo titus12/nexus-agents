@@ -2294,9 +2294,12 @@ def _task_capsule_text(
     lines.append(acceptance_standard_hint())
     lines.append(
         "Return TASK_APPROVED only when no active P0/P1 finding applies to this "
-        "task; otherwise return TASK_CHANGES_REQUIRED with review_checks and "
-        "task-scoped findings. Do not echo revision ids or hashes; the "
-        "orchestrator stamps them."
+        "task. If the task itself is fine but the run lacks the investigation "
+        "needed to judge it, return REQUEST_ANALYST_EVIDENCE instead: the "
+        "Analyst collects evidence, while the Solver can only edit plan text "
+        "and cannot manufacture evidence. Otherwise return "
+        "TASK_CHANGES_REQUIRED with review_checks and task-scoped findings. "
+        "Do not echo revision ids or hashes; the orchestrator stamps them."
     )
     return "\n".join(lines)
 
