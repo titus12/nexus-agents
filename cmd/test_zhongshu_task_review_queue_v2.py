@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 from orchestrator.zhongshu_review import aggregate_task_review_results
 from orchestrator.zhongshu_review_queue import (
-    PENDING,
-    RUNNING,
-    StaleReviewLease,
+    COMPLETED,
+    TaskReviewQueue,
     build_review_jobs,
     canonical_hash,
     structural_gate,
@@ -50,59 +50,51 @@ def _plan(*, nested: bool = False) -> dict:
     }
 
 
+def _completed(queue) -> TaskReviewQueue:
+    return TaskReviewQueue(
+        queue.revision_id,
+        queue.plan_hash,
+        [replace(job, status=COMPLETED) for job in queue.jobs],
+    )
+
+
 class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
     def test_build_flattens_every_task(self) -> None:
         queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
         self.assertEqual(len(queue.jobs), 10)
-        self.assertEqual(queue.counts().get(PENDING), 10)
+        self.assertEqual(queue.counts().get("PENDING"), 10)
         self.assertTrue(all(job.task_hash for job in queue.jobs))
         self.assertTrue(all(job.review_job_id.startswith("zhongshu:revision-1:") for job in queue.jobs))
 
-    def test_claim_is_unique_and_stale_lease_is_rejected(self) -> None:
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
-        claimed = [queue.claim_next(f"slot-{index}") for index in range(1, 7)]
-        self.assertEqual(len({job.review_job_id for job in claimed if job}), 6)
-        self.assertEqual(queue.counts().get(RUNNING), 6)
+    def test_review_surface_sorts_acceptance_signals(self) -> None:
+        # A5: the projection hash decides re-review, so formatting-only edits
+        # such as reordering the acceptance checklist must not change it.
+        from orchestrator.zhongshu_review_queue import review_surface
 
-        first = claimed[0]
-        assert first is not None
-        with self.assertRaises(StaleReviewLease):
-            queue.complete(first.review_job_id, "wrong-lease", first.attempt, "bad.json")
-        queue.complete(first.review_job_id, first.lease_id, first.attempt, "result-1.json")
+        first = review_surface({"item_id": "i", "acceptance_signals": ["b", "a"]})
+        second = review_surface({"item_id": "i", "acceptance_signals": ["a", "b"]})
+        self.assertEqual(first, second)
+        self.assertEqual(first["acceptance_signals"], ["a", "b"])
 
-        seventh = queue.claim_next("slot-1")
-        assert seventh is not None
-        self.assertNotIn(
-            seventh.review_job_id,
-            {job.review_job_id for job in claimed if job},
-        )
-        self.assertEqual(queue.counts().get("COMPLETED"), 1)
+    def test_dependency_cycle_detection_survives_deep_graphs(self) -> None:
+        # A10: the DFS is iterative, so a 5000-node chain must not exhaust
+        # the interpreter stack.
+        from orchestrator.zhongshu_review_queue import _dependency_cycles
 
-    def test_recovered_running_job_reuses_external_request(self) -> None:
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
-        original = queue.claim_next("slot-1")
-        assert original is not None
-        queue.recover_running()
-        recovered = queue.claim_next("slot-2")
-        assert recovered is not None
-        self.assertEqual(recovered.attempt, original.attempt)
-        self.assertEqual(recovered.request_id, original.request_id)
-        self.assertEqual(recovered.idempotency_key, original.idempotency_key)
-        self.assertNotEqual(recovered.lease_id, original.lease_id)
+        by_item = {
+            f"item-{index:05d}": {"dependencies": [f"item-{index - 1:05d}"]}
+            for index in range(1, 5001)
+        }
+        self.assertEqual(_dependency_cycles(by_item), [])
+        cyclic = dict(by_item)
+        cyclic["item-00001"] = {"dependencies": ["item-05000"]}
+        cycles = _dependency_cycles(cyclic)
+        self.assertEqual(len(cycles), 1)
+        self.assertEqual(cycles[0][0], cycles[0][-1])
 
     def test_full_coverage_approves_freeze(self) -> None:
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
-        results = []
-        for index, _ in enumerate(queue.jobs, 1):
-            claimed = queue.claim_next(f"slot-{(index - 1) % 6 + 1}")
-            assert claimed is not None
-            queue.complete(
-                claimed.review_job_id,
-                claimed.lease_id,
-                claimed.attempt,
-                f"result-{index}.json",
-            )
-            results.append(_result(claimed, "TASK_APPROVED", queue.plan_hash))
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
+        results = [_result(job, "TASK_APPROVED", queue.plan_hash) for job in queue.jobs]
         report = aggregate_task_review_results(
             queue.revision_id, queue.plan_hash, queue, results
         )
@@ -113,68 +105,197 @@ class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
         self.assertEqual(report["affected_item_ids"], [])
 
     def test_task_change_binds_finding_to_item(self) -> None:
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
         job = queue.jobs[0]
-        claimed = queue.claim_next("slot-1")
-        assert claimed is not None
-        queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
-        result = _result(claimed, "TASK_CHANGES_REQUIRED", queue.plan_hash)
+        result = _result(job, "TASK_CHANGES_REQUIRED", queue.plan_hash)
         result["findings"] = [
             {"finding_id": "f-1", "severity": "P0", "claim": "boundary unclear"}
         ]
-        others = []
-        for index, job in enumerate(queue.jobs[1:], 2):
-            done = queue.claim_next(f"slot-{index}")
-            assert done is not None
-            queue.complete(done.review_job_id, done.lease_id, done.attempt, "r.json")
-            others.append(_result(job, "TASK_APPROVED", queue.plan_hash))
+        others = [_result(other, "TASK_APPROVED", queue.plan_hash) for other in queue.jobs[1:]]
         report = aggregate_task_review_results(
             queue.revision_id, queue.plan_hash, queue, [result] + others
         )
         self.assertEqual(report["action"], "REQUEST_SOLVER_REVISION")
-        self.assertEqual(report["affected_item_ids"], [claimed.item_id])
+        self.assertEqual(report["affected_item_ids"], [job.item_id])
         finding = report["findings"][0]
-        self.assertEqual(finding["item_id"], claimed.item_id)
-        self.assertEqual(finding["group_id"], claimed.group_id)
+        self.assertEqual(finding["item_id"], job.item_id)
+        self.assertEqual(finding["group_id"], job.group_id)
 
     def test_missing_result_cannot_approve(self) -> None:
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
-        for index, _ in enumerate(queue.jobs, 1):
-            claimed = queue.claim_next(f"slot-{index}")
-            assert claimed is not None
-            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
         report = aggregate_task_review_results(
             queue.revision_id, queue.plan_hash, queue, []
         )
         self.assertEqual(report["action"], "HUMAN_GATE")
         self.assertFalse(report["task_review_complete"])
 
-    def test_result_with_wrong_group_id_is_rejected_not_raised(self) -> None:
-        # A result that names a different group id (e.g. a zero-padded variant)
-        # must be reconciled by item id and rejected as an identity mismatch,
-        # never abort the whole node join with an uncaught ReviewQueueError.
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+    def test_worker_echoes_are_stamped_from_the_queue_job(self) -> None:
+        # The dispatch pins what the worker reviews: identity/hash fields are
+        # stamped from the queue job, and a present-but-wrong echo is recorded
+        # instead of rejecting the whole review wave.
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
         results = []
         for index, job in enumerate(queue.jobs, 1):
-            claimed = queue.claim_next(f"slot-{(index - 1) % 6 + 1}")
-            assert claimed is not None
-            queue.complete(
-                claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json"
-            )
-            result = _result(claimed, "TASK_APPROVED", queue.plan_hash)
+            result = _result(job, "TASK_APPROVED", queue.plan_hash)
             if index == 1:
                 result["group_id"] = "group-001"
+            if index == 2:
+                result["reviewed_dependency_hash"] = job.dependency_hash[:-1]
+            if index == 3:
+                # The stamped contract no longer asks for these fields; a
+                # body without them is stamped silently.
+                for field in (
+                    "revision_id",
+                    "plan_hash",
+                    "reviewed_plan_hash",
+                    "reviewed_task_hash",
+                    "reviewed_dependency_hash",
+                    "group_id",
+                    "item_id",
+                ):
+                    result.pop(field)
             results.append(result)
 
         report = aggregate_task_review_results(
             queue.revision_id, queue.plan_hash, queue, results
         )
-        self.assertFalse(report["task_review_complete"])
-        self.assertEqual(report["action"], "HUMAN_GATE")
-        reasons = {
-            entry.get("reason") for entry in report["rejected_reviews"]
+        self.assertTrue(report["task_review_complete"])
+        self.assertEqual(report["action"], "APPROVE_FREEZE")
+        self.assertEqual(len(report["identity_corrections"]), 2)
+        fields = {
+            (entry["item_id"], item["field"])
+            for entry in report["identity_corrections"]
+            for item in entry["corrections"]
         }
-        self.assertIn("TASK_REVIEW_RESULT_IDENTITY_MISMATCH", reasons)
+        self.assertEqual(
+            fields,
+            {
+                (queue.jobs[0].item_id, "group_id"),
+                (queue.jobs[1].item_id, "reviewed_dependency_hash"),
+            },
+        )
+        stamped = next(
+            item for item in report["task_reviews"]
+            if item["item_id"] == queue.jobs[2].item_id
+        )
+        self.assertEqual(stamped["action"], "TASK_APPROVED")
+
+    def test_live_slip_replay_empty_and_dropped_hashes(self) -> None:
+        # Live incident task-20260918-30ec74: one critic left revision_id
+        # blank and another dropped one character of the dependency hash.
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
+        results = []
+        for index, job in enumerate(queue.jobs, 1):
+            result = _result(job, "TASK_APPROVED", queue.plan_hash)
+            if index == 1:
+                result["revision_id"] = ""
+            if index == 2:
+                result["reviewed_dependency_hash"] = job.dependency_hash[:-1]
+            results.append(result)
+
+        report = aggregate_task_review_results(
+            queue.revision_id, queue.plan_hash, queue, results
+        )
+        self.assertTrue(report["task_review_complete"])
+        self.assertEqual(report["action"], "APPROVE_FREEZE")
+        self.assertEqual(len(report["identity_corrections"]), 2)
+
+    def test_pseudo_blocked_missing_input_claim_is_demoted(self) -> None:
+        # Live incident task-20260919-61f195: one critic returned BLOCKED
+        # claiming the dispatch lacked the capsule/hashes/evidence slice,
+        # while its own queue job recorded every hash.  A single BLOCKED
+        # verdict hijacked the whole round past the revision path, so the
+        # aggregate demotes a missing-input BLOCKED that the authoritative
+        # job data contradicts and lets the revision path act instead.
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
+        results = []
+        for index, job in enumerate(queue.jobs, 1):
+            result = _result(job, "TASK_APPROVED", queue.plan_hash)
+            if index == 1:
+                result["action"] = "BLOCKED"
+                result["findings"] = [
+                    {
+                        "finding_id": "f-pseudo-1",
+                        "severity": "P1",
+                        "category": "execution_integrity",
+                        "claim": "当前输入缺少该 task 的正式 capsule、plan/revision/task/dependency hashes 和 Analyst evidence slice。",
+                    }
+                ]
+            results.append(result)
+
+        report = aggregate_task_review_results(
+            queue.revision_id, queue.plan_hash, queue, results
+        )
+        self.assertTrue(report["task_review_complete"])
+        self.assertEqual(report["action"], "REQUEST_SOLVER_REVISION")
+        self.assertEqual(len(report["blocked_downgrades"]), 1)
+        downgrade = report["blocked_downgrades"][0]
+        self.assertEqual(downgrade["item_id"], queue.jobs[0].item_id)
+        self.assertEqual(downgrade["finding_ids"], ["f-pseudo-1"])
+        self.assertEqual(report["blocked_task_ids"], [])
+        demoted = next(
+            item for item in report["task_reviews"]
+            if item["item_id"] == queue.jobs[0].item_id
+        )
+        self.assertEqual(demoted["action"], "TASK_CHANGES_REQUIRED")
+
+    def test_blocked_without_missing_input_claim_still_blocks(self) -> None:
+        # A BLOCKED verdict justified by anything other than a missing-input
+        # execution-integrity claim is genuine and still escalates.
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
+        results = []
+        for index, job in enumerate(queue.jobs, 1):
+            result = _result(job, "TASK_APPROVED", queue.plan_hash)
+            if index == 1:
+                result["action"] = "BLOCKED"
+                result["findings"] = [
+                    {
+                        "finding_id": "f-genuine-1",
+                        "severity": "P1",
+                        "category": "review_scope",
+                        "claim": "该任务与本轮审查问题无关且无法安全裁剪。",
+                    }
+                ]
+            results.append(result)
+
+        report = aggregate_task_review_results(
+            queue.revision_id, queue.plan_hash, queue, results
+        )
+        self.assertEqual(report["action"], "BLOCKED")
+        self.assertEqual(report["blocked_downgrades"], [])
+
+    def test_missing_input_blocked_is_kept_when_job_lacks_hashes(self) -> None:
+        # The demotion guard requires the queue job to prove the inputs were
+        # present; without the authoritative hashes the BLOCKED stands.
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
+        results = []
+        for index, job in enumerate(queue.jobs, 1):
+            result = _result(job, "TASK_APPROVED", queue.plan_hash)
+            if index == 1:
+                result["action"] = "BLOCKED"
+                result["findings"] = [
+                    {
+                        "finding_id": "f-pseudo-2",
+                        "severity": "P1",
+                        "category": "execution_integrity",
+                        "claim": "dispatch context 缺少 task hash，无法复核。",
+                    }
+                ]
+            results.append(result)
+
+        demoted_queue = TaskReviewQueue(
+            queue.revision_id,
+            queue.plan_hash,
+            [
+                replace(job, task_hash="") if index == 0 else job
+                for index, job in enumerate(queue.jobs)
+            ],
+        )
+        report = aggregate_task_review_results(
+            queue.revision_id, queue.plan_hash, demoted_queue, results
+        )
+        self.assertEqual(report["action"], "BLOCKED")
+        self.assertEqual(report["blocked_downgrades"], [])
 
     def test_projection_reads_group_item_ids(self) -> None:
         # Solver-style plans carry group membership in groups[*].item_ids and
@@ -219,12 +340,8 @@ class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
         # stored must keep pointing at the old opinion, and a different opinion
         # reusing that id must be renumbered instead of storing two records
         # with one id.
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
         first, second = queue.jobs[0], queue.jobs[1]
-        for job in queue.jobs:
-            claimed = queue.claim_next(f"slot-{job.item_id}")
-            assert claimed is not None
-            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
         previous = {
             "findings": [
                 {
@@ -296,12 +413,8 @@ class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
         # category/claim, which changes the semantic key.  The matched record
         # must keep the stored canonical key so the ledger fold replaces the
         # old record instead of accumulating live siblings under one id.
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
         contested = queue.jobs[0]
-        for job in queue.jobs:
-            claimed = queue.claim_next(f"slot-{job.item_id}")
-            assert claimed is not None
-            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
 
         def _round_result(category: str, claim: str) -> dict:
             result = _result(contested, "TASK_CHANGES_REQUIRED", queue.plan_hash)
@@ -345,12 +458,8 @@ class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
         self.assertEqual(merged[0].finding_id, "finding-aaa1")
 
     def test_regression_reasons_explain_recontested_tasks(self) -> None:
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
         job_dep, job_content, job_rereview, job_new = queue.jobs[:4]
-        for job in queue.jobs:
-            claimed = queue.claim_next(f"slot-{job.item_id}")
-            assert claimed is not None
-            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
         previous = {
             "task_review_ledger": [
                 {
@@ -402,8 +511,12 @@ class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
 
 
 def _result(job, action: str, plan_hash: str) -> dict:
+    # Mirrors the payload the joiner hands to aggregation: review_job_id is
+    # injected from the binding context, so it survives even when a worker
+    # drops the identity fields from its body.
     return {
         "action": action,
+        "review_job_id": job.review_job_id,
         "revision_id": job.revision_id,
         "plan_hash": plan_hash,
         "reviewed_plan_hash": plan_hash,
@@ -411,7 +524,7 @@ def _result(job, action: str, plan_hash: str) -> dict:
         "item_id": job.item_id,
         "reviewed_task_hash": job.task_hash,
         "reviewed_dependency_hash": job.dependency_hash,
-        "worker_id": job.worker_id,
+        "worker_id": f"critic-{job.item_id}",
         "findings": [],
         "review_checks": {},
     }

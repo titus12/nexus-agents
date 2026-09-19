@@ -25,6 +25,18 @@ from orchestrator.zhongshu_review import (
 from orchestrator.zhongshu_review_queue import build_review_jobs, structural_gate
 
 
+def _completed(queue):
+    from dataclasses import replace
+
+    from orchestrator.zhongshu_review_queue import COMPLETED, TaskReviewQueue
+
+    return TaskReviewQueue(
+        queue.revision_id,
+        queue.plan_hash,
+        [replace(job, status=COMPLETED) for job in queue.jobs],
+    )
+
+
 def _plan(*, drop_item: str | None = None) -> dict:
     items = [
         {
@@ -137,22 +149,14 @@ class AcceptanceSignalGateTests(unittest.TestCase):
 
 class DiscardRecommendationTests(unittest.TestCase):
     def _queue_and_results(self, action: str, with_finding: bool):
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="hash-1")
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="hash-1"))
         results = []
-        for index, job in enumerate(queue.jobs, 1):
-            claimed = queue.claim_next(f"slot-{index}")
-            assert claimed is not None
-            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
+        for job in queue.jobs:
             result = {
                 "action": action if job.item_id == "item-000001" else "TASK_APPROVED",
-                "revision_id": job.revision_id,
-                "plan_hash": queue.plan_hash,
-                "reviewed_plan_hash": queue.plan_hash,
+                "review_job_id": job.review_job_id,
                 "group_id": job.group_id,
                 "item_id": job.item_id,
-                "reviewed_task_hash": job.task_hash,
-                "reviewed_dependency_hash": job.dependency_hash,
-                "worker_id": job.worker_id,
                 "findings": [],
                 "review_checks": {},
             }
@@ -193,22 +197,14 @@ class DiscardRecommendationTests(unittest.TestCase):
 
     def test_wont_verify_closes_the_finding(self) -> None:
         self.assertEqual(normalize_finding_status(decision="WONT_VERIFY"), "WONT_VERIFY")
-        queue = build_review_jobs(_plan(), "revision-1", plan_hash="hash-1")
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="hash-1"))
         results = []
         for index, job in enumerate(queue.jobs, 1):
-            claimed = queue.claim_next(f"slot-{index}")
-            assert claimed is not None
-            queue.complete(claimed.review_job_id, claimed.lease_id, claimed.attempt, "r.json")
             result = {
                 "action": "TASK_CHANGES_REQUIRED" if index == 1 else "TASK_APPROVED",
-                "revision_id": job.revision_id,
-                "plan_hash": queue.plan_hash,
-                "reviewed_plan_hash": queue.plan_hash,
+                "review_job_id": job.review_job_id,
                 "group_id": job.group_id,
                 "item_id": job.item_id,
-                "reviewed_task_hash": job.task_hash,
-                "reviewed_dependency_hash": job.dependency_hash,
-                "worker_id": job.worker_id,
                 "findings": [],
                 "review_checks": {},
             }

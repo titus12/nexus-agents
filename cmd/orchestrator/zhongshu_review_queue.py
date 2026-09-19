@@ -10,11 +10,9 @@ and the runtime dispatches one external request per claimed job.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 import hashlib
 import json
-import threading
-import uuid
 from typing import Any, Iterable, Mapping
 
 from .acceptance_standards import acceptance_signal_gate
@@ -26,10 +24,6 @@ COMPLETED = "COMPLETED"
 RETRYABLE = "RETRYABLE"
 CANCELLED = "CANCELLED"
 HUMAN_GATE = "HUMAN_GATE"
-
-
-class StaleReviewLease(RuntimeError):
-    """Raised when a completion/failure does not own the current lease."""
 
 
 class ReviewQueueError(RuntimeError):
@@ -75,7 +69,7 @@ def review_surface(item: Mapping[str, Any], *, group_item_ids: Iterable[str] = (
         "source_requirement_ids": sorted(
             _surface_list(item.get("source_requirement_ids") or item.get("requirement_ids"))
         ),
-        "acceptance_signals": _surface_list(item.get("acceptance_signals") or item.get("acceptance")),
+        "acceptance_signals": sorted(_surface_list(item.get("acceptance_signals") or item.get("acceptance"))),
     }
 
 
@@ -86,17 +80,8 @@ class ReviewJob:
     group_id: str
     item_id: str
     status: str = PENDING
-    lease_id: str = ""
-    worker_id: str = ""
-    attempt: int = 0
-    request_id: str = ""
     task_hash: str = ""
     dependency_hash: str = ""
-    result_path: str = ""
-
-    @property
-    def idempotency_key(self) -> str:
-        return f"{self.review_job_id}:attempt-{max(1, self.attempt)}"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -123,13 +108,8 @@ class ReviewJob:
             group_id=str(data.get("group_id") or "").strip(),
             item_id=str(data.get("item_id") or "").strip(),
             status=status,
-            lease_id=str(data.get("lease_id") or ""),
-            worker_id=str(data.get("worker_id") or ""),
-            attempt=int(data.get("attempt") or 0),
-            request_id=str(data.get("request_id") or ""),
             task_hash=str(data.get("task_hash") or ""),
             dependency_hash=str(data.get("dependency_hash") or ""),
-            result_path=str(data.get("result_path") or ""),
         )
 
 
@@ -223,7 +203,13 @@ def build_review_jobs(
 
 
 class TaskReviewQueue:
-    """Lease-based, coverage-checked review queue with a durable snapshot."""
+    """Coverage-checked review queue with a durable snapshot.
+
+    The queue is a plain job register: production builds it fresh per node
+    run (``build_review_jobs`` for dispatch enumeration, ``queue_from_dispatch_contexts``
+    for fan-in aggregation) and never leases jobs out; claiming/failing is the
+    runtime's job, not the queue's.
+    """
 
     def __init__(
         self,
@@ -243,7 +229,6 @@ class TaskReviewQueue:
                 raise ReviewQueueError(f"duplicate review job: {job.review_job_id}")
             self._jobs[job.review_job_id] = job
             self._order.append(job.review_job_id)
-        self._lock = threading.RLock()
 
     @property
     def jobs(self) -> tuple[ReviewJob, ...]:
@@ -262,109 +247,6 @@ class TaskReviewQueue:
 
     def get(self, job_id: str) -> ReviewJob | None:
         return self._jobs.get(str(job_id))
-
-    def claim_next(self, worker_id: str) -> ReviewJob | None:
-        worker = str(worker_id or "")
-        if not worker:
-            raise ReviewQueueError("worker_id is required to claim a job")
-        with self._lock:
-            for job_id in self._order:
-                job = self._jobs[job_id]
-                if job.status not in {PENDING, RETRYABLE}:
-                    continue
-                recovering = bool(job.request_id) and job.attempt > 0
-                attempt = job.attempt if recovering else job.attempt + 1
-                request_id = job.request_id or f"{job.review_job_id}:attempt-{attempt}"
-                claimed = replace(
-                    job,
-                    status=RUNNING,
-                    lease_id=uuid.uuid4().hex,
-                    worker_id=worker,
-                    attempt=attempt,
-                    request_id=request_id,
-                    result_path="",
-                )
-                self._jobs[job_id] = claimed
-                return claimed
-        return None
-
-    def complete(
-        self,
-        job_id: str,
-        lease_id: str,
-        attempt: int,
-        result_path: str,
-    ) -> ReviewJob:
-        with self._lock:
-            job = self._require_lease(job_id, lease_id, attempt)
-            completed = replace(job, status=COMPLETED, result_path=str(result_path or ""))
-            self._jobs[job.review_job_id] = completed
-            return completed
-
-    def fail(
-        self,
-        job_id: str,
-        lease_id: str,
-        attempt: int,
-        error: str,
-        *,
-        retryable: bool,
-    ) -> ReviewJob:
-        with self._lock:
-            job = self._require_lease(job_id, lease_id, attempt)
-            failed = replace(
-                job,
-                status=RETRYABLE if retryable else HUMAN_GATE,
-                lease_id="",
-                result_path="",
-            )
-            expected = failed.request_id if retryable else ""
-            failed = replace(failed, request_id=expected)
-            self._jobs[job.review_job_id] = failed
-            return failed
-
-    def _require_lease(self, job_id: str, lease_id: str, attempt: int) -> ReviewJob:
-        job = self._jobs.get(str(job_id))
-        if job is None:
-            raise StaleReviewLease(f"unknown review job: {job_id}")
-        if job.lease_id != str(lease_id) or int(job.attempt) != int(attempt):
-            raise StaleReviewLease(
-                f"stale review lease for {job_id}: "
-                f"lease={lease_id!r} attempt={attempt} "
-                f"current={job.lease_id!r} attempt={job.attempt}"
-            )
-        return job
-
-    def recover_running(self) -> None:
-        """Return RUNNING leases to the pool, keeping the external request."""
-
-        with self._lock:
-            for job_id, job in list(self._jobs.items()):
-                if job.status == RUNNING:
-                    self._jobs[job_id] = replace(job, status=RETRYABLE, lease_id="")
-
-    def requeue(self, job_ids: Iterable[str], revision_id: str = "") -> None:
-        revision = str(revision_id or self.revision_id)
-        with self._lock:
-            for raw_id in job_ids:
-                job_id = str(raw_id)
-                job = self._jobs.get(job_id)
-                if job is None:
-                    raise ReviewQueueError(f"cannot requeue unknown job: {job_id}")
-                self._jobs[job_id] = replace(
-                    job,
-                    status=PENDING,
-                    lease_id="",
-                    worker_id="",
-                    request_id="",
-                    result_path="",
-                    revision_id=revision,
-                )
-
-    def all_completed(self) -> bool:
-        return bool(self._order) and all(
-            job.status == COMPLETED for job in self.jobs
-        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -494,28 +376,38 @@ def structural_gate(plan: Mapping[str, Any]) -> list[str]:
 
 
 def _dependency_cycles(by_item: Mapping[str, dict[str, Any]]) -> list[list[str]]:
+    """Iterative DFS back-edge detection; deep graphs cannot exhaust the stack."""
+
     color: dict[str, int] = {}
     cycles: list[list[str]] = []
-    stack: list[str] = []
-
-    def visit(node: str) -> None:
-        color[node] = 1
-        stack.append(node)
-        for dependency in by_item.get(node, {}).get("dependencies", []):
-            if dependency not in by_item:
-                continue
-            state = color.get(dependency, 0)
-            if state == 1:
-                start = stack.index(dependency)
-                cycles.append(stack[start:] + [dependency])
-            elif state == 0:
-                visit(dependency)
-        stack.pop()
-        color[node] = 2
-
-    for node in by_item:
-        if color.get(node, 0) == 0:
-            visit(node)
+    for root in by_item:
+        if color.get(root, 0):
+            continue
+        stack: list[tuple[str, int]] = [(root, 0)]
+        path: list[str] = []
+        while stack:
+            node, dep_index = stack[-1]
+            if dep_index == 0:
+                color[node] = 1
+                path.append(node)
+            dependencies = [
+                str(dep)
+                for dep in by_item.get(node, {}).get("dependencies", [])
+                if str(dep) in by_item
+            ]
+            if dep_index < len(dependencies):
+                stack[-1] = (node, dep_index + 1)
+                dependency = dependencies[dep_index]
+                state = color.get(dependency, 0)
+                if state == 1:
+                    start = path.index(dependency)
+                    cycles.append(path[start:] + [dependency])
+                elif state == 0:
+                    stack.append((dependency, 0))
+            else:
+                stack.pop()
+                path.pop()
+                color[node] = 2
     return cycles
 
 
@@ -528,7 +420,6 @@ __all__ = [
     "ReviewJob",
     "ReviewQueueError",
     "RUNNING",
-    "StaleReviewLease",
     "TaskReviewQueue",
     "build_review_jobs",
     "canonical_hash",
