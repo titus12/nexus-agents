@@ -339,6 +339,18 @@ class _ConcreteWorkflowState:
                     last_failure=failure,
                 )
             update = replace(update, recovery=recovery)
+        if event.name == "NODE_COMPLETED" and action not in {
+            "RETRY", "BLOCK", "BLOCKED", "OPEN_HUMAN_GATE", "HUMAN_GATE",
+        }:
+            # A clean join pays the wave's reply debt: the reply-retry budget
+            # is scoped to one dispatch wave, not a whole-run allowance, or a
+            # late-phase role inherits the retries an earlier role already
+            # spent (Analyst slips would drain the Critic's first wave).
+            recovery = update.recovery or RecoveryUpdate()
+            update = replace(
+                update,
+                recovery=replace(recovery, reply_retry_count=0),
+            )
         if action == "RESUME" and self.name == "HUMAN_GATE":
             update = replace(
                 update,
@@ -1294,7 +1306,11 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                             ),
                         ),
                         recovery=RecoveryUpdate(
-                            no_progress_count=verdict.no_progress_count
+                            no_progress_count=verdict.no_progress_count,
+                            # This branch rebuilds the recovery update from
+                            # scratch, so the per-wave reply-debt reset from
+                            # _transition_decision must be restated here.
+                            reply_retry_count=0,
                         ),
                     ),
                 )

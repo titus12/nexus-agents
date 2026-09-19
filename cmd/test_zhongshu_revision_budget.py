@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import unittest
 
 from orchestrator.domain.context import (
@@ -325,6 +327,67 @@ class ZhongshuNoProgressTests(unittest.TestCase):
         self.assertEqual(
             decision.transition.reason_code, "ZHONGSHU_FREEZE_WITH_FOLLOWUPS"
         )
+
+
+class ReplyBudgetWaveScopeTests(unittest.TestCase):
+    """The reply-retry budget is per-wave: a clean join pays the debt.
+
+    Regression: the counter only ever incremented, so a late-phase role
+    inherited the retries an earlier role already spent (an Analyst that
+    burned 2 of 3 left the Critic's first protocol slip nowhere to go).
+    """
+
+    def _context(self, reply_retry_count: int) -> WorkflowContext:
+        return replace(
+            _context(round_=0),
+            recovery=RecoveryState(reply_retry_count=reply_retry_count),
+        )
+
+    def test_clean_join_resets_the_reply_retry_budget(self) -> None:
+        context = self._context(reply_retry_count=2)
+
+        decision = ZhongshuCriticState().handle(
+            context, _event("REQUEST_SOLVER_REVISION")
+        )
+
+        self.assertEqual(decision.transition.action, "REQUEST_SOLVER_REVISION")
+        self.assertEqual(decision.update.recovery.reply_retry_count, 0)
+
+        after = LinearContextReducer().apply(
+            WorkflowSnapshot("task-1", context, 0), decision
+        )
+        self.assertEqual(after.context.recovery.reply_retry_count, 0)
+
+    def test_clean_join_resets_even_when_the_wave_asks_for_evidence(self) -> None:
+        context = self._context(reply_retry_count=3)
+
+        decision = ZhongshuCriticState().handle(
+            context, _event("REQUEST_ANALYST_EVIDENCE")
+        )
+
+        self.assertEqual(decision.transition.action, "REQUEST_ANALYST_EVIDENCE")
+        self.assertEqual(decision.update.recovery.reply_retry_count, 0)
+
+    def test_a_reply_retry_within_a_wave_keeps_charging(self) -> None:
+        # The FAIL path must not reset: the budget bounds re-asks of the
+        # same wave, so the charge survives until the wave joins cleanly.
+        context = self._context(reply_retry_count=1)
+        event = DomainEvent(
+            "FAIL",
+            "task-1",
+            4,
+            {
+                "retryable": True,
+                "error_code": "NODE_TASK_REVIEW_RESULT_INVALID",
+                "failure_id": "f-1",
+            },
+            "2026-09-13T00:00:00Z",
+        )
+
+        decision = ZhongshuCriticState().handle(context, event)
+
+        self.assertEqual(decision.transition.action, "RETRY")
+        self.assertEqual(decision.update.recovery.reply_retry_count, 2)
 
 
 class SolverContextTests(unittest.TestCase):
