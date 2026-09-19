@@ -18,6 +18,7 @@ from orchestrator.runtime.reducer import LinearContextReducer
 from orchestrator.runtime.repository import WorkflowSnapshot
 from orchestrator.zhongshu_review import (
     _blocking_findings,
+    consolidate_finding_observations,
     finding_semantic_key,
 )
 
@@ -63,11 +64,15 @@ class StableFindingIdentityTests(unittest.TestCase):
 
         self.assertNotEqual(finding_semantic_key(first), finding_semantic_key(second))
 
-    def test_different_category_is_a_different_identity(self) -> None:
-        first = _observation(category="acceptance")
+    def test_reworded_category_keeps_the_identity(self) -> None:
+        # The category is the critic's re-wordable label for the same complaint
+        # ("general" -> "boundary"); a re-picked label must not mint a second
+        # blocker for one issue (live run task-20260918-30ec74 churned the
+        # blocker count this way until the per-item ratchet fired).
+        first = _observation()
         second = _observation(category="boundary")
 
-        self.assertNotEqual(finding_semantic_key(first), finding_semantic_key(second))
+        self.assertEqual(finding_semantic_key(first), finding_semantic_key(second))
 
     def test_anchored_and_unanchored_findings_do_not_collapse(self) -> None:
         anchored = _observation()
@@ -95,6 +100,43 @@ class StableFindingIdentityTests(unittest.TestCase):
         )
 
         self.assertNotEqual(finding_semantic_key(left), finding_semantic_key(right))
+
+
+class SeverityFollowsCurrentRoundTests(unittest.TestCase):
+    """Severity follows this round's judgment instead of the historical worst."""
+
+    def test_downgraded_severity_stops_blocking(self) -> None:
+        # One worker's P1 used to pin the finding blocking forever, even after
+        # the critic re-raised the same issue as P2 in every later round.
+        first = _observation(severity="P1")
+        previous = {
+            "finding-000001": {
+                **first,
+                "canonical_key": finding_semantic_key(first),
+            }
+        }
+        downgraded = _observation(severity="P2", claim="re-raised milder")
+        observations = {finding_semantic_key(downgraded): [downgraded]}
+
+        ledger, _ = consolidate_finding_observations(
+            observations, previous, quorum=1
+        )
+
+        (finding,) = ledger.values()
+        self.assertEqual(finding["severity"], "P2")
+        self.assertEqual(_blocking_findings([finding]), [])
+
+    def test_worst_severity_within_one_round_still_wins(self) -> None:
+        first = _observation(severity="P1", worker_id="w-1")
+        second = _observation(severity="P2", worker_id="w-2")
+        key = finding_semantic_key(first)
+
+        ledger, _ = consolidate_finding_observations(
+            {key: [first, second]}, {}, quorum=1
+        )
+
+        (finding,) = ledger.values()
+        self.assertEqual(finding["severity"], "P1")
 
 
 class AcceptorRiskIsNotBlockingTests(unittest.TestCase):
@@ -416,7 +458,11 @@ class RewordedFindingStaysOneLedgerEntryTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(disagreements, [])
 
-    def test_distinct_categories_stay_separate(self) -> None:
+    def test_distinct_categories_on_one_item_stay_one_entry(self) -> None:
+        # The category is a re-wordable label, not structural identity: the
+        # per-task review reasons about (scope, item, affected refs).  Two
+        # category labels for one item's complaint fold into one ledger entry
+        # and both observations stay visible on it.
         first = _observation(category="acceptance")
         ledger, _ = self._consolidate(first, None)
 
@@ -424,7 +470,12 @@ class RewordedFindingStaysOneLedgerEntryTests(unittest.TestCase):
             _observation(finding_id="finding-000002", category="boundary"), ledger
         )
 
-        self.assertEqual(len(merged), 2)
+        self.assertEqual(len(merged), 1)
+        (entry,) = merged.values()
+        # The ledger entry keeps the original canonical id; the observations
+        # field carries this round's snapshot (the latest observation wins).
+        self.assertEqual(entry["finding_id"], "finding-000001")
+        self.assertEqual(entry["observations"][0]["finding_id"], "finding-000002")
 
 
 class StuckFindingEscalationTests(unittest.TestCase):

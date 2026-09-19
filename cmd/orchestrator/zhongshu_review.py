@@ -353,14 +353,18 @@ def _finding_text(value: Any) -> str:
 def finding_semantic_key(finding: dict[str, Any]) -> str:
     """Return a worker-independent key for the same underlying finding.
 
-    The raw finding ID and the free-text ``claim`` are deliberately excluded.
-    Critic workers namespace their IDs independently and re-word the same issue
-    every round, so keying on either aspect mints a brand-new ledger entry (and
-    a new canonical ID) for an issue that is already recorded.  That churn grows
-    the ledger without bound, keeps superseded findings active, and resets the
-    per-finding stall counter, so the convergence loop can never retire
-    anything.  Scope, category, target, and the affected references are the
-    structural identity a task-scoped review actually reasons about.
+    The raw finding ID, the free-text ``claim``, and the ``category`` label are
+    deliberately excluded.  Critic workers namespace their IDs independently and
+    re-word the same issue every round, and the category is exactly the kind of
+    label a critic re-picks when re-raising a chronic complaint ("general" ->
+    "boundary"), so keying on any of them mints a brand-new ledger entry (and a
+    new canonical ID) for an issue that is already recorded.  That churn grows
+    the ledger without bound, keeps superseded findings active, resets the
+    per-finding stall counter, and inflates the active-blocker count the
+    convergence gate watches (live run task-20260918-30ec74: the blocker count
+    oscillated 5->3->4->4->5->3, defeating the no-progress exit until the
+    per-item ratchet fired).  Scope, target, and the affected references are
+    the structural identity a task-scoped review actually reasons about.
 
     A finding with no structural anchor at all falls back to its raw ID rather
     than being merged with every other anonymous observation.
@@ -373,7 +377,6 @@ def finding_semantic_key(finding: dict[str, Any]) -> str:
         "scope": _finding_text(finding.get("scope") or "item"),
         "group_id": _finding_text(finding.get("group_id")),
         "item_id": _finding_text(finding.get("item_id") or target),
-        "category": _finding_text(finding.get("category") or "general"),
         "target": _finding_text(target or "global"),
         "affected_item_ids": sorted(_finding_text(item) for item in affected_items) if isinstance(affected_items, list) else [_finding_text(affected_items)],
         "affected_requirement_ids": sorted(_finding_text(item) for item in affected_requirements) if isinstance(affected_requirements, list) else [_finding_text(affected_requirements)],
@@ -381,7 +384,6 @@ def finding_semantic_key(finding: dict[str, Any]) -> str:
     if (
         identity["item_id"] in ("", "global")
         and identity["target"] in ("", "global")
-        and identity["category"] in ("", "general")
         and not identity["affected_item_ids"]
         and not identity["affected_requirement_ids"]
     ):
@@ -519,9 +521,14 @@ def consolidate_finding_observations(
         canonical["worker_ids"] = sorted(worker_ids)
         canonical["quorum_support"] = len(worker_ids)
         canonical["observations"] = values
+        # Severity follows this round's observations, not the historical worst:
+        # "the incoming observation wins" is the ledger's lifecycle doctrine,
+        # and pinning the old severity forever meant one worker's P1 kept a
+        # finding blocking even after the critic downgraded it to P2 in every
+        # later round.  Within one round the worst severity still wins.
         severities = [
             str(item.get("severity") or "P2").upper()
-            for item in values + ([old] if old else [])
+            for item in values
         ]
         canonical["severity"] = min(
             severities,
