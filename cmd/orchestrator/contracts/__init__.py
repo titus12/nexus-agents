@@ -8,6 +8,7 @@ from .menxia_item_critic import CONTRACT as MENXIA_ITEM_CRITIC
 from .menxia_item_solver import CONTRACT as MENXIA_ITEM_SOLVER
 from .zhongshu_analyst import CONTRACT as ZHONGSHU_ANALYST
 from .zhongshu_critic import CONTRACT as ZHONGSHU_CRITIC
+from .zhongshu_freeze_check import CONTRACT as ZHONGSHU_FREEZE_CHECK
 from .zhongshu_solver import CONTRACT as ZHONGSHU_SOLVER
 
 
@@ -15,6 +16,7 @@ _BY_STATE: dict[str, PhaseContract] = {
     "ZHONGSHU_ANALYST": ZHONGSHU_ANALYST,
     "ZHONGSHU_SOLVER": ZHONGSHU_SOLVER,
     "ZHONGSHU_CRITIC": ZHONGSHU_CRITIC,
+    "ZHONGSHU_FREEZE_CHECK": ZHONGSHU_FREEZE_CHECK,
     "MENXIA_ITEM_SOLVER": MENXIA_ITEM_SOLVER,
     "MENXIA_ITEM_ANALYST": MENXIA_ITEM_ANALYST,
     "MENXIA_ITEM_CRITIC": MENXIA_ITEM_CRITIC,

@@ -39,10 +39,12 @@ class StructuredOutputSpec:
         properties = self.schema.get("properties", {})
         phase = str(properties.get("phase", {}).get("const") or "")
         role = str(properties.get("role", {}).get("const") or "")
-        try:
-            contract_id = contract_for_state(self.state).contract_id
-        except KeyError:
-            contract_id = ""
+        # Loud on purpose: a dispatched state without a registered contract is
+        # exactly the bug that let the freeze check fall back to the critic
+        # contract and deadlock its own reply validation (task-20260919-67a1a3
+        # freeze attempts 17/19/21/23 were all rejected either way the worker
+        # filled the state field).
+        contract_id = contract_for_state(self.state).contract_id
         return {
             "mode": self.mode,
             "protocol": self.protocol,

@@ -1453,6 +1453,8 @@ class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
     name = "ZHONGSHU_FREEZE_CHECK"
     supported_actions = (
         "FREEZE_APPROVED", "APPROVE_FREEZE", "FREEZE_OK", "FREEZE_REJECTED",
+        "REQUEST_ANALYST_EVIDENCE", "REQUEST_SOLVER_REVISION",
+        "HUMAN_GATE", "BLOCKED",
         "RETRY", "BLOCK", "OPEN_HUMAN_GATE",
     )
     exhausted_reason = "ZHONGSHU_FREEZE_BUDGET_EXHAUSTED"
