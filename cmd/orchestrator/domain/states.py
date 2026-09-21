@@ -51,6 +51,7 @@ from .policies.zhongshu import (
     blocker_fingerprint,
     freeze_retry_allowed,
     merge_findings,
+    rebind_restatement_findings,
     revision_allowed,
 )
 from .policies.prompts import build_prompt
@@ -575,6 +576,21 @@ class _ConcreteWorkflowState:
             )
         if completed_id and str(completed_id) not in completed:
             completed.append(str(completed_id))
+        salvaged_rows = _salvaged_task_review_rows(context, payload, task_items)
+        if salvaged_rows and str(payload.get("action") or "") == "FAIL":
+            # A failed wave's salvaged verdicts carry their findings; without
+            # this fold the findings existed only inside the dead round's
+            # aggregate and vanished with it.
+            salvaged_findings = []
+            for row in salvaged_rows:
+                for item in row.get("findings") or []:
+                    if isinstance(item, Mapping):
+                        try:
+                            salvaged_findings.append(Finding.from_dict(dict(item)))
+                        except (TypeError, ValueError):
+                            continue
+            if salvaged_findings:
+                findings = findings + tuple(salvaged_findings)
         # A discarded task leaves the plan.  Its leftovers must leave with it,
         # or the stale ledger row keeps re-escalating ITEM_STALLED forever and
         # its open findings keep the graph "blocked" for an item no job will
@@ -666,6 +682,7 @@ class _ConcreteWorkflowState:
             attempted_item_ids=_attempted_item_ids(existing, payload),
             attempted_finding_ids=_attempted_finding_ids(payload, existing),
             item_workflows=workflows_value,
+            salvaged_task_reviews=salvaged_rows,
             evidence_packet=(
                 dict(payload["evidence_packet"])
                 if isinstance(payload.get("evidence_packet"), Mapping)
@@ -1315,6 +1332,47 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                     ),
                 )
             return decision
+        if (
+            event.name != "TIMEOUT"
+            and action == "REQUEST_ANALYST_EVIDENCE"
+            and context.review is not None
+        ):
+            # An evidence round is a legitimate progress path, but it must be
+            # bound by the same convergence fuses as a revision round.  The
+            # live run task-20260920-94c51b spun Critic -> Analyst -> Solver
+            # forever because this aggregate action never entered a gated
+            # branch: the stuck fuse threshold had already been crossed
+            # (stuck_rounds=4 > max 3) and the no-progress / stall exits were
+            # unreachable, while zhongshu_revision_round stayed frozen so the
+            # revision budget could not bound the loop either.
+            decision = self._transition_decision(context, event, action=action)
+            round_after = self._round_after(context, decision)
+            verdict = self._gate_verdict(context, round_after)
+            gate_decision = self._apply_gate_verdict(
+                context, event, decision, round_after, verdict, action
+            )
+            if gate_decision is not None:
+                return gate_decision
+            review_update = decision.update.review
+            if review_update is None:
+                review_update = ReviewUpdate(revision_id=context.review.revision_id)
+            decision = replace(
+                decision,
+                update=replace(
+                    decision.update,
+                    review=replace(
+                        review_update,
+                        last_reply_fingerprint=blocker_fingerprint(
+                            round_after.findings
+                        ),
+                    ),
+                    recovery=RecoveryUpdate(
+                        no_progress_count=verdict.no_progress_count,
+                        reply_retry_count=0,
+                    ),
+                ),
+            )
+            return decision
         return super().handle(context, event)
 
     def _round_after(self, context: WorkflowContext, decision: StateDecision):
@@ -1812,9 +1870,14 @@ def _previous_review_snapshot(context: WorkflowContext) -> dict[str, object] | N
         return None
     findings = [asdict(finding) for finding in review.findings]
     ledger = [asdict(record) for record in review.task_review_ledger]
-    if not findings and not ledger:
+    salvaged = [dict(row) for row in review.salvaged_task_reviews]
+    if not findings and not ledger and not salvaged:
         return None
-    return {"findings": findings, "task_review_ledger": ledger}
+    return {
+        "findings": findings,
+        "task_review_ledger": ledger,
+        "salvaged_task_reviews": salvaged,
+    }
 
 
 def _task_review_bindings(
@@ -1950,7 +2013,8 @@ def _task_review_bindings(
                 "group_id": job.group_id,
                 "item_id": job.item_id,
                 "prompt_ref": _task_capsule_text(
-                    job, item, group, evidence["records"]
+                    job, item, group, evidence["records"],
+                    active_findings=dispatch_context["active_findings"],
                 ),
                 "dispatch_context": dispatch_context,
             }
@@ -1962,13 +2026,32 @@ def _select_review_jobs(
     jobs: object,
     review: object,
 ) -> list[object]:
-    """Re-review a job only when its content, dependencies, or verdict changed."""
+    """Re-review a job only when its content, dependencies, or verdict changed.
+
+    Two carry rules keep a retry from re-paying for verdicts it already has:
+    an ``APPROVED`` ledger record with matching hashes (the approval ratchet)
+    and a salvaged row from a failed wave with matching hashes (the row is
+    replayed verbatim by the fan-in).  A hash mismatch — the Solver patched the
+    task or its dependencies — invalidates both and forces a fresh review.
+    """
 
     ledger = {
         record.item_id: record for record in getattr(review, "task_review_ledger", ())
     }
+    salvaged = {
+        str(row.get("item_id") or ""): row
+        for row in getattr(review, "salvaged_task_reviews", ()) or ()
+        if isinstance(row, Mapping)
+    }
     selected: list[object] = []
     for job in jobs:
+        salvage = salvaged.get(job.item_id)
+        if (
+            salvage is not None
+            and str(salvage.get("reviewed_task_hash") or "") == job.task_hash
+            and str(salvage.get("reviewed_dependency_hash") or "") == job.dependency_hash
+        ):
+            continue
         record = ledger.get(job.item_id)
         if (
             record is None
@@ -1991,6 +2074,15 @@ def _merge_and_close_findings(
 ) -> tuple[object, ...]:
     """Merge findings and close those owned by a task the Critic approved."""
 
+    incoming, rebinds = rebind_restatement_findings(existing, incoming)
+    for rebind in rebinds:
+        logger.warning(
+            "TASK_REVIEW_FINDING_REBOUND item_id=%s from=%s to=%s shared_anchor=%s",
+            rebind["item_id"],
+            rebind["from"] or "<none>",
+            rebind["to"],
+            rebind["shared_anchor"],
+        )
     merged = merge_findings(existing, incoming)
     if isinstance(task_reviews, list) and task_reviews:
         approved = {
@@ -2173,9 +2265,11 @@ def _task_review_ledger_update(
 
     A protocol-failed wave (aggregate action ``FAIL``) records verdicts for
     state-keeping only: the approval ratchet still lets the retry skip
-    re-dispatching approved tasks, but the retry re-reviews non-approved tasks
-    and charges them then -- so one worker's protocol slip must not spend
-    other items' stall budget twice.
+    re-dispatching approved tasks, non-approved tasks with a valid salvage row
+    are replayed verbatim by the fan-in (see ``salvaged_task_reviews``), and
+    the retry charges a task's stall budget only when its fresh re-review
+    joins cleanly -- so one worker's protocol slip must not spend other
+    items' stall budget twice.
     """
 
     raw = payload.get("task_reviews")
@@ -2258,12 +2352,82 @@ def _task_review_ledger_update(
     return tuple(current.values()) if updated else None
 
 
+def _salvaged_task_review_rows(
+    context: WorkflowContext,
+    payload: Mapping[str, object],
+    task_items: object = None,
+) -> tuple[dict[str, object], ...] | None:
+    """Project the salvage-carry set after folding one review payload.
+
+    A failed Critic wave stores the full verdict rows its successful workers
+    produced (``salvaged_task_reviews`` on the aggregate); the retry then
+    re-dispatches only the tasks still missing and the fan-in replays the
+    carried rows.  The set evolves by three rules:
+
+    - a failed round's payload replaces the carried rows for the items it
+      salvaged (fresh salvage wins); rows for already-approved tasks are
+      dropped because the approval ratchet already holds them;
+    - any round that produced a fresh verdict for an item drops that item's
+      carried row (a real ledger row exists now);
+    - rows for discarded items disappear with the item.
+    """
+
+    review = context.review
+    previous_rows = {
+        str(row.get("item_id") or ""): dict(row)
+        for row in (review.salvaged_task_reviews if review else ())
+        if isinstance(row, Mapping)
+    }
+    failed_round = str(payload.get("action") or "") == "FAIL"
+    raw_salvaged = payload.get("salvaged_task_reviews")
+    reviewed_items = {
+        str(entry.get("item_id") or "")
+        for entry in (
+            payload.get("task_reviews") if isinstance(payload.get("task_reviews"), list) else []
+        )
+        if isinstance(entry, Mapping)
+    }
+    if not failed_round and not reviewed_items and not previous_rows:
+        return None
+    merged: dict[str, dict[str, object]] = {}
+    if failed_round and isinstance(raw_salvaged, list):
+        for row in raw_salvaged:
+            if not isinstance(row, Mapping):
+                continue
+            item_id = str(row.get("item_id") or "")
+            action = str(row.get("action") or "")
+            if not item_id or not str(row.get("reviewed_task_hash") or ""):
+                continue
+            if action not in {"TASK_APPROVED", "TASK_CHANGES_REQUIRED"}:
+                continue
+            if action == "TASK_APPROVED":
+                # The ratchet already holds approved tasks in the ledger; a
+                # carried row would only duplicate that decision.
+                continue
+            merged[item_id] = dict(row)
+    for item_id, row in previous_rows.items():
+        if item_id in merged or item_id in reviewed_items:
+            continue
+        merged[item_id] = row
+    discarded = _discarded_item_ids(context, task_items)
+    for item_id in discarded:
+        merged.pop(item_id, None)
+    return tuple(merged[item_id] for item_id in sorted(merged))
+
+
 def _task_capsule_text(
     job: object,
     item: ReviewTaskItem | None,
     group: ReviewTaskGroup | None,
     evidence_records: object = (),
+    active_findings: object = (),
 ) -> str:
+    active_p0_ids = [
+        str(finding.get("finding_id") or "")
+        for finding in (active_findings or ())
+        if isinstance(finding, Mapping)
+        and str(finding.get("severity") or "").strip().upper() == "P0"
+    ]
     lines = [
         f"Review job: {getattr(job, 'review_job_id', '')}",
         f"Review only task {getattr(job, 'item_id', '')} "
@@ -2295,6 +2459,31 @@ def _task_capsule_text(
         )
     lines.append(acceptance_standard_hint())
     lines.append(
+        "dispatch_context.active_findings lists the canonical findings already "
+        "recorded for this task. This is a hard output gate, not a suggestion: "
+        "a finding that continues, re-words, narrows, or translates an existing "
+        "active finding MUST reuse its finding_id verbatim and MUST write the "
+        "claim in the same language as that canonical claim. Switching between "
+        "Chinese and English (or re-wording) the same issue across rounds does "
+        "not create a new finding; live runs show such alternation minting new "
+        "ids for already-recorded issues, which resets the convergence counters "
+        "and burns revision rounds. Mint a new finding_id only for a genuinely "
+        "new issue that no active finding covers, and keep its claim language "
+        "stable in later rounds."
+    )
+    if active_p0_ids:
+        lines.append(
+            "Delta disposition gate: every active P0 finding listed in "
+            "dispatch_context.active_findings (finding_id: "
+            f"{', '.join(active_p0_ids)}) MUST be explicitly answered in this "
+            "reply. Re-raise it in findings with its canonical finding_id "
+            "(STILL_OPEN), or add a finding_responses entry with "
+            "finding_id + response=RESOLVED (name what changed, with "
+            "evidence) or response=ACCEPT (accept the risk; put the "
+            "follow-up plan in note). A silent P0 is a contract violation: "
+            "the reply is rejected and re-dispatched."
+        )
+    lines.append(
         "Return TASK_APPROVED only when no active P0/P1 finding applies to this "
         "task. If the task itself is fine but the run lacks the investigation "
         "needed to judge it, return REQUEST_ANALYST_EVIDENCE instead: the "
@@ -2302,6 +2491,23 @@ def _task_capsule_text(
         "and cannot manufacture evidence. Otherwise return "
         "TASK_CHANGES_REQUIRED with review_checks and task-scoped findings. "
         "Do not echo revision ids or hashes; the orchestrator stamps them."
+    )
+    lines.append(
+        "When you return TASK_CHANGES_REQUIRED, every finding MUST carry "
+        "required_action: one concrete, minimal modification suggestion naming "
+        "the item field to change (objective, acceptance_signals, dependencies, "
+        "or source_requirement_ids) and the direction to move it. The Solver "
+        "reads required_action verbatim as its revision brief, so state the "
+        "correction you would accept as RESOLVED instead of restating the "
+        "complaint."
+    )
+    lines.append(
+        "REQUEST_ANALYST_EVIDENCE must ask only for evidence that exists NOW "
+        "(repository state, plan text, dispatch records). No task in this run "
+        "has executed yet, so another task's future output (results, rankings, "
+        "computed sets) cannot be evidence; if your concern depends on what a "
+        "task will produce, judge the task's stated contract instead and "
+        "return TASK_CHANGES_REQUIRED."
     )
     return "\n".join(lines)
 

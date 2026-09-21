@@ -228,6 +228,109 @@ class TaskReviewLedgerTests(unittest.TestCase):
         )
         self.assertNotEqual(effect.payload.get("dispatch_mode"), "task_review")
 
+    def _salvage_context(self) -> tuple[WorkflowContext, tuple[str, str]]:
+        context = _context()
+        hashes = _hashes(_bindings(context)[0])
+        salvaged = (
+            {
+                "review_job_id": "zhongshu:rev-1:group-01:item-01",
+                "group_id": "group-01",
+                "item_id": "item-01",
+                "worker_id": "critic-salvaged",
+                "action": "TASK_CHANGES_REQUIRED",
+                "reviewed_task_hash": hashes[0],
+                "reviewed_dependency_hash": hashes[1],
+                "review_checks": {},
+                "findings": [
+                    {
+                        "finding_id": "f-s1",
+                        "severity": "P1",
+                        "status": "OPEN",
+                        "claim": "salvaged blocker",
+                    }
+                ],
+            },
+        )
+        return (
+            replace(
+                context,
+                review=replace(context.review, salvaged_task_reviews=salvaged),
+            ),
+            hashes,
+        )
+
+    def test_salvaged_unchanged_task_is_not_re_dispatched(self) -> None:
+        context, _ = self._salvage_context()
+        bindings = _bindings(context)
+        self.assertEqual(
+            [binding["item_id"] for binding in bindings], ["item-02", "item-03"]
+        )
+
+    def test_stale_salvage_hash_forces_re_dispatch(self) -> None:
+        context, _ = self._salvage_context()
+        stale = replace(
+            context,
+            review=replace(
+                context.review,
+                salvaged_task_reviews=(
+                    dict(context.review.salvaged_task_reviews[0],
+                         reviewed_task_hash="stale-hash"),
+                ),
+            ),
+        )
+        bindings = _bindings(stale)
+        self.assertEqual(
+            [binding["item_id"] for binding in bindings],
+            ["item-01", "item-02", "item-03"],
+        )
+
+    def test_failed_wave_stores_salvage_rows_and_their_findings(self) -> None:
+        context, hashes = self._salvage_context()
+        payload = {
+            "action": "FAIL",
+            "task_reviews": [
+                {
+                    "item_id": "item-01",
+                    "action": "TASK_CHANGES_REQUIRED",
+                    "reviewed_task_hash": hashes[0],
+                    "reviewed_dependency_hash": hashes[1],
+                },
+            ],
+            "salvaged_task_reviews": [
+                dict(context.review.salvaged_task_reviews[0]),
+            ],
+        }
+        update = ZhongshuCriticState._review_update(context, payload)
+        self.assertEqual(
+            [row["item_id"] for row in update.salvaged_task_reviews], ["item-01"]
+        )
+        finding_ids = {finding.finding_id for finding in update.findings}
+        self.assertIn("f-s1", finding_ids)
+
+    def test_fresh_verdict_drops_the_salvage_row(self) -> None:
+        context, _ = self._salvage_context()
+        payload = {
+            "revision_id": "rev-1",
+            "task_reviews": [
+                {
+                    "item_id": "item-01",
+                    "action": "TASK_CHANGES_REQUIRED",
+                    "reviewed_task_hash": "fresh-h",
+                    "reviewed_dependency_hash": "fresh-d",
+                },
+            ],
+        }
+        update = ZhongshuCriticState._review_update(context, payload)
+        self.assertEqual(update.salvaged_task_reviews, ())
+
+    def test_salvage_rows_round_trip_through_dto(self) -> None:
+        context, _ = self._salvage_context()
+        restored = context_from_dto(context_to_dto(context))
+        self.assertEqual(
+            restored.review.salvaged_task_reviews,
+            context.review.salvaged_task_reviews,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

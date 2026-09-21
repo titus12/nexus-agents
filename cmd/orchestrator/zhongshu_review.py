@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -349,6 +351,22 @@ def _finding_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
 
+def _normalized_target_text(value: Any) -> str:
+    """Normalize a free-text finding target for identity hashing.
+
+    Workers re-word the same target every round ("item-1 acceptance_signals"
+    vs "item-1 acceptance signal: parallelism >1"), and each spelling minted
+    a brand-new ledger entry (live run task-20260920-bbd659 grew 7 records
+    for 3 issues on one item).  Separators, underscores, brackets, and
+    surrounding punctuation carry no identity, so collapse them; the
+    alphanumeric skeleton is what the critic actually reasons about.
+    """
+
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", text)
+    return " ".join(text.split())
+
+
 def finding_semantic_key(finding: dict[str, Any]) -> str:
     """Return a worker-independent key for the same underlying finding.
 
@@ -376,7 +394,7 @@ def finding_semantic_key(finding: dict[str, Any]) -> str:
         "scope": _finding_text(finding.get("scope") or "item"),
         "group_id": _finding_text(finding.get("group_id")),
         "item_id": _finding_text(finding.get("item_id") or target),
-        "target": _finding_text(target or "global"),
+        "target": _normalized_target_text(target or "global"),
         "affected_item_ids": sorted(_finding_text(item) for item in affected_items) if isinstance(affected_items, list) else [_finding_text(affected_items)],
         "affected_requirement_ids": sorted(_finding_text(item) for item in affected_requirements) if isinstance(affected_requirements, list) else [_finding_text(affected_requirements)],
     }
@@ -393,6 +411,160 @@ def finding_semantic_key(finding: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+_CLAIM_SIMILARITY_THRESHOLD = 0.70
+
+
+def _claim_identity_text(finding: dict[str, Any]) -> str:
+    # Claim only: required_action legitimately differs between workers even
+    # when the issue is the same, and folding it in dilutes the ratio below
+    # the threshold (live corpus pair scored 0.39 on the claim but <0.35
+    # with the action appended).
+    return _normalized_target_text(str(finding.get("claim") or ""))
+
+
+def _claim_similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    # autojunk must stay off: with the default heuristic the ratio is
+    # order-dependent once one side exceeds 200 chars (the space character
+    # gets junked in the longer argument), so the same pair scored 0.05 in
+    # one order and 0.39 in the other.  The greedy block matching itself is
+    # still order-sensitive, hence the symmetric max.
+    forward = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    if forward == 1.0:
+        return forward
+    return max(forward, difflib.SequenceMatcher(None, b, a, autojunk=False).ratio())
+
+
+def _observation_anchor(finding: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Scope anchor for similarity merging: (scope, group_id, item_id).
+
+    Returns ``None`` when the observation carries no item anchor, so
+    anonymous/global findings keep their raw-id fallback and are never
+    merged by text similarity.
+    """
+
+    item_id = _finding_text(finding.get("item_id"))
+    if not item_id or item_id == "global":
+        return None
+    return (
+        _finding_text(finding.get("scope") or "item"),
+        _finding_text(finding.get("group_id")),
+        item_id,
+    )
+
+
+def _group_matches_previous(
+    key: str,
+    values: list[dict[str, Any]],
+    ledger: dict[str, dict[str, Any]],
+) -> bool:
+    for item in values:
+        raw_id = str(item.get("finding_id") or item.get("id") or "").strip()
+        if raw_id and raw_id in ledger:
+            return True
+    return any(
+        str(finding.get("canonical_key") or "") == key
+        for finding in ledger.values()
+    )
+
+
+def _merge_similar_observation_groups(
+    observations: dict[str, list[dict[str, Any]]],
+    previous: dict[str, dict[str, Any]] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Fold observation groups that re-word the same issue into one group.
+
+    The semantic key hashes the structural anchor, so a critic that re-words
+    the free-text ``target`` every round mints a new ledger entry for an
+    issue that is already recorded; the entry then never accrues
+    ``stuck_rounds`` and inflates the active-blocker count.  Live corpus
+    (task-20260920-bbd659, one item, 7 records / 3 issues): only the
+    near-verbatim re-wording pairs scored above 0.7 while a same-item
+    different-issue pair scored 0.39 and cross-language re-wordings 0.11-0.19,
+    so the threshold stays deliberately conservative (0.70) — near-verbatim
+    duplicates merge here, everything else is the job of the finding_id echo
+    instruction on the task capsule (workers reuse the canonical id from
+    ``dispatch_context.active_findings``), which the previous_match pass
+    already consumes.
+    """
+
+    if len(observations) < 2:
+        return observations
+    ledger = {
+        str(finding_id): finding
+        for finding_id, finding in (previous or {}).items()
+        if isinstance(finding, dict)
+    }
+    anchors: dict[tuple[str, str, str], list[str]] = {}
+    for key in sorted(observations):
+        values = [item for item in observations[key] if isinstance(item, dict)]
+        if not values:
+            continue
+        anchor = _observation_anchor(values[0])
+        if anchor is not None:
+            anchors.setdefault(anchor, []).append(key)
+    if not any(len(keys) > 1 for keys in anchors.values()):
+        return observations
+
+    parent: dict[str, str] = {key: key for key in observations}
+
+    def find(key: str) -> str:
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def union(a: str, b: str) -> str:
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return ra
+        # Prefer the root that already carries a previous-ledger identity so
+        # the surviving canonical id keeps its stuck_rounds history.
+        a_prev = _group_matches_previous(ra, observations.get(ra, []), ledger)
+        b_prev = _group_matches_previous(rb, observations.get(rb, []), ledger)
+        keep = ra if (a_prev and not b_prev) or (a_prev == b_prev and ra <= rb) else rb
+        parent[rb if keep == ra else ra] = keep
+        return keep
+
+    for keys in anchors.values():
+        if len(keys) < 2:
+            continue
+        for index, key_a in enumerate(keys):
+            for key_b in keys[index + 1:]:
+                best = 0.0
+                for item_a in observations[key_a]:
+                    if not isinstance(item_a, dict):
+                        continue
+                    text_a = _claim_identity_text(item_a)
+                    for item_b in observations[key_b]:
+                        if not isinstance(item_b, dict):
+                            continue
+                        best = max(
+                            best,
+                            _claim_similarity(
+                                text_a, _claim_identity_text(item_b)
+                            ),
+                        )
+                        if best >= _CLAIM_SIMILARITY_THRESHOLD:
+                            break
+                    if best >= _CLAIM_SIMILARITY_THRESHOLD:
+                        break
+                if best >= _CLAIM_SIMILARITY_THRESHOLD:
+                    union(key_a, key_b)
+
+    roots: dict[str, str] = {}
+    for key in observations:
+        root = find(key)
+        roots.setdefault(root, root)
+    if len(roots) == len(observations):
+        return observations
+    merged: dict[str, list[dict[str, Any]]] = {}
+    for key in sorted(observations):
+        merged.setdefault(find(key), []).extend(observations[key])
+    return merged
+
+
 def consolidate_finding_observations(
     observations: dict[str, list[dict[str, Any]]],
     previous: dict[str, dict[str, Any]] | None = None,
@@ -400,6 +572,7 @@ def consolidate_finding_observations(
     quorum: int = 2,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     """Consolidate duplicate Critic observations without losing provenance."""
+    observations = _merge_similar_observation_groups(observations, previous)
     ledger = {
         str(finding_id): copy.deepcopy(finding)
         for finding_id, finding in (previous or {}).items()
@@ -747,6 +920,24 @@ _BLOCKED_INPUT_CLAIM_MARKERS = (
 )
 
 
+def _execution_integrity_finding_ids(body: dict[str, Any]) -> list[str]:
+    """Return the finding ids a BLOCKED verdict rests on for input claims.
+
+    Any ``execution_integrity`` finding qualifies regardless of its wording:
+    the authoritative queue-job hashes decide whether the claim is a
+    perception slip (see the demotion call site), so keyword matching must
+    not gate the downgrade.
+    """
+
+    return sorted({
+        str(item.get("finding_id") or "")
+        for item in body.get("findings") or []
+        if isinstance(item, dict)
+        and str(item.get("category") or "").strip().lower() == "execution_integrity"
+        and str(item.get("finding_id") or "").strip()
+    })
+
+
 def _task_review_pseudo_blocked(body: dict[str, Any]) -> bool:
     """Detect a BLOCKED verdict that is justified by a missing-input claim.
 
@@ -882,6 +1073,7 @@ def aggregate_task_review_results(
     rejected: list[dict[str, Any]] = []
     identity_corrections: list[dict[str, Any]] = []
     blocked_downgrades: list[dict[str, Any]] = []
+    blocked_reasons: list[dict[str, str]] = []
     known_jobs = {job.review_job_id: job for job in queue.jobs}
     for raw in results:
         body = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
@@ -932,11 +1124,57 @@ def aggregate_task_review_results(
             continue
         by_job[job_id] = copy.deepcopy(body)
 
+    # Verdicts salvaged from a previous failed wave stand in for the tasks the
+    # retry did not re-dispatch (their content and dependencies are unchanged,
+    # enforced by _select_review_jobs at dispatch time).  Any item that is part
+    # of THIS round's dispatch is excluded: a re-dispatch means the salvage
+    # row's hashes went stale, so only a fresh verdict may speak for it.
+    dispatched_item_ids = {job.item_id for job in queue.jobs}
+    salvaged_seen_items = {
+        str(body.get("item_id") or "") for body in by_job.values()
+    }
+    salvaged_rows: list[dict[str, Any]] = []
+    for row in (previous or {}).get("salvaged_task_reviews") or []:
+        if not isinstance(row, Mapping):
+            continue
+        item_id = str(row.get("item_id") or "")
+        action = str(row.get("action") or "")
+        if not item_id or action not in {"TASK_APPROVED", "TASK_CHANGES_REQUIRED"}:
+            continue
+        if item_id in dispatched_item_ids or item_id in salvaged_seen_items:
+            continue
+        body = copy.deepcopy(dict(row))
+        body["salvaged"] = True
+        salvaged_rows.append(body)
+        salvaged_seen_items.add(item_id)
+        logger.info(
+            "TASK_REVIEW_SALVAGE_CARRIED item_id=%s review_job_id=%s action=%s",
+            item_id,
+            str(row.get("review_job_id") or ""),
+            action,
+        )
+
     previous_ledger = {
         str(item.get("finding_id") or item.get("id")): copy.deepcopy(item)
         for item in (previous or {}).get("findings") or []
         if isinstance(item, dict) and (item.get("finding_id") or item.get("id"))
     }
+    # Delta-reply contract: the active P0 findings each dispatched job must
+    # disposition.  Active = the lifecycle status still holds work open (the
+    # consolidation statuses RESOLVED / DEFERRED / WONT_FIX / WONT_VERIFY do
+    # not), and the row is item-scoped.
+    active_p0_by_item: dict[str, list[str]] = {}
+    for row in previous_ledger.values():
+        if (
+            str(row.get("severity") or "").strip().upper() == "P0"
+            and normalize_finding_status(row.get("status"), row.get("decision"))
+            in _ACTIVE_FINDING_STATUSES
+        ):
+            item_id = str(row.get("item_id") or "")
+            if item_id:
+                active_p0_by_item.setdefault(item_id, []).append(
+                    str(row.get("finding_id") or row.get("id"))
+                )
     observations: dict[str, list[dict[str, Any]]] = {}
     task_reviews: list[dict[str, Any]] = []
     actions: set[str] = set()
@@ -944,6 +1182,45 @@ def aggregate_task_review_results(
     for job in queue.jobs:
         body = by_job.get(job.review_job_id)
         if body is None:
+            continue
+        # Delta-reply contract gate: a contested verdict that stays silent on
+        # an active P0 finding neither closes nor addresses it, so the finding
+        # blocks every later round while nobody works on it (the live ping-pong
+        # signature).  The reply is rejected on a bounded retry instead, and
+        # the capsule instructs the worker to disposition every active P0
+        # (re-raise / RESOLVED / ACCEPT).  Silence on P1s is tolerated: the
+        # approval close plus the stuck fuse bound that path already.
+        re_raised_ids = {
+            str(item.get("finding_id") or item.get("id") or "").strip()
+            for item in body.get("findings") or []
+            if isinstance(item, dict)
+        }
+        disposition_ids = {
+            str(entry.get("finding_id") or "").strip()
+            for entry in body.get("finding_responses") or []
+            if isinstance(entry, Mapping) and str(entry.get("finding_id") or "").strip()
+        }
+        uncovered_p0 = [
+            finding_id
+            for finding_id in active_p0_by_item.get(job.item_id, [])
+            if finding_id not in re_raised_ids and finding_id not in disposition_ids
+        ]
+        if uncovered_p0:
+            del by_job[job.review_job_id]
+            rejected.append({
+                "review_job_id": job.review_job_id,
+                "group_id": job.group_id,
+                "item_id": job.item_id,
+                "finding_ids": uncovered_p0,
+                "reason": "TASK_REVIEW_P0_DISPOSITION_MISSING",
+            })
+            logger.warning(
+                "TASK_REVIEW_P0_DISPOSITION_MISSING review_job_id=%s item_id=%s "
+                "findings=%s",
+                job.review_job_id,
+                job.item_id,
+                uncovered_p0,
+            )
             continue
         worker_id = str(body.get("worker_id") or "")
         if worker_id:
@@ -997,31 +1274,61 @@ def aggregate_task_review_results(
                 job.item_id,
             )
             action = "TASK_CHANGES_REQUIRED"
-        if action == "BLOCKED" and job.task_hash and job.dependency_hash and _task_review_pseudo_blocked(body):
-            # A missing-input BLOCKED contradicted by the authoritative queue
-            # job is a perception slip: keep the finding (it still blocks the
-            # approval) but demote the verdict so the revision path acts.
-            pseudo_blocked_ids = sorted({
-                str(item.get("finding_id") or "")
-                for item in body.get("findings") or []
-                if isinstance(item, dict)
-                and str(item.get("category") or "").strip().lower() == "execution_integrity"
-            })
-            logger.warning(
-                "TASK_REVIEW_BLOCKED_DOWNGRADED review_job_id=%s item_id=%s "
-                "findings=%s",
-                job.review_job_id,
-                job.item_id,
-                pseudo_blocked_ids,
-            )
-            blocked_downgrades.append({
-                "review_job_id": job.review_job_id,
-                "group_id": job.group_id,
-                "item_id": job.item_id,
-                "finding_ids": pseudo_blocked_ids,
-            })
-            action = "TASK_CHANGES_REQUIRED"
+        if action == "BLOCKED" and job.task_hash and job.dependency_hash:
+            integrity_finding_ids = _execution_integrity_finding_ids(body)
+            if integrity_finding_ids:
+                # A BLOCKED justified by "the dispatch lacked inputs" is
+                # contradicted by the authoritative queue job whenever it
+                # recorded the task/dependency hashes: those hashes only exist
+                # because the capsule shipped with the dispatch.  Keyword
+                # matching alone missed the "are unavailable" wording (live
+                # incident task-20260920-bbd659 CRITIC_12 worker-02), so the
+                # structural check is authoritative and the marker scan is
+                # only logged as a fast-path hint.  The finding is preserved
+                # (it still blocks approval) but the verdict is demoted so
+                # the revision path acts instead of the whole round dying.
+                pseudo_blocked_ids = integrity_finding_ids
+                logger.warning(
+                    "TASK_REVIEW_BLOCKED_DOWNGRADED review_job_id=%s item_id=%s "
+                    "findings=%s marker_hit=%s",
+                    job.review_job_id,
+                    job.item_id,
+                    pseudo_blocked_ids,
+                    _task_review_pseudo_blocked(body),
+                )
+                blocked_downgrades.append({
+                    "review_job_id": job.review_job_id,
+                    "group_id": job.group_id,
+                    "item_id": job.item_id,
+                    "finding_ids": pseudo_blocked_ids,
+                })
+                action = "TASK_CHANGES_REQUIRED"
+        if action == "TASK_CHANGES_REQUIRED" and item_findings:
+            suggestionless = [
+                str(item.get("finding_id") or item.get("id") or "")
+                for item in item_findings
+                if not str(item.get("required_action") or "").strip()
+            ]
+            if suggestionless:
+                # Soft signal, not a rejection: the contract asks every
+                # contested finding to carry a concrete modification
+                # suggestion the Solver can act on.  Missing suggestions make
+                # the revision loop guess, which feeds the stubborn-finding
+                # classifier later.
+                logger.warning(
+                    "TASK_REVIEW_SUGGESTION_MISSING review_job_id=%s item_id=%s "
+                    "findings=%s",
+                    job.review_job_id,
+                    job.item_id,
+                    suggestionless,
+                )
         actions.add(action)
+        if action == "BLOCKED":
+            blocked_reasons.append({
+                "item_id": job.item_id,
+                "worker_id": worker_id,
+                "summary": str(body.get("summary") or ""),
+            })
         task_reviews.append({
             "review_job_id": job.review_job_id,
             "group_id": job.group_id,
@@ -1045,6 +1352,104 @@ def aggregate_task_review_results(
             finding["worker_id"] = worker_id
             observations.setdefault(finding_semantic_key(finding), []).append(finding)
 
+    # Explicit dispositions from the delta-reply contract.  A response that
+    # answers a canonical finding without re-raising it still must reach the
+    # consolidation pool, or the silence=approval close (and only that) would
+    # be able to retire a finding.  The canonical ledger row supplies the
+    # scope/severity, the response supplies the lifecycle decision, and
+    # consolidate_finding_observations keeps the decision only when nothing
+    # open contradicts it.
+    dispositions: list[dict[str, Any]] = []
+    for body in by_job.values():
+        worker_id = str(body.get("worker_id") or "")
+        re_raised_ids = {
+            str(item.get("finding_id") or item.get("id") or "").strip()
+            for item in body.get("findings") or []
+            if isinstance(item, dict)
+        }
+        for entry in body.get("finding_responses") or []:
+            if not isinstance(entry, Mapping):
+                continue
+            finding_id = str(entry.get("finding_id") or "").strip()
+            response = normalize_finding_status(None, entry.get("response"))
+            note = str(entry.get("note") or "")
+            if not finding_id or response == "OPEN":
+                continue
+            previous_row = previous_ledger.get(finding_id)
+            if previous_row is None or finding_id in re_raised_ids:
+                continue
+            item_id = str(body.get("item_id") or "")
+            if str(previous_row.get("item_id") or "") not in {"", item_id}:
+                continue
+            synth = copy.deepcopy(previous_row)
+            synth["finding_id"] = finding_id
+            synth["item_id"] = item_id
+            synth["group_id"] = str(body.get("group_id") or "")
+            synth.setdefault("scope", "item")
+            synth["worker_id"] = worker_id
+            synth["status"] = synth["decision"] = response
+            if note:
+                synth["resolution"] = note
+            observations.setdefault(finding_semantic_key(synth), []).append(synth)
+            dispositions.append({
+                "review_job_id": str(body.get("review_job_id") or ""),
+                "item_id": item_id,
+                "finding_id": finding_id,
+                "response": response,
+            })
+            logger.info(
+                "TASK_REVIEW_FINDING_DISPOSITIONED item_id=%s finding_id=%s "
+                "response=%s",
+                item_id,
+                finding_id,
+                response,
+            )
+
+    # Salvaged rows speak with the same authority as fresh verdicts: their
+    # action joins the round action and their findings join the observation
+    # pool (consolidation dedups them against the persisted ledger via the
+    # semantic key, so re-carrying them every round is idempotent).
+    for body in salvaged_rows:
+        worker_id = str(body.get("worker_id") or "")
+        if worker_id:
+            worker_ids.add(worker_id)
+        action = str(body.get("action") or "")
+        actions.add(action)
+        if action == "BLOCKED":
+            blocked_reasons.append({
+                "item_id": str(body.get("item_id") or ""),
+                "worker_id": worker_id,
+                "summary": str(body.get("summary") or ""),
+            })
+        item_findings = [
+            copy.deepcopy(item)
+            for item in body.get("findings") or []
+            if isinstance(item, dict)
+        ]
+        task_reviews.append({
+            "review_job_id": str(body.get("review_job_id") or ""),
+            "group_id": str(body.get("group_id") or ""),
+            "item_id": str(body.get("item_id") or ""),
+            "worker_id": worker_id,
+            "action": action,
+            "reviewed_task_hash": body.get("reviewed_task_hash"),
+            "reviewed_dependency_hash": body.get("reviewed_dependency_hash"),
+            "review_checks": copy.deepcopy(body.get("review_checks") or {}),
+            "finding_ids": sorted({
+                str(item.get("finding_id") or item.get("id"))
+                for item in item_findings
+                if (item.get("finding_id") or item.get("id"))
+            }),
+            "salvaged": True,
+        })
+        for finding in item_findings:
+            finding["group_id"] = str(body.get("group_id") or "")
+            finding["item_id"] = str(body.get("item_id") or "")
+            finding.setdefault("scope", "item")
+            finding.setdefault("related_item_ids", [])
+            finding["worker_id"] = worker_id
+            observations.setdefault(finding_semantic_key(finding), []).append(finding)
+
     ledger, disagreements = consolidate_finding_observations(
         observations,
         previous_ledger,
@@ -1057,10 +1462,11 @@ def aggregate_task_review_results(
         job.review_job_id for job in queue.jobs if job.status == "COMPLETED"
     }
     complete = (
-        bool(queue.jobs)
+        bool(queue.jobs or salvaged_rows)
         and len(completed_job_ids) == len(queue.jobs)
         and completed_job_ids == set(by_job)
     )
+    total_task_count = len(queue.jobs) + len(salvaged_rows)
     if not complete:
         # A missing/stale/unfinished task review is an execution-integrity
         # problem, not evidence that Solver should rewrite the plan.
@@ -1119,16 +1525,18 @@ def aggregate_task_review_results(
         "rejected_reviews": rejected,
         "identity_corrections": identity_corrections,
         "blocked_downgrades": blocked_downgrades,
+        "finding_dispositions": dispositions,
         "valid_worker_ids": sorted(worker_ids),
         "quorum": 1,
         "approval_count": task_approved,
         "distinct_review_fingerprint_count": len(task_reviews),
         "task_review_mode": True,
         "task_review_complete": complete,
-        "total_task_count": len(queue.jobs),
+        "total_task_count": total_task_count,
         "completed_task_count": sum(
             1 for job in queue.jobs if job.status == "COMPLETED"
-        ),
+        ) + len(salvaged_rows),
+        "salvaged_review_count": len(salvaged_rows),
         "task_queue_counts": queue_counts,
         "active_p0_p1_finding_ids": [item["finding_id"] for item in blocking],
         "affected_item_ids": affected_item_ids,
@@ -1137,8 +1545,19 @@ def aggregate_task_review_results(
         "failed_task_ids": failed_task_ids,
         "retryable_task_ids": retryable_task_ids,
         "blocked_task_ids": sorted(set(blocked_task_ids)),
+        "blocked_reasons": blocked_reasons,
+        "blocked_reason": (
+            "; ".join(
+                str(item.get("summary") or "").strip()
+                for item in blocked_reasons
+                if str(item.get("summary") or "").strip()
+            )
+            if action == "BLOCKED"
+            else ""
+        ),
         "decision_basis": [
-            f"tasks={len(queue.jobs)} completed={sum(1 for job in queue.jobs if job.status == 'COMPLETED')} "
+            f"tasks={total_task_count} completed={sum(1 for job in queue.jobs if job.status == 'COMPLETED') + len(salvaged_rows)} "
+            f"salvaged={len(salvaged_rows)} "
             f"approved={task_approved} active_blockers={len(blocking)} action={action}"
         ],
     }
@@ -1152,7 +1571,7 @@ def aggregate_task_review_results(
         }
         output["human_gate_request"] = _task_review_human_gate(
             complete=complete,
-            total=len(queue.jobs),
+            total=total_task_count,
             accepted=len(by_job),
             rejected=rejected,
             missing_job_ids=sorted(completed_job_ids - set(by_job) - rejected_job_ids),

@@ -834,6 +834,51 @@ def _partial_task_reviews(
     return reviews
 
 
+def _salvage_payload_from_report(report: Mapping[str, object]) -> dict[str, object] | None:
+    """Turn a task-review aggregate into the FAIL payload's salvage section.
+
+    The aggregate's ``task_reviews`` rows carry the ledger identity fields and
+    its ``findings`` carry the consolidated finding records; embedding each
+    item's findings into its row yields a self-contained salvage row the FSM
+    can store on the review state and the next round's fan-in can reuse
+    verbatim.
+    """
+
+    findings_by_item: dict[str, list[dict[str, object]]] = {}
+    for finding in report.get("findings") or []:
+        if not isinstance(finding, Mapping):
+            continue
+        item_id = str(finding.get("item_id") or "")
+        if item_id:
+            findings_by_item.setdefault(item_id, []).append(dict(finding))
+    rows: list[dict[str, object]] = []
+    for row in report.get("task_reviews") or []:
+        if not isinstance(row, Mapping):
+            continue
+        item_id = str(row.get("item_id") or "")
+        rows.append(
+            {
+                **dict(row),
+                "findings": list(findings_by_item.get(item_id, [])),
+            }
+        )
+    if not rows:
+        return None
+    return {
+        "task_reviews": [
+            dict(row)
+            for row in report.get("task_reviews") or []
+            if isinstance(row, Mapping)
+        ],
+        "findings": [
+            dict(finding)
+            for finding in report.get("findings") or []
+            if isinstance(finding, Mapping)
+        ],
+        "salvaged_task_reviews": rows,
+    }
+
+
 class AgentNodeJoiner:
     """Join agent worker replies into one deterministic node decision."""
 
@@ -935,8 +980,19 @@ class AgentNodeJoiner:
             aggregate: dict[str, object] = {"action": "FAIL"}
             if partial_reviews:
                 # The FSM folds these into the review ledger even on the
-                # FAIL -> RETRY path (see _select_review_jobs).
-                aggregate["task_reviews"] = partial_reviews
+                # FAIL -> RETRY path (see _select_review_jobs).  When the
+                # queue-mode fan-in can still normalize the surviving
+                # verdicts, carry the full salvage payload (rows + findings)
+                # so the retry re-dispatches only the tasks still missing.
+                salvage = (
+                    self._salvage_failed_round(results, failed)
+                    if self._task_review_queue is not None
+                    else None
+                )
+                if salvage is not None:
+                    aggregate.update(salvage)
+                else:
+                    aggregate["task_reviews"] = partial_reviews
             return NodeResult(
                 self._node_run_id,
                 "FAILED",
@@ -1050,6 +1106,57 @@ class AgentNodeJoiner:
             aggregate = {"action": actions[0], "worker_count": len(results)}
         return NodeResult(self._node_run_id, "SUCCEEDED", results, aggregate=aggregate)
 
+    def _salvage_failed_round(
+        self,
+        results: tuple[WorkerResult, ...],
+        failed: list[WorkerResult],
+    ) -> dict[str, object] | None:
+        """Normalize the surviving workers' verdicts through the real fan-in.
+
+        Running ``aggregate_task_review_results`` over the successful payloads
+        yields the same identity stamping, pseudo-blocked demotion, and finding
+        consolidation a healthy round gets, so the salvaged rows are exactly
+        what a retry's fan-in expects to receive back.  Any fan-in rejection
+        falls back to the slim ledger rows collected by
+        ``_partial_task_reviews``.
+        """
+
+        from ..zhongshu_review import aggregate_task_review_results
+
+        failed_ids = {result.worker_id for result in failed}
+        payloads: list[dict[str, object]] = []
+        for result in results:
+            if result.worker_id in failed_ids:
+                continue
+            payload = result.result_payload
+            if not isinstance(payload, Mapping):
+                continue
+            if str(payload.get("action") or "") not in _TASK_REVIEW_ACTIONS:
+                continue
+            merged = {**dict(payload), "worker_id": result.worker_id}
+            context = self._binding_contexts.get(result.worker_id)
+            if context and context.get("review_job_id"):
+                merged["review_job_id"] = str(context["review_job_id"])
+            payloads.append(merged)
+        if not payloads:
+            return None
+        try:
+            report = aggregate_task_review_results(
+                self._revision_id,
+                self._plan_hash,
+                self._task_review_queue,
+                payloads,
+                previous=self._previous_review,
+            )
+        except (ValueError, TypeError, KeyError) as error:
+            logger.warning(
+                "NODE_TASK_REVIEW_SALVAGE_FAILED node_run_id=%s error=%s",
+                self._node_run_id,
+                error,
+            )
+            return None
+        return _salvage_payload_from_report(report)
+
     def _join_task_review(self, results, worker_payloads, partial_reviews=()):
         from ..zhongshu_review import aggregate_task_review_results
         from ..zhongshu_review_queue import ReviewQueueError
@@ -1161,6 +1268,10 @@ class AgentNodeJoiner:
                 aggregate={
                     "action": "FAIL",
                     "task_reviews": report.get("task_reviews") or [],
+                    **(
+                        _salvage_payload_from_report(report)
+                        or {"task_reviews": report.get("task_reviews") or []}
+                    ),
                 },
                 failure=FailureRecord(
                     failure_id=f"{self._node_run_id}:NODE_TASK_REVIEW_RESULT_INVALID",

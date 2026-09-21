@@ -111,6 +111,39 @@ class StageResolutionTests(unittest.TestCase):
         self.assertIs(resolve_reply_stage({}, review), SolverStage.REVISE)
         self.assertIs(resolve_reply_stage({}, _context(plan=None).review), SolverStage.FORMALIZE)
 
+    def test_read_only_mode_cannot_override_a_revision_batch(self) -> None:
+        # Live regression (task-20260920-94c51b seq 10): a revision reply kept
+        # declaring the formalization mode, which silently skipped the batch
+        # validation and the scoped carry-forward, so the Solver rewrote an
+        # approved task and its approval was forfeited.  A finding_batch echo
+        # against an existing plan is structural evidence of the revise
+        # channel; the self-reported mode loses.
+        review = _context(plan=_plan()).review
+        contradictory = {
+            "mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY",
+            "finding_batch": {
+                "selected_finding_ids": ["finding-01"],
+                "remaining_finding_ids": [],
+            },
+        }
+        self.assertIs(resolve_reply_stage(contradictory, review), SolverStage.REVISE)
+        # An empty or missing batch carries no revise evidence.
+        self.assertIs(
+            resolve_reply_stage(
+                {
+                    "mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY",
+                    "finding_batch": {"selected_finding_ids": [], "remaining_finding_ids": []},
+                },
+                review,
+            ),
+            SolverStage.FORMALIZE,
+        )
+        # A batch without a plan is still formalization (first run).
+        self.assertIs(
+            resolve_reply_stage(contradictory, _context(plan=None).review),
+            SolverStage.FORMALIZE,
+        )
+
     def test_contract_stage_reads_the_explicit_key_with_legacy_fallback(self) -> None:
         self.assertIs(
             resolve_solver_stage({"solver_stage": "revise"}), SolverStage.REVISE
@@ -200,6 +233,58 @@ class SolverChannelIsolationTests(unittest.TestCase):
         )
         self.assertIs(formalize_reply.stage, SolverStage.FORMALIZE)
         self.assertEqual(formalize_reply.error, "")
+
+    def test_mode_contradiction_keeps_approved_tasks_frozen(self) -> None:
+        # End-to-end regression for task-20260920-94c51b seq 10: a revise
+        # reply that mislabels itself as formalization must still go through
+        # the scoped materialization, so an approved untargeted task survives
+        # verbatim and its Critic approval is not forfeited.
+        findings = (
+            _finding(1, "P1", item_id="item-001"),
+            _finding(2, "P1", item_id="item-002"),
+        )
+        review = replace(
+            _context(findings, plan=_plan()).review,
+            task_review_ledger=(
+                ReviewTaskRecord("item-007", "h7", "d7", "APPROVED", 0),
+            ),
+        )
+        rewritten = _plan()
+        next(item for item in rewritten["items"] if item["item_id"] == "item-007")[
+            "title"
+        ] = "unauthorized rewrite"
+        outcome = process_solver_reply(
+            {
+                "mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY",
+                "action": "READY_FOR_CRITIC",
+                "plan": rewritten,
+                "finding_batch": {
+                    "selected_finding_ids": ["finding-01", "finding-02"],
+                    "remaining_finding_ids": [],
+                },
+                "finding_resolutions": [
+                    {
+                        "finding_id": "finding-01",
+                        "resolution": "RESOLVED",
+                        "note": "fixed",
+                    },
+                    {
+                        "finding_id": "finding-02",
+                        "resolution": "RESOLVED",
+                        "note": "fixed",
+                    },
+                ],
+            },
+            review,
+        )
+        self.assertIs(outcome.stage, SolverStage.REVISE)
+        self.assertEqual(outcome.error, "")
+        materialized = outcome.materialized
+        self.assertIsNotNone(materialized)
+        item7 = next(
+            item for item in materialized["items"] if item["item_id"] == "item-007"
+        )
+        self.assertNotIn("title", item7)
 
 
 class SolverDispatchIsolationTests(unittest.TestCase):

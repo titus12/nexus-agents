@@ -510,6 +510,87 @@ class ZhongshuTaskReviewQueueV2Tests(unittest.TestCase):
         )
 
 
+    def test_salvaged_verdicts_count_towards_an_incremental_retry(self) -> None:
+        # A failed wave's CHANGES_REQUIRED verdicts are replayed by the retry's
+        # fan-in: the round stays complete and its action still reflects the
+        # carried rejection even though only the missing tasks re-dispatched.
+        full = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        job_a, job_b, salvage_job = full.jobs[0], full.jobs[1], full.jobs[2]
+        queue = TaskReviewQueue(
+            full.revision_id,
+            full.plan_hash,
+            [replace(job, status=COMPLETED) for job in (job_a, job_b)],
+        )
+        salvage_row = {
+            "review_job_id": salvage_job.review_job_id,
+            "group_id": salvage_job.group_id,
+            "item_id": salvage_job.item_id,
+            "worker_id": "critic-salvaged",
+            "action": "TASK_CHANGES_REQUIRED",
+            "reviewed_task_hash": salvage_job.task_hash,
+            "reviewed_dependency_hash": salvage_job.dependency_hash,
+            "review_checks": {},
+            "findings": [
+                {"finding_id": "f-salv", "severity": "P1", "claim": "stale blocker"}
+            ],
+        }
+        report = aggregate_task_review_results(
+            queue.revision_id,
+            queue.plan_hash,
+            queue,
+            [_result(job_a, "TASK_APPROVED", queue.plan_hash),
+             _result(job_b, "TASK_APPROVED", queue.plan_hash)],
+            previous={"salvaged_task_reviews": [salvage_row]},
+        )
+        self.assertTrue(report["task_review_complete"])
+        self.assertEqual(report["total_task_count"], 3)
+        self.assertEqual(report["completed_task_count"], 3)
+        self.assertEqual(report["salvaged_review_count"], 1)
+        self.assertEqual(report["action"], "REQUEST_SOLVER_REVISION")
+        carried = [
+            row for row in report["task_reviews"] if row.get("salvaged")
+        ]
+        self.assertEqual([row["item_id"] for row in carried], [salvage_job.item_id])
+        self.assertIn("f-salv", report["active_p0_p1_finding_ids"])
+        finding = next(
+            item for item in report["findings"] if item["finding_id"] == "f-salv"
+        )
+        self.assertEqual(finding["item_id"], salvage_job.item_id)
+
+    def test_fresh_result_replaces_a_salvaged_row_for_the_same_item(self) -> None:
+        # A re-dispatched task invalidates its salvage row: only the fresh
+        # verdict may speak for the item.
+        full = build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash")
+        job = full.jobs[0]
+        queue = TaskReviewQueue(
+            full.revision_id,
+            full.plan_hash,
+            [replace(job, status=COMPLETED)],
+        )
+        salvage_row = {
+            "review_job_id": job.review_job_id,
+            "group_id": job.group_id,
+            "item_id": job.item_id,
+            "worker_id": "critic-salvaged",
+            "action": "TASK_CHANGES_REQUIRED",
+            "reviewed_task_hash": "stale-hash",
+            "reviewed_dependency_hash": job.dependency_hash,
+            "review_checks": {},
+            "findings": [],
+        }
+        report = aggregate_task_review_results(
+            queue.revision_id,
+            queue.plan_hash,
+            queue,
+            [_result(job, "TASK_APPROVED", queue.plan_hash)],
+            previous={"salvaged_task_reviews": [salvage_row]},
+        )
+        rows = [row for row in report["task_reviews"] if row["item_id"] == job.item_id]
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("salvaged", rows[0])
+        self.assertEqual(report["action"], "APPROVE_FREEZE")
+
+
 def _result(job, action: str, plan_hash: str) -> dict:
     # Mirrors the payload the joiner hands to aggregation: review_job_id is
     # injected from the binding context, so it survives even when a worker

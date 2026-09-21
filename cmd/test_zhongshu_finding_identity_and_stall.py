@@ -478,6 +478,126 @@ class RewordedFindingStaysOneLedgerEntryTests(unittest.TestCase):
         self.assertEqual(entry["observations"][0]["finding_id"], "finding-000002")
 
 
+class CrossLanguageRestatementRebindTests(unittest.TestCase):
+    """The ingest must unify a language-switched re-raise onto the stored id.
+
+    Live run task-20260920-bbd659: the critic alternated Chinese and English
+    across rounds and minted seven finding ids for three real issues, which
+    reset the stuck counters and inflated the blocker count.  The orchestrator
+    now stamps the identity mechanically instead of trusting the echo rule.
+    """
+
+    def _existing(self, **overrides) -> Finding:
+        fields = dict(
+            finding_id="finding-canonical",
+            severity="P1",
+            status="OPEN",
+            group_id="group-000001",
+            item_id="item-000001",
+            claim=(
+                "要求将 AGENT_SOLVER_ID 扩展为组并支持 round-robin 负载均衡，"
+                "但未定义 JsonSchema 结构与 fallback 语义"
+            ),
+            required_action="补充 JsonSchema 契约与失效行为",
+            stuck_rounds=2,
+        )
+        fields.update(overrides)
+        return Finding(**fields)
+
+    def _incoming(self, **overrides) -> Finding:
+        fields = dict(
+            finding_id="finding-minted",
+            severity="P1",
+            status="OPEN",
+            group_id="group-000001",
+            item_id="item-000001",
+            claim=(
+                "AGENT_SOLVER_ID group expansion lacks a JsonSchema contract "
+                "and fallback semantics"
+            ),
+            required_action="define the schema contract",
+        )
+        fields.update(overrides)
+        return Finding(**fields)
+
+    def test_cross_language_restatement_rebinds_to_the_stored_id(self) -> None:
+        from orchestrator.domain.policies.zhongshu import (
+            rebind_restatement_findings,
+        )
+
+        existing = self._existing()
+        incoming = self._incoming()
+
+        rebound, rebinds = rebind_restatement_findings((existing,), (incoming,))
+
+        self.assertEqual(rebound[0].finding_id, "finding-canonical")
+        self.assertEqual(len(rebinds), 1)
+        self.assertEqual(rebinds[0]["from"], "finding-minted")
+        self.assertEqual(rebinds[0]["to"], "finding-canonical")
+        self.assertEqual(rebinds[0]["shared_anchor"], "AGENT_SOLVER_ID")
+
+    def test_cross_language_without_a_shared_anchor_stays_separate(self) -> None:
+        from orchestrator.domain.policies.zhongshu import (
+            rebind_restatement_findings,
+        )
+
+        existing = self._existing(
+            claim="未规定并发观测的计量单位与基线来源，无法形成稳定判定",
+        )
+        incoming = self._incoming(
+            claim="the concurrency signal lacks a measurement unit and baseline",
+        )
+
+        rebound, rebinds = rebind_restatement_findings((existing,), (incoming,))
+
+        self.assertEqual(rebound[0].finding_id, "finding-minted")
+        self.assertEqual(rebinds, [])
+
+    def test_same_language_rewording_is_not_rebound(self) -> None:
+        # Inside one language the similarity gate and the echo instruction
+        # stay responsible; the rebind must not grab prose paraphrases.
+        from orchestrator.domain.policies.zhongshu import (
+            rebind_restatement_findings,
+        )
+
+        existing = self._existing()
+        incoming = self._incoming(
+            claim="要求将 AGENT_SOLVER_ID 扩展为组，但 JsonSchema 契约与 fallback 语义仍未定义",
+        )
+
+        rebound, rebinds = rebind_restatement_findings((existing,), (incoming,))
+
+        self.assertEqual(rebound[0].finding_id, "finding-minted")
+        self.assertEqual(rebinds, [])
+
+    def test_resolved_finding_is_not_a_rebind_target(self) -> None:
+        from orchestrator.domain.policies.zhongshu import (
+            rebind_restatement_findings,
+        )
+
+        existing = self._existing(status="RESOLVED")
+
+        rebound, rebinds = rebind_restatement_findings(
+            (existing,), (self._incoming(),)
+        )
+
+        self.assertEqual(rebound[0].finding_id, "finding-minted")
+        self.assertEqual(rebinds, [])
+
+    def test_rebind_lets_the_stuck_counter_accrue_on_one_id(self) -> None:
+        from orchestrator.domain.states import _merge_and_close_findings
+
+        existing = self._existing()
+        incoming = self._incoming()
+
+        merged = _merge_and_close_findings((existing,), (incoming,), [])
+
+        self.assertEqual(len(merged), 1)
+        (finding,) = merged
+        self.assertEqual(finding.finding_id, "finding-canonical")
+        self.assertEqual(finding.stuck_rounds, 3)
+
+
 class StuckFindingEscalationTests(unittest.TestCase):
     """A stable identity is what lets the stuck counter finally accumulate."""
 

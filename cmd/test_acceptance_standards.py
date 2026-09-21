@@ -75,6 +75,18 @@ class AcceptanceStandardHintTests(unittest.TestCase):
         self.assertIn("execution phase", capsule)
         self.assertNotIn("five recipe elements", capsule)
 
+    def test_capsule_finding_gate_is_hard_and_language_stable(self) -> None:
+        capsule = _task_capsule_text(
+            job=type("Job", (), {"review_job_id": "job-1", "item_id": "item-000001"})(),
+            item=None,
+            group=None,
+        )
+
+        self.assertIn("hard output gate", capsule)
+        self.assertIn("MUST reuse its finding_id verbatim", capsule)
+        self.assertIn("same language as that canonical claim", capsule)
+        self.assertIn("Chinese and English", capsule)
+
 
 if __name__ == "__main__":
     unittest.main()

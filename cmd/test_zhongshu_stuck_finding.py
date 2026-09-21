@@ -13,6 +13,7 @@ from orchestrator.domain.events import DomainEvent
 from orchestrator.domain.findings import Finding
 from orchestrator.domain.policies.zhongshu import (
     age_unresolved_findings,
+    blocker_fingerprint,
     stuck_blockers,
 )
 from orchestrator.domain.states import ZhongshuCriticState
@@ -226,6 +227,99 @@ class ZhongshuStuckFindingTests(unittest.TestCase):
 
         self.assertEqual(decision.transition.action, "HUMAN_GATE")
         self.assertEqual(decision.transition.reason_code, "ZHONGSHU_STUCK_FINDING")
+
+
+class ZhongshuAnalystEvidenceFuseTests(unittest.TestCase):
+    """Evidence rounds must be bound by the same convergence fuses.
+
+    The live run task-20260920-94c51b spun Critic -> Analyst -> Solver forever
+    because REQUEST_ANALYST_EVIDENCE bypassed the gate: the stuck threshold
+    was already crossed and the no-progress exit was unreachable.
+    """
+
+    def setUp(self) -> None:
+        self.state = ZhongshuCriticState()
+        self.reducer = LinearContextReducer()
+
+    def _context(
+        self,
+        findings: tuple[Finding, ...],
+        *,
+        no_progress_count: int = 0,
+        last_reply_fingerprint: str | None = None,
+    ) -> WorkflowContext:
+        return WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("ZHONGSHU_CRITIC", 6, "2026-09-13T00:00:00Z"),
+            recovery=RecoveryState(
+                no_progress_count=no_progress_count,
+                max_no_progress=3,
+                max_stuck_finding_rounds=3,
+            ),
+            review=ReviewState(
+                revision_id="task-1:ZHONGSHU_ANALYST:2",
+                findings=findings,
+                zhongshu_revision_round=2,
+                max_zhongshu_revision_rounds=8,
+                plan_hash="plan-hash",
+                last_reply_fingerprint=last_reply_fingerprint,
+            ),
+        )
+
+    def _event(self, finding: Finding) -> DomainEvent:
+        return DomainEvent(
+            "NODE_COMPLETED",
+            "task-1",
+            6,
+            {
+                "action": "REQUEST_ANALYST_EVIDENCE",
+                "findings": [_finding_payload(finding)],
+            },
+            "2026-09-13T00:00:00Z",
+        )
+
+    def test_analyst_round_hits_the_stuck_fuse(self) -> None:
+        context = self._context((_finding("f-1", stuck_rounds=3),))
+
+        decision = self.state.handle(context, self._event(_finding("f-1")))
+
+        self.assertEqual(decision.transition.action, "HUMAN_GATE")
+        self.assertEqual(decision.transition.reason_code, "ZHONGSHU_STUCK_FINDING")
+
+        after = self.reducer.apply(WorkflowSnapshot("task-1", context, 0), decision)
+        self.assertEqual(after.context.progression.state, "HUMAN_GATE")
+
+    def test_repeated_analyst_rounds_accumulate_no_progress(self) -> None:
+        # A P0 residual disables the P1-followup freeze, so the third round
+        # with an unchanged fingerprint must hit the no-progress block.
+        finding = _finding("f-1", severity="P0")
+        context = self._context(
+            (finding,),
+            no_progress_count=2,
+            last_reply_fingerprint=blocker_fingerprint((finding,)),
+        )
+
+        decision = self.state.handle(context, self._event(finding))
+
+        self.assertEqual(decision.transition.action, "BLOCKED")
+        self.assertEqual(decision.transition.reason_code, "ZHONGSHU_NO_PROGRESS")
+
+    def test_fresh_findings_keep_the_analyst_loop_going(self) -> None:
+        finding = _finding("f-1")
+        context = self._context(
+            (finding,),
+            no_progress_count=2,
+            last_reply_fingerprint="different",
+        )
+
+        decision = self.state.handle(context, self._event(finding))
+
+        self.assertEqual(decision.transition.action, "REQUEST_ANALYST_EVIDENCE")
+        self.assertEqual(decision.update.recovery.no_progress_count, 0)
+        self.assertEqual(
+            decision.update.review.last_reply_fingerprint,
+            blocker_fingerprint((finding,)),
+        )
 
 
 if __name__ == "__main__":

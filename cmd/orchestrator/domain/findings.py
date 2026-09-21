@@ -12,6 +12,8 @@ _CRITIC_DECISION_STATUS = {
     "WONT_FIX": "WONT_FIX",
     "DEFERRED": "DEFERRED",
     "ACCEPTED_RISK": "DEFERRED",
+    "ACCEPT": "DEFERRED",
+    "ACCEPTED": "DEFERRED",
     # The claim cannot be verified within this run (no authority to measure,
     # no data source).  Closing with a verification recipe is convergence,
     # not evasion: the recipe rides the resolution text as a follow-up.

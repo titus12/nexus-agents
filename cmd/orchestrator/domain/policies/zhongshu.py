@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 import hashlib
+import re
 
 from ..context import ReviewState
 from ..findings import Finding
@@ -93,6 +94,96 @@ def merge_findings(
         finding = value if isinstance(value, Finding) else Finding.from_dict(dict(value))
         merged[_finding_identity(finding)] = finding
     return tuple(merged.values())
+
+
+# --- cross-language restatement gate ---------------------------------------
+#
+# The task-review Critic re-raises chronic complaints across rounds, and the
+# live run task-20260920-bbd659 showed it alternating between Chinese and
+# English while minting a fresh finding_id each time (one item collected seven
+# ids for three real issues).  Text-similarity dedup cannot bridge a language
+# switch (those pairs scored 0.11-0.19), so the ingest folds such restatements
+# back onto the stored finding mechanically: the orchestrator stamps the
+# identity, exactly like it stamps revision ids and plan hashes.  The match is
+# deliberately narrow — different script AND a shared code anchor (identifier
+# or file:line) on the same item — because a false merge silently replaces the
+# stored claim, while prose-only rewordings inside one language stay the job of
+# the similarity gate and the finding_id echo instruction.
+
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_CODE_ANCHOR_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9_\-.]*\.py:\d+"        # file:line references
+    r"|[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+"   # snake_case identifiers
+    r"|[a-z]+[A-Z][A-Za-z0-9]+"                # camelCase identifiers
+    r"|[A-Z][A-Z0-9_]{3,}"                     # shouting constants
+)
+_REBIND_ANCHOR_STOPWORDS = frozenset(
+    {"UNKNOWN", "RESOLVED", "OPEN", "PENDING", "REOPENED", "TODO"}
+)
+
+
+def _claim_script(claim: str) -> str:
+    cjk = len(_CJK_RE.findall(claim))
+    return "cjk" if cjk * 5 >= len(claim) else "latin"
+
+
+def _code_anchors(claim: str) -> frozenset[str]:
+    anchors = {
+        match.group(0).upper()
+        for match in _CODE_ANCHOR_RE.finditer(claim)
+    }
+    return frozenset(anchors - _REBIND_ANCHOR_STOPWORDS)
+
+
+def rebind_restatement_findings(
+    current: Iterable[Finding],
+    incoming: Iterable[Finding | Mapping[str, object]],
+) -> tuple[tuple[Finding, ...], list[dict[str, str]]]:
+    """Rewrite cross-language restatements onto the stored finding identity.
+
+    Returns the (possibly re-keyed) incoming findings plus a report of every
+    rebind for the caller to log.  Only an inbound finding that switches the
+    claim language while sharing a code anchor with an active finding on the
+    same item is rebound; everything else keeps the id the Critic minted.
+    """
+
+    current_findings = [
+        finding if isinstance(finding, Finding) else Finding.from_dict(dict(finding))
+        for finding in current or ()
+    ]
+    rebinds: list[dict[str, str]] = []
+    rebound: list[Finding] = []
+    for value in incoming or ():
+        finding = (
+            value if isinstance(value, Finding) else Finding.from_dict(dict(value))
+        )
+        claim = str(finding.claim or "")
+        item_id = str(finding.item_id or "").strip()
+        anchors = _code_anchors(claim)
+        if item_id and anchors:
+            for existing in current_findings:
+                if not existing.active:
+                    continue
+                if str(existing.item_id or "").strip() != item_id:
+                    continue
+                existing_claim = str(existing.claim or "")
+                if _claim_script(existing_claim) == _claim_script(claim):
+                    continue
+                shared = anchors & _code_anchors(existing_claim)
+                if not shared:
+                    continue
+                rebinds.append(
+                    {
+                        "from": str(finding.finding_id or ""),
+                        "to": str(existing.finding_id or ""),
+                        "item_id": item_id,
+                        "shared_anchor": sorted(shared)[0],
+                    }
+                )
+                finding = replace(finding, finding_id=existing.finding_id)
+                break
+        rebound.append(finding)
+    return tuple(rebound), rebinds
 
 
 def age_unresolved_findings(

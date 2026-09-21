@@ -169,6 +169,13 @@ class ReviewState:
     # The orchestrator-owned canonical task graph.  It is the base the Solver
     # patches with bounded ``changes`` and the source of the plan hash.
     plan: dict[str, object] | None = None
+    # Full per-task review rows salvaged from a failed Critic wave (one worker
+    # died after the others delivered usable verdicts).  A retry re-dispatches
+    # only the tasks still missing; these rows stand in for the finished ones
+    # so the retry's fan-in still sees their verdicts and findings.  Each row
+    # stays valid only while its reviewed content/dependency hashes match the
+    # live plan; a fresh verdict for the same item replaces the row.
+    salvaged_task_reviews: tuple[dict[str, object], ...] = ()
 
     def next_menxia_item(self) -> ReviewTaskItem | None:
         completed = set(self.completed_item_ids)
@@ -339,6 +346,7 @@ class ReviewUpdate:
     item_workflows: tuple[ItemWorkflow, ...] | None = None
     requirements: tuple[dict[str, object], ...] | None = None
     plan: dict[str, object] | None = None
+    salvaged_task_reviews: tuple[dict[str, object], ...] | None = None
 
 
 def apply_review_update(
@@ -463,6 +471,11 @@ def apply_review_update(
             if update.plan is not None
             else current.plan if current else None
         ),
+        salvaged_task_reviews=(
+            update.salvaged_task_reviews
+            if update.salvaged_task_reviews is not None
+            else current.salvaged_task_reviews if current else ()
+        ),
     )
 
 
@@ -559,6 +572,9 @@ def context_to_dto(context: WorkflowContext) -> dict[str, object]:
             asdict(workflow) for workflow in context.review.item_workflows
         ]
         review["requirements"] = [dict(item) for item in context.review.requirements]
+        review["salvaged_task_reviews"] = [
+            dict(row) for row in context.review.salvaged_task_reviews
+        ]
     return {
         "identity": asdict(context.identity),
         "request": asdict(context.request),
@@ -668,6 +684,11 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             ),
             requirements=requirements,
             plan=_plan_from_dto(review_value.get("plan")),
+            salvaged_task_reviews=tuple(
+                dict(row)
+                for row in review_value.get("salvaged_task_reviews", [])
+                if isinstance(row, Mapping)
+            ),
         )
 
     gate_value = value.get("human_gate")
