@@ -639,6 +639,48 @@ def validate_zhongshu_evidence_packet(
     return ""
 
 
+def _demote_evidence_update_overflow(
+    body: dict[str, Any],
+    *,
+    worker_id: str,
+) -> list[dict[str, Any]]:
+    """Demote per-worker evidence overflow instead of failing the round.
+
+    The per-worker cap is a prioritization budget, not a protocol wall: a
+    verbose worker used to void a whole healthy round and force every peer
+    to re-run. The reply order is the worker's own priority signal, so the
+    prefix within budget is kept and the remainder is demoted to the merged
+    packet's ``deferred_evidence_updates`` for audit. Malformed or contract
+    violating updates inside the kept prefix still fail validation.
+    """
+    updates = body.get("evidence_updates")
+    if not isinstance(updates, list):
+        return []
+    if len(updates) <= ANALYST_MAX_EVIDENCE_UPDATES_PER_WORKER:
+        return []
+    demoted = updates[ANALYST_MAX_EVIDENCE_UPDATES_PER_WORKER:]
+    body["evidence_updates"] = updates[:ANALYST_MAX_EVIDENCE_UPDATES_PER_WORKER]
+    for update in demoted:
+        if isinstance(update, dict):
+            update.setdefault("worker_id", worker_id)
+    logger.warning(
+        "ZHONGSHU_EVIDENCE_PACKET_UPDATES_DEMOTED worker_id=%s kept=%d "
+        "deferred=%d deferred_ids=%s",
+        worker_id,
+        ANALYST_MAX_EVIDENCE_UPDATES_PER_WORKER,
+        len(demoted),
+        json.dumps(
+            [
+                str(item.get("evidence_id") or "")
+                for item in demoted
+                if isinstance(item, dict)
+            ],
+            ensure_ascii=False,
+        ),
+    )
+    return demoted
+
+
 def merge_analyst_evidence(
     task_id: str,
     revision_id: str,
@@ -670,6 +712,7 @@ def merge_analyst_evidence(
     project_context: dict[str, Any] = {}
     worker_evidence: dict[str, Any] = {}
     updates: list[dict[str, Any]] = []
+    deferred_updates: list[dict[str, Any]] = []
     questions_for_solver: list[Any] = []
     evidence_requests: list[Any] = []
     questions_for_user: list[Any] = []
@@ -686,6 +729,9 @@ def merge_analyst_evidence(
             _analyst_worker_body(result),
             canonical_requirements,
             worker_id=worker_id,
+        )
+        deferred_updates.extend(
+            _demote_evidence_update_overflow(body, worker_id=worker_id)
         )
         reason = validate_zhongshu_evidence_packet(
             body,
@@ -777,6 +823,23 @@ def merge_analyst_evidence(
 
     if not requirement_by_id:
         raise ValueError("Analyst results contain no requirements")
+    merged_updates = merge_evidence_updates(updates)
+    kept_evidence_ids = {
+        str(item.get("evidence_id") or "")
+        for item in merged_updates
+        if isinstance(item, dict) and item.get("evidence_id")
+    }
+    # Demoted overflow stays auditable but out of the decision path: entries
+    # already reported within budget by any worker are duplicates and drop.
+    deferred_unique = merge_evidence_updates(deferred_updates)
+    deferred_updates_final = [
+        item
+        for item in deferred_unique
+        if not (
+            isinstance(item, dict)
+            and str(item.get("evidence_id") or "") in kept_evidence_ids
+        )
+    ]
     packet = {
         "plan_id": f"evidence-{task_id}-{revision_id}",
         "plan_revision_id": revision_id,
@@ -795,7 +858,8 @@ def merge_analyst_evidence(
         "non_goals": union_records(constraints),
         "project_context": project_context,
         "confirmed_facts": confirmed_facts,
-        "evidence_updates": merge_evidence_updates(updates),
+        "evidence_updates": merged_updates,
+        "deferred_evidence_updates": deferred_updates_final,
         "evidence_requests": evidence_requests[:ANALYST_MAX_EVIDENCE_REQUESTS],
         "worker_evidence": worker_evidence,
         "protected_paths": protected_paths,
