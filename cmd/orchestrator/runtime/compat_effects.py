@@ -198,6 +198,15 @@ class MulticaTransportAdapter:
             error_message="remote run reported failure" if status == "FAILED" else None,
         )
 
+    def cancel_runs(self, request: PollRequest) -> list[str]:
+        external = self._requests.get(request.request_id)
+        if external is None:
+            return []
+        cancel = getattr(self._adapter, "cancel_stale_runs", None)
+        if not callable(cancel):
+            return []
+        return list(cancel(external) or [])
+
     def lookup(self, operation_id: str) -> DispatchReceipt | None:
         for request in self._requests.values():
             finder = getattr(self._adapter, "find_existing_request", None)

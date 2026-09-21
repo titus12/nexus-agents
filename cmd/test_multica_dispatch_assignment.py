@@ -26,12 +26,16 @@ def _request(**overrides) -> AgentRequest:
 
 
 class MulticaDispatchAssignmentTests(unittest.TestCase):
-    """Dispatch must snapshot runs, assign the agent, then post the request.
+    """Dispatch must snapshot runs, assign the agent, sweep stale live runs,
+    then post the request.
 
     Multica triggers the Agent runtime on issue assignment, so the assignment
     has to happen before the structured comment is posted; the run that the
     assignment fires is later correlated by the run-id watermark rather than by
-    a trigger comment id.
+    a trigger comment id.  Any live run for the same agent is cancelled before
+    the comment is posted — manual assignments, leftover runs, and the direct
+    run our own assign step just fired — because none of them can ever see the
+    payload and Multica would merge the fresh run behind them.
     """
 
     def _adapter(self, directory: str) -> MulticaCliAdapter:
@@ -59,8 +63,10 @@ class MulticaDispatchAssignmentTests(unittest.TestCase):
             calls[1][:5],
             ("issue", "update", "SER-1", "--assignee-id", "agent-1"),
         )
-        self.assertEqual(calls[2][:4], ("issue", "comment", "add", "SER-1"))
-        self.assertEqual(len(calls), 3)
+        # Stale live-run sweep for the same agent, then the trigger comment.
+        self.assertEqual(calls[2][:3], ("issue", "runs", "SER-1"))
+        self.assertEqual(calls[3][:4], ("issue", "comment", "add", "SER-1"))
+        self.assertEqual(len(calls), 4)
 
     def test_the_posted_comment_carries_the_structured_dispatch_payload(self) -> None:
         captured: dict[str, str] = {}

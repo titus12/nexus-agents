@@ -122,6 +122,10 @@ class AgentTransportPort(Protocol):
         """Return a completed result when the remote artifact already exists, without dispatching again."""
         return None
 
+    def cancel_runs(self, request: PollRequest) -> list[str]:
+        """Best-effort cancel non-terminal remote runs correlated to a request."""
+        return []
+
 
 class DomainEventInbox(Protocol):
     def next(self, task_id: str) -> DomainEvent | None: ...

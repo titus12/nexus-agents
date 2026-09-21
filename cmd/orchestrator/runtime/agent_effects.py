@@ -162,6 +162,18 @@ class AgentWorkerRunner:
             datetime.now(timezone.utc).timestamp() + self._timeout_seconds,
             timezone.utc,
         ).isoformat()
+        logger.info(
+            "AGENT_DISPATCH_START task_id=%s request_id=%s phase=%s role=%s "
+            "timeout_seconds=%s deadline_at=%s max_polls=%s poll_interval=%s",
+            request.task_id,
+            dispatch.request_id,
+            dispatch.phase,
+            dispatch.role,
+            self._timeout_seconds,
+            deadline_at,
+            self._max_polls,
+            self._poll_interval,
+        )
         lease_id: str | None = None
         if self._admission is not None:
             worker_id = str(payload.get("worker_id") or dispatch.agent_id)
@@ -251,6 +263,19 @@ class AgentWorkerRunner:
                             request, dispatch, receipt, poll, deadline_at, salvaged
                         )
                     failure = self._remote_failure(request, status, receipt)
+                    logger.warning(
+                        "REMOTE_RUN_FAILED task_id=%s request_id=%s "
+                        "operation_id=%s remote_status=%s remote_error=%s "
+                        "error_code=%s retryable=%s deadline_at=%s",
+                        request.task_id,
+                        poll.request_id,
+                        receipt.operation_id,
+                        status.status,
+                        status.error_message or "",
+                        failure.error_code,
+                        failure.retryable,
+                        deadline_at,
+                    )
                     return EffectOutcome(
                         status="FAILED",
                         event_name="FAIL",
@@ -279,6 +304,20 @@ class AgentWorkerRunner:
             else:
                 code = "AGENT_TIMEOUT"
                 message = "agent run did not reach a terminal state before deadline"
+            # The remote run keeps consuming tokens after this give-up, and
+            # the FSM retry's new run would be merged/queued behind it (live
+            # incident task-20260920-3c6b68).  Cancel the stale runs first.
+            self._cancel_remote_runs(poll)
+            logger.warning(
+                "REMOTE_RUN_TERMINAL_STATE_NOT_REACHED task_id=%s request_id=%s "
+                "operation_id=%s error_code=%s last_status=%s deadline_at=%s",
+                request.task_id,
+                correlated_request_id,
+                receipt.operation_id,
+                code,
+                last_status.status if last_status else "none",
+                deadline_at,
+            )
             failure = self._failure(
                 request,
                 stage="remote_run",
@@ -304,6 +343,30 @@ class AgentWorkerRunner:
         finally:
             if lease_id is not None:
                 self._admission.release(lease_id)
+
+    def _cancel_remote_runs(self, poll: PollRequest) -> None:
+        """Best-effort stop the stale remote runs before the FSM retries."""
+
+        cancel = getattr(self._transport, "cancel_runs", None)
+        if not callable(cancel):
+            return
+        try:
+            cancelled = cancel(poll)
+        except Exception as error:
+            logger.warning(
+                "AGENT_REMOTE_RUN_CANCEL_ERROR task_id=%s request_id=%s error=%s",
+                poll.task_id,
+                poll.request_id,
+                str(error)[:300],
+            )
+            return
+        if cancelled:
+            logger.warning(
+                "AGENT_REMOTE_RUN_CANCEL_ISSUED task_id=%s request_id=%s runs=%s",
+                poll.task_id,
+                poll.request_id,
+                ",".join(str(item) for item in cancelled),
+            )
 
     def _completed(
         self,

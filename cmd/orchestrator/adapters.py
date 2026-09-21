@@ -295,24 +295,104 @@ class MulticaCliAdapter:
             except OSError:
                 pass
 
-    def _capture_run_watermark(self, issue_id: str, idempotency_key: str) -> None:
+    def _capture_run_watermark(
+        self, issue_id: str, idempotency_key: str
+    ) -> set[str] | None:
         """Record the issue's run ids immediately before a dispatch.
 
         Switching the issue assignee makes Multica create a *direct* run that
         carries no ``trigger_comment_id``.  Such a run can only be recognised
         by the delta against this snapshot, which avoids comparing the
         orchestrator's sub-second dispatch time with Multica's
-        second-granularity ``created_at``.
+        second-granularity ``created_at``.  Returns the captured ids (or
+        ``None`` when the snapshot failed) so the dispatcher can also cancel
+        stale live runs predating this dispatch.
         """
 
         if not issue_id or not idempotency_key:
-            return
+            return None
         run_ids = self._issue_run_ids(issue_id)
         if run_ids is None:
-            return
+            return None
         with self._dispatch_index_lock:
             self._run_watermarks[str(idempotency_key)] = sorted(run_ids)
             self._save_dispatch_index()
+        return run_ids
+
+    def _cancel_stale_live_runs(self, issue_id: str, request: AgentRequest) -> None:
+        """Cancel live runs for the same agent before the trigger comment lands.
+
+        Any run that is alive when this dispatch fires (a manual issue
+        assignment, or the *direct* run our own assign step just created) was
+        started without the structured payload and can never see it: the
+        trigger comment does not exist yet.  Multica merges runs sharing one
+        ``(issue, agent)`` target by cancelling or queueing the newer comment
+        run behind the older one, so a live run starves the fresh dispatch
+        (live incidents task-20260920-ac132f and task-20260920-599525).  The
+        comment run that follows this sweep runs standalone and reads the
+        payload from the trigger comment, which is the pattern proven by
+        task-20260920-3c6b68.
+        """
+
+        if not request.agent_id:
+            return
+        try:
+            value = self._run_with_read_retry(
+                "issue", "runs", issue_id, "--output", "json"
+            )
+        except Exception as error:
+            logger.warning(
+                "AGENT_STRAY_RUN_LOOKUP_FAILED task_id=%s request_id=%s "
+                "issue_id=%s error=%s",
+                request.task_id,
+                request.request_id,
+                issue_id,
+                str(error)[:300],
+            )
+            return
+        runs = value if isinstance(value, list) else (
+            value.get("runs", value.get("items", []))
+            if isinstance(value, dict)
+            else []
+        )
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            run_id = str(run.get("id") or "")
+            if not run_id:
+                continue
+            if str(run.get("agent_id") or "") != str(request.agent_id):
+                continue
+            status = self._normalize_run_status(run.get("status"))
+            if status in {"completed", "failed"}:
+                continue
+            try:
+                self._run(
+                    "issue", "cancel-task", run_id, "--issue", issue_id,
+                    "--output", "json",
+                )
+            except Exception as error:
+                logger.warning(
+                    "AGENT_STRAY_RUN_CANCEL_FAILED task_id=%s request_id=%s "
+                    "issue_id=%s run_id=%s status=%s error=%s",
+                    request.task_id,
+                    request.request_id,
+                    issue_id,
+                    run_id,
+                    status,
+                    str(error)[:300],
+                )
+                continue
+            logger.warning(
+                "AGENT_STRAY_RUN_CANCELLED task_id=%s request_id=%s "
+                "issue_id=%s run_id=%s kind=%s previous_status=%s",
+                request.task_id,
+                request.request_id,
+                issue_id,
+                run_id,
+                str(run.get("kind") or ""),
+                status,
+            )
 
     def _issue_run_ids(self, issue_id: str) -> set[str] | None:
         try:
@@ -801,6 +881,7 @@ class MulticaCliAdapter:
         self._capture_run_watermark(issue_id, request.idempotency_key)
         if request.agent_id:
             self._run("issue", "update", issue_id, "--assignee-id", request.agent_id, "--output", "json")
+        self._cancel_stale_live_runs(issue_id, request)
         path = self.log_dir / f"dispatch_{request.request_id.replace(':', '_')}.json"
         path.write_text(content, encoding="utf-8")
         value = self._run_with_local_file(
@@ -1870,6 +1951,63 @@ class MulticaCliAdapter:
                 str(run.get("failure_reason") or ""),
             )
         return status
+
+    def cancel_stale_runs(self, request: AgentRequest) -> list[str]:
+        """Best-effort cancel non-terminal remote runs correlated to a request.
+
+        When the orchestrator gives up on a run (AGENT_TIMEOUT), the remote
+        agent keeps consuming tokens and, because runs sharing one
+        (issue, agent) target are merged by Multica, the re-dispatched run is
+        queued behind the stale one.  Cancelling the correlated non-terminal
+        runs before the FSM retries prevents orphaned twin runs.
+        """
+
+        issue_id = request.issue_id or request.task_id
+        try:
+            matches = self._matching_runs(request)
+        except Exception as error:
+            logger.warning(
+                "AGENT_REMOTE_RUN_CANCEL_LOOKUP_FAILED task_id=%s request_id=%s "
+                "issue_id=%s error=%s",
+                request.task_id,
+                request.request_id,
+                issue_id,
+                str(error)[:300],
+            )
+            return []
+        cancelled: list[str] = []
+        for run in matches:
+            run_id = str(run.get("id") or "")
+            status = self._normalize_run_status(run.get("status"))
+            if not run_id or status in {"completed", "failed"}:
+                continue
+            try:
+                self._run(
+                    "issue", "cancel-task", run_id, "--issue", issue_id,
+                    "--output", "json",
+                )
+            except Exception as error:
+                logger.warning(
+                    "AGENT_REMOTE_RUN_CANCEL_FAILED task_id=%s request_id=%s "
+                    "run_id=%s status=%s error=%s",
+                    request.task_id,
+                    request.request_id,
+                    run_id,
+                    status,
+                    str(error)[:300],
+                )
+                continue
+            cancelled.append(run_id)
+            logger.warning(
+                "AGENT_REMOTE_RUN_CANCELLED task_id=%s request_id=%s "
+                "issue_id=%s run_id=%s previous_status=%s",
+                request.task_id,
+                request.request_id,
+                issue_id,
+                run_id,
+                status,
+            )
+        return cancelled
 
     def find_existing_request(self, idempotency_key: str, issue_id: str = "") -> DispatchReceipt | None:
         with self._dispatch_index_lock:
