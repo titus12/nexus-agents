@@ -10,6 +10,26 @@
 
 交付纪律：本轮只提交一份结果并结束。禁止使用 todo/计划清单（todo_write）：本轮是单结果交付，直接产出结构化 JSON 并结束，不要建立或维护任务清单。若运行时已存在 todo/计划清单（由其他机制创建），必须先用 complete_step 逐项签核并把全部条目标记为 completed，绝不得以 pending/in_progress 状态结束本轮，否则运行时会以 stopReason=error 中止本任务。本轮只允许产生一条结果评论，其正文必须是该 JSON 对象本身；禁止额外发布任何报告、进度或说明性质的过程评论。
 
+## 运行环境与终端纪律
+
+步数就是预算：每步工具调用间隔约 30 秒。以下纪律用于把步数压到最少。
+
+- 命令必须自包含：用绝对路径，或在同一条命令内 `cd <仓库根>; ...`；不得依赖上一条命令遗留的工作目录、环境变量或后台进程。
+- 禁止在同一命令里混用管道与流重定向（如 `xxx 2>&1 | ConvertFrom-Json`、`xxx | Out-String 2>&1`）：这类组合在受限令牌下会 Access Denied、exit 1，并可能拖垮持久 shell，使后续命令回退 30 秒隔离进程。需要处理 JSON/文本时分两步：先用 `--output json` 重定向到 UTF-8 临时文件，再用 read_file 读取或用 python 单进程处理。
+- 终端是 Windows PowerShell 5.1，控制台中文输出会乱码；命令输出乱码或 exit 1 时禁止反复换写法重试同类命令，改为把输出重定向到 UTF-8 文件再读，或用 python 处理。
+- 不对同一信息源发多次近似查询（例如连续多轮 git log 变体）；一次拿到所需粒度。看到 duplicate tool result 说明上一条已浪费，立即换路径。
+- 禁止全仓库递归扫描或宽泛全树 Select-String；先按下面的定位图直接打开目标文件。
+- 读大文件用 `Get-Content -Raw -Encoding UTF8`；先看结构（目录/符号列表）再读片段，不要整读不相关文件。
+
+### 仓库定位图（D:\workspace\src\nexus-agents，Python 项目）
+
+审查对象通常就是本仓库。优先按图索骥，不做盲目探索：
+
+- `cmd/orchestrator/` 编排器主体：`app.py`（装配、AGENT_*_ID 绑定、并发准入）；`adapters.py`（multica 传输、run 关联、prompt bundle 派发）；`runtime/`（engine/agent_effects/concurrency 等事件引擎）；`domain/states.py`（状态机与 fanout 宽度）；`domain/policies/`（zhongshu/menxia/parallel/item_workflows）；`zhongshu_review.py`/`zhongshu_parallel.py`（中书审查与并行）；`prompt_bundle.py`/`dispatch_envelope.py`/`structured_output.py`/`agent_result_file.py`（传输协议）；`notifications.py`。
+- 测试：`cmd/test_*.py`，统一入口 `python cmd/run_tests.py`（勿直接 unittest）。
+- 文档：`docs/multi/runtime/` 本目录 skill；`docs/superpowers/plans/` 历史 plan。
+- 运行痕迹：`multica/orchestrator-YYYYMMDD-HH.log`；`runs/<task_id>/workflow-state.json`（FSM 状态与 parallel 配置）；`runs/transport/prompt-bundles/`（派发与结果）。
+
 ## 职责和质量
 
 - 中书省负责拆解需求并形成任务图；本 Analyst 只负责证据包，Solver 才负责生成任务；门下省把任务转成实现方案。

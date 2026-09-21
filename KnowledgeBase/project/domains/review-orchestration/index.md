@@ -19,6 +19,7 @@
 
 ## 3. 章节导航
 
+- [00 设计初衷与关键设计点](00-design-intent.md)
 - [01 项目边界与角色职责](01-project-scope-and-roles.md)
 - [02 中书省协议](02-zhongshu-protocol.md)
 - [03 门下省协议](03-menxia-protocol.md)
