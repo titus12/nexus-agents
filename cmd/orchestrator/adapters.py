@@ -758,6 +758,16 @@ class MulticaCliAdapter:
             },
         )
         prompt_ref = bundle.reference()
+        # Some worker models fail to decode the manifest path out of the
+        # doubly-escaped issue body (live incident task-20260920-bbd659
+        # CRITIC worker-02), so restate the raw absolute locations as a
+        # plain-text field and instruct explicit decoding.
+        manifest_dir = Path(str(prompt_ref.get("manifest_path", ""))).parent
+        prompt_bundle_paths = (
+            "manifest.json: " + str(manifest_dir / "manifest.json") + "\n"
+            "prompt.txt: " + str(manifest_dir / "prompt.txt") + "\n"
+            "context.json: " + str(prompt_ref.get("context_path", "")) + "\n"
+        )
         structured_output_instruction = (
             "Do not modify project files. Return exactly one complete structured JSON "
             "result in the reply; the Orchestrator will validate and persist it. "
@@ -766,6 +776,8 @@ class MulticaCliAdapter:
         prompt_payload = {
             "prompt": (
                 f"Read every required file in the prompt bundle manifest as UTF-8, including active-skill.md when present, then follow prompt.txt. "
+                f"The bundle file locations are listed verbatim in the prompt_bundle_paths field below; use those absolute paths exactly as given "
+                f"(decode JSON escaping if your tooling shows them escaped) and read them with UTF-8 before doing anything else. "
                 f"Active runtime Skill: {request.context.get('active_runtime_skill', '')}. "
                 f"Skill lock: {json.dumps(request.context.get('active_runtime_skill_lock', {}), ensure_ascii=False, sort_keys=True)}. "
                 f"Runtime directive: {request.context.get('active_runtime_skill_directive', '')} "
@@ -773,6 +785,7 @@ class MulticaCliAdapter:
                 "Only the active runtime Skill is authoritative; other attached Skills are inactive for this turn. "
                 f"{structured_output_instruction}"
             ),
+            "prompt_bundle_paths": prompt_bundle_paths,
             "prompt_ref": prompt_ref,
             "structured_output": request.structured_output,
         }
