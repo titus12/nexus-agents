@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -11,6 +12,22 @@ from ..domain.errors import InvariantViolation, PostCommitLeaseReleaseError
 from ..domain.events import DomainEvent
 from .repository import CommitResult, WorkflowRepository, WorkflowSnapshot
 from .ports import LockPort
+
+logger = logging.getLogger("review_orchestrator_fsm")
+
+
+def _failure_reason(event: DomainEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else None
+    if not isinstance(payload, dict):
+        return ""
+    failure = payload.get("failure")
+    if isinstance(failure, dict):
+        code = str(failure.get("error_code") or "")
+        message = str(failure.get("message") or "")
+        return f"{code}: {message}".strip(": ")
+    code = str(payload.get("error_code") or "")
+    message = str(payload.get("reason") or payload.get("message") or "")
+    return f"{code}: {message}".strip(": ")
 
 
 class DomainEventInbox(Protocol):
@@ -92,6 +109,16 @@ class WorkflowEngine:
             if event.sequence != before.context.progression.sequence:
                 raise InvariantViolation("domain event sequence does not match snapshot")
             state = self._states.get(before.context.progression.state)
+            logger.info(
+                "DOMAIN_EVENT_DISPATCH task_id=%s event_id=%s event=%s "
+                "sequence=%s state=%s%s",
+                event.task_id,
+                event.event_id,
+                event.name,
+                event.sequence,
+                before.context.progression.state,
+                f" failure={_failure_reason(event)}" if event.name == "FAIL" else "",
+            )
             decision = state.handle(before.context, event)
             if not isinstance(decision, StateDecision):
                 raise InvariantViolation("workflow state must return StateDecision")
@@ -123,6 +150,21 @@ class WorkflowEngine:
                     after = self._reducer.apply(before, decision)
             self._validate_after(before, after)
             commit_result = self._repository.commit_transition(before, after, decision)
+            after_context = commit_result.snapshot.context
+            logger.info(
+                "DOMAIN_TRANSITION task_id=%s transition_id=%s event=%s "
+                "before=%s:%s after=%s:%s action=%s reason=%s effects=%s",
+                event.task_id,
+                commit_result.transition_id,
+                event.name,
+                before.context.progression.state,
+                before.context.progression.sequence,
+                after_context.progression.state,
+                after_context.progression.sequence,
+                decision.transition.action if decision.transition else "",
+                decision.transition.reason_code if decision.transition else "",
+                len(decision.effects),
+            )
         except BaseException as error:
             try:
                 self._lock.release(event.task_id)

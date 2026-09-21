@@ -545,6 +545,11 @@ class OrchestratorApp:
                 # Retry wait is an internal bounded recovery state.  The
                 # runner resumes it after the persisted failure has been
                 # observed; the retry counter is enforced by the domain.
+                logger.info(
+                    "RETRY_WAIT_AUTO_RESUMED task_id=%s sequence=%s",
+                    task_id,
+                    snapshot.context.progression.sequence,
+                )
                 self.resume()
                 idle_since = time.monotonic()
                 continue
@@ -558,6 +563,13 @@ class OrchestratorApp:
 
             if time.monotonic() - idle_since >= self._max_idle_seconds:
                 current = self.repository.load(task_id)
+                logger.warning(
+                    "EVENT_INPUT_TIMEOUT_PUBLISHED task_id=%s sequence=%s "
+                    "max_idle_seconds=%s",
+                    task_id,
+                    current.context.progression.sequence,
+                    self._max_idle_seconds,
+                )
                 self.inbox.publish(
                     DomainEvent(
                         name="TIMEOUT",
