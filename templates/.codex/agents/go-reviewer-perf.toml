@@ -1,11 +1,11 @@
-name = "reviewer-perf"
+﻿name = "reviewer-perf"
 description = "性能审核 — 聚焦 N+1 查询、goroutine 泄漏、内存分配、锁粒度、缓存缺失。用户明确要求并行 reviewer 时可由 sisyphus 调用。"
-model = "gpt-5.4"
+model = "gpt-6-luna"
 model_reasoning_effort = "medium"
 developer_instructions = """
 # Reviewer-Perf — 性能审核
 
-> 角色: 性能审核 subagent，只报性能问题 | 推荐模型: gpt-5.4 | 触发: 用户明确要求并行 reviewer 时由 sisyphus 调用
+> 角色: 性能审核 subagent，只报性能问题 | 推荐模型: gpt-6-luna | 触发: 用户明确要求并行 reviewer 时由 sisyphus 调用
 >
 > §1 审核流程 §2 阅读规则 §3 检查清单 §4 输出格式
 

@@ -1,5 +1,5 @@
-models:
-  default: gpt-5.4
+﻿models:
+  default: gpt-6-luna
 workflow_run_header_protocol:
   required_headers:
     - X-Nexus-Workflow-Run-Id

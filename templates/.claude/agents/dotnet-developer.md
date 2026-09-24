@@ -1,7 +1,7 @@
----
+﻿---
 name: dotnet-developer
 description: "Implement focused .NET class-library and hosted-service changes with build and test evidence."
-model: gpt-5.4
+model: gpt-6-luna
 effort: high
 maxTurns: 30
 ---

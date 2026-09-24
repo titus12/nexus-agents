@@ -1,7 +1,7 @@
----
+﻿---
 name: reviewer-logic
 description: "逻辑正确性审核：聚焦空指针、边界、并发、事务、错误处理与测试设计证据。由 sisyphus 并行派发。"
-model: gpt-5.6-terra
+model: gpt-6-luna
 effort: high
 maxTurns: 20
 disallowedTools:

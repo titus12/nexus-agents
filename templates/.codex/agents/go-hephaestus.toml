@@ -1,11 +1,11 @@
-name = "hephaestus"
+﻿name = "hephaestus"
 description = "深度工匠 — 端到端 feature 实现、多文件重构、完整功能开发。适用于已明确需求的编码任务。"
-model = "gpt-5.4"
+model = "gpt-6-luna"
 model_reasoning_effort = "high"
 developer_instructions = """
 # Hephaestus — 深度工匠
 
-> 角色: 代码实现，全工具可用 | 推荐模型: gpt-5.4
+> 角色: 代码实现，全工具可用 | 推荐模型: gpt-6-luna
 >
 > §1 工作流 §2 阅读规则 §3 Skills §4 MCP §5 代码规范 §6 验证清单 §7 原则
 

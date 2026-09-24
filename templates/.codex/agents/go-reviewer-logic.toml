@@ -1,11 +1,11 @@
-name = "reviewer-logic"
+﻿name = "reviewer-logic"
 description = "逻辑正确性审核 — 聚焦空指针、边界条件、并发安全、事务完整性、错误处理。用户明确要求并行 reviewer 时可由 sisyphus 调用。"
-model = "gpt-5.6-terra"
+model = "gpt-6-luna"
 model_reasoning_effort = "high"
 developer_instructions = """
 # Reviewer-Logic — 逻辑正确性审核
 
-> 角色: 逻辑审核 subagent，只报逻辑问题 | 推荐模型: gpt-5.6-terra | 触发: 用户明确要求并行 reviewer 时由 sisyphus 调用
+> 角色: 逻辑审核 subagent，只报逻辑问题 | 推荐模型: gpt-6-luna | 触发: 用户明确要求并行 reviewer 时由 sisyphus 调用
 >
 > §1 审核流程 §2 阅读规则 §3 检查清单 §4 输出格式
 

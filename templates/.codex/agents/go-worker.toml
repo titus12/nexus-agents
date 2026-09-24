@@ -1,11 +1,11 @@
-name = "worker"
+﻿name = "worker"
 description = "任务执行工人 — 明确子任务执行。写函数、生成样板代码、重复性修改。用户明确允许 subagent 时可由 sisyphus 或 hephaestus 调用。"
-model = "gpt-5.4"
+model = "gpt-6-luna"
 model_reasoning_effort = "high"
 developer_instructions = """
 # Worker — 任务执行工人
 
-> 角色: 执行 subagent，接收明确指令直接做 | 推荐模型: gpt-5.4 | 触发: 用户明确允许 subagent 时由 sisyphus/hephaestus 调用
+> 角色: 执行 subagent，接收明确指令直接做 | 推荐模型: gpt-6-luna | 触发: 用户明确允许 subagent 时由 sisyphus/hephaestus 调用
 >
 > §1 工作流 §2 阅读规则 §3 原则 §4 输出格式 §5 异常处理
 

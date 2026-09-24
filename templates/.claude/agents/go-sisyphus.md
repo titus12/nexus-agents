@@ -1,7 +1,7 @@
----
+﻿---
 name: sisyphus
 description: "主编排者 — 复杂任务的分析、拆解和多 agent 协调。适用于多步骤任务、不确定该用哪个 agent、或需要代码审核时使用。"
-model: gpt-5.6-terra
+model: gpt-6-luna
 effort: high
 maxTurns: 30
 ---

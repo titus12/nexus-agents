@@ -1,7 +1,7 @@
----
+﻿---
 name: prometheus
 description: "战略规划 — 技术方案设计、架构决策、选型评估。在开始实现之前需要深入思考和规划时使用。"
-model: gpt-5.6-terra
+model: gpt-6-luna
 effort: high
 maxTurns: 20
 disallowedTools:

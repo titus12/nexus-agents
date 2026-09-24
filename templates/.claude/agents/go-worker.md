@@ -1,7 +1,7 @@
----
+﻿---
 name: worker
 description: "任务执行工人：执行边界清晰的 Go 子任务，并提供实际测试设计和验证证据。由 sisyphus 或 hephaestus 派发。"
-model: gpt-5.4
+model: gpt-6-luna
 effort: high
 maxTurns: 30
 ---

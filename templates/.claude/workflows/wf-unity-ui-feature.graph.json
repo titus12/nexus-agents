@@ -1,4 +1,4 @@
-{
+﻿{
   "id": "ui-feature-development",
   "name": "wf-unity-ui-feature",
   "nodes": [
@@ -26,7 +26,7 @@
       "id": "requirement",
       "y": 210,
       "agent": "requirement-collector",
-      "model": "gpt-5.4",
+      "model": "gpt-6-luna",
       "category": "action",
       "type": "agent",
       "x": 430,
@@ -42,7 +42,7 @@
       "x": 690,
       "label": "unity-ui-developer",
       "detail": "Develop Unity UI feature with UIArchitect, UGUI, TMP, and asset safety.",
-      "model": "gpt-5.4"
+      "model": "gpt-6-luna"
     },
     {
       "id": "asset",
@@ -64,7 +64,7 @@
       "x": 950,
       "label": "unity-regression-evaluator",
       "detail": "Verify compile, Console, interactions, input locks, and UI states.",
-      "model": "gpt-5.4"
+      "model": "gpt-6-luna"
     },
     {
       "id": "review",
@@ -86,7 +86,7 @@
       "x": 1730,
       "label": "deliver",
       "detail": "Return result, evidence, skipped checks, and remaining risks.",
-      "model": "gpt-5.4"
+      "model": "gpt-6-luna"
     }
   ],
   "edges": [

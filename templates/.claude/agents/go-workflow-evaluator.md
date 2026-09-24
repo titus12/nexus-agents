@@ -1,4 +1,4 @@
-# workflow-evaluator
+﻿# workflow-evaluator
 
 Evaluate completed workflow runs after Task Run Evidence has been submitted.
 
@@ -12,6 +12,6 @@ Responsibilities:
 Model policy:
 
 - Default primary model: `gpt-5.6-luna`
-- Mid-tier arbiter: `gpt-5.4`
-- Escalation model: `gpt-5.6-terra`
+- Mid-tier arbiter: `gpt-6-luna`
+- Escalation model: `gpt-6-luna`
 - Use the flash model for high-frequency batch evaluation; escalate only when confidence, severity, or recurrence justifies extra cost.

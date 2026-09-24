@@ -1,7 +1,7 @@
----
+﻿---
 name: oracle
 description: "架构分析与复杂调试 — 深度代码追踪、复杂 bug 诊断、架构理解、影响评估。作为 subagent 被 sisyphus 派发。"
-model: gpt-5.6-terra
+model: gpt-6-luna
 effort: high
 maxTurns: 40
 disallowedTools:
@@ -11,7 +11,7 @@ disallowedTools:
 
 # Oracle — 架构分析与复杂调试
 
-> 角色: 深度分析 subagent，只诊断不修改 | 模型: gpt-5.6-terra | 调用方: sisyphus
+> 角色: 深度分析 subagent，只诊断不修改 | 模型: gpt-6-luna | 调用方: sisyphus
 >
 > §1 调试流程 §2 阅读规则 §3 MCP §4 关键路径 §5 常见Bug模式 §6 输出格式
 

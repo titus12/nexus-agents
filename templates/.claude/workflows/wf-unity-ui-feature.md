@@ -1,4 +1,4 @@
-# Unity UI 功能开发
+﻿# Unity UI 功能开发
 
 Source: `.claude/rules/unity-00-routing.md`  
 Stack: Unity / C# / UGUI / TextMeshPro / UIArchitect
@@ -46,16 +46,16 @@ logic.
 These roles are part of the default feature workflow split. Tasks handled by this workflow are expected to benefit from
 real role separation.
 
-1. `requirement-collector` - default **subagent**, spawn with model `gpt-5.4` to collect and compress requirements from user input, Feishu docs,
+1. `requirement-collector` - default **subagent**, spawn with model `gpt-6-luna` to collect and compress requirements from user input, Feishu docs,
    screenshots/tables, protocol paths, config paths, Feature Cards, UI AIConfig, and KnowledgeBase. Output only the
    minimal task context package.
 2. `ui-developer` - default **main agent role**, use the current main model unless the user explicitly requests another model. Implement UI and business logic from the task context package. Read generated
    bindings, Service/DataEvents/Cache, protocol, config, one example, or one template only when needed.
-3. `ui-tester` - default **subagent**, spawn with model `gpt-5.4` to validate compile, Console, tests, interactions, state transitions,
+3. `ui-tester` - default **subagent**, spawn with model `gpt-6-luna` to validate compile, Console, tests, interactions, state transitions,
    and input-lock release paths.
 4. `ui-reviewer` - default **subagent**, spawn with model `gpt-5.5` to review diff, assets, layout adaptation, View/ViewModel/Service/DataEvents/
    Cache boundaries, generated-file safety, and remaining risks.
-5. `workflow-evaluator` - default **subagent**, spawn with model `gpt-5.4` to prepare verification evidence, role/model usage records,
+5. `workflow-evaluator` - default **subagent**, spawn with model `gpt-6-luna` to prepare verification evidence, role/model usage records,
    Nexus TaskRun payload, metrics, and final report.
 
 ## 计划门禁
@@ -173,11 +173,11 @@ Default mode for this workflow is **one implementation owner plus four support s
 
 For the normal tasks that still use this workflow:
 
-- `requirement-collector` runs first as an independent read-only subagent with `model: gpt-5.4` and produces the Requirement Context Package;
+- `requirement-collector` runs first as an independent read-only subagent with `model: gpt-6-luna` and produces the Requirement Context Package;
 - `ui-developer` stays in the main session and owns the implementation;
 - `ui-reviewer` reviews the implementation diff independently with `model: gpt-5.5`;
-- `ui-tester` validates compile / console / interaction / edge paths independently with `model: gpt-5.4`;
-- `workflow-evaluator` independently prepares the Nexus Evidence Package and metrics with `model: gpt-5.4`.
+- `ui-tester` validates compile / console / interaction / edge paths independently with `model: gpt-6-luna`;
+- `workflow-evaluator` independently prepares the Nexus Evidence Package and metrics with `model: gpt-6-luna`.
 
 When spawning these default subagents, pass the model override explicitly in the subagent call. Do not merely print a
 role/model label while continuing to execute every role on the main model.

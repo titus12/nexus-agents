@@ -1,7 +1,7 @@
----
+﻿---
 name: reviewer-security
 description: "安全审核 — 聚焦越权访问、输入验证、资源耗尽、数据泄露、注入攻击、重放攻击。作为 subagent 被 sisyphus 并行派发。"
-model: gpt-5.6-terra
+model: gpt-6-luna
 effort: high
 maxTurns: 15
 disallowedTools:

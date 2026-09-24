@@ -1,7 +1,7 @@
----
+﻿---
 name: dotnet-reviewer
 description: "Review .NET class-library and hosted-service changes for API, runtime, dependency, and verification risk."
-model: gpt-5.4
+model: gpt-6-luna
 effort: high
 maxTurns: 30
 ---

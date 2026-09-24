@@ -1,7 +1,7 @@
----
+﻿---
 name: dotnet-debugger
 description: "Reproduce and isolate .NET build, test, runtime, configuration, concurrency, or cancellation failures."
-model: gpt-5.4
+model: gpt-6-luna
 effort: high
 maxTurns: 30
 ---
