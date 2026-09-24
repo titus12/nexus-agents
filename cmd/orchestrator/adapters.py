@@ -120,6 +120,90 @@ def _declared_role_modes(structured_output: object) -> tuple[str, ...]:
     return tuple(str(item) for item in modes if str(item or ""))
 
 
+def _evidence_demand_rejection(request: AgentRequest, payload: object) -> str:
+    """Mechanical check that demanded evidence targets were actually cited.
+
+    The dispatch carried an ``evidence_demand`` (the Critic's evidence_targets).
+    A target that exists in the workspace and is not cited anywhere in the
+    reply means the agent dodged the demand.  Wording is irrelevant — only
+    coverage of concrete, verifiable file/symbol references counts.  A target
+    that does not exist on disk is skipped: claiming it is unavailable is then
+    a legitimate UNKNOWN, not an excuse.  Each demanded finding (one that
+    carries evidence_targets) must also have a ``finding_responses`` answer so
+    the Critic has something to disposition next round.
+    """
+
+    context = request.context or {}
+    demand = context.get("evidence_demand")
+    if not isinstance(demand, dict):
+        return ""
+    body = payload if isinstance(payload, dict) else {}
+    raw_targets = demand.get("evidence_targets")
+    demands = demand.get("active_findings")
+    if not isinstance(raw_targets, list) and not isinstance(demands, list):
+        return ""
+    try:
+        text = json.dumps(payload, ensure_ascii=False).casefold()
+    except (TypeError, ValueError):
+        return ""
+    # A JSON-encoded backslash is the two-character escape `\\`, so a
+    # Windows-style citation (`cmd\\app.py`) must be folded to forward
+    # slashes before the substring match or it reads as uncited.
+    text = text.replace("\\\\", "/")
+    missing: list[str] = []
+    if isinstance(raw_targets, list):
+        for target in raw_targets:
+            if not isinstance(target, dict):
+                continue
+            path = str(target.get("path") or "").strip()
+            if not path:
+                continue
+            normalized = path.replace("\\", "/").strip("/")
+            candidates = [Path(path), Path(normalized)]
+            resolved = next((c for c in candidates if c.is_file()), None)
+            if resolved is None:
+                continue
+            symbol = str(target.get("symbol") or "").strip()
+            if (
+                normalized.casefold() in text
+                or resolved.as_posix().casefold() in text
+                or (symbol and symbol in text)
+            ):
+                continue
+            size = resolved.stat().st_size
+            missing.append(
+                f"{path} exists at {resolved} ({size}B); cite it as file:line"
+            )
+    if isinstance(demands, list):
+        answered = {
+            str(entry.get("finding_id") or "").strip()
+            for entry in body.get("finding_responses") or []
+            if isinstance(entry, dict)
+        }
+        for finding in demands:
+            if not isinstance(finding, dict) or not finding.get("evidence_targets"):
+                continue
+            finding_id = str(finding.get("finding_id") or "").strip()
+            if finding_id and finding_id not in answered:
+                missing.append(
+                    f"finding {finding_id} has evidence_targets but no "
+                    "finding_responses answer; answer every demanded finding "
+                    "(finding_id + answer + evidence_ids + suggested_disposition)"
+                )
+    if not missing:
+        return ""
+    detail = "; ".join(missing)
+    if len(missing) > 3:
+        detail = "; ".join(missing[:3]) + f"; (+{len(missing) - 3} more unmet demands)"
+    return (
+        "evidence targets unmet: " + detail
+        + ". Cite each existing file as file:line (locate by globbing the "
+        "filename / grepping the symbol; the workspace is mounted read-only "
+        "and remote git has no credentials by design). Return one complete "
+        "structured result."
+    )
+
+
 class MulticaAdapter(Protocol):
     def dispatch(self, request: AgentRequest) -> DispatchReceipt: ...
     def poll(self, request: AgentRequest) -> list[ExternalMessage]: ...
@@ -771,7 +855,9 @@ class MulticaCliAdapter:
         structured_output_instruction = (
             "Do not modify project files. Return exactly one complete structured JSON "
             "result in the reply; the Orchestrator will validate and persist it. "
-            "Do not return Markdown, a result pointer, a diff/patch, or a partial result."
+            "Do not return Markdown, a result pointer, or a partial result, and never "
+            "replace the structured JSON with a bare diff/patch; code or diff text "
+            "inside the result's own fields is expected where the active Skill demands it."
         )
         prompt_payload = {
             "prompt": (
@@ -1099,6 +1185,21 @@ class MulticaCliAdapter:
             file_result.sha256,
             file_result.bytes,
         )
+        rejection = _evidence_demand_rejection(request, file_result.payload)
+        if rejection:
+            logger.warning(
+                "AGENT_REPLY_EVIDENCE_TARGETS_REJECTED task_id=%s request_id=%s "
+                "phase=%s role=%s path=%s reason=%s",
+                request.task_id,
+                request.request_id,
+                request.phase,
+                request.role,
+                file_result.path,
+                rejection,
+            )
+            if rejections is not None:
+                rejections.append(rejection)
+            return None
         return ExternalMessage(
             request.agent_id,
             file_result.payload,
@@ -1111,14 +1212,26 @@ class MulticaCliAdapter:
         request: AgentRequest,
         payload: dict,
     ) -> dict:
-        if not self.orchestrator_result_write_enabled:
-            return payload
         inline_payload = payload
         if payload.get("protocol") == "nexus-agent-result-inline-v1":
             nested = payload.get("result")
             if not isinstance(nested, dict):
                 raise AgentResultFileError("inline result.result must be an object")
             inline_payload = nested
+        rejection = _evidence_demand_rejection(request, inline_payload)
+        if rejection:
+            logger.warning(
+                "AGENT_REPLY_EVIDENCE_TARGETS_REJECTED task_id=%s request_id=%s "
+                "phase=%s role=%s reason=%s",
+                request.task_id,
+                request.request_id,
+                request.phase,
+                request.role,
+                rejection,
+            )
+            raise AgentResultFileError(rejection)
+        if not self.orchestrator_result_write_enabled:
+            return payload
         encoded_size = len(
             json.dumps(inline_payload, ensure_ascii=False).encode("utf-8")
         )
@@ -2314,7 +2427,10 @@ def _response_contract_for(request: AgentRequest) -> dict:
         ]
         instruction = (
             "You are the Menxia item evidence Analyst. Return one structured "
-            "JSON object with the allowed action and ItemEvidenceAudit fields."
+            "JSON object with the allowed action and ItemEvidenceAudit fields. "
+            "Re-derive the item from the original requirement before reading the "
+            "proposal, verdict each atomic claim with evidence, and keep every "
+            "suggestion code-level actionable."
         )
     elif request.phase == "MENXIA" and request.role == "review-critic":
         optional.extend([
@@ -2349,7 +2465,10 @@ def _response_contract_for(request: AgentRequest) -> dict:
         ]
         instruction = (
             "You are the Menxia item Critic. Return one structured JSON "
-            "object with action, evidence-backed findings, and review fields."
+            "object with action, evidence-backed findings, and review fields. "
+            "Attack changes hunk by hunk, state a falsification plan, walk every "
+            "acceptance signal back to a change, and settle every prior-round "
+            "finding explicitly."
         )
     elif request.phase == "MENXIA" and request.role == "review-solver":
         optional.extend([
@@ -2361,6 +2480,14 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "next_actions",
         ])
         allowed_actions = ["FEASIBLE", "READY_FOR_ANALYST", "READY_FOR_CRITIC", "HUMAN_GATE", "BLOCKED"]
+        instruction = (
+            "You are the Menxia item Solver. Return one structured JSON "
+            "implementation proposal whose changes are code-level: before/after "
+            "for edits, complete code for new logic, assertion-level tests. The "
+            "implementer must make zero design decisions from changes alone, and "
+            "every Critic finding must be answered by finding ID in "
+            "responses_to_critic."
+        )
     if request.phase == "ZHONGSHU":
         from .zhongshu_review import ANALYST_ACTIONS, CRITIC_ACTIONS, TASK_CRITIC_ACTIONS
         if request.role == "review-analyst":
@@ -2597,17 +2724,29 @@ class FeishuHttpAdapter:
             }),
             token=self._token("gate"),
         )
+        items = value.get("data", {}).get("items", [])
+        gate_message_id = str(gate.message_id or "")
+        if not gate_message_id and gate.decision_id:
+            # The gate message body carries its decision id; use the newest
+            # match as the thread root so replies are recognized even when
+            # the orchestrator restarted and lost the original message id.
+            for item in items:
+                if gate.decision_id in _feishu_message_text(item):
+                    gate_message_id = str(
+                        item.get("message_id") or item.get("id") or ""
+                    )
+                    break
         replies: list[HumanReply] = []
-        for item in value.get("data", {}).get("items", []):
+        for item in items:
             message_id = str(item.get("message_id") or item.get("id") or "")
-            if gate.message_id and message_id == gate.message_id:
+            if gate_message_id and message_id == gate_message_id:
                 continue
             body = _feishu_message_text(item)
             parent_id = str(item.get("parent_id") or "")
             root_id = str(item.get("root_id") or "")
             is_direct_reply = bool(
-                gate.message_id
-                and gate.message_id in {parent_id, root_id}
+                gate_message_id
+                and gate_message_id in {parent_id, root_id}
             )
             contains_decision_id = gate.decision_id in body
             if not is_direct_reply and not contains_decision_id:
@@ -2630,7 +2769,7 @@ class FeishuHttpAdapter:
         logger.info(
             "FEISHU_GATE_POLL_RESULT decision_id=%s gate_message_id=%s messages_total=%s replies=%s",
             gate.decision_id,
-            gate.message_id,
+            gate_message_id,
             len(value.get("data", {}).get("items", [])),
             len(replies),
         )

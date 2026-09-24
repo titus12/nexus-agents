@@ -112,6 +112,54 @@ def solver_revision_task(context: WorkflowContext) -> str:
     return "\n".join(lines) + "\n"
 
 
+def analyst_evidence_task(context: WorkflowContext) -> str:
+    """Render the Critic's active findings as the Analyst's directed brief.
+
+    The Analyst used to see only ``Current review finding count: N`` -- the
+    demand stayed in the 58 KB context.json while the Critic kept rejecting
+    the undirected evidence dump for not addressing it.  The Solver already
+    receives its batch verbatim (``solver_revision_task``); the Analyst gets
+    the same treatment, plus each finding's structured ``evidence_targets``
+    so the fulfillment gate and the answer share one demand definition.
+    """
+
+    review = context.review
+    if review is None:
+        return ""
+    active = tuple(finding for finding in review.findings if finding.active)
+    if not active:
+        return ""
+    lines = [
+        "",
+        "[Evidence task] The Critic holds "
+        f"{len(active)} open finding(s). Answer each one in finding_responses "
+        "(finding_id, answer, evidence_ids, suggested_disposition) with "
+        "file:line evidence; keep evidence_updates scoped to these demands:",
+    ]
+    for finding in active:
+        severity = str(getattr(finding, "severity", "") or "?").strip().upper()
+        item_id = str(getattr(finding, "item_id", "") or "-").strip()
+        demand = (
+            getattr(finding, "required_action", None)
+            or getattr(finding, "claim", "")
+        )
+        demand = " ".join(str(demand or "").split())
+        lines.append(
+            f"- {finding.finding_id} [{severity}, item {item_id}] {demand[:220]}"
+        )
+        targets = [
+            {"path": str(target.get("path") or ""), "symbol": str(target.get("symbol") or "")}
+            for target in (getattr(finding, "evidence_targets", ()) or ())
+            if isinstance(target, Mapping) and str(target.get("path") or "").strip()
+        ]
+        if targets:
+            lines.append(
+                "  evidence_targets: "
+                + json.dumps(targets, ensure_ascii=False, sort_keys=True)
+            )
+    return "\n".join(lines) + "\n"
+
+
 def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -> PromptSpec:
     """Project immutable context into a bounded role prompt.
 
@@ -137,6 +185,9 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
     revision_task = (
         solver_revision_task(context) if state == "ZHONGSHU_SOLVER" else ""
     )
+    evidence_task = (
+        analyst_evidence_task(context) if state == "ZHONGSHU_ANALYST" else ""
+    )
     # The acceptance-quality standard rides with every producing dispatch, so
     # acceptance signals are written observably the first time instead of
     # being negotiated inside the Critic revision loop.
@@ -152,6 +203,7 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
         f"Current review finding count: {findings}\n"
         "Return exactly one complete structured result for the bound state."
         f"{revision_task}"
+        f"{evidence_task}"
         f"{acceptance_block}"
         f"{retry_feedback(context, state)}"
     )

@@ -938,6 +938,30 @@ def _execution_integrity_finding_ids(body: dict[str, Any]) -> list[str]:
     })
 
 
+def _answered_finding_in_scope(
+    previous_ledger: dict[str, dict[str, Any]],
+    finding_id: str,
+    item_id: str,
+) -> bool:
+    """True when a re-raised finding_id really is the answered finding.
+
+    Critics occasionally mint a new claim under an id the ledger already
+    uses for a different item (live incident task-menxia-t1 CRITIC_25: a
+    fresh dependency finding on item-000004 reused ``finding-000001``,
+    which belongs to item-000005).  That id collision is a worker naming
+    accident — the consolidation pool already mints a fresh id for it —
+    not the evidence-dodge signature this gate targets, and rejecting the
+    whole wave for it burned the reply budget every round.  The dodge only
+    exists when the stored finding with that id belongs to the dispatched
+    item.
+    """
+
+    row = previous_ledger.get(finding_id)
+    if row is None:
+        return False
+    return str(row.get("item_id") or "").strip() == item_id
+
+
 def _task_review_pseudo_blocked(body: dict[str, Any]) -> bool:
     """Detect a BLOCKED verdict that is justified by a missing-input claim.
 
@@ -1159,6 +1183,17 @@ def aggregate_task_review_results(
         for item in (previous or {}).get("findings") or []
         if isinstance(item, dict) and (item.get("finding_id") or item.get("id"))
     }
+    # Finding ids the Analyst already answered in the evidence packet.  A
+    # verdict that re-raises such a finding without responding to the answer
+    # is the evidence-dodge signature (the answer supplied file:line evidence
+    # and the Critic simply re-demands it), so the reply is rejected on a
+    # bounded retry and the capsule instructs the Critic to disposition every
+    # answered finding (accept-and-close, or rebut via finding_responses).
+    answered_finding_ids = {
+        str(entry.get("finding_id") or "").strip()
+        for entry in (previous or {}).get("finding_responses") or []
+        if isinstance(entry, Mapping) and str(entry.get("finding_id") or "").strip()
+    }
     # Delta-reply contract: the active P0 findings each dispatched job must
     # disposition.  Active = the lifecycle status still holds work open (the
     # consolidation statuses RESOLVED / DEFERRED / WONT_FIX / WONT_VERIFY do
@@ -1220,6 +1255,31 @@ def aggregate_task_review_results(
                 job.review_job_id,
                 job.item_id,
                 uncovered_p0,
+            )
+            continue
+        ignored_answers = sorted(
+            finding_id
+            for finding_id in re_raised_ids & answered_finding_ids
+            if finding_id not in disposition_ids
+            and _answered_finding_in_scope(
+                previous_ledger, finding_id, job.item_id
+            )
+        )
+        if ignored_answers:
+            del by_job[job.review_job_id]
+            rejected.append({
+                "review_job_id": job.review_job_id,
+                "group_id": job.group_id,
+                "item_id": job.item_id,
+                "finding_ids": ignored_answers,
+                "reason": "TASK_REVIEW_ANSWERED_FINDING_IGNORED",
+            })
+            logger.warning(
+                "TASK_REVIEW_ANSWERED_FINDING_IGNORED review_job_id=%s item_id=%s "
+                "findings=%s",
+                job.review_job_id,
+                job.item_id,
+                ignored_answers,
             )
             continue
         worker_id = str(body.get("worker_id") or "")

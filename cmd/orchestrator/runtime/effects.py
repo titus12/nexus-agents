@@ -48,6 +48,34 @@ class EffectRunnerNotFound(InvariantViolation):
     error_code = "EFFECT_RUNNER_NOT_FOUND"
 
 
+class FastTrackRunner:
+    """Synthesize the NODE_COMPLETED of an auto-approved stage.
+
+    The fast-track flag lets a stage finish without dispatching agents: this
+    runner converts the effect request into the same NODE_COMPLETED event a
+    real worker aggregate would have produced, so the FSM loop, the reducer
+    and the next-stage dispatch all behave exactly as they do for a live wave.
+    """
+
+    def run_once(self, request: EffectRequest) -> EffectOutcome:
+        payload = request.payload
+        action = str(payload.get("action") or "")
+        if not action:
+            raise InvariantViolation("fast track effect requires a domain action")
+        return EffectOutcome(
+            status="SUCCEEDED",
+            event_name="NODE_COMPLETED",
+            event_payload={
+                "action": action,
+                "aggregate": {"action": action},
+                "node_run_id": str(payload.get("node_run_id") or request.effect_id),
+                "worker_results": [],
+                "fast_track": True,
+                "sequence": payload.get("sequence"),
+            },
+        )
+
+
 @dataclass(frozen=True)
 class EffectOutcome:
     """Optional richer result returned by an external effect runner."""
@@ -241,6 +269,7 @@ __all__ = [
     "EffectOutcome",
     "EffectRunner",
     "EffectRunnerNotFound",
+    "FastTrackRunner",
     "CONTRACT_REJECTED_EVENT",
     "REPLY_EVENT_FAILURES",
     "UNSTRUCTURED_REPLY_EVENT",

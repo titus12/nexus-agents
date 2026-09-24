@@ -15,6 +15,12 @@ FIELDS = {
 CONTRACT = make_contract(
     contract_id="nexus.menxia.item_analyst.v1", state="MENXIA_ITEM_ANALYST", phase="MENXIA", role="review-analyst",
     modes=_MODES, actions=_ACTIONS, fields=FIELDS,
-    prompt_rules=("Verify evidence for the current item only.", "Separate verified facts, unknowns, and missing evidence."),
+    prompt_rules=(
+        "Verify evidence for the current item only.",
+        "Re-derive the item from the original requirement before reading the proposal; a proposal that does not derive from the requirement is a finding.",
+        "Decompose the proposal into atomic claims and verdict each claim with evidence; an unevidenced claim is UNSUPPORTED, never SUPPORTED.",
+        "Questions and suggestions must be code-level actionable so Solver can translate them one-to-one into changes.",
+        "Separate verified facts, unknowns, and missing evidence.",
+    ),
     example_overrides={"action": "EVIDENCE_SUFFICIENT", "mode": "ITEM_EVIDENCE_REVIEW"},
 )

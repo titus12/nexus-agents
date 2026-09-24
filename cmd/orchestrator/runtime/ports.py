@@ -158,6 +158,8 @@ class NotificationPort(Protocol):
 
     def send(self, request: NotificationRequest) -> NotificationReceipt: ...
 
+    def poll_reply(self, gate: object) -> list: ...
+
 
 class ArtifactPort(Protocol):
     """One-call boundary for durable artifact writes."""

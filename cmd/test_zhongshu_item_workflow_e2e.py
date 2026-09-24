@@ -6,6 +6,7 @@ import unittest
 from orchestrator.adapters import FakeMulticaAdapter
 from orchestrator.app import OrchestratorApp
 from orchestrator.domain.context import (
+    MenxiaParallelLimits,
     ParallelState,
     ProgressState,
     RequestState,
@@ -14,6 +15,23 @@ from orchestrator.domain.context import (
     ZhongshuParallelLimits,
 )
 from test_zhongshu_convergence_e2e import _ConvergingMultica, _plan
+
+
+def _revised_group_doc(acceptance: tuple[str, ...]) -> str:
+    """The group-000001 requirement document v2 with a rewritten §8."""
+
+    sections = (
+        "背景", "目标", "标识与范围", "状态与边界语义", "行为要求",
+        "责任边界", "交叉不变量", "验收标准", "非目标",
+    )
+    lines = ["# group-000001 需求文档 [v2]"]
+    for number, name in enumerate(sections, start=1):
+        lines.append(f"## {number}. {name}")
+        if name == "背景":
+            lines.append("group-000001 的上下文。")
+        elif name == "验收标准":
+            lines.extend(acceptance)
+    return "\n".join(lines)
 
 
 def _context() -> WorkflowContext:
@@ -25,6 +43,11 @@ def _context() -> WorkflowContext:
         ),
         parallel=ParallelState(
             zhongshu=ZhongshuParallelLimits(item_workflow_enabled=True),
+            menxia=MenxiaParallelLimits(
+                enabled=True,
+                max_concurrent_groups=2,
+                max_concurrent_items=3,
+            ),
         ),
     )
 
@@ -59,6 +82,19 @@ class _ItemWorkflowMultica(_ConvergingMultica):
                         "finding_id": "finding-item2",
                         "response": "acceptance rewritten observably",
                         "changed_fields": ["acceptance_signals"],
+                    }
+                ],
+                # The rewritten signal changes the group document's §8
+                # closure, so the reply re-authors the owning group's
+                # requirement document (supersede v1 with v2).
+                "group_docs": [
+                    {
+                        "group_id": "group-000001",
+                        "markdown": _revised_group_doc(
+                            ("A is observable",
+                             "revised observable signal; measured in UTF-8 "
+                             "bytes; source states.py"),
+                        ),
                     }
                 ],
             },

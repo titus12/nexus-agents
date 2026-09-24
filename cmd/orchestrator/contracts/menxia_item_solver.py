@@ -15,6 +15,12 @@ FIELDS = {
 CONTRACT = make_contract(
     contract_id="nexus.menxia.item_solver.v1", state="MENXIA_ITEM_SOLVER", phase="MENXIA", role="review-solver",
     modes=_MODES, actions=_ACTIONS, fields=FIELDS,
-    prompt_rules=("Propose implementation for the current item only.", "Keep files, changes, tests, verification, and rollback explicit."),
+    prompt_rules=(
+        "Propose implementation for the current item only.",
+        "changes must be code-level: existing functions as before/after diff text, new logic as complete implementation code, tests at assertion level.",
+        "The implementer must make zero design decisions: file placement, signatures, error paths, and boundary handling are all decided in this proposal.",
+        "Answer every Critic finding by ID in responses_to_critic; each accepted finding must map to a concrete change.",
+        "Keep files, changes, tests, verification, and rollback explicit.",
+    ),
     example_overrides={"action": "READY_FOR_CRITIC", "mode": "ITEM_IMPLEMENTATION_PROPOSAL", "implementation_proposal": {"objective": "objective", "approach": "approach", "files": [], "changes": [], "tests": []}},
 )

@@ -218,14 +218,143 @@ class ZhongshuDeltaDispositionTests(unittest.TestCase):
         closed = _p0(job.item_id)
         closed["status"] = closed["decision"] = "RESOLVED"
         report = aggregate_task_review_results(
-            queue.revision_id,
-            queue.plan_hash,
-            queue,
-            [result],
+            queue.revision_id, queue.plan_hash, queue, [result],
             previous=_previous(closed),
         )
         self.assertEqual(report["rejected_reviews"], [])
         self.assertTrue(report["task_review_complete"])
+
+    def test_answered_finding_reraised_without_response_is_rejected(self) -> None:
+        # The Analyst answered the finding with evidence; re-raising it while
+        # staying silent about the answer is the evidence-dodge signature.
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
+        job = queue.jobs[0]
+        result = _result(job, "TASK_CHANGES_REQUIRED", queue.plan_hash)
+        result["findings"] = [
+            {
+                "finding_id": "finding-p0-1",
+                "severity": "P0",
+                "category": "observability",
+                "target": "item-0101",
+                "claim": "acceptance signal cannot be verified",
+            }
+        ]
+        previous = _previous(_p0(job.item_id))
+        previous["finding_responses"] = [
+            {
+                "finding_id": "finding-p0-1",
+                "answer": "the signal is computed in states.py:914",
+                "evidence_ids": ["ev-1"],
+                "suggested_disposition": "CLOSE",
+            }
+        ]
+        report = aggregate_task_review_results(
+            queue.revision_id, queue.plan_hash, queue, [result],
+            previous=previous,
+        )
+        reasons = {
+            str(entry.get("reason") or "") for entry in report["rejected_reviews"]
+        }
+        self.assertIn("TASK_REVIEW_ANSWERED_FINDING_IGNORED", reasons)
+        self.assertFalse(report["task_review_complete"])
+
+    def test_answered_finding_reraised_with_rebuttal_passes(self) -> None:
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
+        job = queue.jobs[0]
+        result = _result(job, "TASK_CHANGES_REQUIRED", queue.plan_hash)
+        result["findings"] = [
+            {
+                "finding_id": "finding-p0-1",
+                "severity": "P0",
+                "category": "observability",
+                "target": "item-0101",
+                "claim": "acceptance signal cannot be verified",
+            }
+        ]
+        result["finding_responses"] = [
+            {
+                "finding_id": "finding-p0-1",
+                "response": "REBUT",
+                "note": "states.py:914 is a helper, not the signal path",
+            }
+        ]
+        previous = _previous(_p0(job.item_id))
+        previous["finding_responses"] = [
+            {
+                "finding_id": "finding-p0-1",
+                "answer": "the signal is computed in states.py:914",
+                "evidence_ids": ["ev-1"],
+                "suggested_disposition": "CLOSE",
+            }
+        ]
+        report = aggregate_task_review_results(
+            queue.revision_id, queue.plan_hash, queue, [result],
+            previous=previous,
+        )
+        self.assertEqual(report["rejected_reviews"], [])
+        self.assertTrue(report["task_review_complete"])
+
+    def test_cross_item_finding_id_collision_passes(self) -> None:
+        # A critic reviewing item-0101 minted a fresh P1 under the id the
+        # ledger already uses for item-0102's answered finding (live
+        # incident task-menxia-t1 CRITIC_25).  The id collision is a naming
+        # accident — the consolidation pool mints a fresh id for it — not
+        # the evidence-dodge signature, so the reply must not be rejected.
+        queue = _completed(build_review_jobs(_plan(), "revision-1", plan_hash="plan-hash"))
+        job = queue.jobs[0]
+        result = _result(job, "TASK_CHANGES_REQUIRED", queue.plan_hash)
+        result["findings"] = [
+            {
+                "finding_id": "finding-000001",
+                "severity": "P1",
+                "category": "dependencies",
+                "target": "item-0101",
+                "claim": "signal 3 measures another item's output without a dependency edge",
+                "required_action": "add the missing dependency edge",
+            }
+        ]
+        previous = _previous(
+            {
+                "finding_id": "finding-000001",
+                "item_id": "item-0102",
+                "group_id": "group-000001",
+                "severity": "P2",
+                "status": "RESOLVED",
+                "decision": "RESOLVED",
+                "category": "observability",
+                "target": "item-0102",
+                "claim": "an unrelated resolved finding on another item",
+            }
+        )
+        previous["finding_responses"] = [
+            {
+                "finding_id": "finding-000001",
+                "answer": "resolved on item-0102 with evidence",
+                "evidence_ids": ["ev-2"],
+                "suggested_disposition": "CLOSE",
+            }
+        ]
+        report = aggregate_task_review_results(
+            queue.revision_id, queue.plan_hash, queue, [result],
+            previous=previous,
+        )
+        reasons = {
+            str(entry.get("reason") or "") for entry in report["rejected_reviews"]
+        }
+        self.assertNotIn("TASK_REVIEW_ANSWERED_FINDING_IGNORED", reasons)
+        self.assertEqual(report["rejected_reviews"], [])
+        self.assertTrue(report["task_review_complete"])
+        by_id = {
+            item["finding_id"]: item for item in report["findings"]
+        }
+        self.assertEqual(by_id["finding-000001"]["item_id"], "item-0102")
+        new_for_item = [
+            item
+            for item in report["findings"]
+            if item.get("item_id") == "item-0101"
+        ]
+        self.assertEqual(len(new_for_item), 1)
+        self.assertNotEqual(new_for_item[0]["finding_id"], "finding-000001")
 
 
 class ZhongshuSuggestionContractTests(unittest.TestCase):

@@ -359,7 +359,12 @@ def _human_gate_block(
         lines.extend(evidence_lines)
     if reason_code:
         lines.append(f"（原因码：{reason_code}）")
-    lines.extend(_human_decision_guidance(context.identity.task_id))
+    decision_id = (
+        str(getattr(human_gate, "decision_id", "") or "").strip()
+        if human_gate is not None
+        else ""
+    )
+    lines.extend(_human_decision_guidance(context.identity.task_id, decision_id))
     return lines
 
 
@@ -473,14 +478,22 @@ def _missing_evidence_lines(
     return lines
 
 
-def _human_decision_guidance(task_id: str) -> list[str]:
-    """Tell the operator exactly what a reply does and how to abort."""
+def _human_decision_guidance(task_id: str, decision_id: str = "") -> list[str]:
+    """Tell the operator exactly what a reply does and how to abort.
 
-    return [
+    The decision id is rendered into the message body so the gate reply
+    poller can match a threaded reply back to this gate even when the
+    original message id is unknown (e.g. after a restart).
+    """
+
+    lines = [
         "怎么回复：直接回复本条消息任意内容 = 继续审查流程；"
         f"如需终止任务：python cmd/review_orchestrator_v2.py --cancel {task_id}",
         "提示：回复文字不会自动转达给 agent；要给出具体意见请到对应 multica issue 下评论。",
     ]
+    if decision_id:
+        lines.append(f"决策编号：{decision_id}")
+    return lines
 
 
 def _review_progress_lines(

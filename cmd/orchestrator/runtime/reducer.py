@@ -221,6 +221,11 @@ class LinearContextReducer:
                 if update.human_gate.message_id is not None
                 else current.message_id if current else None
             ),
+            zhongshu_group_parks=(
+                update.human_gate.zhongshu_group_parks
+                if update.human_gate.zhongshu_group_parks
+                else current.zhongshu_group_parks if current else ()
+            ),
         )
 
     @staticmethod

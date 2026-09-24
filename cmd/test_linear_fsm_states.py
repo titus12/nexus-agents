@@ -2,20 +2,30 @@ from __future__ import annotations
 
 import unittest
 
-from orchestrator.domain.context import ProgressState, TaskIdentity, WorkflowContext
+from orchestrator.domain.context import (
+    MenxiaParallelLimits,
+    ParallelState,
+    ProgressState,
+    TaskIdentity,
+    WorkflowContext,
+)
 from orchestrator.domain.decisions import StateDecision
 from orchestrator.domain.errors import InvariantViolation
 from orchestrator.domain.events import DomainEvent
 from orchestrator.domain.policies.prompts import build_prompt
+from orchestrator.domain.policies.zhongshu import MENXIA_FREEZE_ENTRY_ACTIONS
 from orchestrator.domain.states import StateRegistry, ZhongshuSolverState
 from orchestrator.domain.transitions import BUSINESS_STATES, SYSTEM_STATES
 
 
 class LinearStateMatrixTests(unittest.TestCase):
     def context(self, state: str, resume_state: str | None = None) -> WorkflowContext:
+        # Minimal matrix fixture: menxia explicitly off, matching the legacy
+        # bare-context semantics this suite's freeze-block contract asserts.
         return WorkflowContext(
             identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
             progression=ProgressState(state, 0, "2026-09-09T00:00:00Z", resume_state),
+            parallel=ParallelState(menxia=MenxiaParallelLimits(enabled=False)),
         )
 
     def test_every_registered_state_is_a_concrete_object(self) -> None:
@@ -33,8 +43,16 @@ class LinearStateMatrixTests(unittest.TestCase):
                     self.context(state_name),
                     DomainEvent(action, "task-1", 0, {}, "2026-09-09T00:00:00Z"),
                 )
+                expected = action
+                if (
+                    state_name == "ZHONGSHU_FREEZE_CHECK"
+                    and action in MENXIA_FREEZE_ENTRY_ACTIONS
+                ):
+                    # Without menxia limits the freeze approval must stop
+                    # loudly: the group pipeline cannot run disabled.
+                    expected = "BLOCKED"
                 self.assertIsInstance(decision, StateDecision)
-                self.assertEqual(decision.transition.action, action)
+                self.assertEqual(decision.transition.action, expected)
 
     def test_system_resume_states_require_and_use_resume_state(self) -> None:
         registry = StateRegistry.default()

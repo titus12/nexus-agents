@@ -14,6 +14,10 @@ _FINDING_RESOLUTION = object_schema(
     },
     required=("finding_id", "response"),
 )
+_GROUP_DOC = object_schema(
+    {"group_id": string(), "markdown": string()},
+    required=("group_id", "markdown"),
+)
 FIELDS = {
     "summary": string(),
     "item_id": string(),
@@ -33,6 +37,9 @@ FIELDS = {
         required=("item_id", "group_id", "title", "objective", "acceptance_signals"),
     ),
     "finding_resolutions": array(_FINDING_RESOLUTION),
+    # Rewriting acceptance signals changes the group's requirement document
+    # closure (§8), so the reply may re-author the owning group's document.
+    "group_docs": {**array(_GROUP_DOC), "type": ["array", "null"]},
     "evidence_ids": array(string()),
     "unknowns": array(),
     "risks": array(),

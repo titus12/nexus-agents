@@ -25,6 +25,15 @@ REVISION_ACTIONS = frozenset(
 # consume one attempt out of the bounded freeze-retry budget.
 FREEZE_RETRY_ACTIONS = frozenset({"FREEZE_REJECTED"})
 
+# Freeze-approval actions that release the plan into the Menxia review.  When
+# the Menxia parallel machinery is disabled these must not enter the shared-
+# document group pipeline (its bindings and document join are gated off), so
+# the freeze-check state stops the run with MENXIA_PARALLEL_DISABLED instead
+# of silently shipping a review with no evidence chain and no documents.
+MENXIA_FREEZE_ENTRY_ACTIONS = frozenset(
+    {"APPROVE_FREEZE", "FREEZE_OK", "FREEZE_APPROVED"}
+)
+
 # Critic actions that assert the reviewed plan is good enough to freeze.  A
 # freeze releases the plan to Menxia, so it must be justified by the whole task
 # ledger, not only by the tasks re-reviewed in the current round.
@@ -566,15 +575,139 @@ def stalled_item_ids(
     return tuple(dict.fromkeys(stalled))
 
 
+def apply_dispositions(
+    findings: Iterable[Finding],
+    resolutions: Iterable[object],
+    round: int,
+) -> tuple[Finding, ...]:
+    """Fold the Solver's ``finding_resolutions`` into the finding ledger.
+
+    ``absorbed`` closes the finding: the plan change the Solver just delivered
+    answers it, so the disposition note lands in ``resolution``.  ``rejected``
+    parks the finding as ``REJECTED_PENDING`` regardless of severity — the
+    Solver's word does not close a blocker, only the Critic's settlement does.
+    Findings the reply does not mention, and non-active findings, pass through
+    unchanged.
+    """
+
+    by_id: dict[str, Mapping[str, object]] = {}
+    for entry in resolutions or ():
+        if not isinstance(entry, Mapping):
+            continue
+        finding_id = str(entry.get("finding_id") or "").strip()
+        if finding_id and finding_id not in by_id:
+            by_id[finding_id] = entry
+    settled: list[Finding] = []
+    for finding in findings:
+        entry = by_id.get(finding.finding_id)
+        if entry is None or not finding.active:
+            settled.append(finding)
+            continue
+        response = str(entry.get("response") or "").strip().casefold()
+        note = str(entry.get("note") or entry.get("reason") or "").strip()
+        if response == "absorbed":
+            suffix = f"absorbed by solver in round {round}"
+            if note:
+                suffix += f": {note}"
+            resolution = (
+                f"{finding.resolution}; {suffix}" if finding.resolution else suffix
+            )
+            settled.append(
+                replace(
+                    finding,
+                    status="CLOSED",
+                    disposition="absorbed",
+                    resolution=resolution,
+                )
+            )
+        elif response == "rejected":
+            settled.append(replace(finding, status="REJECTED_PENDING", disposition="rejected"))
+        else:
+            settled.append(finding)
+    return tuple(settled)
+
+
+# Critic responses that confirm the Solver's rejection stands (维持驳回).
+_REJECTION_CONFIRMED_RESPONSES = frozenset({"REJECTED", "UPHELD", "MAINTAIN"})
+
+
+def settle_rejected_findings(
+    findings: Iterable[Finding],
+    critic_responses: Iterable[object],
+    reraised_keys: Iterable[str],
+) -> tuple[Finding, ...]:
+    """Settle ``REJECTED_PENDING`` findings after a Critic round.
+
+    A finding the Critic re-raised (its ``canonical_key`` is in
+    ``reraised_keys``) revives as OPEN with the disposition cleared.  A P0/P1
+    rejection only closes when the Critic's ``finding_responses`` explicitly
+    confirm it; silence keeps the blocker pending.  A P2/P3 rejection closes
+    automatically after one silent round (``disposition="rejected-auto"``),
+    because low-severity disagreements must not park a review on a human.
+    """
+
+    reraised = {
+        str(key).strip() for key in (reraised_keys or ()) if str(key).strip()
+    }
+    confirmed: set[str] = set()
+    for entry in critic_responses or ():
+        if not isinstance(entry, Mapping):
+            continue
+        finding_id = str(entry.get("finding_id") or "").strip()
+        response = str(entry.get("response") or "").strip().upper()
+        if finding_id and response in _REJECTION_CONFIRMED_RESPONSES:
+            confirmed.add(finding_id)
+    settled: list[Finding] = []
+    for finding in findings:
+        if finding.status != "REJECTED_PENDING":
+            settled.append(finding)
+            continue
+        canonical = str(finding.canonical_key or "").strip()
+        if canonical and canonical in reraised:
+            settled.append(
+                replace(finding, status="OPEN", disposition="")
+            )
+            continue
+        if finding.severity.strip().upper() in _BLOCKING_SEVERITIES:
+            if finding.finding_id in confirmed:
+                suffix = "critic upheld the rejection"
+                resolution = (
+                    f"{finding.resolution}; {suffix}"
+                    if finding.resolution
+                    else suffix
+                )
+                settled.append(
+                    replace(finding, status="CLOSED", resolution=resolution)
+                )
+            else:
+                settled.append(finding)
+            continue
+        suffix = "auto-closed: rejected by solver and not re-raised in the next critic round"
+        resolution = (
+            f"{finding.resolution}; {suffix}" if finding.resolution else suffix
+        )
+        settled.append(
+            replace(
+                finding,
+                status="CLOSED",
+                disposition="rejected-auto",
+                resolution=resolution,
+            )
+        )
+    return tuple(settled)
+
+
 __all__ = [
     "APPROVAL_ACTIONS",
     "FREEZE_RETRY_ACTIONS",
+    "MENXIA_FREEZE_ENTRY_ACTIONS",
     "REVISION_ACTIONS",
     "active_blocker_count",
     "active_blocker_ids",
     "active_findings",
     "active_findings_by_severity",
     "age_unresolved_findings",
+    "apply_dispositions",
     "approved_item_ids",
     "blocker_fingerprint",
     "freeze_retry_allowed",
@@ -583,6 +716,7 @@ __all__ = [
     "revision_allowed",
     "revision_made_progress",
     "select_solver_batch",
+    "settle_rejected_findings",
     "stalled_item_ids",
     "stuck_blockers",
     "unapproved_item_ids",

@@ -7,7 +7,7 @@ from .common import array, make_contract, object_schema, string
 _ACTIONS = ("APPROVE_FREEZE", "REQUEST_ANALYST_EVIDENCE", "REQUEST_SOLVER_REVISION", "REQUEST_REGROUP", "HUMAN_GATE", "BLOCKED", "TASK_APPROVED", "TASK_CHANGES_REQUIRED", "REQUEST_TASK_DISCARD")
 _MODES = ("REVIEW_CURRENT_TASK_GRAPH", "REVIEW_ONE_TASK")
 _FINDING = object_schema(
-    {"finding_id": string(), "category": string(), "target": string(), "claim": string(), "decision": string(), "severity": string(), "evidence_strength": string(), "evidence_ids": array(string()), "required_action": string()},
+    {"finding_id": string(), "category": string(), "target": string(), "claim": string(), "decision": string(), "severity": string(), "evidence_strength": string(), "evidence_ids": array(string()), "required_action": string(), "evidence_targets": array(object_schema({"path": string(), "symbol": string()}, required=("path",)))},
     required=("finding_id", "category", "target", "claim", "decision", "severity", "evidence_strength"),
 )
 _REVIEW_CHECKS = object_schema(
@@ -63,6 +63,19 @@ CONTRACT = make_contract(
         "(objective, acceptance_signals, dependencies, or source_requirement_ids) "
         "and the direction to move it. State the correction you would accept as "
         "RESOLVED; do not restate the complaint as the action.",
+        "Evidence demand rule: a finding whose required_action demands "
+        "source-level file:line evidence MUST carry evidence_targets: one "
+        "entry per workspace file (path, plus symbol when applicable) the "
+        "evidence must cite. Paths are relative to the mounted review "
+        "workspace; runtime facts that no file can prove stay out of "
+        "evidence_targets and close as WONT_VERIFY instead.",
+        "Answered-finding rule: finding_responses from the analyst or solver "
+        "arrive inside the evidence slice. A response backed by file:line "
+        "evidence that covers the demanded targets MUST be explicitly "
+        "dispositioned: accept it (close the finding with decision=RESOLVED, "
+        "naming the response) or rebut it by naming the concrete defect with "
+        "file:line. Re-requesting evidence the response already supplies is a "
+        "protocol violation.",
     ),
     example_overrides={"action": "APPROVE_FREEZE", "mode": "REVIEW_CURRENT_TASK_GRAPH", "review_checks": {"requirement_coverage": [], "boundary": [], "dependencies": [], "acceptance": [], "risks": []}},
 )

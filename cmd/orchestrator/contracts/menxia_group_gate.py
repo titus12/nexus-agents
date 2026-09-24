@@ -10,7 +10,7 @@ _ITEM_DECISION = object_schema({"item_id": string(), "action": string(), "summar
 FIELDS = {
     "summary": string(), "review_summary": string(), "decision": string(), "findings": array(), "score": object_schema(nullable=True), "remaining_risks": array(),
     "item_review": object_schema(nullable=True), "group_review": object_schema(nullable=True), "group_consistency": object_schema({"item_decisions": array(_ITEM_DECISION), "consistent": {"type": "boolean"}}, required=("item_decisions", "consistent"), nullable=True),
-    "required_changes": array(), "verification_plan": array(), "rollback_plan": object_schema(nullable=True), "questions_for_user": array(), "next_actions": array(),
+    "group_ids": array(string()), "required_changes": array(), "verification_plan": array(), "rollback_plan": object_schema(nullable=True), "questions_for_user": array(), "next_actions": array(),
 }
 CONTRACT = make_contract(
     contract_id="nexus.menxia.group_gate.v1", state="MENXIA_GROUP_GATE", phase="MENXIA", role="review-critic",

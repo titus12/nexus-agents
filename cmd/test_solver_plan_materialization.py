@@ -82,6 +82,23 @@ def _finding(finding_id: str, item_id: str = "item-1", severity: str = "P1") -> 
     )
 
 
+def _group_doc(group_id: str = "group-1", version: int = 1) -> str:
+    sections = (
+        "背景", "目标", "标识与范围", "状态与边界语义", "行为要求",
+        "责任边界", "交叉不变量", "验收标准", "非目标",
+    )
+    lines = [f"# {group_id} 需求文档 [v{version}]"]
+    for number, name in enumerate(sections, start=1):
+        lines.append(f"## {number}. {name}")
+        if name == "背景":
+            lines.append(f"{group_id} 的上下文。")
+    return "\n".join(lines)
+
+
+def _group_docs_entry(group_id: str = "group-1", version: int = 1) -> dict:
+    return {"group_id": group_id, "markdown": _group_doc(group_id, version)}
+
+
 class SolverPlanPolicyTests(unittest.TestCase):
     def test_noop_revision_materializes_current_plan(self) -> None:
         plan, error = materialize_solver_reply({"action": "READY_FOR_CRITIC", "changes": []}, _plan())
@@ -463,6 +480,8 @@ class SolverStateMaterializationTests(unittest.TestCase):
                     {"op": "replace_item_fields", "item_id": "item-1", "fields": {"objective": "Fixed"}}
                 ],
                 "finding_batch": {"selected_finding_ids": ["f-1"], "remaining_finding_ids": []},
+                "finding_resolutions": [{"finding_id": "f-1", "response": "absorbed"}],
+                "group_docs": [_group_docs_entry()],
             }
         )
         decision = self.state.handle(context, event)
@@ -568,6 +587,11 @@ class SolverStateMaterializationTests(unittest.TestCase):
                     "selected_finding_ids": selected,
                     "remaining_finding_ids": remaining,
                 },
+                "finding_resolutions": [
+                    {"finding_id": finding_id, "response": "absorbed"}
+                    for finding_id in selected
+                ],
+                "group_docs": [_group_docs_entry()],
             }
         )
         decision = self.state.handle(context, event)
@@ -608,11 +632,13 @@ class SolverStateMaterializationTests(unittest.TestCase):
                 "finding_resolutions": [
                     {
                         "finding_id": "f-1",
-                        "response": "routed to analyst for missing evidence",
+                        "response": "absorbed",
+                        "note": "routed to analyst for missing evidence",
                         "owner_role": "review-analyst",
                         "next_action": "collect evidence",
                     }
                 ],
+                "group_docs": [_group_docs_entry()],
             }
         )
         decision = self.state.handle(context, event)
@@ -630,6 +656,8 @@ class SolverStateMaterializationTests(unittest.TestCase):
                 "changes": [
                     {"target": "item-1", "fields": ["objective"], "description": "fixed"}
                 ],
+                "finding_resolutions": [{"finding_id": "f-1", "response": "absorbed"}],
+                "group_docs": [_group_docs_entry()],
             }
         )
         decision = self.state.handle(context, event)
@@ -651,6 +679,11 @@ class SolverStateMaterializationTests(unittest.TestCase):
                     "selected_finding_ids": selected,
                     "remaining_finding_ids": remaining,
                 },
+                "finding_resolutions": [
+                    {"finding_id": finding_id, "response": "absorbed"}
+                    for finding_id in selected
+                ],
+                "group_docs": [_group_docs_entry()],
             }
         )
         decision = self.state.handle(context, event)
@@ -690,6 +723,8 @@ class SolverStateMaterializationTests(unittest.TestCase):
                 "changes": [
                     {"op": "replace_item_fields", "item_id": "item-1", "fields": {"objective": "Fixed"}}
                 ],
+                "finding_resolutions": [{"finding_id": "f-1", "response": "absorbed"}],
+                "group_docs": [_group_docs_entry()],
             }
         )
         decision = self.state.handle(context, event)
@@ -707,7 +742,11 @@ class SolverStateMaterializationTests(unittest.TestCase):
         cycle_plan["items"][0]["dependencies"] = ["item-2"]
         cycle_plan["items"][1]["dependencies"] = ["item-1"]
         context = self._context(None)
-        event = self._event({"action": "READY_FOR_CRITIC", "plan": cycle_plan})
+        event = self._event({
+            "action": "READY_FOR_CRITIC",
+            "plan": cycle_plan,
+            "group_docs": [_group_docs_entry()],
+        })
 
         decision = self.state.handle(context, event)
 

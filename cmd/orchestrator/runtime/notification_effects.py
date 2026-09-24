@@ -28,6 +28,9 @@ class NullNotificationPort:
         # without ever contacting Feishu or hanging on a retry loop.
         return NotificationReceipt(request.notification_key, delivered=True)
 
+    def poll_reply(self, gate: HumanGate) -> list:
+        return []
+
 
 class FeishuNotificationPort:
     """Adapt the existing Feishu gate adapter to the runtime port."""
@@ -45,6 +48,9 @@ class FeishuNotificationPort:
             )
         )
         return NotificationReceipt(request.notification_key, delivered=receipt.delivered)
+
+    def poll_reply(self, gate: HumanGate) -> list:
+        return self._adapter.poll_reply(gate)
 
 
 class NotificationEffectRunner:

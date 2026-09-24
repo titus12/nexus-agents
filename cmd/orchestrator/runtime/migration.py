@@ -410,6 +410,7 @@ def _zhongshu_limits(value: object) -> ZhongshuParallelLimits:
         critic_max_workers=_positive_int(data, "critic_max_workers", 4),
         critic_default_workers=_positive_int(data, "critic_default_workers", 4),
         item_workflow_enabled=bool(data.get("item_workflow_enabled", False)),
+        fast_track=bool(data.get("fast_track", False)),
         global_max_workers=_positive_int(data, "global_max_workers", 6),
         per_task_max_workers=_positive_int(data, "per_task_max_workers", 6),
     )
@@ -418,7 +419,7 @@ def _zhongshu_limits(value: object) -> ZhongshuParallelLimits:
 def _menxia_limits(value: object) -> MenxiaParallelLimits:
     data = dict(value) if isinstance(value, Mapping) else {}
     return MenxiaParallelLimits(
-        enabled=bool(data.get("enabled", False)),
+        enabled=bool(data.get("enabled", True)),
         max_concurrent_groups=_positive_int(data, "max_concurrent_groups", 1),
         max_concurrent_items=_positive_int(data, "max_concurrent_items", 3),
         failure_policy=str(data.get("failure_policy") or "continue_and_block_group"),

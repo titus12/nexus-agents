@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import time
@@ -21,8 +22,24 @@ from ..domain.errors import (
     LeaseLostError,
     TransportError,
     UNSTRUCTURED_REPLY_EVENT,
+    is_infrastructure_failure,
 )
 from ..domain.policies.parallel import aggregate_zhongshu_workers
+from ..domain.policies.menxia import (
+    menxia_evidence_contribution,
+    menxia_item_next_stage,
+    menxia_wave_action,
+)
+from ..domain.policies.menxia_group import (
+    MENXIA_GROUP_TARGETS,
+    menxia_group_next_stage,
+    menxia_group_wave_action,
+)
+from ..domain.menxia_doc import (
+    MenxiaGroupDoc,
+    menxia_approval_blockers,
+    verify_group_reply,
+)
 from ..transport import RawTransportReply, ReplyBinding, ReplyNormalizer
 from .effects import EffectOutcome
 from .ports import (
@@ -41,6 +58,25 @@ from .nodes import NodeResult
 
 
 logger = logging.getLogger("review_orchestrator_fsm")
+
+
+def _sha256_hex(text: str) -> str:
+    """Content hash used for the group document version chain."""
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _menxia_infra_failure(result: WorkerResult) -> bool:
+    """True when a wave worker failed for an agent/transport reason."""
+
+
+    failure = result.failure
+    return (
+        result.status == "FAILED"
+        and failure is not None
+        and bool(getattr(failure, "retryable", False))
+        and is_infrastructure_failure(getattr(failure, "error_code", ""))
+    )
 
 # A run that failed after the agent delivered its reply is salvaged with a
 # short bounded read: enough to cover comment-visibility lag around the
@@ -896,7 +932,9 @@ class AgentNodeJoiner:
         dispatch_mode: str = "",
         base_plan: object | None = None,
         previous_review: object | None = None,
+        salvaged_worker_payloads: tuple[dict[str, object], ...] = (),
         binding_contexts: Mapping[str, Mapping[str, object]] | None = None,
+        menxia_stage_census: Mapping[str, object] | None = None,
     ) -> None:
         self._node_run_id = node_run_id
         self._task_id = task_id
@@ -913,13 +951,36 @@ class AgentNodeJoiner:
             if isinstance(previous_review, Mapping)
             else None
         )
+        self._salvaged_worker_payloads: tuple[dict[str, object], ...] = tuple(
+            dict(row)
+            for row in (salvaged_worker_payloads or ())
+            if isinstance(row, Mapping) and str(row.get("worker_id") or "")
+        )
         self._binding_contexts: dict[str, dict[str, object]] = {
             str(worker_id): dict(ctx)
             for worker_id, ctx in (binding_contexts or {}).items()
             if isinstance(ctx, Mapping)
         }
+        self._menxia_stage_census: dict[str, str] = {
+            str(item_id): str(stage)
+            for item_id, stage in (menxia_stage_census or {}).items()
+        }
 
     def join(self, results: tuple[WorkerResult, ...]):
+        if (
+            self._state.startswith("MENXIA_")
+            and self._dispatch_mode == "menxia_item_pipeline"
+        ):
+            menxia = self._join_menxia(results)
+            if menxia is not None:
+                return menxia
+        if (
+            self._state in MENXIA_GROUP_TARGETS
+            and self._dispatch_mode == "menxia_group_pipeline"
+        ):
+            group = self._join_menxia_group(results)
+            if group is not None:
+                return group
         failed = [
             result
             for result in results
@@ -993,6 +1054,13 @@ class AgentNodeJoiner:
                     aggregate.update(salvage)
                 else:
                     aggregate["task_reviews"] = partial_reviews
+            if self._analyst_salvage_enabled():
+                salvaged_rows = self._analyst_salvage_rows(results, failed)
+                if salvaged_rows:
+                    aggregate["salvaged_worker_payloads"] = [
+                        {**row, "salvage_revision_id": self._revision_id}
+                        for row in salvaged_rows
+                    ]
             return NodeResult(
                 self._node_run_id,
                 "FAILED",
@@ -1013,6 +1081,20 @@ class AgentNodeJoiner:
             if context and context.get("review_job_id"):
                 merged["review_job_id"] = str(context["review_job_id"])
             worker_payloads.append(merged)
+        analyst_salvage = (
+            self._salvaged_worker_payloads
+            if self._analyst_salvage_enabled()
+            else ()
+        )
+        if analyst_salvage:
+            fresh_ids = {
+                str(payload.get("worker_id") or "") for payload in worker_payloads
+            }
+            worker_payloads.extend(
+                dict(row)
+                for row in analyst_salvage
+                if str(row.get("worker_id") or "") not in fresh_ids
+            )
         if self._task_review_queue is not None:
             return self._join_task_review(results, worker_payloads, partial_reviews)
 
@@ -1080,6 +1162,10 @@ class AgentNodeJoiner:
                     worker_payloads,
                     self._canonical_requirements or None,
                 )
+                if analyst_salvage:
+                    # The carried payloads were consumed by this fan-in;
+                    # clear the salvage set so the next wave starts clean.
+                    aggregate["salvaged_worker_payloads"] = []
             except ValueError as error:
                 return NodeResult(
                     self._node_run_id,
@@ -1105,6 +1191,296 @@ class AgentNodeJoiner:
         else:
             aggregate = {"action": actions[0], "worker_count": len(results)}
         return NodeResult(self._node_run_id, "SUCCEEDED", results, aggregate=aggregate)
+
+    def _menxia_item_id(self, result: WorkerResult, payload: Mapping[str, object]) -> str:
+        context = self._binding_contexts.get(result.worker_id) or {}
+        item_id = str(context.get("item_id") or "") or str(payload.get("item_id") or "")
+        return item_id.strip()
+
+    def _join_menxia(self, results: tuple[WorkerResult, ...]) -> NodeResult | None:
+        """Fan-in for the menxia stage-barrier wave (continue_and_block_group).
+
+        Content-level worker failures park their item as ``BLOCKED`` instead of
+        failing the whole node; infrastructure failures return ``None`` so the
+        standard retry path takes over.  The aggregate carries the per-item
+        results (folded into the menxia pipeline rows by the FSM) and the
+        reduced wave action.
+        """
+
+        infra_failed = [
+            result
+            for result in results
+            if result.status != "SUCCEEDED"
+            and _menxia_infra_failure(result)
+        ]
+        if infra_failed:
+            return None
+        succeeded = [
+            result
+            for result in results
+            if result.status == "SUCCEEDED"
+            and isinstance(result.result_payload, Mapping)
+        ]
+        succeeded_ids = {id(result) for result in succeeded}
+        content_failed = [
+            result for result in results if id(result) not in succeeded_ids
+        ]
+        item_results: list[dict[str, object]] = []
+        result_actions: dict[str, str] = {}
+        evidence_contributions: list[dict[str, object]] = []
+        for result in succeeded:
+            payload = result.result_payload
+            assert isinstance(payload, Mapping)
+            item_id = self._menxia_item_id(result, payload)
+            action = str(payload.get("action") or "").strip()
+            if not item_id or not action:
+                return None
+            row: dict[str, object] = {"item_id": item_id, "action": action}
+            fingerprint = str(payload.get("fingerprint") or "")
+            if fingerprint:
+                row["fingerprint"] = fingerprint
+            if self._state == "MENXIA_ITEM_SOLVER":
+                # Persist the proposal on the fold row so the item Critic can
+                # weigh it instead of re-demanding a proposal the run made.
+                proposal = payload.get("implementation_proposal")
+                if isinstance(proposal, Mapping):
+                    row["implementation_proposal"] = dict(proposal)
+            elif self._state == "MENXIA_ITEM_ANALYST":
+                # Carry the analyst's evidence into the shared packet; the
+                # item Critic slices it from its dispatch context instead of
+                # re-requesting evidence the wave just produced.
+                contribution = menxia_evidence_contribution(
+                    item_id, payload, str(result.worker_id or "")
+                )
+                if contribution is not None:
+                    evidence_contributions.append(contribution)
+            item_results.append(row)
+            result_actions[item_id] = action
+        for result in content_failed:
+            context = self._binding_contexts.get(result.worker_id) or {}
+            item_id = str(context.get("item_id") or "").strip()
+            if not item_id:
+                return None
+            reason = str(
+                (result.failure.error_code if result.failure else "")
+                or "MENXIA_ITEM_BLOCKED"
+            )
+            item_results.append(
+                {
+                    "item_id": item_id,
+                    "action": "BLOCKED",
+                    "blocked_reason": reason,
+                }
+            )
+            result_actions[item_id] = "BLOCKED"
+        if not item_results:
+            return None
+        census = dict(self._menxia_stage_census)
+        for item_id, action in result_actions.items():
+            next_stage = menxia_item_next_stage(action)
+            if next_stage is None:
+                next_stage = census.get(item_id) or "SOLVING"
+            census[item_id] = next_stage
+        aggregate: dict[str, object] = {
+            "action": menxia_wave_action(
+                self._state, result_actions=result_actions, census=census
+            ),
+            "menxia_item_results": item_results,
+            "worker_results": [
+                dict(payload)
+                for payload in (
+                    result.result_payload
+                    for result in succeeded
+                    if isinstance(result.result_payload, Mapping)
+                )
+            ],
+        }
+        findings: list[dict[str, object]] = []
+        for result in succeeded:
+            payload = result.result_payload
+            assert isinstance(payload, Mapping)
+            raw_findings = payload.get("findings")
+            if isinstance(raw_findings, list):
+                findings.extend(
+                    dict(finding)
+                    for finding in raw_findings
+                    if isinstance(finding, Mapping)
+                )
+        if findings:
+            aggregate["findings"] = findings
+        if evidence_contributions:
+            aggregate["menxia_evidence"] = evidence_contributions
+        return NodeResult(self._node_run_id, "SUCCEEDED", results, aggregate=aggregate)
+
+    def _join_menxia_group(self, results: tuple[WorkerResult, ...]) -> NodeResult | None:
+        """Fan-in for the group-pipeline wave (shared document model).
+
+        Each group is one worker, so the mechanical document checks run here
+        before anything folds: a reply that fails ``verify_group_reply`` is
+        demoted to a ``BLOCKED`` row carrying the violations, never folded
+        into the document chain.  Infrastructure failures return ``None`` so
+        the standard retry path takes over.
+        """
+
+        infra_failed = [
+            result
+            for result in results
+            if result.status != "SUCCEEDED"
+            and _menxia_infra_failure(result)
+        ]
+        if infra_failed:
+            return None
+        succeeded = [
+            result
+            for result in results
+            if result.status == "SUCCEEDED"
+            and isinstance(result.result_payload, Mapping)
+        ]
+        succeeded_ids = {id(result) for result in succeeded}
+        content_failed = [
+            result for result in results if id(result) not in succeeded_ids
+        ]
+        role = {
+            "MENXIA_GROUP_SOLVER": "solver",
+            "MENXIA_GROUP_ANALYST": "analyst",
+            "MENXIA_GROUP_CRITIC": "critic",
+        }[self._state]
+        group_rows: list[dict[str, object]] = []
+        result_actions: dict[str, str] = {}
+        for result in succeeded:
+            payload = result.result_payload
+            assert isinstance(payload, Mapping)
+            context = self._binding_contexts.get(result.worker_id) or {}
+            # The dispatch binding is the identity authority: the reply's
+            # group_id is attacker/worker-claimed data, so the fold must key
+            # on the bound group and reject replies that name another one.
+            group_id = str(context.get("group_id") or "").strip()
+            action = str(payload.get("action") or "").strip()
+            if not group_id or not action:
+                return None
+            claimed_group_id = str(payload.get("group_id") or "").strip()
+            if claimed_group_id and claimed_group_id != group_id:
+                group_rows.append({
+                    "group_id": group_id,
+                    "action": "BLOCKED",
+                    "blocked_reason": (
+                        "MENXIA_GROUP_IDENTITY_MISMATCH: reply claims "
+                        f"{claimed_group_id!r}, dispatch bound {group_id!r}"
+                    ),
+                })
+                result_actions[group_id] = "BLOCKED"
+                continue
+            previous_markdown = str(context.get("doc_markdown") or "")
+            previous = (
+                MenxiaGroupDoc.parse(previous_markdown)
+                if previous_markdown.strip() else None
+            )
+            violations = verify_group_reply(
+                previous, role=role, reply=payload,
+            )
+            if violations:
+                group_rows.append({
+                    "group_id": group_id,
+                    "action": "BLOCKED",
+                    "blocked_reason": "MENXIA_GROUP_DOC_BREACH: "
+                    + "; ".join(violations),
+                })
+                result_actions[group_id] = "BLOCKED"
+                continue
+            doc_markdown = str(payload.get("doc_markdown"))
+            doc = MenxiaGroupDoc.parse(doc_markdown)
+            approval_blockers: tuple[str, ...] = ()
+            if role == "critic" and action == "APPROVE_GROUP":
+                # The approval map must close against the group requirement
+                # document (§9): no undecided markers, no incomplete
+                # exception rows, no acceptance-map entries the requirement
+                # never stated.  Legacy bindings without a requirement
+                # markdown skip the map closure.
+                approval_blockers = menxia_approval_blockers(
+                    doc.body_markdown,
+                    requirement_markdown=str(
+                        context.get("requirement_markdown") or ""
+                    ),
+                )
+            if (
+                role == "critic"
+                and action == "APPROVE_GROUP"
+                and (
+                    doc.open_blocking()
+                    or doc.pending_rejections()
+                    or approval_blockers
+                )
+            ):
+                # The convergence rule gates the approval: a critic cannot
+                # approve a group whose document still carries unresolved
+                # blocking suggestions, unconfirmed rejections, or plan-body
+                # blockers.  Fold the demand back to the solver instead of
+                # advancing to the gate.
+                action = "REQUEST_SOLVER_REVISION"
+            row: dict[str, object] = {
+                "group_id": group_id,
+                "action": action,
+                "doc_version": doc.version,
+                "doc_hash": _sha256_hex(doc_markdown),
+                "doc_markdown": doc_markdown,
+                "open_count": doc.open_count(),
+            }
+            fingerprint = str(payload.get("fingerprint") or "")
+            if fingerprint:
+                row["fingerprint"] = fingerprint
+            if role == "solver":
+                # Doc mutations the fold needs, claimed by the worker and
+                # already mechanically verified against the section rules.
+                absorbed_ids = payload.get("absorbed_ids")
+                rejected_ids = payload.get("rejected_ids")
+                if isinstance(absorbed_ids, (list, tuple)):
+                    row["absorbed_ids"] = list(absorbed_ids)
+                if isinstance(rejected_ids, (list, tuple)):
+                    row["rejected_ids"] = list(rejected_ids)
+            group_rows.append(row)
+            result_actions[group_id] = action
+        for result in content_failed:
+            context = self._binding_contexts.get(result.worker_id) or {}
+            group_id = str(context.get("group_id") or "").strip()
+            if not group_id:
+                return None
+            reason = str(
+                (result.failure.error_code if result.failure else "")
+                or "MENXIA_GROUP_BLOCKED"
+            )
+            group_rows.append(
+                {
+                    "group_id": group_id,
+                    "action": "BLOCKED",
+                    "blocked_reason": reason,
+                }
+            )
+            result_actions[group_id] = "BLOCKED"
+        if not group_rows:
+            return None
+        census = dict(self._menxia_stage_census)
+        for group_id, action in result_actions.items():
+            next_stage = menxia_group_next_stage(action)
+            if next_stage is None:
+                next_stage = census.get(group_id) or "SOLVING"
+            census[group_id] = next_stage
+        aggregate: dict[str, object] = {
+            "action": menxia_group_wave_action(
+                self._state, result_actions=result_actions, census=census
+            ),
+            "menxia_group_results": group_rows,
+            "worker_results": [
+                dict(payload)
+                for payload in (
+                    result.result_payload
+                    for result in succeeded
+                    if isinstance(result.result_payload, Mapping)
+                )
+            ],
+        }
+        return NodeResult(
+            self._node_run_id, "SUCCEEDED", results, aggregate=aggregate
+        )
 
     def _salvage_failed_round(
         self,
@@ -1156,6 +1532,46 @@ class AgentNodeJoiner:
             )
             return None
         return _salvage_payload_from_report(report)
+
+    def _analyst_salvage_enabled(self) -> bool:
+        """Analyst evidence waves are the only generic-mode salvage source."""
+
+        return (
+            self._task_review_queue is None
+            and self._dispatch_mode != "item_revise"
+            and self._state == "ZHONGSHU_ANALYST"
+        )
+
+    def _analyst_salvage_rows(
+        self,
+        results: tuple[WorkerResult, ...],
+        failed: list[WorkerResult],
+    ) -> list[dict[str, object]]:
+        """Evidence payloads to carry across a failed Analyst wave.
+
+        Fresh successful workers' payloads come first (they win over any
+        carried row for the same worker id); rows salvaged by an earlier
+        failed round and handed back through the retry dispatch fill in the
+        slots that are still missing, so a repeatedly failing wave never
+        loses the evidence it already paid for.
+        """
+
+        failed_ids = {result.worker_id for result in failed}
+        rows: list[dict[str, object]] = []
+        fresh_ids: set[str] = set()
+        for result in results:
+            if result.worker_id in failed_ids:
+                continue
+            payload = result.result_payload
+            if not isinstance(payload, Mapping):
+                continue
+            fresh_ids.add(result.worker_id)
+            rows.append({**dict(payload), "worker_id": result.worker_id})
+        for row in self._salvaged_worker_payloads:
+            if str(row.get("worker_id") or "") in fresh_ids:
+                continue
+            rows.append(dict(row))
+        return rows
 
     def _join_task_review(self, results, worker_payloads, partial_reviews=()):
         from ..zhongshu_review import aggregate_task_review_results
@@ -1432,6 +1848,21 @@ class AgentNodeJoiner:
             self._node_run_id,
             [patch.item_id for patch in patches],
         )
+        # A patch that rewrites acceptance signals changes the owning group's
+        # document closure (§8), so the worker may re-author that document;
+        # carry the submissions (and which groups were patched) through to
+        # the FSM fold.
+        group_docs: list[object] = []
+        for payload in worker_payloads:
+            docs = payload.get("group_docs")
+            if isinstance(docs, list):
+                group_docs.extend(doc for doc in docs if isinstance(doc, dict))
+        patched_group_ids = sorted({
+            str((patch.item or {}).get("group_id") or "").strip()
+            for patch in patches
+            if isinstance(patch.item, dict)
+            and str((patch.item or {}).get("group_id") or "").strip()
+        })
         return NodeResult(
             self._node_run_id,
             "SUCCEEDED",
@@ -1444,6 +1875,8 @@ class AgentNodeJoiner:
                     "item-scoped revision merged for "
                     + ",".join(patch.item_id for patch in patches)
                 ),
+                "group_docs": group_docs or None,
+                "patched_group_ids": patched_group_ids,
             },
         )
 

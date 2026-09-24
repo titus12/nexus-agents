@@ -10,6 +10,8 @@ finding batch coverage, and expose a single error code when a reply is invalid.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from collections.abc import Iterable, Mapping, Sequence
 
 from ...zhongshu_review_queue import structural_gate
@@ -74,6 +76,18 @@ _RETRYABLE_SOLVER_REPLY_PREFIXES = (
     # A blocker the Solver pushed into the deferred remainder is a shape slip
     # too: the graph cannot freeze while an active P0/P1 is not being worked on.
     "SOLVER_BATCH_MISMATCH:",
+    # A missing or mis-typed disposition entry is the same class of mechanical
+    # slip: the Solver must account for every dictated batch finding, and an
+    # incomplete ``finding_resolutions`` list is fixed by re-asking, not by a human.
+    "SOLVER_RESOLUTION_COVERAGE_INCOMPLETE:",
+    # Rewriting a group document outside the revision scope is a boundary slip
+    # the Solver fixes by dropping the document or echoing it verbatim.
+    "SOLVER_GROUP_DOC_FROZEN:",
+    # A missing or malformed group requirement document is a mechanical slip:
+    # re-asking the Solver with the authoritative documents attached lets it
+    # resubmit, whereas blocking the task for a human would not fix the form.
+    "SOLVER_GROUP_DOC_MISSING:",
+    "SOLVER_GROUP_DOC_INVALID:",
 )
 
 
@@ -324,6 +338,191 @@ def solver_batch_coverage_error(
     return ""
 
 
+_RESOLUTION_RESPONSES = frozenset({"absorbed", "rejected"})
+
+
+def solver_resolution_coverage_error(
+    selected_finding_ids: Sequence[object],
+    payload: Mapping[str, object],
+) -> str:
+    """Require a disposition for every dictated batch finding.
+
+    The orchestrator picks the batch, so the reply must say what happened to
+    each selected finding: ``absorbed`` (the plan change answers it) or
+    ``rejected`` (the Solver pushes back and the Critic settles it later).
+    Ids are resolved with :func:`resolve_finding_ids` first, so an
+    abbreviated but unambiguous id counts as covered.  An entry with an
+    unknown ``response`` value covers nothing — it is reported missing so
+    the re-ask can fix the wording instead of silently dropping the finding.
+    """
+
+    selected = [
+        str(item).strip() for item in selected_finding_ids if str(item).strip()
+    ]
+    if not selected:
+        return ""
+    resolutions = payload.get("finding_resolutions")
+    covered: set[str] = set()
+    if isinstance(resolutions, list):
+        for entry in resolutions:
+            if not isinstance(entry, Mapping):
+                continue
+            response = str(entry.get("response") or "").strip().casefold()
+            if response not in _RESOLUTION_RESPONSES:
+                continue
+            resolved = resolve_finding_ids([entry.get("finding_id")], selected)
+            covered.update(value for value in resolved if value)
+    missing = sorted(set(selected) - covered)
+    if missing:
+        return f"SOLVER_RESOLUTION_COVERAGE_INCOMPLETE:missing={missing}"
+    return ""
+
+
+def carry_forward_group_docs(
+    submitted_docs: Iterable[object],
+    current_rows: Iterable[object],
+    editable_group_ids: Iterable[str],
+    *,
+    required_group_ids: Iterable[str] = (),
+    review: object = None,
+    plan: object = None,
+) -> tuple[dict[str, dict[str, object]], str]:
+    """Enforce the group-document freeze zone and fold editable submissions.
+
+    ``submitted_docs`` is the reply's ``group_docs`` array (``group_id`` +
+    ``markdown``); ``current_rows`` are the authoritative
+    :class:`ZhongshuGroupState` rows.  A document for a group outside
+    ``editable_group_ids`` must be byte-identical to the authoritative
+    markdown (or omitted); any variant is reported as
+    ``SOLVER_GROUP_DOC_FROZEN:<sorted group_ids>`` and nothing folds.
+
+    Every group in ``required_group_ids`` (the FORMALIZE groups, or the
+    REVISE batch scope) must submit a document; a gap is reported as
+    ``SOLVER_GROUP_DOC_MISSING:all`` when nothing required arrived, else
+    the sorted missing group ids.  Each editable submission must pass the
+    mechanical document checks (nine sections, wording, acceptance
+    closure, version arithmetic against the authoritative row) and is
+    reported as ``SOLVER_GROUP_DOC_INVALID:<details>`` otherwise.
+
+    An accepted editable submission folds with the title version, the
+    hash recomputed here, and the plan-projection source hash, so the
+    chain never trusts a worker's claim.  Groups whose submission is only
+    an identical echo of the authoritative markdown — and groups with no
+    submission — stay absent from the fold; the caller keeps the
+    authoritative row.
+    """
+
+    from ..zhongshu_doc import ZhongshuRequirementDoc, group_doc_violations
+
+    rows = {
+        str(getattr(row, "group_id", "") or ""): row
+        for row in current_rows or ()
+        if str(getattr(row, "group_id", "") or "")
+    }
+    editable = {str(gid).strip() for gid in (editable_group_ids or ()) if str(gid).strip()}
+    submitted: dict[str, str] = {}
+    for entry in submitted_docs or ():
+        if not isinstance(entry, Mapping):
+            continue
+        group_id = str(entry.get("group_id") or "").strip()
+        markdown = entry.get("markdown")
+        if not group_id or not isinstance(markdown, str) or not markdown.strip():
+            continue
+        submitted[group_id] = markdown
+    required = list(dict.fromkeys(
+        str(gid).strip() for gid in (required_group_ids or ()) if str(gid).strip()
+    ))
+    missing = [group_id for group_id in required if group_id not in submitted]
+    if missing:
+        # ``all`` means the reply carried no documents whatsoever; a partial
+        # submission names exactly which required groups stayed silent.
+        code = "all" if not submitted else ",".join(sorted(missing))
+        return {}, f"SOLVER_GROUP_DOC_MISSING:{code}"
+    folded: dict[str, dict[str, object]] = {}
+    frozen: list[str] = []
+    for group_id, markdown in sorted(submitted.items()):
+        if group_id not in editable:
+            row = rows.get(group_id)
+            authoritative = str(getattr(row, "doc_markdown", "") or "") if row else ""
+            if markdown != authoritative:
+                frozen.append(group_id)
+            continue
+        row = rows.get(group_id)
+        row_version = int(getattr(row, "doc_version", 0) or 0)
+        previous_version = row_version if row_version > 0 else None
+        violations = group_doc_violations(
+            markdown,
+            previous_version=previous_version,
+            review=_review_for_doc_verify(review, plan),
+            group_id=group_id,
+        )
+        if violations:
+            return {}, "SOLVER_GROUP_DOC_INVALID:" + ";".join(violations[:10])
+        document = ZhongshuRequirementDoc.parse(markdown)
+        folded[group_id] = {
+            "markdown": markdown,
+            "doc_version": document.version,
+            "doc_hash": hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+            "doc_source_hash": _plan_source_hash(plan),
+        }
+    if frozen:
+        return {}, f"SOLVER_GROUP_DOC_FROZEN:{sorted(set(frozen))}"
+    return folded, ""
+
+
+def _plan_source_hash(plan: object) -> str:
+    """SHA-256 of the canonical plan projection that produced the document."""
+
+    payload = (
+        json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if isinstance(plan, Mapping)
+        else ""
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class _PlanItemView:
+    """Item-shaped read view over one submitted plan item."""
+
+    def __init__(self, item: Mapping[str, object]) -> None:
+        self.group_id = str(item.get("group_id") or "")
+        self.acceptance_signals = tuple(
+            str(signal)
+            for signal in (item.get("acceptance_signals") or ())
+            if str(signal)
+        )
+
+
+class _PlanReviewView:
+    """Review-shaped projection of a submitted plan's items.
+
+    The first formalization folds before the plan exists in the review, so
+    the document closure (§8 vs acceptance_signals) must read the signals
+    from the very plan the reply submits — not from an empty review.
+    """
+
+    def __init__(self, plan: Mapping[str, object]) -> None:
+        self.task_items = tuple(
+            _PlanItemView(item)
+            for item in (plan.get("items") or ())
+            if isinstance(item, Mapping)
+        )
+
+
+def _review_for_doc_verify(review: object, plan: object) -> object:
+    """Review projection for document verification.
+
+    A submitted document must close with the plan being submitted: the
+    materialized plan (the reply's formalization or the patched plan after an
+    item revision) is the authority on acceptance signals.  Only when no plan
+    projection exists does the live review provide the items.
+    """
+
+    if isinstance(plan, Mapping) and (plan.get("items") or ()):
+        return _PlanReviewView(plan)
+    return review
+
+
 def apply_solver_changes(
     current_plan: Mapping[str, object],
     changes: Sequence[object],
@@ -511,6 +710,8 @@ __all__ = [
     "normalize_solver_finding_ids",
     "resolve_finding_ids",
     "solver_batch_coverage_error",
+    "solver_resolution_coverage_error",
+    "carry_forward_group_docs",
     "solver_revision_response_error",
     "structural_integrity_errors",
 ]

@@ -159,6 +159,47 @@ ITEM_LOAD
 
 不能因为同名就认定功能等价。
 
+### 4.5 第一性原理审计程序
+
+对 Solver 提案本身，Analyst 采用三步程序，而不是直接评价提案的文字：
+
+```text
+归零重推
+  → 原子主张判定表
+  → 假设台账
+```
+
+**归零重推**：先不看提案，从原始需求和验收信号独立推导"这个条目必须
+做到什么"。然后对照提案，检查它是否是这条推导链的有效产物。需求要 A
+而提案优化了 B，无论 B 本身多正确、写得多漂亮，直接成 finding。
+
+**原子主张判定表**：把提案拆成原子主张（符号存在、签名匹配、当前行为
+假设、依赖可用等），逐条判定：
+
+```text
+SUPPORTED      必须挂 evidence_id，来自真实读取的代码/文档/日志
+UNSUPPORTED    没有证据支撑；举证责任倒置：无证据一律 UNSUPPORTED，不得默认成立
+CONTRADICTED   与已验证事实冲突，直接成 finding
+```
+
+**假设台账**：提案中隐含未言明的前提，逐条浮出为可证伪陈述。关键假设
+未解决时按注入契约选择补证或修订，不得带未清算假设放行。
+
+背书是有成本的：放行结论必须同时记录"该条目最强的反方论证"。找不到
+反方论证，本身就是审计不充分的信号。
+
+### 4.6 建议质量门槛
+
+Analyst 提出的问题和建议必须代码级可实施：
+
+```text
+指明涉及哪个函数、什么行为、什么边界；
+Solver 能把它一对一翻译成一条 change，不需要再猜意图。
+```
+
+"多考虑一下错误处理"这类泛化建议不满足门槛，输出前要么落成代码级
+表述，要么不输出。
+
 ## 5. 证据状态
 
 每个关键结论必须标记：
@@ -230,6 +271,8 @@ ItemEvidenceAudit 只描述证据审计语义：事实、来源、当前行为�
 
 ```text
 不审文字漂亮程度，审事实是否成立。
+不审提案写得好不好，审推导链和事实基础是否成立。
+无证据的主张一律 UNSUPPORTED，举证责任在提案方。
 不补写实现方案，审证据是否足够。
 不把未知判成错误，先区分证据缺失和方案缺陷。
 不直接修改冻结条目，只返回审计结果。
@@ -248,11 +291,18 @@ runtime evidence.
 
 REQUIRED ORDER:
 1. Trace the item to the original requirement.
-2. Verify cited sources.
-3. Confirm current behavior.
-4. Check dependencies and reusable capabilities.
-5. Record evidence strength, gaps, conflicts, and unknowns.
-6. Return ItemEvidenceAudit.
+2. Re-derive what the item must achieve from the requirement and acceptance
+   signals, before reading the proposal; check the proposal against this
+   derivation.
+3. Verify cited sources.
+4. Confirm current behavior.
+5. Check dependencies and reusable capabilities.
+6. Decompose the proposal into atomic claims and verdict each with evidence;
+   unevidenced claims are UNSUPPORTED.
+7. Record evidence strength, gaps, conflicts, unknowns, and the ledger of
+   unstated assumptions.
+8. Return ItemEvidenceAudit, including the strongest counter-argument to any
+   endorsement.
 
 DO NOT:
 - design the final implementation;
@@ -260,6 +310,8 @@ DO NOT:
 - approve or reject the item;
 - invent missing evidence;
 - turn hypotheses into confirmed facts;
+- default unevidenced claims to SUPPORTED;
+- emit suggestions that Solver cannot translate one-to-one into changes;
 - modify workflow state.
 ```
 

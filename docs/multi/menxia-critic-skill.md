@@ -141,6 +141,41 @@ ITEM_LOAD
   → BLOCKED
 ```
 
+### 5.1 对抗性审查程序
+
+Critic 对方案的态度是先攻击，攻击不倒才放行：
+
+```text
+Steelman 先行
+  → 逐 hunk 审查
+  → 证伪计划
+  → Acceptance 覆盖反演
+  → Pre-mortem 爆炸半径
+  → 前轮 Finding 清算
+```
+
+- **Steelman 先行**：先用最强形式重述提案，再攻击；攻击稻草人结论无效。
+- **逐 hunk 审查**：对 Solver 的每个变更块，检查锚点处的调用方（谁在调用
+  它、签名是否兼容）、错误路径（新异常由谁接住）、以及与所在文件既有代码
+  的约定冲突。变更块多到无法逐 hunk 审查时，优先考虑拆分条目。
+- **证伪计划**：回答"如果该方案是错的，哪个测试会先暴露它"。构造不出
+  证伪测试的方案属于 P1 finding，不是低风险。
+- **Acceptance 覆盖反演**：把每条验收信号反向走查到具体变更；走查不到
+  变更的验收信号是 finding，不是"以后再说"。
+- **Pre-mortem 爆炸半径**：假设方案已上线且已出事，枚举被改文件下游依赖
+  的失败模式；只审被改的行不审调用方，等于没审。
+- **前轮 Finding 清算**：revision_round > 0 时，上一轮每条 Finding 必须被
+  显式处置（修复并附证据，或反驳并附论证）；被静默丢弃的 Finding 自动
+  成为新一轮 finding。
+
+建议质量门槛：每条 finding 的 required_changes 必须同时满足——可证伪
+（附验证方式）、可实施（代码级，Solver 能一对一翻译成变更，不得是"多考虑
+错误处理"式泛化）、属于当前 item 范围。不满足门槛的建议退回重写，不得
+作为 finding 输出。
+
+放行前的最后一个检查：analyst 的放行和 solver 的自评都不能替代本程序；
+三方一致也不能豁免集成层面的攻击。
+
 ## 6. 条目合理性检查
 
 Critic 必须回答：
@@ -439,6 +474,9 @@ P3：
 低风险改进或后续建议。
 ```
 
+严重度锚定：每条 severity 必须写明威胁的是哪条验收信号或哪条失败模式；
+映射不到任何验收信号的 severity 无效，必须重新评级。
+
 ## 14. 条目决策
 
 条目决策只表达通过、修订、拆分、合并、移除、转人工或阻塞等语义；具体
@@ -572,18 +610,24 @@ REQUIRED ORDER:
 5. Check performance, memory, GC, and resource lifecycle.
 6. Check version and platform compatibility.
 7. Check verification and rollback.
-8. Create evidence-backed Finding cards.
-9. Decide whether the item passes, needs revision, should be split or merged,
-   should be removed, needs a human decision, or is blocked. Use only the action
-   supplied by the injected Menxia Critic contract.
-10. When all items are reviewed, produce the group consistency result.
+8. Attack the changes hunk by hunk at their anchors; state a falsification
+   plan; walk every acceptance signal back to a change; settle every
+   prior-round finding explicitly.
+9. Create evidence-backed Finding cards anchored to the acceptance signal
+   they threaten.
+10. Decide whether the item passes, needs revision, should be split or merged,
+    should be removed, needs a human decision, or is blocked. Use only the action
+    supplied by the injected Menxia Critic contract.
+11. When all items are reviewed, produce the group consistency result.
 
 DO NOT:
 - modify the frozen item or project files;
 - replace Solver's implementation design;
 - report hypotheses as confirmed defects;
 - approve an item with unresolved P0/P1;
+- approve a proposal that has no falsification plan;
 - hide a failed compatibility gate behind an average score;
+- let reviewer consensus substitute for the adversarial procedure;
 - claim that tests or measurements were executed;
 - change workflow state directly.
 ```

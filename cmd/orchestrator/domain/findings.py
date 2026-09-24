@@ -29,6 +29,10 @@ _FINDING_STATUSES = {
     "WONT_FIX",
     "DEFERRED",
     "WONT_VERIFY",
+    # Solver disposition ledger lifecycle: the Solver rejected the finding and
+    # the Critic has not settled it yet, or the settlement closed it for good.
+    "REJECTED_PENDING",
+    "CLOSED",
 }
 
 
@@ -67,6 +71,10 @@ class Finding:
     # high value means the Solver revision loop is not converging on it.
     stuck_rounds: int = 0
     resolution: str | None = None
+    # Structured rejection bookkeeping from the Solver disposition ledger:
+    # "absorbed" (merged into the plan), "rejected" (Solver pushed back, the
+    # Critic settles it later) or "rejected-auto" (silent-round auto-close).
+    disposition: str = ""
     supporting_evidence: tuple[str, ...] = ()
     verification: tuple[str, ...] = ()
     remaining_risk: str | None = None
@@ -80,6 +88,11 @@ class Finding:
     claim: str = ""
     required_action: str = ""
     impact: str = ""
+    # Structured, mechanically checkable evidence demands: each entry names a
+    # workspace path (and optionally a symbol) the evidence must cite.  The
+    # fulfillment gate verifies existence in the mounted workspace, so the
+    # demand survives any rewording of an "environment blocked me" excuse.
+    evidence_targets: tuple[dict[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -112,6 +125,18 @@ class Finding:
                 data[name] = tuple(str(item) for item in raw)
             else:
                 raise TypeError(f"finding field {name} must be an array")
+        raw_targets = data.get("evidence_targets") or ()
+        targets: list[dict[str, str]] = []
+        if not isinstance(raw_targets, (list, tuple)):
+            raise TypeError("finding field evidence_targets must be an array")
+        for raw_target in raw_targets:
+            if not isinstance(raw_target, Mapping) or not str(raw_target.get("path") or "").strip():
+                raise ValueError("evidence target must be an object with a non-empty path")
+            targets.append({
+                "path": str(raw_target.get("path")).strip(),
+                "symbol": str(raw_target.get("symbol") or "").strip(),
+            })
+        data["evidence_targets"] = tuple(targets)
         allowed = set(cls.__dataclass_fields__)
         data = {name: data[name] for name in allowed if name in data}
         if not data["finding_id"]:

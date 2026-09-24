@@ -7,7 +7,7 @@ import os
 import tempfile
 import uuid
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import NoReturn, Protocol
 
@@ -110,6 +110,20 @@ class JsonWorkflowRepository:
         if self.state_path.exists():
             raise PersistenceError(f"snapshot already exists: {self.state_path}")
         self._atomic_write(self.state_path, _snapshot_to_dto(snapshot))
+
+    def patch_context(self, task_id: str, context: WorkflowContext) -> None:
+        """Persist a startup context correction (e.g. env-driven parallel
+        flags) in place.
+
+        Keeps the current state_version: journal snapshots only win on a
+        strictly greater version, so the patched base snapshot stays
+        authoritative and later reloads observe the corrected flags.
+        """
+
+        snapshot = self.load(task_id)
+        updated = replace(snapshot, context=context)
+        self._validate_snapshot(updated)
+        self._atomic_write(self.state_path, _snapshot_to_dto(updated))
 
     def load(self, task_id: str) -> WorkflowSnapshot:
         value = self._read_snapshot() if self.state_path.exists() else None

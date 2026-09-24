@@ -86,6 +86,23 @@ class NodeEffectRunner:
                 if isinstance(payload.get("previous_review"), Mapping)
                 else None
             ),
+            menxia_stage_census=(
+                {
+                    str(item_id): str(stage)
+                    for item_id, stage in payload["menxia_stage_census"].items()
+                }
+                if isinstance(payload.get("menxia_stage_census"), Mapping)
+                else None
+            ),
+            salvaged_worker_payloads=(
+                tuple(
+                    dict(item)
+                    for item in payload.get("salvaged_worker_payloads")
+                    if isinstance(item, Mapping)
+                )
+                if isinstance(payload.get("salvaged_worker_payloads"), (list, tuple))
+                else ()
+            ),
         )
         executor = (
             self._executor_factory(node, context)

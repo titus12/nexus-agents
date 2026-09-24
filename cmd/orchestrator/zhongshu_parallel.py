@@ -717,6 +717,40 @@ def merge_analyst_evidence(
     evidence_requests: list[Any] = []
     questions_for_user: list[Any] = []
     assumptions: list[Any] = []
+    finding_responses: dict[str, dict[str, Any]] = {}
+
+    def _collect_finding_responses(body: dict[str, Any], worker_id: str) -> None:
+        """Merge per-worker answers to the Critic's findings into the packet.
+
+        First answer per finding_id wins; a later worker disagreeing only on
+        disposition keeps the first answer and logs the divergence, because
+        the Critic dispositions one answer per finding rather than a debate.
+        """
+
+        for response in body.get("finding_responses") or []:
+            if not isinstance(response, dict):
+                continue
+            finding_id = str(response.get("finding_id") or "").strip()
+            answer = str(response.get("answer") or "").strip()
+            if not finding_id or not answer:
+                continue
+            merged = dict(response)
+            merged["worker_id"] = worker_id
+            existing = finding_responses.get(finding_id)
+            if existing is None:
+                finding_responses[finding_id] = merged
+                continue
+            if (
+                str(existing.get("suggested_disposition") or "")
+                != str(merged.get("suggested_disposition") or "")
+            ):
+                logger.warning(
+                    "ZHONGSHU_FINDING_RESPONSE_DISAGREEMENT finding_id=%s "
+                    "kept_worker=%s diverging_worker=%s",
+                    finding_id,
+                    existing.get("worker_id"),
+                    worker_id,
+                )
 
     for result in sorted(worker_results, key=lambda value: str(value.get("worker_id", ""))):
         if not isinstance(result, dict):
@@ -733,6 +767,7 @@ def merge_analyst_evidence(
         deferred_updates.extend(
             _demote_evidence_update_overflow(body, worker_id=worker_id)
         )
+        _collect_finding_responses(body, worker_id)
         reason = validate_zhongshu_evidence_packet(
             body,
             canonical_requirements,
@@ -861,6 +896,9 @@ def merge_analyst_evidence(
         "evidence_updates": merged_updates,
         "deferred_evidence_updates": deferred_updates_final,
         "evidence_requests": evidence_requests[:ANALYST_MAX_EVIDENCE_REQUESTS],
+        "finding_responses": [
+            finding_responses[key] for key in sorted(finding_responses)
+        ],
         "worker_evidence": worker_evidence,
         "protected_paths": protected_paths,
         "conflicts": conflicts,

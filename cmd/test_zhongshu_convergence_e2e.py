@@ -7,12 +7,16 @@ from collections import Counter
 from orchestrator.adapters import FakeMulticaAdapter
 from orchestrator.app import OrchestratorApp
 from orchestrator.domain.context import (
+    MenxiaParallelLimits,
+    ParallelState,
     ProgressState,
     RequestState,
     TaskIdentity,
     WorkflowContext,
 )
 from orchestrator.transport.external import ExternalMessage
+from test_group_doc_loop import GroupWaveScripting
+from test_group_doc_loop import _zhongshu_doc as _loop_group_doc
 
 
 def _plan() -> dict:
@@ -51,8 +55,29 @@ def _plan() -> dict:
     }
 
 
-class _ConvergingMultica(FakeMulticaAdapter):
-    """Rejects one task once, then approves; the graph must still freeze."""
+def _zhongshu_doc(version: int = 1, acceptance: tuple[str, ...] = ()) -> str:
+    sections = (
+        "背景", "目标", "标识与范围", "状态与边界语义", "行为要求",
+        "责任边界", "交叉不变量", "验收标准", "非目标",
+    )
+    lines = ["# group-000001 需求文档 [v%d]" % version]
+    for number, name in enumerate(sections, start=1):
+        lines.append(f"## {number}. {name}")
+        if name == "背景":
+            lines.append("group-000001 的上下文。")
+        elif name == "验收标准" and acceptance:
+            lines.extend(acceptance)
+    return "\n".join(lines)
+
+
+class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
+    """Rejects one task once, then approves; the graph must still freeze.
+
+    The menxia group leg runs the real shared-document pipeline (the serial
+    fallback is gone); the scripted group waves converge on the first pass.
+    """
+
+    critic_demands_revision = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -72,13 +97,16 @@ class _ConvergingMultica(FakeMulticaAdapter):
             self._reply_solver(request)
         elif target == "ZHONGSHU_CRITIC":
             self._reply_critic(request)
+        elif target in (
+            "MENXIA_GROUP_SOLVER",
+            "MENXIA_GROUP_ANALYST",
+            "MENXIA_GROUP_CRITIC",
+        ):
+            self._reply_group_wave(request)
         else:
             action = {
                 "ZHONGSHU_ANALYST": "READY_FOR_SOLVER",
                 "ZHONGSHU_FREEZE_CHECK": "FREEZE_APPROVED",
-                "MENXIA_ITEM_SOLVER": "FEASIBLE",
-                "MENXIA_ITEM_ANALYST": "EVIDENCE_SUFFICIENT",
-                "MENXIA_ITEM_CRITIC": "APPROVE_ITEM",
                 "MENXIA_GROUP_GATE": "APPROVE_GROUP",
             }.get(target)
             if action:
@@ -120,11 +148,44 @@ class _ConvergingMultica(FakeMulticaAdapter):
 
     def _reply_solver(self, request) -> None:
         revision = bool(request.context.get("has_current_plan"))
+        # Each revision must supersede the authoritative document: the freeze
+        # zone pins the version chain, so re-submitting the same version is a
+        # doc_version_jump violation.  Derive the next version from the
+        # authoritative markdown the dispatch carries.
+        authoritative = str(
+            (request.context.get("group_docs_authoritative") or {}).get(
+                "group-000001"
+            )
+            or ""
+        )
+        previous_version = 0
+        marker = authoritative.rfind("[v")
+        if marker >= 0:
+            digits = ""
+            for char in authoritative[marker + 2:]:
+                if not char.isdigit():
+                    break
+                digits += char
+            if digits:
+                previous_version = int(digits)
         payload = {
             "action": "READY_FOR_CRITIC",
             "plan": _plan(),
             "plan_hash": "plan-1",
             "changes": [],
+            # §8 must close with the plan's acceptance_signals verbatim —
+            # the submitted plan itself is the closure source on the first
+            # formalization; revisions bump the version against the
+            # authoritative row.
+            "group_docs": [
+                {
+                    "group_id": "group-000001",
+                    "markdown": _zhongshu_doc(
+                        version=previous_version + 1,
+                        acceptance=("A is observable", "B is observable"),
+                    ),
+                }
+            ],
         }
         if revision:
             # Only on a revision: the initial run has no active findings, so a
@@ -132,7 +193,8 @@ class _ConvergingMultica(FakeMulticaAdapter):
             payload["finding_resolutions"] = [
                 {
                     "finding_id": "finding-item2",
-                    "response": "clarified the acceptance signal",
+                    "response": "absorbed",
+                    "note": "clarified the acceptance signal",
                     "changed_fields": ["acceptance_signals"],
                     "evidence": [],
                     "owner_role": "review-solver",
@@ -202,6 +264,13 @@ def _context() -> WorkflowContext:
         progression=ProgressState("REQUEST_INTAKE", 0, "2026-09-15T00:00:00Z"),
         request=RequestState(
             raw_request="run a review", project_type="python", task_type="review"
+        ),
+        parallel=ParallelState(
+            menxia=MenxiaParallelLimits(
+                enabled=True,
+                max_concurrent_groups=2,
+                max_concurrent_items=3,
+            )
         ),
     )
 
@@ -273,9 +342,15 @@ class ZhongshuConvergenceEndToEndTests(unittest.TestCase):
         # rejection count across the revision round.
         self.assertEqual(ledger["item-000001"].status, "APPROVED")
         self.assertEqual(ledger["item-000001"].changes_rounds, 0)
+        # The Solver's absorbed disposition now closes the finding directly
+        # (disposition ledger); the approval ratchet keeps the ledger row.
         self.assertEqual(
             [finding.status for finding in snapshot.context.review.findings],
-            ["RESOLVED"],
+            ["CLOSED"],
+        )
+        self.assertEqual(
+            [finding.disposition for finding in snapshot.context.review.findings],
+            ["absorbed"],
         )
 
 
@@ -374,6 +449,250 @@ class StubbornBlockerIsFrozenWithFollowUpsTests(unittest.TestCase):
         self.assertGreaterEqual(
             snapshot.context.review.zhongshu_revision_round, 3
         )
+
+
+class _PingPongMultica(GroupWaveScripting, FakeMulticaAdapter):
+    """Two groups: A converges first, B only after a gate bounce.
+
+    group-000002 depends on group-000001, so the first freeze check freezes
+    only A (early hand-over) while B keeps its Zhongshu row.  The menxia
+    gate then bounces the run back to the Zhongshu Critic, B freezes on the
+    next pass and the group pipeline finishes the run.  The menxia leg runs
+    the short loop (critic approves the first document).
+    """
+
+    critic_demands_revision = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate_dispatches = 0
+
+    def dispatch(self, request):
+        receipt = super().dispatch(request)
+        context = request.context
+        if (
+            context.get("contract_mode")
+            or context.get("zhongshu_dispatch_mode") == "requirement_contract"
+        ):
+            self._reply(
+                request,
+                {
+                    "action": "REQUIREMENT_CONTRACT_READY",
+                    "requirements": _pingpong_plan()["requirements"],
+                },
+            )
+            return receipt
+        target = request.target_state
+        if target == "ZHONGSHU_ANALYST":
+            self._reply(request, {"action": "READY_FOR_SOLVER", "findings": []})
+        elif target == "ZHONGSHU_SOLVER":
+            self._reply(
+                request,
+                {
+                    "action": "READY_FOR_CRITIC",
+                    "plan": _pingpong_plan(),
+                    "plan_hash": "plan-1",
+                    "changes": [],
+                    "group_docs": [
+                        {
+                            "group_id": "group-000001",
+                            "markdown": _loop_group_doc(
+                                "group-000001", ("Task A", "Task B")
+                            ),
+                        },
+                        {
+                            "group_id": "group-000002",
+                            "markdown": _loop_group_doc(
+                                "group-000002", ("Task C",)
+                            ),
+                        },
+                    ],
+                },
+            )
+        elif target == "ZHONGSHU_CRITIC":
+            item_id = str(context.get("item_id") or "")
+            self._reply(
+                request,
+                {
+                    "action": "TASK_APPROVED",
+                    "item_id": item_id,
+                    "group_id": str(context.get("group_id") or ""),
+                    "reviewed_plan_hash": str(context.get("plan_hash") or ""),
+                    "reviewed_task_hash": str(context.get("task_hash") or ""),
+                    "reviewed_dependency_hash": str(
+                        context.get("dependency_hash") or ""
+                    ),
+                    "worker_id": request.request_id,
+                    "findings": [],
+                    "review_checks": {},
+                },
+            )
+        elif target == "ZHONGSHU_FREEZE_CHECK":
+            self._reply(request, {"action": "FREEZE_APPROVED"})
+        elif target in (
+            "MENXIA_GROUP_SOLVER",
+            "MENXIA_GROUP_ANALYST",
+            "MENXIA_GROUP_CRITIC",
+        ):
+            self._reply_group_wave(request)
+        elif target == "MENXIA_GROUP_GATE":
+            self.gate_dispatches += 1
+            self._reply(request, {"action": "APPROVE_GROUP"})
+        return receipt
+
+
+def _pingpong_plan() -> dict:
+    def item(item_id: str, group_id: str, title: str, deps: tuple[str, ...]) -> dict:
+        return {
+            "item_id": item_id,
+            "group_id": group_id,
+            "title": title,
+            "objective": f"do {title}",
+            "dependencies": list(deps),
+            "source_requirement_ids": ["req-000001"],
+            "acceptance_signals": [f"{title} is observable"],
+        }
+
+    return {
+        "plan_id": "plan-1",
+        "items": [
+            item("item-000001", "group-000001", "Task A", ()),
+            item("item-000002", "group-000001", "Task B", ()),
+            item("item-000003", "group-000002", "Task C", ("item-000001",)),
+        ],
+        "groups": [
+            {
+                "group_id": "group-000001",
+                "item_ids": ["item-000001", "item-000002"],
+            },
+            {"group_id": "group-000002", "item_ids": ["item-000003"]},
+        ],
+        "requirements": [
+            {
+                "requirement_id": "req-000001",
+                "statement": "run a review",
+                "priority": "must",
+                "scope": "in",
+                "kind": "task",
+            }
+        ],
+    }
+
+
+def _pingpong_context() -> WorkflowContext:
+    return WorkflowContext(
+        identity=TaskIdentity("task-pingpong", "issue-pp", "", "request-pp"),
+        progression=ProgressState("REQUEST_INTAKE", 0, "2026-09-24T00:00:00Z"),
+        request=RequestState(
+            raw_request="run a review", project_type="python", task_type="review"
+        ),
+        parallel=ParallelState(
+            menxia=MenxiaParallelLimits(
+                enabled=True,
+                max_concurrent_groups=2,
+                max_concurrent_items=3,
+            )
+        ),
+    )
+
+
+class ZhongshuMenxiaPingPongEndToEndTests(unittest.TestCase):
+    """Early hand-over through the whole linear FSM (implementation plan
+    Task 8, ``PingPongTerminates``): the frozen group enters Menxia while
+    the other keeps converging, the gate bounces the run back, and the
+    ping-pong stays bounded before reaching DONE."""
+
+    def test_pingpong_terminates_with_done(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = _PingPongMultica()
+            app = OrchestratorApp(
+                _pingpong_context(),
+                root=directory,
+                multica=adapter,
+                poll_interval=0,
+                timeout_seconds=15,
+            )
+            self.assertTrue(app.run())
+            snapshot = app.repository.load("task-pingpong")
+            dispatched = list(adapter.dispatched)
+
+        self.assertEqual(snapshot.context.progression.state, "DONE")
+        review = snapshot.context.review
+        self.assertIsNotNone(review)
+
+        # Both groups froze and both menxia rows approved; every item is
+        # completed and no revision budget was burned.
+        zhongshu_stages = {
+            row.group_id: row.stage for row in review.zhongshu_groups
+        }
+        self.assertEqual(
+            zhongshu_stages,
+            {"group-000001": "FROZEN", "group-000002": "FROZEN"},
+        )
+        menxia_stages = {
+            row.group_id: row.stage for row in (review.menxia_groups or ())
+        }
+        self.assertEqual(
+            menxia_stages,
+            {"group-000001": "APPROVED", "group-000002": "APPROVED"},
+        )
+        self.assertEqual(
+            set(review.completed_item_ids),
+            {"item-000001", "item-000002", "item-000003"},
+        )
+        self.assertEqual(review.zhongshu_revision_round, 0)
+        self.assertIsNone(snapshot.context.recovery.blocked_reason)
+
+        # Early hand-over: group-000001's whole menxia leg ran before the
+        # first gate dispatch, and group-000002's leg only after it.
+        gate_index = next(
+            index
+            for index, request in enumerate(dispatched)
+            if request.target_state == "MENXIA_GROUP_GATE"
+        )
+        first_a_wave = min(
+            index
+            for index, request in enumerate(dispatched)
+            if request.context.get("group_id") == "group-000001"
+            and request.context.get("menxia_dispatch_mode") == "group_pipeline"
+        )
+        last_a_wave = max(
+            index
+            for index, request in enumerate(dispatched)
+            if request.context.get("group_id") == "group-000001"
+            and request.context.get("menxia_dispatch_mode") == "group_pipeline"
+        )
+        first_b_wave = min(
+            index
+            for index, request in enumerate(dispatched)
+            if request.context.get("group_id") == "group-000002"
+            and request.context.get("menxia_dispatch_mode") == "group_pipeline"
+        )
+        self.assertLess(first_a_wave, gate_index)
+        self.assertLess(last_a_wave, gate_index)
+        self.assertGreater(first_b_wave, gate_index)
+
+        # Every group wave before the gate dispatch belongs to the frozen
+        # group: B is not seeded while it is still converging in Zhongshu.
+        pre_gate_wave_groups = {
+            str(request.context.get("group_id") or "")
+            for request in dispatched[:gate_index]
+            if request.context.get("menxia_dispatch_mode") == "group_pipeline"
+        }
+        self.assertEqual(pre_gate_wave_groups, {"group-000001"})
+
+        # The ping-pong is bounded: exactly one gate bounce (the frozen
+        # groups grow monotonically, so at most one bounce per group) and
+        # never more than groups x per-group budget critic waves after the
+        # first gate dispatch.
+        bounces_after_gate = [
+            request
+            for request in dispatched[gate_index:]
+            if request.target_state == "ZHONGSHU_CRITIC"
+        ]
+        self.assertLessEqual(len(bounces_after_gate), 2 * 5)
+        self.assertEqual(len(bounces_after_gate), 1)
+        self.assertEqual(adapter.gate_dispatches, 2)
 
 
 if __name__ == "__main__":

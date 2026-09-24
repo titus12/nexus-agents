@@ -63,10 +63,15 @@ _EVIDENCE_REQUEST = object_schema(
     {"item_id": {"type": ["string", "null"]}, "requirement_id": string(), "question": string(), "reason": string()},
     required=("item_id", "requirement_id", "question", "reason"),
 )
+_GROUP_DOC = object_schema(
+    {"group_id": string(), "markdown": string()},
+    required=("group_id", "markdown"),
+)
 
 FIELDS = {
     "summary": string(), "plan": {**_PLAN, "type": ["object", "null"]},
     "changes": array(), "finding_resolutions": array(_FINDING_RESOLUTION), "finding_batch": object_schema(_FINDING_BATCH["properties"], required=_FINDING_BATCH["required"], nullable=True),
+    "group_docs": {**array(_GROUP_DOC), "type": ["array", "null"]},
     "dependencies": array(), "scope": object_schema(nullable=True), "unknowns": array(), "risks": array(),
     "unknown_resolutions": array(), "questions_for_user": array(), "next_actions": array(), "evidence_requests": array(_EVIDENCE_REQUEST),
 }
@@ -82,6 +87,7 @@ CONTRACT = make_contract(
         "plan.items is the only complete task-object index. Every group must use item_ids to reference plan.items; never emit groups[*].items or duplicate task objects.",
         "Do not emit implementation-level design fields forbidden by the solver protocol.",
         "Every finding resolution must identify its owner and next action.",
+        "Every group must carry one nine-section requirement document in group_docs; section 8 must list each member item acceptance_signal verbatim, and section 2 must not hedge.",
     ),
     example_overrides={
         "action": "READY_FOR_CRITIC",

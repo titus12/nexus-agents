@@ -77,6 +77,14 @@ class NodeContext:
     # Task-review nodes: the dispatch-time snapshot of the prior round's
     # findings and task-review ledger, consumed by the fan-in aggregate.
     previous_review: Mapping[str, object] | None = None
+    # Menxia stage-barrier nodes: dispatch-time snapshot of every pipeline
+    # row's stage; rows not dispatched in this wave cannot change during it,
+    # so the joiner computes the post-wave census as snapshot ∪ mapped results.
+    menxia_stage_census: Mapping[str, str] | None = None
+    # Analyst evidence nodes: evidence payloads salvaged from the failed
+    # round's wave; the joiner replays them at fan-in alongside the fresh
+    # workers' results.
+    salvaged_worker_payloads: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)

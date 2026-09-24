@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from .common import PhaseContract
+from .menxia_group_analyst import CONTRACT as MENXIA_GROUP_ANALYST
+from .menxia_group_critic import CONTRACT as MENXIA_GROUP_CRITIC
 from .menxia_group_gate import CONTRACT as MENXIA_GROUP_GATE
+from .menxia_group_solver import CONTRACT as MENXIA_GROUP_SOLVER
 from .menxia_item_analyst import CONTRACT as MENXIA_ITEM_ANALYST
 from .menxia_item_critic import CONTRACT as MENXIA_ITEM_CRITIC
 from .menxia_item_solver import CONTRACT as MENXIA_ITEM_SOLVER
@@ -20,6 +23,9 @@ _BY_STATE: dict[str, PhaseContract] = {
     "MENXIA_ITEM_SOLVER": MENXIA_ITEM_SOLVER,
     "MENXIA_ITEM_ANALYST": MENXIA_ITEM_ANALYST,
     "MENXIA_ITEM_CRITIC": MENXIA_ITEM_CRITIC,
+    "MENXIA_GROUP_SOLVER": MENXIA_GROUP_SOLVER,
+    "MENXIA_GROUP_ANALYST": MENXIA_GROUP_ANALYST,
+    "MENXIA_GROUP_CRITIC": MENXIA_GROUP_CRITIC,
     "MENXIA_GROUP_GATE": MENXIA_GROUP_GATE,
 }
 

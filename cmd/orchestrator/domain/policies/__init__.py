@@ -7,6 +7,7 @@ from .replies import NormalizedRoleReply, normalize_role_reply
 from .zhongshu import (
     APPROVAL_ACTIONS,
     FREEZE_RETRY_ACTIONS,
+    MENXIA_FREEZE_ENTRY_ACTIONS,
     REVISION_ACTIONS,
     active_blocker_count,
     active_blocker_ids,
@@ -26,6 +27,7 @@ from .zhongshu import (
 __all__ = [
     "APPROVAL_ACTIONS",
     "FREEZE_RETRY_ACTIONS",
+    "MENXIA_FREEZE_ENTRY_ACTIONS",
     "NormalizedRoleReply",
     "PromptSpec",
     "REVISION_ACTIONS",

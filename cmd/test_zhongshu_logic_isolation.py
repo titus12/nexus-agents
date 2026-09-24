@@ -67,6 +67,23 @@ def _plan(item_count: int = 7) -> dict:
     }
 
 
+def _group_doc(group_id: str = "group-000001", version: int = 1) -> str:
+    sections = (
+        "背景", "目标", "标识与范围", "状态与边界语义", "行为要求",
+        "责任边界", "交叉不变量", "验收标准", "非目标",
+    )
+    lines = [f"# {group_id} 需求文档 [v{version}]"]
+    for number, name in enumerate(sections, start=1):
+        lines.append(f"## {number}. {name}")
+        if name == "背景":
+            lines.append(f"{group_id} 的上下文。")
+    return "\n".join(lines)
+
+
+def _group_docs_entry(group_id: str = "group-000001", version: int = 1) -> dict:
+    return {"group_id": group_id, "markdown": _group_doc(group_id, version)}
+
+
 def _context(findings=(), *, plan=None, state: str = "ZHONGSHU_SOLVER") -> WorkflowContext:
     return WorkflowContext(
         identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
@@ -95,6 +112,25 @@ class StageResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             resolve_dispatch_stage("REQUEST_INTAKE"), SolverStage.FORMALIZE
+        )
+
+    def test_analyst_edge_with_open_findings_is_a_revision(self) -> None:
+        # Live regression (task-20260921-8f18de seq 8/10): the evidence-packet
+        # return is relabelled READY_FOR_SOLVER by the fan-in, so the source
+        # state alone cannot tell it from the initial contract hand-over.  The
+        # dispatch went out as formalization, the Solver full-re-planned every
+        # item, and the review ratchet was destroyed.
+        self.assertEqual(
+            resolve_dispatch_stage(
+                "ZHONGSHU_ANALYST", has_active_findings=True
+            ),
+            SolverStage.REVISE,
+        )
+        self.assertEqual(
+            resolve_dispatch_stage(
+                "ZHONGSHU_ANALYST", has_active_findings=False
+            ),
+            SolverStage.FORMALIZE,
         )
 
     def test_reply_stage_follows_the_declared_mode(self) -> None:
@@ -185,6 +221,10 @@ class SolverChannelIsolationTests(unittest.TestCase):
             "action": "READY_FOR_CRITIC",
             "changes": [],
             "finding_batch": batch.as_reply_template(),
+            "finding_resolutions": [
+                {"finding_id": finding_id, "response": "absorbed"}
+                for finding_id in batch.selected_finding_ids
+            ],
         }
         self.assertEqual(logic.validate(echo, review), "")
         self.assertEqual(
@@ -216,6 +256,11 @@ class SolverChannelIsolationTests(unittest.TestCase):
                 "action": "READY_FOR_CRITIC",
                 "changes": [],
                 "finding_batch": batch.as_reply_template(),
+                "finding_resolutions": [
+                    {"finding_id": finding_id, "response": "absorbed"}
+                    for finding_id in batch.selected_finding_ids
+                ],
+                "group_docs": [_group_docs_entry()],
             },
             review,
         )
@@ -228,6 +273,7 @@ class SolverChannelIsolationTests(unittest.TestCase):
                 "mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY",
                 "action": "READY_FOR_CRITIC",
                 "plan": _plan(),
+                "group_docs": [_group_docs_entry()],
             },
             review,
         )
@@ -265,15 +311,16 @@ class SolverChannelIsolationTests(unittest.TestCase):
                 "finding_resolutions": [
                     {
                         "finding_id": "finding-01",
-                        "resolution": "RESOLVED",
+                        "response": "absorbed",
                         "note": "fixed",
                     },
                     {
                         "finding_id": "finding-02",
-                        "resolution": "RESOLVED",
+                        "response": "absorbed",
                         "note": "fixed",
                     },
                 ],
+                "group_docs": [_group_docs_entry()],
             },
             review,
         )
@@ -317,14 +364,29 @@ class SolverDispatchIsolationTests(unittest.TestCase):
         self.assertEqual(context["focus_finding_ids"], list(batch["selected_finding_ids"]))
 
     def test_formalize_context_carries_no_critic_feedback(self) -> None:
-        findings = tuple(_finding(i) for i in range(1, 8))
-        context = self._dispatch(findings, plan=None, state="ZHONGSHU_ANALYST")
+        # The initial hand-over enters without Critic findings; an Analyst
+        # edge with open findings is the evidence-packet revision instead.
+        context = self._dispatch((), plan=None, state="ZHONGSHU_ANALYST")
 
         self.assertEqual(context["solver_stage"], "formalize")
         self.assertEqual(context["zhongshu_dispatch_mode"], "solver_formalize")
         self.assertNotIn("solver_batch", context)
         self.assertEqual(context["active_findings"], [])
         self.assertEqual(context["focus_finding_ids"], [])
+
+    def test_evidence_packet_return_from_analyst_dispatches_as_revision(self) -> None:
+        # The evidence-packet edge re-enters the Solver with the Critic's
+        # findings still open; it must carry the batch and the scoped
+        # envelope, not the formalization "plan.full" envelope.
+        findings = tuple(_finding(i) for i in range(1, 8))
+        context = self._dispatch(findings, plan=_plan(), state="ZHONGSHU_ANALYST")
+
+        self.assertEqual(context["solver_stage"], "revise")
+        self.assertEqual(context["zhongshu_dispatch_mode"], "solver_revision")
+        batch = context["solver_batch"]
+        self.assertEqual(len(batch["selected_finding_ids"]), 6)
+        shipped = {f["finding_id"] for f in context["active_findings"]}
+        self.assertEqual(shipped, set(batch["selected_finding_ids"]))
 
     def test_trimmed_revise_context_is_materially_smaller(self) -> None:
         import json

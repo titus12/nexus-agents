@@ -85,6 +85,7 @@ def evaluate_gate(
     no_progress_count: int,
     max_no_progress: int,
     max_stuck_rounds: int,
+    use_fingerprint_fuse: bool = True,
 ) -> GateVerdict:
     """Decide what the round does next, in priority order.
 
@@ -96,6 +97,12 @@ def evaluate_gate(
     4. once the blocker set stops shrinking, residual P1s may be accepted as
        follow-ups (never P0, and only when every expected task was reviewed),
        otherwise the stall/stuck/no-progress exits apply in that order.
+
+    ``use_fingerprint_fuse=False`` retires the global no-progress block (group
+    stall tracking owns convergence then): the counter still ages while the
+    blocker set fails to shrink, so the bounded freeze-with-followups exit
+    keeps its exact precondition, but the generic ``ZHONGSHU_NO_PROGRESS``
+    block is never returned.
     """
 
     if not revision_allowed:
@@ -159,7 +166,7 @@ def evaluate_gate(
             ),
             no_progress_count=no_progress,
         )
-    if no_progress >= max_no_progress:
+    if use_fingerprint_fuse and no_progress >= max_no_progress:
         return GateVerdict(
             action="BLOCKED",
             reason_code="ZHONGSHU_NO_PROGRESS",

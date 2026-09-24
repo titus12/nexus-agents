@@ -25,6 +25,7 @@ from .domain.context import (
 from .domain.decisions import EffectRequest
 from .domain.events import DomainEvent
 from .domain.transitions import TERMINAL_STATES
+from .domain.policies.menxia import MENXIA_ITEM_TARGETS
 from .feishu_command_parser import normalize_task_request
 from .logging_setup import configure_logging
 from .locks import TaskLock
@@ -58,7 +59,9 @@ from .runtime import (
     WorkflowEngine,
 )
 from .runtime.migration import legacy_dto_to_snapshot
+from .runtime.effects import FastTrackRunner
 from .runtime.plan_effects import PlanArtifactRunner
+from .transport.external import HumanGate
 
 
 logger = logging.getLogger("review_orchestrator_fsm")
@@ -134,6 +137,76 @@ class _FanoutNodeExecutor:
         return result
 
 
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "no", "off"})
+
+
+def _env_flag(name: str) -> bool | None:
+    """Read an opt-in boolean env flag; None means "not set" (keep as-is)."""
+    raw = os.environ.get(name, "").strip().lower()
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSY:
+        return False
+    return None
+
+
+def _with_parallel_flag_overrides(context: WorkflowContext) -> WorkflowContext:
+    """Apply explicit parallel-limit env flags to new and resumed tasks.
+
+    The persisted workflow-state carries the parallel limits it was created
+    with, and the loader restores them verbatim.  Without this override there
+    is no way to exercise a different execution mode (e.g. the Menxia item
+    phase) against a baseline-derived task.
+    """
+    item_flag = _env_flag("ZHONGSHU_ITEM_WORKFLOW_ENABLED")
+    menxia_flag = _env_flag("NEXUS_MENXIA_ENABLED")
+    fast_track_flag = _env_flag("NEXUS_FAST_TRACK")
+    # The Menxia group pipeline is on by default: when the env flag is unset,
+    # new and resumed tasks both get enabled=True.  An explicit
+    # NEXUS_MENXIA_ENABLED=0 still opts out.  The equality check in the caller
+    # skips the repository patch when nothing actually changes.
+    if menxia_flag is None:
+        menxia_flag = True
+    zhongshu = context.parallel.zhongshu
+    if item_flag is not None:
+        zhongshu = replace(zhongshu, item_workflow_enabled=item_flag)
+    if fast_track_flag is not None:
+        zhongshu = replace(zhongshu, fast_track=fast_track_flag)
+    menxia = context.parallel.menxia
+    if menxia_flag is not None:
+        menxia = replace(menxia, enabled=menxia_flag)
+    return replace(
+        context,
+        parallel=replace(context.parallel, zhongshu=zhongshu, menxia=menxia),
+    )
+
+
+def _agent_pool_by_state() -> dict[str, str]:
+    """Canonical agent identity pool per dispatch state.
+
+    Values are comma-separated multica agent UUIDs from the environment.
+    Every state that emits an agent/node dispatch must appear here: when a
+    state is missing, worker binding falls back to the payload's worker name
+    (e.g. "menxia-solver-01"), which the multica CLI rejects as a non-canonical
+    assignee.
+    """
+
+    return {
+        "ZHONGSHU_ANALYST": os.environ.get("AGENT_ANALYST_ID", ""),
+        "ZHONGSHU_SOLVER": os.environ.get("AGENT_SOLVER_ID", ""),
+        "ZHONGSHU_CRITIC": os.environ.get("AGENT_CRITIC_ID", ""),
+        "ZHONGSHU_FREEZE_CHECK": os.environ.get("AGENT_CRITIC_ID", ""),
+        "MENXIA_ITEM_SOLVER": os.environ.get("AGENT_SOLVER_ID", ""),
+        "MENXIA_ITEM_ANALYST": os.environ.get("AGENT_ANALYST_ID", ""),
+        "MENXIA_ITEM_CRITIC": os.environ.get("AGENT_CRITIC_ID", ""),
+        "MENXIA_GROUP_SOLVER": os.environ.get("AGENT_SOLVER_ID", ""),
+        "MENXIA_GROUP_ANALYST": os.environ.get("AGENT_ANALYST_ID", ""),
+        "MENXIA_GROUP_CRITIC": os.environ.get("AGENT_CRITIC_ID", ""),
+        "MENXIA_GROUP_GATE": os.environ.get("AGENT_CRITIC_ID", ""),
+    }
+
+
 class OrchestratorApp:
     """Run one workflow using only the New immutable FSM."""
 
@@ -157,24 +230,23 @@ class OrchestratorApp:
             snapshot = self.repository.load(context.identity.task_id)
         else:
             snapshot = WorkflowSnapshot(context.identity.task_id, context, 0)
-            if os.environ.get("ZHONGSHU_ITEM_WORKFLOW_ENABLED", "").strip().lower() in {
-                "1", "true", "yes", "on"
-            }:
-                snapshot = WorkflowSnapshot(
-                    context.identity.task_id,
-                    replace(
-                        context,
-                        parallel=replace(
-                            context.parallel,
-                            zhongshu=replace(
-                                context.parallel.zhongshu,
-                                item_workflow_enabled=True,
-                            ),
-                        ),
-                    ),
-                    0,
-                )
             self.repository.initialize(snapshot)
+        # Explicit env flags win over persisted parallel limits for both new
+        # and resumed tasks.  The repository is the source of truth and every
+        # step reloads from it, so a correction must be persisted, not just
+        # held in memory.
+        overridden = _with_parallel_flag_overrides(snapshot.context)
+        if overridden != snapshot.context:
+            logger.info(
+                "PARALLEL_FLAG_OVERRIDE task_id=%s menxia_enabled=%s item_workflow=%s "
+                "fast_track=%s",
+                snapshot.task_id,
+                overridden.parallel.menxia.enabled,
+                overridden.parallel.zhongshu.item_workflow_enabled,
+                overridden.parallel.zhongshu.fast_track,
+            )
+            self.repository.patch_context(snapshot.task_id, overridden)
+            snapshot = replace(snapshot, context=overridden)
         self.context = snapshot.context
         self.multica = multica or MulticaCliAdapter(self.root / "transport")
         self.transport = (
@@ -187,6 +259,10 @@ class OrchestratorApp:
         )
         self.poll_interval = max(0.0, poll_interval)
         self.timeout_seconds = max(0.0, float(timeout_seconds))
+        self._gate_poll_interval = max(
+            2.0, float(os.environ.get("GATE_POLL_INTERVAL_SEC", "10"))
+        )
+        self._last_gate_poll = 0.0
         self.notification_port = notification_port or (
             FeishuNotificationPort()
             if feishu_notifications_enabled()
@@ -214,16 +290,7 @@ class OrchestratorApp:
             poll_interval=self.poll_interval,
             max_polls=max_polls,
             timeout_seconds=self.timeout_seconds,
-            agent_ids={
-                "ZHONGSHU_ANALYST": os.environ.get("AGENT_ANALYST_ID", ""),
-                "ZHONGSHU_SOLVER": os.environ.get("AGENT_SOLVER_ID", ""),
-                "ZHONGSHU_CRITIC": os.environ.get("AGENT_CRITIC_ID", ""),
-                "ZHONGSHU_FREEZE_CHECK": os.environ.get("AGENT_CRITIC_ID", ""),
-                "MENXIA_ITEM_SOLVER": os.environ.get("AGENT_SOLVER_ID", ""),
-                "MENXIA_ITEM_ANALYST": os.environ.get("AGENT_ANALYST_ID", ""),
-                "MENXIA_ITEM_CRITIC": os.environ.get("AGENT_CRITIC_ID", ""),
-                "MENXIA_GROUP_GATE": os.environ.get("AGENT_CRITIC_ID", ""),
-            },
+            agent_ids=_agent_pool_by_state(),
         )
         self._node_max_workers = max(1, int(os.environ.get("NODE_MAX_WORKERS", "6")))
         self._critic_max_workers = max(
@@ -242,6 +309,7 @@ class OrchestratorApp:
                 "agent_dispatch": self.runner,
                 "node_dispatch": self.node_effects,
                 "plan_artifact": self.plan_effects,
+                "fast_track": FastTrackRunner(),
             },
         )
         self.inbox = JsonDomainEventInbox(self.repository)
@@ -291,13 +359,18 @@ class OrchestratorApp:
             and pool_size == 1
             and child_supported
         )
-        fanout = fanout_analyst or fanout_critic or fanout_item_revise
+        fanout_menxia = (
+            node_context.state in MENXIA_ITEM_TARGETS
+            and node_context.dispatch_mode == "menxia_item_pipeline"
+            and total > 1
+            and pool_size == 1
+            and child_supported
+        )
+        fanout = (
+            fanout_analyst or fanout_critic or fanout_item_revise or fanout_menxia
+        )
         if fanout:
-            cap = (
-                total
-                if (fanout_analyst or fanout_item_revise)
-                else self._critic_max_workers
-            )
+            cap = total if (fanout_analyst or fanout_item_revise or fanout_menxia) else self._critic_max_workers
             max_workers = min(self._node_max_workers, cap, total)
         else:
             max_workers = min(
@@ -346,6 +419,8 @@ class OrchestratorApp:
                 dispatch_mode=node_context.dispatch_mode,
                 base_plan=node_context.base_plan,
                 previous_review=node_context.previous_review,
+                salvaged_worker_payloads=node_context.salvaged_worker_payloads,
+                menxia_stage_census=node_context.menxia_stage_census,
                 binding_contexts={
                     binding.worker_id: dict(binding.dispatch_context)
                     for binding in node.bindings
@@ -376,6 +451,10 @@ class OrchestratorApp:
         if not context.issue_id:
             return node
         analyst = context.state == "ZHONGSHU_ANALYST"
+        menxia_wave = (
+            context.state in MENXIA_ITEM_TARGETS
+            and context.dispatch_mode == "menxia_item_pipeline"
+        )
         lenses = _analyst_lenses() if analyst else ()
         bindings: list[WorkerBinding] = []
         for position, binding in enumerate(node.bindings):
@@ -384,6 +463,11 @@ class OrchestratorApp:
                 title = (
                     f"Analyst 维度 {suffix} · {context.task_id} "
                     f"· seq{context.sequence}"
+                )
+            elif menxia_wave:
+                title = (
+                    f"Menxia {binding.role} {binding.item_id or suffix} "
+                    f"· {context.task_id} · seq{context.sequence}"
                 )
             else:
                 task_label = binding.item_id or binding.group_id or suffix
@@ -557,6 +641,8 @@ class OrchestratorApp:
                 # These states require an explicit operator/human decision;
                 # an idle clock must never turn waiting for a person into a
                 # synthetic failure.
+                if state == "HUMAN_GATE":
+                    self._poll_human_gate_reply(task_id)
                 if self.poll_interval:
                     time.sleep(min(self.poll_interval, 0.25))
                 continue
@@ -603,6 +689,57 @@ class OrchestratorApp:
             )
         )
         return True
+
+    def _poll_human_gate_reply(self, task_id: str) -> None:
+        """Consume one operator reply from the gate chat and resume on it.
+
+        The gate message promises "reply anything to continue"; the poller
+        makes that promise true.  Replies are matched by the Feishu adapter
+        (threaded reply to the gate message, or a message quoting the gate's
+        decision id), so unrelated chat traffic never triggers a resume.
+        """
+
+        now = time.monotonic()
+        if now - self._last_gate_poll < self._gate_poll_interval:
+            return
+        self._last_gate_poll = now
+        poller = getattr(self.notification_port, "poll_reply", None)
+        if not callable(poller):
+            return
+        snapshot = self.repository.load(task_id)
+        gate = snapshot.context.human_gate
+        if gate is None or not str(gate.decision_id or "").strip():
+            return
+        request = HumanGate(
+            decision_id=gate.decision_id,
+            task_id=task_id,
+            resume_state=gate.resume_state or "",
+            prompt="",
+            message_id=gate.message_id or "",
+        )
+        try:
+            replies = poller(request)
+        except Exception:
+            logger.exception(
+                "HUMAN_GATE_POLL_FAILED task_id=%s decision_id=%s",
+                task_id,
+                gate.decision_id,
+            )
+            return
+        if not replies:
+            return
+        answer = " | ".join(
+            str(getattr(reply, "answer", "") or "").strip()
+            for reply in replies
+            if str(getattr(reply, "answer", "") or "").strip()
+        )
+        logger.info(
+            "HUMAN_GATE_REPLY_CONSUMED task_id=%s decision_id=%s replies=%s",
+            task_id,
+            gate.decision_id,
+            len(replies),
+        )
+        self.resume(answer)
 
     def resume(self, answer: str = "") -> bool:
         """Apply one operator/human resume decision to a recoverable state."""
@@ -705,6 +842,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll-interval", type=float, default=float(os.environ.get("POLL_INTERVAL_SEC", "8")))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("PHASE_TIMEOUT_SEC", "900")))
     parser.add_argument(
+        "--fast-track",
+        action="store_true",
+        help=(
+            "Fast track: the Zhongshu Critic approves the whole plan without a "
+            "review wave and the freeze check releases it immediately, so the "
+            "run reaches the Menxia group pipeline right after Analyst + Solver."
+        ),
+    )
+    parser.add_argument(
         "--no-external-notifications",
         action="store_true",
         help=(
@@ -716,6 +862,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_external_notifications:
         # Must be set before the app wires its notification port.
         os.environ["NEXUS_TEST_NO_EXTERNAL_NOTIFICATIONS"] = "1"
+    if args.fast_track:
+        # Ride the persisted parallel-flag override path so both --new and
+        # --resume pick the flag up through the same code path as the env.
+        os.environ["NEXUS_FAST_TRACK"] = "1"
     multica = MulticaCliAdapter(Path(args.runs_root) / "transport")
 
     try:

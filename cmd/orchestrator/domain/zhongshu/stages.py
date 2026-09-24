@@ -16,7 +16,7 @@ from typing import Any, Mapping
 logger = logging.getLogger("review_orchestrator_fsm")
 
 # Edges that enter the Solver carrying Critic feedback.  Every other edge into
-# ``ZHONGSHU_SOLVER`` (intake, analyst) starts the formalization channel.
+# ``ZHONGSHU_SOLVER`` starts the formalization channel.
 _REVISE_SOURCES = frozenset({"ZHONGSHU_CRITIC", "ZHONGSHU_FREEZE_CHECK"})
 
 
@@ -27,15 +27,39 @@ class SolverStage(Enum):
     REVISE = "revise"        # critic findings -> bounded, scoped revision
 
 
-def resolve_dispatch_stage(source_state: str) -> SolverStage:
+def review_has_active_findings(review: object) -> bool:
+    """Whether the review snapshot holds at least one open Critic finding."""
+
+    return any(
+        getattr(finding, "active", False)
+        for finding in getattr(review, "findings", ()) or ()
+    )
+
+
+def resolve_dispatch_stage(
+    source_state: str,
+    *,
+    has_active_findings: bool = False,
+) -> SolverStage:
     """Stage of the dispatch leaving ``source_state`` towards the Solver.
 
     The transition edge is authoritative: the Critic hands over feedback, so
     that edge is a revision regardless of whether a plan happens to exist in
     the snapshot (an Analyst-produced plan can predate the first Solver call).
+
+    The Analyst edge carries two channels.  The initial contract wave enters
+    without Critic findings (formalization); the evidence-packet return
+    (``merge_analyst_evidence`` relabels it ``READY_FOR_SOLVER``) comes back
+    while the Critic's findings are still open, and it must re-enter the
+    revision channel.  Dispatching it as formalization sends the Solver into a
+    full re-plan that rewrites every item and destroys the review ratchet
+    (task-20260921-8f18de seq 8/10).  Open findings therefore force REVISE on
+    the Analyst edge too.
     """
 
     if str(source_state or "") in _REVISE_SOURCES:
+        return SolverStage.REVISE
+    if str(source_state or "") == "ZHONGSHU_ANALYST" and has_active_findings:
         return SolverStage.REVISE
     return SolverStage.FORMALIZE
 
@@ -87,4 +111,9 @@ def _reply_carries_revision_batch(payload: Mapping[str, Any]) -> bool:
     )
 
 
-__all__ = ["SolverStage", "resolve_dispatch_stage", "resolve_reply_stage"]
+__all__ = [
+    "SolverStage",
+    "resolve_dispatch_stage",
+    "resolve_reply_stage",
+    "review_has_active_findings",
+]

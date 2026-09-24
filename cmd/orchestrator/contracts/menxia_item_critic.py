@@ -15,6 +15,13 @@ FIELDS = {
 CONTRACT = make_contract(
     contract_id="nexus.menxia.item_critic.v1", state="MENXIA_ITEM_CRITIC", phase="MENXIA", role="review-critic",
     modes=_MODES, actions=_ACTIONS, fields=FIELDS,
-    prompt_rules=("Review the current item or group only.", "Every required change must be observable through verification_plan."),
+    prompt_rules=(
+        "Review the current item or group only.",
+        "Attack every change hunk by hunk at its anchors: call sites, error paths, convention conflicts.",
+        "State a falsification plan: which test would expose the proposal if wrong; an unfalsifiable proposal is a P1 finding.",
+        "Walk each acceptance signal back to the changes; uncovered signals are findings.",
+        "Settle every prior-round finding: fixed with evidence or refuted with argument; silently dropped findings recur.",
+        "Every required change must be observable through verification_plan.",
+    ),
     example_overrides={"action": "APPROVE_ITEM", "mode": "ITEM_OR_GROUP_REVIEW", "decision": "APPROVE"},
 )

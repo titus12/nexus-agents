@@ -300,6 +300,9 @@ _SKILLS = {
     "MENXIA_ITEM_SOLVER": "menxia-solver",
     "MENXIA_ITEM_ANALYST": "menxia-analyst",
     "MENXIA_ITEM_CRITIC": "menxia-critic",
+    "MENXIA_GROUP_SOLVER": "menxia-solver",
+    "MENXIA_GROUP_ANALYST": "menxia-analyst",
+    "MENXIA_GROUP_CRITIC": "menxia-critic",
     "MENXIA_GROUP_GATE": "menxia-critic",
 }
 

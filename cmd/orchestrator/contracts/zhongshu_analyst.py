@@ -68,6 +68,20 @@ _EVIDENCE_REQUEST = object_schema(
     },
     required=("item_id", "requirement_id", "question", "reason", "blocking"),
 )
+# Answer channel: when the dispatch lists the Critic's active findings (the
+# "[Evidence task]" block), the Analyst answers each finding with evidence and
+# a suggested disposition instead of returning an undirected evidence dump.
+_FINDING_RESPONSE = object_schema(
+    {
+        "finding_id": string(), "answer": string(), "evidence_ids": array(string()),
+        "suggested_disposition": string(
+            enum=("CLOSE", "REVISE", "DOWNGRADE", "NEEDS_RUNTIME_DATA"),
+            fallback="REVISE",
+        ),
+        "note": string(),
+    },
+    required=("finding_id", "answer"),
+)
 
 FIELDS = {
     "summary": string(),
@@ -76,6 +90,7 @@ FIELDS = {
     "candidate_items": array(max_items=0),
     "candidate_groups": array(max_items=0),
     "evidence_updates": array(_EVIDENCE_UPDATE),
+    "finding_responses": array(_FINDING_RESPONSE),
     "confirmed_facts": array(),
     "constraints": array(),
     "conflicts": array(),
@@ -102,6 +117,14 @@ CONTRACT = make_contract(
         "task_proposals, candidate_items, and candidate_groups must always be empty; Solver is the only task-graph producer.",
         "Every evidence update must include decision_relevance, exactly one of: "
         "boundary, coverage, dependency, acceptance, risk.",
+        "Answer every finding listed in the [Evidence task] block: one "
+        "finding_response per finding_id, whose answer cites file:line "
+        "evidence for the demanded targets, references the evidence_ids that "
+        "support it, and proposes suggested_disposition (CLOSE when the "
+        "evidence resolves the claim, NEEDS_RUNTIME_DATA only when no file "
+        "can prove it). The workspace is mounted read-only locally: locate "
+        "files with local search, cite local paths, and never claim that git "
+        "or remote access limits block the evidence.",
         "Return the complete envelope even when an array is empty.",
     ),
     example_overrides={

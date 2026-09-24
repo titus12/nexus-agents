@@ -5,11 +5,71 @@ import unittest
 
 from orchestrator.adapters import FakeMulticaAdapter
 from orchestrator.app import OrchestratorApp
-from orchestrator.domain.context import ProgressState, RequestState, TaskIdentity, WorkflowContext
+from orchestrator.domain.context import (
+    MenxiaParallelLimits,
+    ParallelState,
+    ProgressState,
+    RequestState,
+    TaskIdentity,
+    WorkflowContext,
+)
 from orchestrator.transport.external import ExternalMessage
+from test_group_doc_loop import GroupWaveScripting
 
 
-class _ScriptedMultica(FakeMulticaAdapter):
+def _entry_plan() -> dict:
+    def item(item_id: str, group_id: str, title: str) -> dict:
+        return {
+            "item_id": item_id,
+            "group_id": group_id,
+            "title": title,
+            "objective": f"do {title}",
+            "dependencies": [],
+            "source_requirement_ids": ["req-000001"],
+            "acceptance_signals": [f"{title} is observable"],
+        }
+
+    return {
+        "plan_id": "plan-entry",
+        "items": [
+            item("item-000001", "group-000001", "Task A"),
+            item("item-000002", "group-000001", "Task B"),
+        ],
+        "groups": [
+            {"group_id": "group-000001", "item_ids": ["item-000001", "item-000002"]},
+        ],
+        "requirements": [
+            {
+                "requirement_id": "req-000001",
+                "statement": "run a review",
+                "priority": "must",
+                "scope": "in",
+                "kind": "task",
+            }
+        ],
+    }
+
+
+def _entry_group_doc() -> str:
+    sections = (
+        "背景", "目标", "标识与范围", "状态与边界语义", "行为要求",
+        "责任边界", "交叉不变量", "验收标准", "非目标",
+    )
+    lines = ["# group-000001 需求文档 [v1]"]
+    for number, name in enumerate(sections, start=1):
+        lines.append(f"## {number}. {name}")
+        if name == "背景":
+            lines.append("group-000001 的上下文。")
+        # §8 must close with the plan's acceptance_signals verbatim; the
+        # freeze check re-verifies the closure against the folded items.
+        elif name == "验收标准":
+            lines.extend(("Task A is observable", "Task B is observable"))
+    return "\n".join(lines)
+
+
+class _ScriptedMultica(GroupWaveScripting, FakeMulticaAdapter):
+    critic_demands_revision = False
+
     def dispatch(self, request):
         receipt = super().dispatch(request)
         if (
@@ -40,44 +100,53 @@ class _ScriptedMultica(FakeMulticaAdapter):
                 ),
             )
             return receipt
+        target = request.target_state
+        if target in (
+            "MENXIA_GROUP_SOLVER",
+            "MENXIA_GROUP_ANALYST",
+            "MENXIA_GROUP_CRITIC",
+        ):
+            self._reply_group_wave(request)
+            return receipt
+        if target == "ZHONGSHU_CRITIC":
+            context = request.context
+            self._reply(
+                request,
+                {
+                    "action": "TASK_APPROVED",
+                    "item_id": str(context.get("item_id") or ""),
+                    "group_id": str(context.get("group_id") or ""),
+                    "reviewed_plan_hash": str(context.get("plan_hash") or ""),
+                    "reviewed_task_hash": str(context.get("task_hash") or ""),
+                    "reviewed_dependency_hash": str(
+                        context.get("dependency_hash") or ""
+                    ),
+                    "worker_id": request.request_id,
+                    "findings": [],
+                    "review_checks": {},
+                },
+            )
+            return receipt
         actions = {
             "ZHONGSHU_ANALYST": "READY_FOR_SOLVER",
             "ZHONGSHU_SOLVER": "READY_FOR_CRITIC",
-            "ZHONGSHU_CRITIC": "APPROVE_FREEZE",
             "ZHONGSHU_FREEZE_CHECK": "FREEZE_APPROVED",
-            "MENXIA_ITEM_SOLVER": "FEASIBLE",
-            "MENXIA_ITEM_ANALYST": "EVIDENCE_SUFFICIENT",
-            "MENXIA_ITEM_CRITIC": "APPROVE_ITEM",
             "MENXIA_GROUP_GATE": "APPROVE_GROUP",
         }
-        action = actions.get(request.target_state)
+        action = actions.get(target)
         if action:
-            self.queue_reply(
-                request.request_id,
-                ExternalMessage(
-                    request.agent_id,
-                    {
-                        "action": action,
-                        "task_id": request.task_id,
-                        "request_id": request.request_id,
-                        "phase": request.phase,
-                        "role": request.role,
-                        "revision_id": request.context.get("revision_id", ""),
-                        "plan_hash": (
-                            "entry-plan"
-                            if request.target_state == "ZHONGSHU_SOLVER"
-                            else request.context.get("plan_hash", "")
-                        ),
-                        "findings": [],
-                        "review_summary": (
-                            f"review-{request.request_id}"
-                            if request.target_state == "ZHONGSHU_CRITIC"
-                            else ""
-                        ),
-                    },
-                    request.request_id,
-                ),
-            )
+            body: dict[str, object] = {"action": action}
+            if target == "ZHONGSHU_SOLVER":
+                # The solver establishes the plan (the menxia group pipeline
+                # seeds its documents from it) and the plan hash the whole
+                # review chain (critic fan-in included) must echo.
+                body["plan_hash"] = "entry-plan"
+                body["plan"] = _entry_plan()
+                body["changes"] = []
+                body["group_docs"] = [
+                    {"group_id": "group-000001", "markdown": _entry_group_doc()}
+                ]
+            self._reply(request, body)
         return receipt
 
 
@@ -86,6 +155,13 @@ def _context() -> WorkflowContext:
         identity=TaskIdentity("task-entry", "issue-entry", "", "request-entry"),
         progression=ProgressState("REQUEST_INTAKE", 0, "2026-09-10T00:00:00Z"),
         request=RequestState(raw_request="run a review", project_type="go", task_type="review"),
+        parallel=ParallelState(
+            menxia=MenxiaParallelLimits(
+                enabled=True,
+                max_concurrent_groups=2,
+                max_concurrent_items=3,
+            )
+        ),
     )
 
 
@@ -106,10 +182,10 @@ class LinearEntrypointTests(unittest.TestCase):
 
         self.assertEqual(snapshot.context.progression.state, "DONE")
         self.assertEqual(snapshot.context.progression.sequence, 10)
-        # One generic Critic round at the unified width
-        # (critic_default_workers=4) plus the contract, lens, solver,
-        # freeze-check and Menxia dispatches.
-        self.assertEqual(len(adapter.dispatched), 14)
+        # Analyst contract + lens wave, solver, per-item Critic wave (2
+        # items), freeze-check, the menxia group waves (solver/analyst/critic
+        # for the single group) and the group gate.
+        self.assertEqual(len(adapter.dispatched), 12)
         self.assertTrue(all(request.request_id for request in adapter.dispatched))
 
 

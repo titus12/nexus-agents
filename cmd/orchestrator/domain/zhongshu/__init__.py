@@ -10,13 +10,19 @@ call the logic here, and translate the result into decisions and effects.
 """
 
 from .contracts import resolve_solver_stage, solver_contract_fragments
-from .stages import SolverStage, resolve_dispatch_stage, resolve_reply_stage
+from .stages import (
+    SolverStage,
+    resolve_dispatch_stage,
+    resolve_reply_stage,
+    review_has_active_findings,
+)
 from .solver import (
     FormalizeSolverLogic,
     ReviseSolverLogic,
     SolverBatch,
     SolverReplyOutcome,
     build_solver_dispatch,
+    fold_item_revise_group_docs,
     plan_artifact_effect,
     process_solver_reply,
     revision_finding_payload,
@@ -40,12 +46,14 @@ __all__ = [
     "SolverStage",
     "build_solver_dispatch",
     "evaluate_gate",
+    "fold_item_revise_group_docs",
     "fold_round",
     "mark_followups",
     "plan_artifact_effect",
     "process_solver_reply",
     "resolve_dispatch_stage",
     "resolve_reply_stage",
+    "review_has_active_findings",
     "resolve_solver_stage",
     "revision_finding_payload",
     "revision_scope",

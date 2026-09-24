@@ -13,15 +13,17 @@ history.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..context import ReviewState, WorkflowContext
+from ..context import ReviewState, WorkflowContext, ZhongshuGroupState
 from ..decisions import EffectRequest
 from ..policies.solver_plan import (
+    carry_forward_group_docs,
     materialize_solver_reply,
     normalize_solver_finding_ids,
     solver_batch_coverage_error,
+    solver_resolution_coverage_error,
     solver_revision_response_error,
     structural_integrity_errors,
 )
@@ -29,7 +31,12 @@ from ..policies.zhongshu import approved_item_ids, select_solver_batch
 from ...zhongshu_parallel import canonical_plan_hash
 from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
 from ...dispatch_envelope import build_envelope
-from .stages import SolverStage, resolve_dispatch_stage, resolve_reply_stage
+from .stages import (
+    SolverStage,
+    resolve_dispatch_stage,
+    resolve_reply_stage,
+    review_has_active_findings,
+)
 
 # Fields a revising Solver needs per finding.  The full finding record carries
 # round history and verification traces that only bloat the revision context
@@ -120,6 +127,63 @@ def batch_item_scope(review: object, batch: SolverBatch) -> list[str]:
     return sorted(scope)
 
 
+def _seeded_group_rows(review: object) -> tuple[object, ...]:
+    """The authoritative ZhongshuGroupState rows, seeded for any new group."""
+
+    seed = getattr(review, "seed_zhongshu_groups", None)
+    return tuple(seed()) if callable(seed) else ()
+
+
+def _plan_group_ids(plan: object) -> tuple[str, ...]:
+    """The sorted group ids a materialized plan declares."""
+
+    groups = plan.get("groups") if isinstance(plan, Mapping) else None
+    if not isinstance(groups, (list, tuple)):
+        return ()
+    return tuple(sorted({
+        str(group.get("group_id") or "").strip()
+        for group in groups
+        if isinstance(group, Mapping) and str(group.get("group_id") or "").strip()
+    }))
+
+
+def batch_group_scope(review: object, batch: SolverBatch) -> list[str]:
+    """Groups the dictated batch may rewrite requirement documents for.
+
+    The group-level counterpart of :func:`batch_item_scope`: the owner groups
+    of the batch's findings, minus groups whose items are all approved, minus
+    frozen groups.  A frozen group is never editable even when the batch names
+    one of its findings — that path can only arise from a stale batch and must
+    fail closed.
+    """
+
+    from ..policies.zhongshu_group import group_of_item
+
+    selected = set(batch.selected_finding_ids)
+    scope: set[str] = set()
+    for finding in getattr(review, "findings", ()) or ():
+        finding_id = str(getattr(finding, "finding_id", "") or "")
+        if finding_id not in selected:
+            continue
+        group_id = str(getattr(finding, "group_id", "") or "").strip()
+        if not group_id:
+            item_id = str(getattr(finding, "item_id", "") or "").strip()
+            group_id = group_of_item(review, item_id) if item_id else ""
+        if group_id:
+            scope.add(group_id)
+    approved = set(approved_item_ids(getattr(review, "task_review_ledger", ()) or ()))
+    for group in getattr(review, "task_groups", ()) or ():
+        members = set(group.item_ids)
+        if members and members.issubset(approved):
+            scope.discard(group.group_id)
+    scope.difference_update(
+        row.group_id
+        for row in _seeded_group_rows(review)
+        if row.stage == "FROZEN"
+    )
+    return sorted(scope)
+
+
 def revision_scope(
     review: object,
     payload: Mapping[str, Any],
@@ -171,10 +235,17 @@ class FormalizeSolverLogic:
 
     There is no Critic feedback to account for, so there is no batch to
     validate; the structured-output schema owns the field-level contract and
-    the structural gate owns graph validity.
+    the structural gate owns graph validity.  Every group must ship its
+    requirement document with the initial graph (plan Task 5): a FORMALIZE
+    reply that omits any group's document is rejected as
+    ``SOLVER_GROUP_DOC_MISSING`` and each submitted document must pass the
+    mechanical form checks before it folds.
     """
 
     stage = SolverStage.FORMALIZE
+
+    def __init__(self) -> None:
+        self.folded_group_docs: dict[str, dict[str, object]] = {}
 
     def validate(self, payload: Mapping[str, Any], review: object) -> str:
         return ""
@@ -187,7 +258,24 @@ class FormalizeSolverLogic:
     def materialize(
         self, payload: Mapping[str, Any], review: object
     ) -> tuple[dict[str, object] | None, str]:
-        return materialize_solver_reply(payload, None)
+        materialized, error = materialize_solver_reply(payload, None)
+        if not error and review is not None:
+            # Before the first plan folds there are no seeded rows to derive
+            # the group set from, so the plan the reply itself declares is the
+            # authority on which groups must ship a document.
+            required = _plan_group_ids(materialized)
+            folded, doc_error = carry_forward_group_docs(
+                payload.get("group_docs"),
+                _seeded_group_rows(review),
+                editable_group_ids=required,
+                required_group_ids=required,
+                review=review,
+                plan=materialized,
+            )
+            if doc_error:
+                return None, doc_error
+            self.folded_group_docs = folded
+        return materialized, error
 
 
 class ReviseSolverLogic:
@@ -203,6 +291,7 @@ class ReviseSolverLogic:
 
     def __init__(self, batch: SolverBatch) -> None:
         self._batch = batch
+        self.folded_group_docs: dict[str, dict[str, object]] = {}
 
     def active_finding_ids(self, review: object) -> list[str]:
         return [
@@ -224,6 +313,10 @@ class ReviseSolverLogic:
                 payload,
                 expected_batch=self._batch.as_expected(),
             )
+        if not error:
+            error = solver_resolution_coverage_error(
+                self._batch.selected_finding_ids, payload
+            )
         return error
 
     def editable_item_ids(
@@ -231,14 +324,31 @@ class ReviseSolverLogic:
     ) -> set[str] | None:
         return revision_scope(review, payload)
 
+    def editable_group_ids(self, review: object) -> list[str]:
+        return batch_group_scope(review, self._batch)
+
     def materialize(
         self, payload: Mapping[str, Any], review: object
     ) -> tuple[dict[str, object] | None, str]:
-        return materialize_solver_reply(
+        materialized, error = materialize_solver_reply(
             payload,
             getattr(review, "plan", None),
             editable_item_ids=self.editable_item_ids(payload, review),
         )
+        if not error and review is not None:
+            editable_groups = self.editable_group_ids(review)
+            folded, doc_error = carry_forward_group_docs(
+                payload.get("group_docs"),
+                _seeded_group_rows(review),
+                editable_group_ids=editable_groups,
+                required_group_ids=editable_groups,
+                review=review,
+                plan=materialized,
+            )
+            if doc_error:
+                return None, doc_error
+            self.folded_group_docs = folded
+        return materialized, error
 
 
 @dataclass(frozen=True)
@@ -249,6 +359,9 @@ class SolverReplyOutcome:
     payload: Mapping[str, Any]
     materialized: Mapping[str, Any] | None
     error: str
+    # Group rows carrying the folded requirement documents (Task 5 fold):
+    # empty unless the reply passed validation and submitted documents.
+    group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
 
 
 def process_solver_reply(
@@ -281,7 +394,83 @@ def process_solver_reply(
         integrity = structural_integrity_errors(materialized)
         if integrity:
             error = "SOLVER_PLAN_STRUCTURE_INVALID:" + ";".join(integrity[:10])
-    return SolverReplyOutcome(stage, normalized, materialized, error)
+    group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
+    if not error and materialized is not None:
+        group_doc_rows = _rows_with_group_docs(review, logic.folded_group_docs)
+    return SolverReplyOutcome(stage, normalized, materialized, error, group_doc_rows)
+
+
+def fold_item_revise_group_docs(
+    payload: Mapping[str, Any],
+    review: ReviewState | None,
+    materialized_plan: Mapping[str, Any] | None,
+) -> tuple[str, tuple[ZhongshuGroupState, ...]]:
+    """Fold an item-revise reply's group documents (the A2/P3 path).
+
+    The item patch may rewrite acceptance signals, so the owning group's
+    requirement document must be re-authored in the same reply: it supersedes
+    the authoritative version and closes with the patched plan.  Only groups
+    the patches actually touched are editable; a document naming another
+    group must byte-match the authoritative markdown or the fold fails.
+    """
+
+    submitted = payload.get("group_docs")
+    if not submitted:
+        return "", ()
+    patched = [
+        str(group_id).strip()
+        for group_id in (payload.get("patched_group_ids") or ())
+        if str(group_id).strip()
+    ]
+    folded, error = carry_forward_group_docs(
+        submitted,
+        _seeded_group_rows(review),
+        editable_group_ids=patched,
+        required_group_ids=[],
+        review=review,
+        plan=materialized_plan,
+    )
+    if error:
+        return error, ()
+    return "", _rows_with_group_docs(review, folded)
+
+
+def _rows_with_group_docs(
+    review: ReviewState | None,
+    folded: Mapping[str, Mapping[str, object]],
+) -> tuple[ZhongshuGroupState, ...]:
+    """Merge folded requirement documents into the authoritative group rows.
+
+    The fold (plan Task 5) writes the orchestrator-recomputed document fields
+    into the matching ``ZhongshuGroupState`` rows; rows for groups the review
+    does not track yet (first formalization, before the plan folds) are
+    seeded fresh.  Groups without a folded document keep their row untouched.
+    """
+
+    if not folded:
+        return ()
+    rows: dict[str, ZhongshuGroupState] = {
+        row.group_id: row
+        for row in getattr(review, "zhongshu_groups", ()) or ()
+        if row.group_id
+    }
+    for group in getattr(review, "task_groups", ()) or ():
+        rows.setdefault(group.group_id, ZhongshuGroupState(group_id=group.group_id))
+    for group_id in folded:
+        rows.setdefault(group_id, ZhongshuGroupState(group_id=group_id))
+    merged = []
+    for group_id, row in rows.items():
+        doc = folded.get(group_id)
+        if doc:
+            row = replace(
+                row,
+                doc_markdown=str(doc.get("markdown") or ""),
+                doc_version=int(doc.get("doc_version") or 0),
+                doc_hash=str(doc.get("doc_hash") or ""),
+                doc_source_hash=str(doc.get("doc_source_hash") or ""),
+            )
+        merged.append(row)
+    return tuple(merged)
 
 
 def build_solver_dispatch(
@@ -300,8 +489,11 @@ def build_solver_dispatch(
     and its findings; the FORMALIZE context carries no Critic feedback at all.
     """
 
-    stage = resolve_dispatch_stage(context.progression.state)
     review = context.review
+    stage = resolve_dispatch_stage(
+        context.progression.state,
+        has_active_findings=review_has_active_findings(review),
+    )
     has_plan = review is not None and isinstance(review.plan, Mapping)
     active = tuple(
         finding for finding in getattr(review, "findings", ()) or () if finding.active
@@ -360,6 +552,12 @@ def build_solver_dispatch(
             "current_formal_plan": dict(review.plan) if has_plan else None,
             "current_plan_ref": review.plan_ref or "" if review else "",
             "current_plan_hash": review.plan_hash or "" if review else "",
+            "group_docs_authoritative": {
+                row.group_id: row.doc_markdown
+                for row in (
+                    review.seed_zhongshu_groups() if review is not None else ()
+                )
+            },
             "envelope": envelope,
         }
     else:
@@ -422,6 +620,7 @@ __all__ = [
     "ReviseSolverLogic",
     "SolverBatch",
     "SolverReplyOutcome",
+    "batch_group_scope",
     "build_solver_dispatch",
     "plan_artifact_effect",
     "process_solver_reply",

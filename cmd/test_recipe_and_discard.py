@@ -101,6 +101,26 @@ def _review_context() -> WorkflowContext:
     )
 
 
+def _group_docs_entry(
+    group_id: str = "group-000001",
+    version: int = 1,
+    acceptance: tuple[str, ...] = ("确认字段存在",),
+) -> dict:
+    sections = (
+        "背景", "目标", "标识与范围", "状态与边界语义", "行为要求",
+        "责任边界", "交叉不变量", "验收标准", "非目标",
+    )
+    lines = [f"# {group_id} 需求文档 [v{version}]"]
+    for number, name in enumerate(sections, start=1):
+        lines.append(f"## {number}. {name}")
+        if name == "背景":
+            lines.append(f"{group_id} 的上下文。")
+        elif name == "验收标准":
+            # §8 closes with the submitted plan's acceptance_signals verbatim.
+            lines.extend(acceptance)
+    return {"group_id": group_id, "markdown": "\n".join(lines)}
+
+
 class AcceptanceSignalGateTests(unittest.TestCase):
     def test_measurement_claim_without_recipe_is_flagged(self) -> None:
         plan = {"items": [
@@ -371,6 +391,14 @@ class SolverSignalGateRetryTests(unittest.TestCase):
                 "plan_hash": "new-hash",
                 "revision_id": "task-1:2",
                 "summary": "plan revision",
+                "group_docs": [
+                    _group_docs_entry(
+                        acceptance=(
+                            "预期观测量：阶段切换间隙耗时减少 ≥30%",
+                            "确认字段存在",
+                        )
+                    )
+                ],
             },
             "2026-09-18T00:00:00Z",
         )

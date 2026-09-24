@@ -14,7 +14,7 @@
 本 skill 只描述当前条目的方案细化方法。机器字段、类型、枚举和结果结构由
 Orchestrator 注入的 Menxia Solver Python 契约决定，不从本文件推导另一套协议。
 
-本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针，不要输出 Markdown、代码围栏、diff 或部分结果。
+本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针，不要以裸 Markdown、代码围栏或 diff/patch 代替结构化 JSON 结果；`changes`、`tests` 等字段内部包含 diff/代码文本是本 Skill 的明确要求，不属于违规。
 
 交付纪律：本轮只提交一份结果并结束。禁止使用 todo/计划清单（todo_write）：本轮是单结果交付，直接产出结构化 JSON 并结束，不要建立或维护任务清单。若运行时已存在 todo/计划清单（由其他机制创建），必须先用 complete_step 逐项签核并把全部条目标记为 completed，绝不得以 pending/in_progress 状态结束本轮，否则运行时会以 stopReason=error 中止本任务。本轮只允许产生一条结果评论，其正文必须是该 JSON 对象本身；禁止额外发布任何报告、进度或说明性质的过程评论。
 
@@ -159,6 +159,41 @@ Solver 首先判断原始条目应该如何处理：保留并细化、修改、�
     "migration": []
   }
 }
+```
+
+### 6.2 代码级实施规格（验收线）
+
+方案细化的验收线只有一条：
+
+```text
+实施者拿到 changes 后，不需要做任何设计决策，只做机械录入。
+```
+
+`changes` 中的每个条目必须是代码级规格：
+
+- 修改既有代码：给出 before/after（原代码片段与替换代码片段，能精确锚定
+  到被改位置即可，格式与语言无关）；
+- 新增逻辑：给出完整实现代码，不允许只有行为描述；
+- 新增测试：给出断言级用例（Arrange/Act/Assert 或等价结构），测试代码属于
+  `changes` 的一部分，不得只写"补充 XX 测试"；
+- 纯样板（如 import 行、注册行）可以折叠省略，但任何含设计决策的代码不得
+  省略。
+
+写不出某段实现，说明存在未解决的设计决策：要么补证后再写，要么
+`HUMAN_GATE`。不允许用"由实施者决定"把决策推给下游。
+
+测试记录放在 `changes` 中（kind 为 test 的条目）；顶层 `tests` 字段只列
+测试名称与覆盖点摘要，并引用对应 change_id，两处不得互相矛盾。
+
+### 6.3 修订吸收义务
+
+revision_round > 0 时，`responses_to_critic` 必须覆盖上一轮每一条
+Finding，逐条给出 finding_id 和 position：
+
+```text
+accepted：对应变更必须出现在 changes 中，缺一即假吸收；
+rejected：必须给出能被 Critic 独立复核的反驳论证；
+其余 position：必须逐条说明后续动作，不允许整段沉默或用总体说明代替。
 ```
 
 ## 7. 可行性检查
@@ -402,6 +437,33 @@ Critic 对条目提出问题后，Solver 必须逐条回应：
 
 这才是可以交给质量门继续检查的落地条目。
 
+### 代码级变更记录（changes 条目示例）
+
+```json
+{
+  "change_id": "chg-000001",
+  "file": "Assets/Scripts/Loading/AddressablesLoader.cs",
+  "kind": "edit",
+  "before": "public Task LoadAsync(string key) { return LoadAsync(key, default); }",
+  "after": "public Task LoadAsync(string key) { return LoadAsync(key, _preloadScheduler.TokenFor(key)); }",
+  "anchor": "AddressablesLoader.LoadAsync(string)",
+  "why": "Critical 资源必须在进入主流程前挂到预加载调度器上 (finding-000003, accepted)"
+}
+```
+
+```json
+{
+  "change_id": "chg-000002",
+  "file": "Assets/Tests/PreloadSchedulerTests.cs",
+  "kind": "test",
+  "code": "Assert.Throws<InvalidOperationException>(() => _scheduler.Preload(critical));",
+  "why": "证伪'Critical 失败不阻止主流程'：若预加载失败未阻断主流程，该断言不成立"
+}
+```
+
+对照第 14 节开头的原始条目："增加核心资源预加载"这种粒度不满足验收线；
+上面的记录粒度才满足。
+
 ## 15. Prompt Contract
 
 ```text
@@ -420,8 +482,12 @@ REQUIRED ORDER:
 4. Detail modules, interfaces, data flow, lifecycle, errors, compatibility,
    verification, and rollback.
 5. Compare reuse and new-implementation choices.
-6. Respond to every Critic finding by finding ID.
-7. Return ItemFeasibilityProposal.
+6. Produce code-level changes: before/after for edits, complete code for new
+   logic, assertion-level tests. The implementer must make zero design
+   decisions from your changes alone.
+7. Respond to every Critic finding by finding ID; each accepted finding maps
+   to a concrete change.
+8. Return ItemFeasibilityProposal.
 
 DO NOT:
 - silently change the overall plan objective;
@@ -429,7 +495,9 @@ DO NOT:
 - claim implementation or tests were completed;
 - declare the item approved;
 - choose user-owned trade-offs without HUMAN_GATE;
-- invent missing facts.
+- invent missing facts;
+- defer design decisions to the implementer with "TBD" or behavior-only
+  placeholders.
 ```
 
 ## 16. 验证要求
@@ -444,10 +512,12 @@ DO NOT:
 6. Solver 能检查 Go/.NET/Unity 专项兼容性；
 7. Solver 能输出可验证的条目；
 8. Solver 能逐条回应 Critic Finding；
-9. Solver 不会直接宣布条目通过；
-10. Solver 不会声称已经修改代码或执行测试；
-11. Solver 能在缺少关键证据时返回 `NEEDS_MORE_EVIDENCE`；
-12. 输出可以被 Critic 的 ItemReviewPacket 校验器读取。
+9. accepted Finding 与 changes 一一对应，不存在假吸收；
+10. changes 达到代码级：实施者仅凭 changes 无需再做设计决策；
+11. Solver 不会直接宣布条目通过；
+12. Solver 不会声称已经修改代码或执行测试；
+13. Solver 能在缺少关键证据时返回 `NEEDS_MORE_EVIDENCE`；
+14. 输出可以被 Critic 的 ItemReviewPacket 校验器读取。
 
 ## 23. Runtime Contract Authority
 
