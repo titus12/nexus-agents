@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from orchestrator.runtime.compat_effects import _SKILLS, _skill_lock
 
@@ -16,6 +17,16 @@ class ActiveRuntimeSkillBindingTests(unittest.TestCase):
         ))
         self.assertTrue(lock.get("sha256"))
         self.assertGreater(lock.get("bytes", 0), 0)
+
+    def test_solver_skill_documents_group_docs(self) -> None:
+        # Live incident task-20260924-beb814: no role document taught the
+        # group_docs deliverable, so the Solver submitted group_docs=null on
+        # every attempt and the run died on SOLVER_GROUP_DOC_MISSING:all.
+        lock = _skill_lock("ZHONGSHU_SOLVER")
+        content = Path(str(lock.get("source") or "")).read_text(encoding="utf-8")
+
+        self.assertIn("group_docs", content)
+        self.assertIn("九节", content)
 
     def test_every_menxia_group_state_has_a_locked_skill_binding(self) -> None:
         # Regression: the group-pipeline states were missing from _SKILLS,

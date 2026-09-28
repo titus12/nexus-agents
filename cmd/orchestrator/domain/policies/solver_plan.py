@@ -14,7 +14,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 
-from ...zhongshu_review_queue import structural_gate
+from ...zhongshu_review_queue import canonical_hash, structural_gate
 from ..errors import SOLVER_STRUCTURE_REPLY_PREFIX
 
 
@@ -67,6 +67,15 @@ _RETRYABLE_SOLVER_REPLY_PREFIXES = (
     "SOLVER_CHANGE_GROUP_UNKNOWN:",
     "SOLVER_CHANGE_OP_UNKNOWN:",
     "SOLVER_CHANGE_PLAN_FIELD_FORBIDDEN:",
+    # A scoped revision whose editable ids name no item in the reviewed plan
+    # (an unresolved finding owner) must not silently carry the reviewed plan
+    # over the solver's fixes; re-ask with a corrected scope instead.
+    "SOLVER_SCOPE_ITEM_UNKNOWN:",
+    # Group-revision patch rewrote a member outside the finding-owning set.
+    "SOLVER_ITEM_FROZEN:",
+    # §8 projection needs one subsection per member item; a missing
+    # subsection is a one-line document fix for the Solver.
+    "PLAN_HAS_NO_ACCEPTANCE:",
     "SOLVER_REVISION_NO_RESPONSE:",
     # A mis-typed or abbreviated finding id is the same class of mechanical
     # slip: the batch intent is often correct, only the id strings are wrong.
@@ -412,7 +421,7 @@ def carry_forward_group_docs(
     authoritative row.
     """
 
-    from ..zhongshu_doc import ZhongshuRequirementDoc, group_doc_violations
+    from ..zhongshu_doc import ZhongshuRequirementDoc, doc_violation_details
 
     rows = {
         str(getattr(row, "group_id", "") or ""): row
@@ -450,14 +459,18 @@ def carry_forward_group_docs(
         row = rows.get(group_id)
         row_version = int(getattr(row, "doc_version", 0) or 0)
         previous_version = row_version if row_version > 0 else None
-        violations = group_doc_violations(
+        violations = doc_violation_details(
             markdown,
             previous_version=previous_version,
             review=_review_for_doc_verify(review, plan),
             group_id=group_id,
         )
         if violations:
-            return {}, "SOLVER_GROUP_DOC_INVALID:" + ";".join(violations[:10])
+            # Feedback carries the expected/actual diff so a re-ask fixes
+            # the exact rows named instead of guessing at the closure rule.
+            return {}, "SOLVER_GROUP_DOC_INVALID:" + ";".join(
+                violation.render(with_expected=True) for violation in violations[:10]
+            )
         document = ZhongshuRequirementDoc.parse(markdown)
         folded[group_id] = {
             "markdown": markdown,
@@ -484,8 +497,17 @@ def _plan_source_hash(plan: object) -> str:
 class _PlanItemView:
     """Item-shaped read view over one submitted plan item."""
 
-    def __init__(self, item: Mapping[str, object]) -> None:
-        self.group_id = str(item.get("group_id") or "")
+    def __init__(
+        self, item: Mapping[str, object], fallback_group_id: str = ""
+    ) -> None:
+        self.item_id = str(item.get("item_id") or "")
+        # Membership may live on the item itself or only in the plan's
+        # ``groups[].item_ids``; both are contract-legal shapes, so the
+        # projection accepts either (task-20260928-bc58c1 SOLVER:3 was
+        # falsely orphaned when only the group list carried membership).
+        self.group_id = (
+            str(item.get("group_id") or "").strip() or fallback_group_id
+        )
         self.acceptance_signals = tuple(
             str(signal)
             for signal in (item.get("acceptance_signals") or ())
@@ -502,8 +524,21 @@ class _PlanReviewView:
     """
 
     def __init__(self, plan: Mapping[str, object]) -> None:
+        group_of: dict[str, str] = {}
+        for group in plan.get("groups") or ():
+            if not isinstance(group, Mapping):
+                continue
+            group_id = str(group.get("group_id") or "").strip()
+            if not group_id:
+                continue
+            for item_id in group.get("item_ids") or ():
+                key = str(item_id).strip()
+                if key:
+                    group_of.setdefault(key, group_id)
         self.task_items = tuple(
-            _PlanItemView(item)
+            _PlanItemView(
+                item, group_of.get(str(item.get("item_id") or "").strip(), "")
+            )
             for item in (plan.get("items") or ())
             if isinstance(item, Mapping)
         )
@@ -526,10 +561,22 @@ def _review_for_doc_verify(review: object, plan: object) -> object:
 def apply_solver_changes(
     current_plan: Mapping[str, object],
     changes: Sequence[object],
+    *,
+    editable_item_ids: Iterable[object] | None = None,
 ) -> tuple[dict[str, object] | None, str]:
-    """Return ``(materialized_plan, error)`` for typed plan changes."""
+    """Return ``(materialized_plan, error)`` for typed plan changes.
+
+    When ``editable_item_ids`` is supplied (scoped revision), item edits
+    outside that set are rejected instead of rewriting reviewed tasks the
+    batch never asked the Solver to touch.
+    """
 
     plan = copy.deepcopy(dict(current_plan))
+    editable = (
+        {str(value).strip() for value in editable_item_ids if str(value).strip()}
+        if editable_item_ids is not None
+        else None
+    )
     items = plan.get("items")
     if not isinstance(items, list):
         items = []
@@ -559,6 +606,8 @@ def apply_solver_changes(
             item = item_index.get(item_id)
             if item is None:
                 return None, f"SOLVER_CHANGE_ITEM_UNKNOWN:{item_id}"
+            if editable is not None and item_id not in editable:
+                return None, f"SOLVER_SCOPE_ITEM_UNKNOWN:{item_id}"
             fields = change.get("fields")
             if not isinstance(fields, Mapping):
                 return None, "SOLVER_CHANGE_FIELDS_NOT_OBJECT"
@@ -599,6 +648,97 @@ def _item_dependencies(item: Mapping[str, object]) -> tuple[str, ...]:
     if not isinstance(raw, (list, tuple, set, frozenset)):
         return ()
     return tuple(sorted(str(value).strip() for value in raw if str(value).strip()))
+
+
+def merge_group_revision_items(
+    current_plan: Mapping[str, object],
+    *,
+    group_id: str,
+    patched_items: Sequence[object],
+    editable_item_ids: Iterable[object],
+) -> tuple[dict[str, object] | None, str]:
+    """Merge one group-revision patch onto the reviewed plan (item layer).
+
+    The patch may rewrite only the finding-owning members of ``group_id``
+    (the group-internal freeze zone, requirements §5.3): every other member
+    and every foreign item must either stay unmentioned or come back as a
+    byte-identical echo.  A reword of an unowned member invalidates the
+    sibling review surface for nothing (the exact churn
+    ``carry_forward_revision_items`` was built to stop), so it is rejected
+    as ``SOLVER_ITEM_FROZEN:<item_ids>``.
+    """
+
+    items = current_plan.get("items")
+    if not isinstance(items, list):
+        return None, "SOLVER_PLAN_STRUCTURE_INVALID:PLAN_HAS_NO_ITEMS"
+    editable = {str(value).strip() for value in editable_item_ids if str(value).strip()}
+    current_index: dict[str, tuple[int, Mapping[str, object]]] = {}
+    for index, item in enumerate(items):
+        if isinstance(item, Mapping) and item.get("item_id"):
+            current_index[str(item.get("item_id"))] = (index, item)
+    merged = copy.deepcopy(dict(current_plan))
+    merged_items = merged["items"]
+    frozen: list[str] = []
+    seen: set[str] = set()
+    for raw in patched_items or ():
+        if not isinstance(raw, Mapping):
+            return None, "SOLVER_CHANGE_NOT_OBJECT"
+        item_id = str(raw.get("item_id") or "").strip()
+        if not item_id:
+            return None, "ITEM_PATCH_IDENTITY:missing item_id"
+        if item_id in seen:
+            return None, f"SOLVER_GROUP_PATCH_DUPLICATE:{item_id}"
+        seen.add(item_id)
+        located = current_index.get(item_id)
+        if located is None:
+            frozen.append(item_id)
+            continue
+        index, current = located
+        owner = str(current.get("group_id") or "")
+        supplied_owner = str(raw.get("group_id") or "")
+        if supplied_owner != owner:
+            # Feedback carries expected/actual: a bare ``ITEM_PATCH_IDENTITY``
+            # left the re-ask guessing which identity field drifted, and live
+            # run task-20260927-616863 burned all four group-revision waves on
+            # the same mislabeled group_id (SOLVER:11/13/15/17).
+            return None, (
+                f"ITEM_PATCH_IDENTITY:{item_id} "
+                f"group_id expected={owner or 'none'} actual={supplied_owner or 'none'}"
+            )
+        in_scope = not group_id or not owner or owner == group_id
+        if (
+            (not in_scope or item_id not in editable)
+            and canonical_hash(_plan_item_view(raw))
+            != canonical_hash(_plan_item_view(current))
+        ):
+            # A full-plan reply may echo frozen members and foreign items
+            # byte-identically (the compact transport rule): only real
+            # rewrites outside the finding-owning set are refused.
+            frozen.append(item_id)
+            continue
+        merged_items[index] = copy.deepcopy(dict(raw))
+    if frozen:
+        return None, "SOLVER_ITEM_FROZEN:" + ",".join(sorted(set(frozen)))
+    return merged, ""
+
+
+def _plan_item_view(item: Mapping[str, object]) -> dict[str, object]:
+    """Content identity of one plan item for echo comparisons."""
+
+    return {
+        key: item.get(key)
+        for key in (
+            "item_id",
+            "group_id",
+            "title",
+            "objective",
+            "dependencies",
+            "source_requirement_ids",
+            "acceptance_signals",
+            "unknowns",
+            "risks",
+        )
+    }
 
 
 def carry_forward_revision_items(
@@ -662,6 +802,37 @@ def carry_forward_revision_items(
     return merged
 
 
+def _editable_scope_error(
+    editable_item_ids: Iterable[object],
+    current_plan: Mapping[str, object],
+) -> str:
+    """Reject a scoped revision whose editable ids name no reviewed item.
+
+    A finding owner that failed to resolve to a real plan item used to land in
+    the editable set as a free-text fragment (``item-000004.acceptance_signals
+    and task_review_ledger``); ``carry_forward_revision_items`` then treated
+    the real item as non-editable and silently replaced the solver's fix with
+    the reviewed plan (live incident task-20260926-35833d).  Surface the
+    mismatch as a retryable reply error instead.
+    """
+
+    raw_items = current_plan.get("items") or current_plan.get("candidate_items") or []
+    known = {
+        str(item.get("item_id") or "").strip()
+        for item in raw_items
+        if isinstance(item, Mapping) and str(item.get("item_id") or "").strip()
+    }
+    if not known:
+        # No item authority to validate against; carry-forward semantics own
+        # this shape (every submitted item is treated as new).
+        return ""
+    editable = {str(value).strip() for value in editable_item_ids if str(value).strip()}
+    unknown = sorted(editable - known)
+    if unknown:
+        return "SOLVER_SCOPE_ITEM_UNKNOWN:" + ",".join(unknown[:8])
+    return ""
+
+
 def materialize_solver_reply(
     payload: Mapping[str, object],
     current_plan: Mapping[str, object] | None,
@@ -687,12 +858,17 @@ def materialize_solver_reply(
     has_changes = isinstance(changes, list) and bool(changes)
     if has_plan:
         if editable_item_ids is not None and isinstance(current_plan, Mapping):
+            error = _editable_scope_error(editable_item_ids, current_plan)
+            if error:
+                return None, error
             return carry_forward_revision_items(plan, current_plan, editable_item_ids), ""
         return dict(plan), ""
     if has_changes:
         if not isinstance(current_plan, Mapping):
             return None, "SOLVER_CURRENT_PLAN_MISSING"
-        return apply_solver_changes(current_plan, changes)
+        return apply_solver_changes(
+            current_plan, changes, editable_item_ids=editable_item_ids
+        )
     if isinstance(current_plan, Mapping):
         return copy.deepcopy(dict(current_plan)), ""
     # No plan and no changes on the initial run: preserve the legacy
@@ -707,6 +883,7 @@ __all__ = [
     "carry_forward_revision_items",
     "is_retryable_solver_reply_error",
     "materialize_solver_reply",
+    "merge_group_revision_items",
     "normalize_solver_finding_ids",
     "resolve_finding_ids",
     "solver_batch_coverage_error",

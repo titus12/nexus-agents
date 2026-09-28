@@ -60,16 +60,49 @@ def _json_parse_diagnostic(text: str) -> dict[str, object]:
     }
 
 
+def _strip_trailing_commas(text: str) -> str | None:
+    """Remove structural trailing commas, never touching string literals.
+
+    Returns ``None`` when no trailing comma exists, so the caller only retries
+    a parse when the transform actually changed something.
+    """
+
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    changed = False
+    for index, char in enumerate(text):
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            continue
+        if char == "," and text[index + 1:].lstrip()[:1] in ("}", "]"):
+            changed = True
+            continue
+        out.append(char)
+    return "".join(out) if changed else None
+
+
 def _parse_json_candidate(
     text: str,
 ) -> tuple[object | None, str, str, int | None]:
     """Parse one Agent JSON document with narrowly scoped framing recovery.
 
     The external comment transport is text, so the Agent can occasionally emit
-    a valid root object followed by one accidental closing brace. Recover only
-    that exact shape. In particular, never accept the first document from
-    concatenated JSON or discard arbitrary trailing content because doing so
-    could silently lose a decision or finding.
+    a valid root object followed by one accidental closing brace, or trailing
+    commas before a closing bracket. Recover only those exact shapes. In
+    particular, never accept the first document from concatenated JSON or
+    discard arbitrary trailing content because doing so could silently lose a
+    decision or finding.
     """
     candidate = str(text).lstrip("\ufeff\u200b").strip()
     try:
@@ -82,11 +115,19 @@ def _parse_json_candidate(
     try:
         value, end = json.JSONDecoder().raw_decode(candidate)
     except (TypeError, ValueError, json.JSONDecodeError):
-        return None, "invalid", strict_error.msg, strict_error.pos
+        value, end = None, 0
 
-    trailing = candidate[end:].strip()
-    if isinstance(value, dict) and trailing == "}":
-        return value, "repaired", "", end
+    if isinstance(value, dict):
+        trailing = candidate[end:].strip()
+        if trailing == "}":
+            return value, "repaired", "EXTRA_CLOSING_BRACE", end
+
+    stripped = _strip_trailing_commas(candidate)
+    if stripped is not None:
+        try:
+            return json.loads(stripped), "repaired", "TRAILING_COMMA", None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
     return None, "invalid", strict_error.msg, strict_error.pos
 
 
@@ -403,7 +444,13 @@ class MulticaCliAdapter:
             self._save_dispatch_index()
         return run_ids
 
-    def _cancel_stale_live_runs(self, issue_id: str, request: AgentRequest) -> None:
+    def _cancel_stale_live_runs(
+        self,
+        issue_id: str,
+        request: AgentRequest,
+        *,
+        known_runs: set[str] | None = None,
+    ) -> None:
         """Cancel live runs for the same agent before the trigger comment lands.
 
         Any run that is alive when this dispatch fires (a manual issue
@@ -416,6 +463,11 @@ class MulticaCliAdapter:
         comment run that follows this sweep runs standalone and reads the
         payload from the trigger comment, which is the pattern proven by
         task-20260920-3c6b68.
+
+        ``known_runs`` is the pre-dispatch run-id watermark: runs outside it
+        are the assignment placeholder this dispatch just created, so their
+        cancellation is expected bookkeeping (INFO), while a run predating the
+        dispatch is a genuine stray (WARNING).
         """
 
         if not request.agent_id:
@@ -467,16 +519,28 @@ class MulticaCliAdapter:
                     str(error)[:300],
                 )
                 continue
-            logger.warning(
-                "AGENT_STRAY_RUN_CANCELLED task_id=%s request_id=%s "
-                "issue_id=%s run_id=%s kind=%s previous_status=%s",
-                request.task_id,
-                request.request_id,
-                issue_id,
-                run_id,
-                str(run.get("kind") or ""),
-                status,
-            )
+            if known_runs is not None and run_id not in known_runs:
+                logger.info(
+                    "AGENT_ASSIGN_RUN_CANCELLED task_id=%s request_id=%s "
+                    "issue_id=%s run_id=%s kind=%s previous_status=%s",
+                    request.task_id,
+                    request.request_id,
+                    issue_id,
+                    run_id,
+                    str(run.get("kind") or ""),
+                    status,
+                )
+            else:
+                logger.warning(
+                    "AGENT_STRAY_RUN_CANCELLED task_id=%s request_id=%s "
+                    "issue_id=%s run_id=%s kind=%s previous_status=%s",
+                    request.task_id,
+                    request.request_id,
+                    issue_id,
+                    run_id,
+                    str(run.get("kind") or ""),
+                    status,
+                )
 
     def _issue_run_ids(self, issue_id: str) -> set[str] | None:
         try:
@@ -977,10 +1041,10 @@ class MulticaCliAdapter:
         # The resulting direct run has no trigger_comment_id; snapshot the
         # issue's runs first so the assignment run can be recognised by its
         # position (run-id delta) instead of by clock comparison.
-        self._capture_run_watermark(issue_id, request.idempotency_key)
+        known_runs = self._capture_run_watermark(issue_id, request.idempotency_key)
         if request.agent_id:
             self._run("issue", "update", issue_id, "--assignee-id", request.agent_id, "--output", "json")
-        self._cancel_stale_live_runs(issue_id, request)
+        self._cancel_stale_live_runs(issue_id, request, known_runs=known_runs)
         path = self.log_dir / f"dispatch_{request.request_id.replace(':', '_')}.json"
         path.write_text(content, encoding="utf-8")
         value = self._run_with_local_file(
@@ -2296,6 +2360,38 @@ def _response_contract_for(request: AgentRequest) -> dict:
                 "optional_fields": optional,
                 "instruction": instruction,
             }
+        if str(request.context.get("zhongshu_dispatch_mode") or "") == "group_revise":
+            optional.extend([
+                "items", "group_docs", "finding_resolutions",
+                "evidence_ids", "unknowns", "risks",
+            ])
+            allowed_actions = ["READY_FOR_CRITIC", "BLOCKED"]
+            required_by_action = {
+                "READY_FOR_CRITIC": [
+                    "action", "group_id", "items", "group_docs",
+                    "finding_resolutions",
+                ],
+            }
+            instruction = (
+                "You are the group-scoped Zhongshu Solver. Revise only the "
+                "editable member tasks named in the capsule and this group's "
+                "requirement document: section 8 of the document must close "
+                "verbatim over the member acceptance signals. Every other "
+                "member and every other group is frozen - echo them "
+                "byte-identically or omit them. Reply with action "
+                "READY_FOR_CRITIC, the group_id, the patched member items in "
+                "items (or a full plan whose other entries are byte-identical "
+                "echoes), this group's next document version in group_docs, and "
+                "one finding_resolution per batch finding. Do not design "
+                "implementation."
+            )
+            return {
+                "contract_id": "nexus.zhongshu.solver.v1",
+                "allowed_actions": allowed_actions,
+                "required_by_action": required_by_action,
+                "optional_fields": optional,
+                "instruction": instruction,
+            }
         optional.extend([
             "plan",
             "changes",
@@ -2349,7 +2445,35 @@ def _response_contract_for(request: AgentRequest) -> dict:
             "questions_for_analyst",
             "questions_for_user",
         ])
-        if str(request.context.get("zhongshu_dispatch_mode") or "") == "task_review":
+        dispatch_mode = str(request.context.get("zhongshu_dispatch_mode") or "")
+        if dispatch_mode == "group_review":
+            from .contracts.zhongshu_critic import GROUP_MODE_ACTIONS
+
+            optional.extend([
+                "group_id",
+                "review_checks",
+                "evidence_ids",
+                "unknowns",
+            ])
+            allowed_actions = sorted(GROUP_MODE_ACTIONS)
+            instruction = (
+                "You are the Zhongshu group Critic. Review the whole assigned "
+                "group capsule (requirement document + every member task) and "
+                "return exactly one group action. Every finding must carry the "
+                "owning member item_id. Do not echo revision ids or business "
+                "hashes (plan/task/dependency); copy the envelope's "
+                "structured_output_schema_hash verbatim from the injected "
+                "contract. Do not review other groups, and do not design "
+                "implementation."
+            )
+            required_by_action = {
+                action: [
+                    "action", "group_id",
+                    "review_checks", "findings", "evidence_ids", "unknowns",
+                ]
+                for action in allowed_actions
+            }
+        elif dispatch_mode == "task_review":
             optional.extend([
                 "group_id",
                 "item_id",
@@ -2366,8 +2490,10 @@ def _response_contract_for(request: AgentRequest) -> dict:
             ]
             instruction = (
                 "You are the Zhongshu task Critic. Review only the assigned "
-                "group_id/item_id capsule. Do not echo revision ids, plan hashes "
-                "or task/dependency hashes (the orchestrator stamps them). Return "
+                "group_id/item_id capsule. Do not echo revision ids or business "
+                "hashes (plan/task/dependency; the orchestrator stamps them); "
+                "copy the envelope's structured_output_schema_hash verbatim "
+                "from the injected contract. Return "
                 "all review_checks and task-scoped evidence-backed findings. Do not "
                 "review or create findings for any other task, and do not design implementation."
             )
@@ -2806,12 +2932,12 @@ def _extract_json(body: str) -> object:
     if "```" in body:
         candidates.append(body.replace("```json", "").replace("```", "").strip())
     for candidate in candidates:
-        value, status, _, _ = _parse_json_candidate(candidate)
+        value, status, repair, _ = _parse_json_candidate(candidate)
         if status in {"valid", "repaired"}:
             if status == "repaired":
                 logger.warning(
-                    "AGENT_REPLY_JSON_REPAIRED repair=EXTRA_CLOSING_BRACE "
-                    "sha256=%s",
+                    "AGENT_REPLY_JSON_REPAIRED repair=%s sha256=%s",
+                    repair or "UNKNOWN",
                     _fingerprint_text(body)["sha256"],
                 )
             return value

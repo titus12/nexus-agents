@@ -76,6 +76,30 @@ class RetryFeedbackTests(unittest.TestCase):
 
         self.assertEqual(retry_feedback(self._context(failure), "ZHONGSHU_SOLVER"), "")
 
+    def test_solver_shape_rejection_is_restated(self) -> None:
+        # Live incident task-20260924-beb814: SOLVER_GROUP_DOC_MISSING was
+        # re-asked four times over an empty feedback channel, so the worker
+        # re-emitted the same unusable reply until the budget died.  A Solver
+        # shape rejection must reach the re-ask like any other reply failure.
+        failure = _failure(
+            "SOLVER_GROUP_DOC_MISSING:all",
+            message="SOLVER_GROUP_DOC_MISSING:all",
+        )
+
+        feedback = retry_feedback(self._context(failure), "ZHONGSHU_SOLVER")
+
+        self.assertIn("Retry feedback", feedback)
+        self.assertIn("SOLVER_GROUP_DOC_MISSING", feedback)
+
+    def test_contract_rules_ride_the_prompt(self) -> None:
+        # The contract's prompt_rules (including the nine-section group
+        # document demand) were stored on the contract and never dispatched,
+        # so the worker could not know group_docs was mandatory.
+        prompt = build_prompt(self._context(None), target_state="ZHONGSHU_SOLVER")
+
+        self.assertIn("[Contract rules]", prompt.content)
+        self.assertIn("nine-section requirement document in group_docs", prompt.content)
+
 
 if __name__ == "__main__":
     unittest.main()

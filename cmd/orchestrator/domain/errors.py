@@ -127,7 +127,17 @@ def is_reply_failure(error_code: object) -> bool:
     """True when a failure code describes an unusable agent reply body."""
 
     code = str(error_code or "").strip().upper()
-    return code in REPLY_FAILURE_CODES or code.startswith(SOLVER_STRUCTURE_REPLY_PREFIX)
+    if code in REPLY_FAILURE_CODES or code.startswith(SOLVER_STRUCTURE_REPLY_PREFIX):
+        return True
+    # The retryable Solver shape family (group docs, batch coverage,
+    # dispositions, ...) is the same class of unusable reply: the retry path
+    # re-asks the agent, so the re-ask must also see the rejection as
+    # feedback (task-20260924-beb814 died re-sending group_docs=null while
+    # the feedback channel stayed empty).  Imported lazily because the policy
+    # module already imports this one for the structure prefix.
+    from .policies.solver_plan import is_retryable_solver_reply_error
+
+    return is_retryable_solver_reply_error(str(error_code or ""))
 
 
 class TransportError(DomainError):

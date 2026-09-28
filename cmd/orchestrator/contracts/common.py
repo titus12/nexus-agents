@@ -184,6 +184,46 @@ def coerce_enum_values(value: Any, schema: Mapping[str, Any]) -> Any:
     return value
 
 
+def coerce_scalar_strings(value: Any, schema: Mapping[str, Any]) -> Any:
+    """Canonicalize plain string fields models filled with null/numbers.
+
+    Identity fields like ``item_id``/``group_id`` routinely arrive as ``null``
+    or a bare number; rejecting the whole result over one type slip stalls a
+    multi-worker fan-out for minutes (task-20260927-de54aa CRITIC:8 group-01
+    died on ``item_id: expected string``).  Map ``None`` to ``""`` and
+    int/float to their decimal text so the reply survives shape validation;
+    bools and containers are left alone so real shape errors still surface.
+    Enum/const fields opt out: their coercion is ``coerce_enum_values``.
+    """
+
+    if not isinstance(schema, Mapping):
+        return value
+    if schema.get("type") == "string" and "enum" not in schema and "const" not in schema:
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            return str(int(value)) if value.is_integer() else str(value)
+        return value
+    if isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, Mapping):
+            for index, item in enumerate(value):
+                value[index] = coerce_scalar_strings(item, item_schema)
+        return value
+    if isinstance(value, dict):
+        properties = schema.get("properties")
+        if isinstance(properties, Mapping):
+            for key, child_schema in properties.items():
+                if key in value and isinstance(child_schema, Mapping):
+                    value[key] = coerce_scalar_strings(value[key], child_schema)
+        return value
+    return value
+
+
 def _type_matches(value: Any, expected: str | list[str]) -> bool:
     expected_types = expected if isinstance(expected, list) else [expected]
     for expected_type in expected_types:

@@ -8,6 +8,7 @@ and out-of-scope reconvergence without budget.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 from orchestrator.domain.context import (
@@ -198,6 +199,159 @@ def _review_with_rows(
         task_review_ledger=review.task_review_ledger,
         zhongshu_groups=rows,
     )
+
+
+class GroupVerdictProjectionTests(unittest.TestCase):
+    """One group verdict projects the whole ledger (2026-09-26 pipeline)."""
+
+    def _verdict_review(self, *, findings: tuple[Finding, ...] = ()) -> ReviewState:
+        return _review(
+            findings=findings,
+            rows=(
+                ZhongshuGroupState(
+                    group_id="group-000001",
+                    doc_hash="doc-1",
+                    doc_markdown="# doc-1",
+                    doc_version=1,
+                ),
+            ),
+        )
+
+    def _member_hashes(self, review: ReviewState) -> dict:
+        from orchestrator.domain.policies.zhongshu_group import current_member_hashes
+
+        return current_member_hashes(review, "group-000001")
+
+    def test_approve_group_projects_ledger_and_stage(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import apply_group_verdict
+
+        review = self._verdict_review()
+        ledger, rows = apply_group_verdict(
+            review,
+            "group-000001",
+            "APPROVE_GROUP",
+            member_hashes=self._member_hashes(review),
+        )
+        by_id = {record.item_id: record for record in ledger}
+        self.assertEqual(by_id["item-000001"].status, "APPROVED")
+        self.assertEqual(by_id["item-000002"].status, "APPROVED")
+        self.assertEqual(rows[0].stage, "CONVERGED")
+        self.assertTrue(rows[0].approved_surface_hash)
+
+    def test_revise_group_resets_whole_group(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import (
+            apply_group_verdict,
+            apply_zhongshu_round,
+        )
+
+        review = self._verdict_review()
+        ledger, rows = apply_group_verdict(
+            review,
+            "group-000001",
+            "REVISE_GROUP",
+            member_hashes=self._member_hashes(review),
+        )
+        by_id = {record.item_id: record for record in ledger}
+        self.assertEqual(by_id["item-000001"].status, "CHANGES_REQUIRED")
+        self.assertEqual(by_id["item-000002"].status, "CHANGES_REQUIRED")
+        self.assertEqual(rows[0].stage, "REVIEWING")
+        updated = apply_zhongshu_round(
+            replace(review, task_review_ledger=ledger, zhongshu_groups=rows),
+            attempted_item_ids=("item-000001",),
+            max_rounds=5,
+        )
+        self.assertEqual(updated[0].revision_round, 1)
+
+    def test_group_surface_hash_held_on_unchanged(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import (
+            apply_group_verdict,
+            group_approval_held,
+        )
+
+        review = self._verdict_review()
+        ledger, rows = apply_group_verdict(
+            review,
+            "group-000001",
+            "APPROVE_GROUP",
+            member_hashes=self._member_hashes(review),
+        )
+        approved = replace(
+            review, task_review_ledger=ledger, zhongshu_groups=rows
+        )
+        self.assertTrue(group_approval_held(approved, "group-000001"))
+
+    def test_surface_invalidated_by_member_change(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import (
+            apply_group_verdict,
+            group_approval_held,
+        )
+
+        review = self._verdict_review()
+        ledger, rows = apply_group_verdict(
+            review,
+            "group-000001",
+            "APPROVE_GROUP",
+            member_hashes=self._member_hashes(review),
+        )
+        approved = replace(
+            review, task_review_ledger=ledger, zhongshu_groups=rows
+        )
+        mutated_items = tuple(
+            replace(item, objective="rewritten")
+            if item.item_id == "item-000001"
+            else item
+            for item in approved.task_items
+        )
+        mutated = replace(approved, task_items=mutated_items)
+        self.assertFalse(group_approval_held(mutated, "group-000001"))
+
+    def test_surface_invalidated_by_doc_change(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import (
+            apply_group_verdict,
+            group_approval_held,
+        )
+
+        review = self._verdict_review()
+        ledger, rows = apply_group_verdict(
+            review,
+            "group-000001",
+            "APPROVE_GROUP",
+            member_hashes=self._member_hashes(review),
+        )
+        approved = replace(
+            review, task_review_ledger=ledger, zhongshu_groups=rows
+        )
+        mutated = replace(
+            approved,
+            zhongshu_groups=(
+                replace(rows[0], doc_hash="doc-2", doc_markdown="# doc-2"),
+            ),
+        )
+        self.assertFalse(group_approval_held(mutated, "group-000001"))
+
+    def test_finding_item_coordinate_survives_verdict(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import apply_group_verdict
+
+        review = self._verdict_review(
+            findings=(
+                Finding(
+                    finding_id="f-1",
+                    severity="P1",
+                    status="OPEN",
+                    item_id="item-000001",
+                    group_id="group-000001",
+                ),
+            )
+        )
+        ledger, rows = apply_group_verdict(
+            review,
+            "group-000001",
+            "REVISE_GROUP",
+            member_hashes=self._member_hashes(review),
+        )
+        self.assertEqual(len(ledger), 2)
+        self.assertEqual(review.findings[0].item_id, "item-000001")
+        self.assertEqual(rows[0].last_verdict, "REVISE_GROUP")
 
 
 class FreezeAndDrainoutTests(unittest.TestCase):

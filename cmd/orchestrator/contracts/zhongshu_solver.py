@@ -14,7 +14,9 @@ _TASK = object_schema(
         "risks": array(), "parallelizable": {"type": "boolean"},
         "rationale": string(), "benefit": string(), "tradeoffs": string(),
     },
-    required=("item_id", "title", "objective", "source_requirement_ids", "dependencies", "acceptance_signals", "unknowns", "risks", "parallelizable", "rationale", "benefit"),
+    # acceptance_signals is optional: the group requirement document §8 is
+    # the single author and the orchestrator projects the field mechanically.
+    required=("item_id", "title", "objective", "source_requirement_ids", "dependencies", "unknowns", "risks", "parallelizable", "rationale", "benefit"),
 )
 _REQUIREMENT = object_schema(
     {
@@ -81,13 +83,18 @@ CONTRACT = make_contract(
     modes=_MODES, actions=_ACTIONS, fields=FIELDS,
     prompt_rules=(
         "Own task graph quality, dependencies, grouping, acceptance, unknowns, and risks.",
+        "Declare the mode you answered in: TASK_GRAPH_FORMALIZATION_READ_ONLY "
+        "on a formalization dispatch (no finding_batch), "
+        "TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME on a revision dispatch "
+        "(dispatch_context.solver_stage=revise). Answering a revision with the "
+        "formalization mode is a protocol violation.",
         "plan.requirements is the immutable Analyst contract; use only the supplied requirement_id values and put evidence-derived work in plan.items.",
         "Analyst candidate_items and candidate_groups are empty in the current evidence-only handoff; Solver creates the formal task graph from evidence.",
         "Dependencies are one-way execution prerequisites only. The complete plan.items dependency graph must be a directed acyclic graph: direct and transitive cycles are invalid, and related-but-not-blocking work must not be encoded as depends_on.",
         "plan.items is the only complete task-object index. Every group must use item_ids to reference plan.items; never emit groups[*].items or duplicate task objects.",
         "Do not emit implementation-level design fields forbidden by the solver protocol.",
-        "Every finding resolution must identify its owner and next action.",
-        "Every group must carry one nine-section requirement document in group_docs; section 8 must list each member item acceptance_signal verbatim, and section 2 must not hedge.",
+        "Every finding resolution must identify its owner and next action, and must carry a non-empty evidence array; an empty evidence list is a contract violation.",
+        "Every group must carry one nine-section requirement document in group_docs; the section headings must be exactly 「1. 背景」「2. 目标」「3. 标识与范围」「4. 状态与边界语义」「5. 行为要求」「6. 责任边界」「7. 交叉不变量」「8. 验收标准」「9. 非目标」 in that order, section 8 must list each member item acceptance_signal verbatim, and section 2 must not hedge.",
     ),
     example_overrides={
         "action": "READY_FOR_CRITIC",

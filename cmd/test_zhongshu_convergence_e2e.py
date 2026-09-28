@@ -13,6 +13,7 @@ from orchestrator.domain.context import (
     RequestState,
     TaskIdentity,
     WorkflowContext,
+    ZhongshuParallelLimits,
 )
 from orchestrator.transport.external import ExternalMessage
 from test_group_doc_loop import GroupWaveScripting
@@ -82,6 +83,7 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
     def __init__(self) -> None:
         super().__init__()
         self.item_two_rejections = 0
+        self.doc_versions: dict[str, int] = {}
 
     def dispatch(self, request):
         receipt = super().dispatch(request)
@@ -93,8 +95,13 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
             self._reply_requirement_contract(request)
             return receipt
         target = request.target_state
-        if target == "ZHONGSHU_SOLVER":
+        mode = str(context.get("zhongshu_dispatch_mode") or "")
+        if target == "ZHONGSHU_SOLVER" and mode == "group_revise":
+            self._reply_group_revise(request)
+        elif target == "ZHONGSHU_SOLVER":
             self._reply_solver(request)
+        elif target == "ZHONGSHU_CRITIC" and mode == "group_review":
+            self._reply_group_review(request)
         elif target == "ZHONGSHU_CRITIC":
             self._reply_critic(request)
         elif target in (
@@ -147,11 +154,9 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
         )
 
     def _reply_solver(self, request) -> None:
+        """Formalize wave (and the legacy single-writer revision fallback)."""
+
         revision = bool(request.context.get("has_current_plan"))
-        # Each revision must supersede the authoritative document: the freeze
-        # zone pins the version chain, so re-submitting the same version is a
-        # doc_version_jump violation.  Derive the next version from the
-        # authoritative markdown the dispatch carries.
         authoritative = str(
             (request.context.get("group_docs_authoritative") or {}).get(
                 "group-000001"
@@ -173,10 +178,6 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
             "plan": _plan(),
             "plan_hash": "plan-1",
             "changes": [],
-            # §8 must close with the plan's acceptance_signals verbatim —
-            # the submitted plan itself is the closure source on the first
-            # formalization; revisions bump the version against the
-            # authoritative row.
             "group_docs": [
                 {
                     "group_id": "group-000001",
@@ -188,8 +189,6 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
             ],
         }
         if revision:
-            # Only on a revision: the initial run has no active findings, so a
-            # finding batch there would be rejected as unknown.
             payload["finding_resolutions"] = [
                 {
                     "finding_id": "finding-item2",
@@ -201,8 +200,6 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
                     "next_action": "none",
                 }
             ]
-            # Only the rejected task is in the batch, so the approved task must
-            # be carried forward untouched.
             payload["finding_batch"] = {
                 "selected_finding_ids": ["finding-item2"],
                 "remaining_finding_ids": [],
@@ -211,14 +208,12 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
             }
         self._reply(request, payload)
 
-    def _reply_critic(self, request) -> None:
-        context = request.context
-        item_id = str(context.get("item_id") or "")
-        reject = item_id == "item-000002" and self.item_two_rejections == 0
-        if reject:
+    def _item_verdict(self, item_id: str) -> tuple:
+        """Per-item review decision, folded into the one group verdict."""
+
+        if item_id == "item-000002" and self.item_two_rejections == 0:
             self.item_two_rejections += 1
-            action = "TASK_CHANGES_REQUIRED"
-            findings = [
+            return "TASK_CHANGES_REQUIRED", [
                 {
                     "finding_id": "finding-item2",
                     "severity": "P1",
@@ -230,12 +225,84 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
                     "evidence_strength": "inference",
                     "worker_id": "worker-critic",
                     "item_id": item_id,
-                    "group_id": str(context.get("group_id") or ""),
+                    "group_id": "group-000001",
                 }
             ]
-        else:
-            action = "TASK_APPROVED"
-            findings = []
+        return "TASK_APPROVED", []
+
+    def _reply_group_review(self, request) -> None:
+        context = request.context
+        group_id = str(context.get("group_id") or "")
+        findings = []
+        revise = False
+        for item_id in [str(v) for v in (context.get("member_ids") or [])]:
+            action, item_findings = self._item_verdict(item_id)
+            if action != "TASK_APPROVED":
+                revise = True
+            findings.extend(item_findings)
+        self._reply(
+            request,
+            {
+                "action": "REVISE_GROUP" if revise else "APPROVE_GROUP",
+                "group_id": group_id,
+                "reviewed_plan_hash": str(context.get("plan_hash") or ""),
+                "findings": findings,
+                "finding_responses": [],
+                "review_checks": {
+                    "requirement_coverage": [],
+                    "boundary": [],
+                    "dependencies": [],
+                    "acceptance": [],
+                    "risks": [],
+                },
+            },
+        )
+
+    def _group_revision_payload(self, group_id: str) -> dict:
+        """One group-revision patch: editable members plus the group document."""
+
+        version = self.doc_versions.get(group_id, 1) + 1
+        self.doc_versions[group_id] = version
+        return {
+            "action": "READY_FOR_CRITIC",
+            "group_id": group_id,
+            "items": [],
+            "group_docs": [
+                {
+                    "group_id": group_id,
+                    "markdown": _zhongshu_doc(
+                        version=version,
+                        acceptance=("A is observable", "B is observable"),
+                    ),
+                }
+            ],
+            "finding_resolutions": [
+                {
+                    "finding_id": "finding-item2",
+                    "response": "absorbed",
+                    "note": "clarified the acceptance signal",
+                    "changed_fields": ["acceptance_signals"],
+                    "evidence": [],
+                    "owner_role": "review-solver",
+                    "next_action": "none",
+                }
+            ],
+        }
+
+    def _reply_group_revise(self, request) -> None:
+        self._reply(
+            request,
+            self._group_revision_payload(
+                str(request.context.get("group_id") or "")
+            ),
+        )
+
+    def _reply_critic(self, request) -> None:
+        """Legacy per-item wave (rollback path), kept for item-mode tests."""
+
+        context = request.context
+        item_id = str(context.get("item_id") or "")
+        action, findings = self._item_verdict(item_id)
         self._reply(
             request,
             {
@@ -257,7 +324,6 @@ class _ConvergingMultica(GroupWaveScripting, FakeMulticaAdapter):
             },
         )
 
-
 def _context() -> WorkflowContext:
     return WorkflowContext(
         identity=TaskIdentity("task-e2e", "issue-e2e", "", "request-e2e"),
@@ -266,6 +332,7 @@ def _context() -> WorkflowContext:
             raw_request="run a review", project_type="python", task_type="review"
         ),
         parallel=ParallelState(
+            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
             menxia=MenxiaParallelLimits(
                 enabled=True,
                 max_concurrent_groups=2,
@@ -314,7 +381,7 @@ class ZhongshuConvergenceEndToEndTests(unittest.TestCase):
         self.assertEqual(snapshot.context.review.zhongshu_revision_round, 1)
         self.assertIsNone(snapshot.context.recovery.blocked_reason)
 
-    def test_only_the_rejected_task_is_re_reviewed(self) -> None:
+    def test_group_wave_re_reviews_the_group_after_revision(self) -> None:
         _, dispatched = self._run()
 
         critic_targets = [
@@ -322,14 +389,23 @@ class ZhongshuConvergenceEndToEndTests(unittest.TestCase):
             for request in dispatched
             if request.target_state == "ZHONGSHU_CRITIC"
         ]
-        # Round 1 reviews both tasks; only the rejected task is re-reviewed.
-        self.assertEqual(len(critic_targets), 3)
-        reviewed = Counter(
-            str(request.context.get("item_id") or "") for request in critic_targets
+        # One group review job per wave: the whole group first, then the
+        # same group again after its revision wave.
+        self.assertEqual(len(critic_targets), 2)
+        self.assertTrue(
+            all(
+                str(request.context.get("group_id") or "") == "group-000001"
+                for request in critic_targets
+            )
         )
-        self.assertEqual(
-            reviewed, {"item-000001": 1, "item-000002": 2}
-        )
+        revise_targets = [
+            request
+            for request in dispatched
+            if request.target_state == "ZHONGSHU_SOLVER"
+            and str(request.context.get("zhongshu_dispatch_mode") or "")
+            == "group_revise"
+        ]
+        self.assertEqual(len(revise_targets), 1)
 
     def test_the_approved_task_is_not_rewritten_or_demoted(self) -> None:
         snapshot, _ = self._run()
@@ -354,56 +430,156 @@ class ZhongshuConvergenceEndToEndTests(unittest.TestCase):
         )
 
 
+class _TargetOnlyFindingMultica(_ConvergingMultica):
+    """Critic findings name their owner only inside the free-text target.
+
+    Live incident task-20260926-35833d: the owner was truncated from the
+    target into a garbage scope id, so the scoped revision silently carried
+    the reviewed plan over the solver's fix and the critic kept re-rejecting
+    the same stale capsule.
+    """
+
+    REVISED_SIGNAL = "item-000002 latency budget is observable via elapsed_ms"
+
+    def _item_verdict(self, item_id: str) -> tuple:
+        if item_id == "item-000002" and self.item_two_rejections == 0:
+            self.item_two_rejections += 1
+            return "TASK_CHANGES_REQUIRED", [
+                {
+                    "finding_id": "finding-item2",
+                    "severity": "P1",
+                    "status": "OPEN",
+                    "category": "acceptance",
+                    # No item_id / group_id: the owner is only named inside the
+                    # free-text target, exactly as in the live incident.
+                    "target": "group-000001/item-000002.acceptance_signals and task_review_ledger",
+                    "claim": "the acceptance signal is not auditable",
+                    "required_action": "reconcile the acceptance signal with the evidence crosswalk",
+                    "evidence_strength": "inference",
+                }
+            ]
+        return "TASK_APPROVED", []
+
+    def _group_revision_payload(self, group_id: str) -> dict:
+        version = self.doc_versions.get(group_id, 1) + 1
+        self.doc_versions[group_id] = version
+        return {
+            "action": "READY_FOR_CRITIC",
+            "group_id": group_id,
+            "items": [
+                {
+                    "item_id": "item-000002",
+                    "group_id": "group-000001",
+                    "title": "Task B",
+                    "objective": "do B",
+                    "dependencies": [],
+                    "source_requirement_ids": ["req-000001"],
+                    "acceptance_signals": [self.REVISED_SIGNAL],
+                }
+            ],
+            "group_docs": [
+                {
+                    "group_id": group_id,
+                    "markdown": _zhongshu_doc(
+                        version=version,
+                        acceptance=("A is observable", self.REVISED_SIGNAL),
+                    ),
+                }
+            ],
+            "finding_resolutions": [
+                {
+                    "finding_id": "finding-item2",
+                    "response": "absorbed",
+                    "note": "reconciled the acceptance signal with the crosswalk",
+                    "changed_fields": ["acceptance_signals"],
+                    "evidence": ["ev-000002"],
+                    "owner_role": "review-solver",
+                    "next_action": "none",
+                }
+            ],
+        }
+
+
+class TargetOnlyFindingRevisionIsAppliedTests(unittest.TestCase):
+    """A target-only finding must not eat the solver's scoped fix."""
+
+    def _run(self) -> object:
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = _TargetOnlyFindingMultica()
+            app = OrchestratorApp(
+                _context(),
+                root=directory,
+                multica=adapter,
+                poll_interval=0,
+                timeout_seconds=5,
+            )
+
+            self.assertTrue(app.run())
+            return app.repository.load("task-e2e")
+
+    def test_the_solver_fix_lands_and_the_graph_reaches_done(self) -> None:
+        snapshot = self._run()
+
+        self.assertEqual(snapshot.context.progression.state, "DONE")
+        items = {
+            item["item_id"]: item
+            for item in snapshot.context.review.plan.get("items") or []
+        }
+        self.assertEqual(
+            items["item-000002"]["acceptance_signals"],
+            [_TargetOnlyFindingMultica.REVISED_SIGNAL],
+        )
+        ledger = {
+            record.item_id: record.status
+            for record in snapshot.context.review.task_review_ledger
+        }
+        self.assertEqual(
+            ledger, {"item-000001": "APPROVED", "item-000002": "APPROVED"}
+        )
+
+    def test_the_persisted_item_capsule_carries_the_revised_signal(self) -> None:
+        snapshot = self._run()
+
+        item = next(
+            entry
+            for entry in snapshot.context.review.task_items
+            if entry.item_id == "item-000002"
+        )
+        self.assertEqual(
+            tuple(item.acceptance_signals), (_TargetOnlyFindingMultica.REVISED_SIGNAL,)
+        )
+
+    def test_the_folded_finding_resolved_its_owner_from_the_target(self) -> None:
+        snapshot = self._run()
+
+        findings = {
+            str(finding.finding_id): finding
+            for finding in snapshot.context.review.findings
+        }
+        self.assertEqual(findings["finding-item2"].item_id, "item-000002")
+
+
 class _StubbornBlockerMultica(_ConvergingMultica):
     """One task is rejected on the same P1 every round, forever."""
 
-    def _reply_critic(self, request) -> None:
-        context = request.context
-        item_id = str(context.get("item_id") or "")
+    def _item_verdict(self, item_id: str) -> tuple:
         if item_id != "item-000002":
-            self._reply(request, {"action": "TASK_APPROVED", "item_id": item_id,
-                                  "group_id": str(context.get("group_id") or ""),
-                                  "reviewed_plan_hash": str(context.get("plan_hash") or ""),
-                                  "reviewed_task_hash": str(context.get("task_hash") or ""),
-                                  "reviewed_dependency_hash": str(context.get("dependency_hash") or ""),
-                                  "worker_id": request.request_id,
-                                  "findings": [],
-                                  "review_checks": {}})
-            return
-        self._reply(
-            request,
+            return "TASK_APPROVED", []
+        return "TASK_CHANGES_REQUIRED", [
             {
-                "action": "TASK_CHANGES_REQUIRED",
-                "reviewed_plan_hash": str(context.get("plan_hash") or ""),
-                "group_id": str(context.get("group_id") or ""),
+                "finding_id": "finding-item2",
+                "severity": "P1",
+                "status": "OPEN",
+                "category": "acceptance",
+                "target": item_id,
+                "claim": "the acceptance signal is still not observable",
+                "required_action": "name an observable acceptance signal",
+                "evidence_strength": "inference",
+                "worker_id": "worker-critic",
                 "item_id": item_id,
-                "reviewed_task_hash": str(context.get("task_hash") or ""),
-                "reviewed_dependency_hash": str(context.get("dependency_hash") or ""),
-                "worker_id": request.request_id,
-                "findings": [
-                    {
-                        "finding_id": "finding-item2",
-                        "severity": "P1",
-                        "status": "OPEN",
-                        "category": "acceptance",
-                        "target": item_id,
-                        "claim": "the acceptance signal is still not observable",
-                        "required_action": "name an observable acceptance signal",
-                        "evidence_strength": "inference",
-                        "worker_id": "worker-critic",
-                        "item_id": item_id,
-                        "group_id": str(context.get("group_id") or ""),
-                    }
-                ],
-                "review_checks": {
-                    "requirement_coverage": [],
-                    "boundary": [],
-                    "dependencies": [],
-                    "acceptance": [],
-                    "risks": [],
-                },
-            },
-        )
+                "group_id": "group-000001",
+            }
+        ]
 
 
 class StubbornBlockerIsFrozenWithFollowUpsTests(unittest.TestCase):
@@ -412,13 +588,31 @@ class StubbornBlockerIsFrozenWithFollowUpsTests(unittest.TestCase):
     This is the token-free validation of the bounded-acceptance policy: the
     scripted Critic restates the same P1 every round, and the graph still
     reaches DONE with the residual risk recorded instead of the run dying.
+    Bounded acceptance is part of the retained item-granular wave (the
+    rollback path); under the group pipeline a stubborn group exhausts its
+    group budget and parks at the human gate instead.
     """
 
     def _run(self) -> tuple[object, tuple]:
+        from orchestrator.domain.context import ZhongshuParallelLimits
+
+        context = WorkflowContext(
+            identity=_context().identity,
+            progression=_context().progression,
+            request=_context().request,
+            parallel=ParallelState(
+                zhongshu=ZhongshuParallelLimits(review_unit="item", plan_review_gate=False),
+                menxia=MenxiaParallelLimits(
+                    enabled=True,
+                    max_concurrent_groups=2,
+                    max_concurrent_items=3,
+                ),
+            ),
+        )
         with tempfile.TemporaryDirectory() as directory:
             adapter = _StubbornBlockerMultica()
             app = OrchestratorApp(
-                _context(),
+                context,
                 root=directory,
                 multica=adapter,
                 poll_interval=0,
@@ -510,20 +704,14 @@ class _PingPongMultica(GroupWaveScripting, FakeMulticaAdapter):
                 },
             )
         elif target == "ZHONGSHU_CRITIC":
-            item_id = str(context.get("item_id") or "")
             self._reply(
                 request,
                 {
-                    "action": "TASK_APPROVED",
-                    "item_id": item_id,
+                    "action": "APPROVE_GROUP",
                     "group_id": str(context.get("group_id") or ""),
                     "reviewed_plan_hash": str(context.get("plan_hash") or ""),
-                    "reviewed_task_hash": str(context.get("task_hash") or ""),
-                    "reviewed_dependency_hash": str(
-                        context.get("dependency_hash") or ""
-                    ),
-                    "worker_id": request.request_id,
                     "findings": [],
+                    "finding_responses": [],
                     "review_checks": {},
                 },
             )
@@ -587,6 +775,7 @@ def _pingpong_context() -> WorkflowContext:
             raw_request="run a review", project_type="python", task_type="review"
         ),
         parallel=ParallelState(
+            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
             menxia=MenxiaParallelLimits(
                 enabled=True,
                 max_concurrent_groups=2,

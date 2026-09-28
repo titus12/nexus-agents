@@ -43,6 +43,15 @@ class ZhongshuParallelLimits:
     # (one binding per contested item) instead of one single-writer revision.
     # Default off; flipped by ZHONGSHU_ITEM_WORKFLOW_ENABLED.
     item_workflow_enabled: bool = False
+    # 2026-09-26 group pipeline: "group" reviews one group per job with a
+    # single group verdict (REVIEW_GROUP); "item" keeps the legacy per-item
+    # task_review wave as the rollback path.
+    review_unit: str = "group"
+    # 2026-09-27 thin plan doc: after the freeze check approves, the run
+    # pauses at a human gate carrying the plan-review document so the operator
+    # can review before the hand-over to Menxia.  Flipped by
+    # ZHONGSHU_PLAN_REVIEW_GATE=0 to keep the direct hand-over.
+    plan_review_gate: bool = True
     # Fast track: the Zhongshu Critic approves the whole plan without a review
     # wave and the freeze check releases it immediately, so the run reaches
     # the Menxia group pipeline right after Analyst + Solver finish.
@@ -588,6 +597,10 @@ class ZhongshuGroupState:
     doc_hash: str = ""
     doc_markdown: str = ""
     doc_source_hash: str = ""
+    # Group surface hash at the last APPROVE_GROUP verdict (doc + member task
+    # surfaces).  The group approval ratchet holds while the live surface
+    # still hashes to this value (2026-09-26 group pipeline).
+    approved_surface_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -618,6 +631,7 @@ class ZhongshuGroupState:
             doc_hash=str(value.get("doc_hash") or ""),
             doc_markdown=str(value.get("doc_markdown") or ""),
             doc_source_hash=str(value.get("doc_source_hash") or ""),
+            approved_surface_hash=str(value.get("approved_surface_hash") or ""),
         )
 
 

@@ -29,6 +29,7 @@ from orchestrator.app import OrchestratorApp
 from orchestrator.domain.context import (
     MenxiaParallelLimits,
     ParallelState,
+    ZhongshuParallelLimits,
     ProgressState,
     RequestState,
     TaskIdentity,
@@ -371,20 +372,14 @@ class _GroupLoopMultica(GroupWaveScripting, FakeMulticaAdapter):
                 },
             )
         elif target == "ZHONGSHU_CRITIC":
-            item_id = str(context.get("item_id") or "")
             self._reply(
                 request,
                 {
-                    "action": "TASK_APPROVED",
-                    "item_id": item_id,
+                    "action": "APPROVE_GROUP",
                     "group_id": str(context.get("group_id") or ""),
                     "reviewed_plan_hash": str(context.get("plan_hash") or ""),
-                    "reviewed_task_hash": str(context.get("task_hash") or ""),
-                    "reviewed_dependency_hash": str(
-                        context.get("dependency_hash") or ""
-                    ),
-                    "worker_id": request.request_id,
                     "findings": [],
+                    "finding_responses": [],
                     "review_checks": {},
                 },
             )
@@ -409,6 +404,7 @@ def _context() -> WorkflowContext:
             raw_request="run a review", project_type="python", task_type="review"
         ),
         parallel=ParallelState(
+            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
             menxia=MenxiaParallelLimits(
                 enabled=True,
                 max_concurrent_groups=2,

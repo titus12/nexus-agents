@@ -17,9 +17,12 @@ from typing import Callable, Protocol, Sequence
 import uuid
 
 from ..domain.errors import (
+    CONTRACT_REJECTED_EVENT,
+    UNSTRUCTURED_REPLY_EVENT,
     FailureRecord,
     InvariantViolation,
     is_infrastructure_failure,
+    is_reply_failure,
 )
 
 
@@ -266,6 +269,58 @@ def _infrastructure_failure(result: WorkerResult) -> bool:
     )
 
 
+def _rejected_reply(result: WorkerResult) -> str | None:
+    """Rejection text when a worker delivered an unusable reply body.
+
+    Two shapes exist: the transport reports an unstructured/contract-rejected
+    reply as a synthetic action on a "successful" result (see ``adapters``),
+    and some paths surface it as a failed result with a reply-shape error
+    code.  Both deserve a targeted re-ask with the rejection restated -- one
+    prose reply used to fail the whole wave and re-dispatch its healthy
+    siblings (task-20260928-eaea40: 4-group wave died on 1 prose reply).
+    """
+
+    payload = result.result_payload
+    if result.status == "SUCCEEDED" and isinstance(payload, Mapping):
+        action = str(payload.get("action") or "")
+        if action == UNSTRUCTURED_REPLY_EVENT:
+            return (
+                "the reply body must be exactly one complete JSON object "
+                "(no prose, no Markdown, no code fences)"
+            )
+        if action == CONTRACT_REJECTED_EVENT:
+            return str(
+                payload.get("contract_rejection")
+                or "the reply violated the role result contract"
+            )
+        return None
+    failure = result.failure
+    if (
+        result.status == "FAILED"
+        and failure is not None
+        and is_reply_failure(getattr(failure, "error_code", ""))
+    ):
+        return str(getattr(failure, "message", "") or "unusable reply")
+    return None
+
+
+def _with_reply_feedback(
+    binding: WorkerBinding,
+    context: NodeContext,
+    rejection: str,
+) -> WorkerBinding:
+    """Re-ask prompt: the worker's own capsule plus its rejection restated."""
+
+    base = binding.prompt_ref or context.prompt_ref
+    feedback = (
+        "\n[Retry feedback] The orchestrator rejected your previous reply: "
+        + rejection[:400]
+        + "\nCorrect exactly that defect and return one complete structured "
+        "result again.\n"
+    )
+    return replace(binding, prompt_ref=base + feedback)
+
+
 def _retry_binding(binding: WorkerBinding, attempt: int) -> WorkerBinding:
     """Give a per-binding retry its own dispatch identity.
 
@@ -296,8 +351,12 @@ def _run_worker(
 ) -> WorkerResult:
     result = _run_worker_once(runner, binding, context)
     for attempt in range(2, INFRASTRUCTURE_WORKER_ATTEMPTS + 1):
-        if not _infrastructure_failure(result):
+        rejection = _rejected_reply(result)
+        if rejection is None and not _infrastructure_failure(result):
             break
+        label = str(getattr(result.failure, "error_code", "") or "")
+        if not label and isinstance(result.result_payload, Mapping):
+            label = str(result.result_payload.get("action") or "")
         logger.warning(
             "NODE_WORKER_RETRY task_id=%s node_run_id=%s worker_id=%s "
             "attempt=%s/%s error_code=%s",
@@ -306,10 +365,16 @@ def _run_worker(
             binding.worker_id,
             attempt,
             INFRASTRUCTURE_WORKER_ATTEMPTS,
-            str(getattr(result.failure, "error_code", "")),
+            label,
         )
         _worker_retry_sleep(INFRASTRUCTURE_WORKER_BACKOFF_SECONDS)
-        result = _run_worker_once(runner, _retry_binding(binding, attempt), context)
+        retried = _retry_binding(binding, attempt)
+        if rejection is not None:
+            # A delivered-but-unusable reply is re-asked with its rejection
+            # restated, mirroring the wave-level retry feedback rule: a blind
+            # re-sample emits the same document and burns the attempt.
+            retried = _with_reply_feedback(retried, context, rejection)
+        result = _run_worker_once(runner, retried, context)
     return result
 
 

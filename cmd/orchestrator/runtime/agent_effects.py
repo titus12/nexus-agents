@@ -770,7 +770,9 @@ _REPLY_ACTION_FAILURES = {
     _UNSTRUCTURED_REPLY_ACTION: (
         "AGENT_REPLY_UNSTRUCTURED",
         "agent worker returned an unstructured reply instead of "
-        "the required JSON result contract",
+        "the required JSON result contract: the reply body must be exactly "
+        "one complete JSON object (no prose, no Markdown, no code fences, "
+        "no extra comments)",
     ),
     _CONTRACT_REJECTED_ACTION: (
         "AGENT_REPLY_CONTRACT_REJECTED",
@@ -1097,6 +1099,12 @@ class AgentNodeJoiner:
             )
         if self._task_review_queue is not None:
             return self._join_task_review(results, worker_payloads, partial_reviews)
+
+        if self._dispatch_mode == "group_review":
+            return self._join_group_review(results, worker_payloads)
+
+        if self._dispatch_mode == "group_revise":
+            return self._join_group_revise(results, worker_payloads)
 
         if self._dispatch_mode == "item_revise":
             return self._join_item_revise(results, worker_payloads)
@@ -1706,6 +1714,518 @@ class AgentNodeJoiner:
                 ),
             )
         return NodeResult(self._node_run_id, "SUCCEEDED", results, aggregate=report)
+
+    def _join_group_review(self, results, worker_payloads):
+        """Aggregate one group verdict per binding into the wave report.
+
+        The wave action is the escalation-max of the per-group verdicts
+        (BLOCKED > HUMAN_GATE > REQUEST_ANALYST_EVIDENCE > revision > approve)
+        so the FSM edge keeps its legacy meaning while ``group_reviews``
+        carries each group's own verdict for the fold.
+        """
+
+        from ..contracts.zhongshu_critic import (
+            GROUP_MODE_ACTIONS,
+            group_finding_scope,
+            normalize_group_action,
+        )
+
+        member_ids_by_group = {
+            str(context.get("group_id") or ""): [
+                str(value) for value in (context.get("member_ids") or ())
+            ]
+            for context in self._binding_contexts.values()
+        }
+        group_reviews: list[dict[str, object]] = []
+        findings: list[dict[str, object]] = []
+        rejected: list[str] = []
+        group_by_worker = {
+            worker_id: str(context.get("group_id") or "")
+            for worker_id, context in self._binding_contexts.items()
+        }
+        for payload in worker_payloads:
+            group_id = (
+                str(payload.get("group_id") or "").strip()
+                or group_by_worker.get(str(payload.get("worker_id") or ""), "")
+            )
+            raw_action = str(payload.get("action") or "")
+            action = normalize_group_action(raw_action)
+            if not group_id or action not in GROUP_MODE_ACTIONS:
+                rejected.append(
+                    f"GROUP_REVIEW_RESULT_INVALID:{group_id or '?'}:{raw_action}"
+                )
+                continue
+            scoped: list[dict[str, object]] = []
+            unscoped: list[str] = []
+            for raw in payload.get("findings") or ():
+                if not isinstance(raw, Mapping):
+                    continue
+                entry = dict(raw)
+                item_id, error = group_finding_scope(
+                    entry, member_ids_by_group.get(group_id, ())
+                )
+                if error:
+                    unscoped.append(error)
+                    continue
+                entry["item_id"] = item_id
+                entry.setdefault("group_id", group_id)
+                scoped.append(entry)
+            if unscoped:
+                rejected.extend(unscoped)
+                continue
+            responses = [
+                dict(entry)
+                for entry in payload.get("finding_responses") or ()
+                if isinstance(entry, Mapping)
+            ]
+            group_reviews.append(
+                {
+                    "group_id": group_id,
+                    "action": action,
+                    "member_ids": member_ids_by_group.get(group_id, []),
+                    "findings": scoped,
+                    "finding_responses": responses,
+                    "reviewed_plan_hash": str(payload.get("reviewed_plan_hash") or ""),
+                }
+            )
+            findings.extend(scoped)
+        if rejected:
+            logger.warning(
+                "NODE_GROUP_REVIEW_RESULT_INVALID node_run_id=%s rejected=%s",
+                self._node_run_id,
+                len(rejected),
+            )
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate={
+                    "action": "FAIL",
+                    "group_reviews": group_reviews,
+                    "findings": findings,
+                },
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:NODE_GROUP_REVIEW_RESULT_INVALID",
+                    stage="node_join",
+                    owner_component="zhongshu_group_review_fan_in",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=None,
+                    effect_id=None,
+                    error_code="NODE_GROUP_REVIEW_RESULT_INVALID",
+                    retryable=True,
+                    message="; ".join(rejected[:6]),
+                    cause_type="FanInValidation",
+                ),
+            )
+        actions = [str(row["action"]) for row in group_reviews]
+        if "BLOCKED" in actions:
+            overall = "BLOCKED"
+        elif "HUMAN_GATE" in actions:
+            overall = "HUMAN_GATE"
+        elif "REQUEST_ANALYST_EVIDENCE" in actions:
+            overall = "REQUEST_ANALYST_EVIDENCE"
+        elif "REVISE_GROUP" in actions:
+            overall = "REQUEST_SOLVER_REVISION"
+        else:
+            overall = "APPROVE_CRITIC"
+        return NodeResult(
+            self._node_run_id,
+            "SUCCEEDED",
+            results,
+            aggregate={
+                "action": overall,
+                "group_reviews": group_reviews,
+                "findings": findings,
+                "finding_responses": [
+                    entry
+                    for row in group_reviews
+                    for entry in row.get("finding_responses") or ()
+                ],
+                "group_review_mode": True,
+                "group_review_complete": True,
+                "reviewed_plan_hash": next(
+                    (
+                        str(row.get("reviewed_plan_hash") or "")
+                        for row in group_reviews
+                        if row.get("reviewed_plan_hash")
+                    ),
+                    "",
+                ),
+            },
+        )
+
+    def _join_group_revise(self, results, worker_payloads):
+        """Merge one group-revision patch per affected group (parallel wave).
+
+        Each worker owns exactly one group and returns its patched member
+        items plus its requirement document; the joiner freezes everything
+        outside the finding-owning member set (``merge_group_revision_items``)
+        and everything outside the patched groups (``carry_forward_group_docs``).
+        """
+
+        from ..domain.policies.item_revise import merge_item_patches  # noqa: F401  (keeps import surface stable)
+        from ..domain.policies.solver_plan import (
+            carry_forward_group_docs,
+            merge_group_revision_items,
+            structural_integrity_errors,
+        )
+        from ..domain.zhongshu_doc import project_acceptance_signals
+        from ..zhongshu_parallel import canonical_plan_hash
+        from ..zhongshu_review_queue import structural_gate
+
+        merged = self._base_plan
+        if not isinstance(merged, Mapping):
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate={"action": "FAIL"},
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:ITEM_REVISION_MERGE_INVALID",
+                    stage="node_join",
+                    owner_component="agent_node_joiner",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=None,
+                    effect_id=None,
+                    error_code="NODE_ITEM_REVISION_INVALID",
+                    retryable=False,
+                    message="group-revision wave needs the reviewed plan",
+                    cause_type="GroupRevisionJoin",
+                ),
+            )
+        group_docs: list[object] = []
+        finding_resolutions: list[object] = []
+        patched_groups: list[str] = []
+        patch_errors: list[tuple[str, str]] = []
+        group_by_worker = {
+            worker_id: str(context.get("group_id") or "")
+            for worker_id, context in self._binding_contexts.items()
+        }
+        for payload in worker_payloads:
+            worker_id = str(payload.get("worker_id") or "")
+            group_id = (
+                str(payload.get("group_id") or "").strip()
+                or group_by_worker.get(worker_id, "")
+            )
+            if str(payload.get("action") or "") != "READY_FOR_CRITIC":
+                patch_errors.append(
+                    (
+                        worker_id,
+                        f"{group_id or 'group'}: group-revision workers must "
+                        "return READY_FOR_CRITIC",
+                    )
+                )
+                continue
+            editable: set[str] = set()
+            for binding in self._binding_contexts.values():
+                if str(binding.get("group_id") or "") != group_id:
+                    continue
+                editable |= {
+                    str(value).strip()
+                    for value in (binding.get("editable_item_ids") or ())
+                    if str(value).strip()
+                }
+            plan = payload.get("plan")
+            raw_items = (
+                plan.get("items")
+                if isinstance(plan, Mapping)
+                else payload.get("items")
+            )
+            merged_plan, error = merge_group_revision_items(
+                merged,
+                group_id=group_id,
+                patched_items=raw_items if isinstance(raw_items, list) else [],
+                editable_item_ids=editable,
+            )
+            if error:
+                logger.warning(
+                    "NODE_GROUP_REVISION_PATCH_INVALID node_run_id=%s group_id=%s "
+                    "error=%s",
+                    self._node_run_id,
+                    group_id,
+                    error,
+                )
+                patch_errors.append((worker_id, error))
+                continue
+            merged = merged_plan
+            for entry in payload.get("group_docs") or ():
+                if isinstance(entry, dict):
+                    group_docs.append(entry)
+            for entry in payload.get("finding_resolutions") or ():
+                if isinstance(entry, dict):
+                    finding_resolutions.append(entry)
+            if group_id:
+                patched_groups.append(group_id)
+        if patch_errors:
+            # A group-revision wave is one patch per group: a patch the joiner
+            # refuses must not discard the patches that were valid (live run
+            # task-20260927-616863 re-dispatched the healthy group in all four
+            # waves because one group kept a mislabeled group_id).  Fold the
+            # fully valid groups into the FAIL aggregate so the retry wave
+            # re-dispatches only the groups still missing.
+            salvage = self._salvage_group_revision(
+                merged,
+                group_docs=group_docs,
+                finding_resolutions=finding_resolutions,
+                patched_groups=patched_groups,
+            )
+            aggregate: dict[str, object] = {"action": "FAIL"}
+            if salvage is not None:
+                aggregate.update(salvage)
+            failed_worker, failed_message = patch_errors[0]
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate=aggregate,
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:NODE_ITEM_REVISION_INVALID",
+                    stage="node_join",
+                    owner_component="agent_node_joiner",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=failed_worker or None,
+                    effect_id=None,
+                    error_code="NODE_ITEM_REVISION_INVALID",
+                    retryable=True,
+                    message=failed_message,
+                    cause_type="GroupRevisionJoin",
+                ),
+            )
+        editable_groups = sorted(set(patched_groups))
+        previous_rows: tuple = ()
+        previous = self._previous_review
+        if isinstance(previous, Mapping):
+            from ..domain.context import ZhongshuGroupState
+
+            previous_rows = tuple(
+                ZhongshuGroupState.from_dict(row)
+                for row in (previous.get("zhongshu_groups") or ())
+                if isinstance(row, Mapping)
+            )
+        folded_docs, doc_error = carry_forward_group_docs(
+            group_docs,
+            previous_rows,
+            editable_group_ids=editable_groups,
+            required_group_ids=editable_groups,
+            review=self._previous_review,
+            plan=merged,
+        )
+        if doc_error:
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate={"action": "FAIL"},
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:NODE_ITEM_REVISION_INVALID",
+                    stage="node_join",
+                    owner_component="agent_node_joiner",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=None,
+                    effect_id=None,
+                    error_code="NODE_ITEM_REVISION_INVALID",
+                    retryable=True,
+                    message=doc_error,
+                    cause_type="GroupRevisionJoin",
+                ),
+            )
+        # §8 stays the single author of acceptance_signals: the projection
+        # runs over the merged plan and the authoritative documents before
+        # the structural gate judges the projected signals.
+        doc_map = {
+            str(getattr(row, "group_id", "") or ""): str(
+                getattr(row, "doc_markdown", "") or ""
+            )
+            for row in previous_rows
+        }
+        for entry in group_docs:
+            doc_map[str(entry.get("group_id") or "")] = str(entry.get("markdown") or "")
+        projected, projection_error = project_acceptance_signals(merged, doc_map)
+        if projection_error:
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate={"action": "FAIL"},
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:NODE_ITEM_REVISION_INVALID",
+                    stage="node_join",
+                    owner_component="agent_node_joiner",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=None,
+                    effect_id=None,
+                    error_code="NODE_ITEM_REVISION_INVALID",
+                    retryable=True,
+                    message=projection_error,
+                    cause_type="GroupRevisionJoin",
+                ),
+            )
+        merged = projected
+        integrity = structural_integrity_errors(merged)
+        gate_issues = structural_gate(merged)
+        problems = integrity + list(gate_issues)
+        if problems:
+            logger.warning(
+                "NODE_ITEM_REVISION_STRUCTURE_INVALID node_run_id=%s issues=%s",
+                self._node_run_id,
+                problems[:6],
+            )
+            return NodeResult(
+                self._node_run_id,
+                "FAILED",
+                results,
+                aggregate={"action": "FAIL"},
+                failure=FailureRecord(
+                    failure_id=f"{self._node_run_id}:NODE_ITEM_REVISION_STRUCTURE_INVALID",
+                    stage="node_join",
+                    owner_component="agent_node_joiner",
+                    task_id=self._task_id,
+                    state=self._state,
+                    sequence=self._sequence,
+                    node_run_id=self._node_run_id,
+                    worker_id=None,
+                    effect_id=None,
+                    error_code="NODE_ITEM_REVISION_INVALID",
+                    retryable=True,
+                    message="merged plan failed the structural gate: "
+                    + ";".join(problems[:6]),
+                    cause_type="GroupRevisionJoin",
+                ),
+            )
+        logger.info(
+            "NODE_GROUP_REVISION_MERGED node_run_id=%s groups=%s",
+            self._node_run_id,
+            editable_groups,
+        )
+        return NodeResult(
+            self._node_run_id,
+            "SUCCEEDED",
+            results,
+            aggregate={
+                "action": "READY_FOR_CRITIC",
+                "plan": merged,
+                "plan_hash": canonical_plan_hash(merged),
+                "finding_resolutions": finding_resolutions,
+                "group_docs": group_docs or None,
+                "patched_group_ids": editable_groups,
+                "summary": (
+                    "group-scoped revision merged for "
+                    + ",".join(editable_groups)
+                ),
+            },
+        )
+
+    def _salvage_group_revision(
+        self,
+        merged,
+        *,
+        group_docs: list[object],
+        finding_resolutions: list[object],
+        patched_groups: list[str],
+    ) -> dict[str, object] | None:
+        """Fold the fully valid groups' revision work into a FAIL aggregate.
+
+        Only a group whose patch AND requirement document survive the full
+        post-merge pipeline (doc fold, §8 projection, structural gates) is
+        salvaged: folding a plan patch without its document would diverge the
+        item's acceptance_signals from §8 and the next projection would
+        silently undo the patch.  When the pipeline refuses, the wave fails
+        whole (legacy behaviour) and the retry re-dispatches every group.
+        """
+
+        if not patched_groups:
+            return None
+        from ..domain.policies.solver_plan import (
+            carry_forward_group_docs,
+            structural_integrity_errors,
+        )
+        from ..domain.zhongshu_doc import project_acceptance_signals
+        from ..zhongshu_parallel import canonical_plan_hash
+        from ..zhongshu_review_queue import structural_gate
+
+        previous_rows: tuple = ()
+        previous = self._previous_review
+        if isinstance(previous, Mapping):
+            from ..domain.context import ZhongshuGroupState
+
+            previous_rows = tuple(
+                ZhongshuGroupState.from_dict(row)
+                for row in (previous.get("zhongshu_groups") or ())
+                if isinstance(row, Mapping)
+            )
+        editable_groups = sorted(set(patched_groups))
+        folded_docs, doc_error = carry_forward_group_docs(
+            group_docs,
+            previous_rows,
+            editable_group_ids=editable_groups,
+            required_group_ids=editable_groups,
+            review=self._previous_review,
+            plan=merged,
+        )
+        if doc_error:
+            logger.warning(
+                "NODE_GROUP_REVISION_SALVAGE_SKIPPED node_run_id=%s reason=%s",
+                self._node_run_id,
+                doc_error,
+            )
+            return None
+        doc_map = {
+            str(getattr(row, "group_id", "") or ""): str(
+                getattr(row, "doc_markdown", "") or ""
+            )
+            for row in previous_rows
+        }
+        for group_id, row in folded_docs.items():
+            doc_map[str(group_id)] = str(row.get("markdown") or "")
+        projected, projection_error = project_acceptance_signals(merged, doc_map)
+        if projection_error:
+            logger.warning(
+                "NODE_GROUP_REVISION_SALVAGE_SKIPPED node_run_id=%s reason=%s",
+                self._node_run_id,
+                projection_error,
+            )
+            return None
+        problems = list(structural_integrity_errors(projected)) + list(
+            structural_gate(projected)
+        )
+        if problems:
+            logger.warning(
+                "NODE_GROUP_REVISION_SALVAGE_SKIPPED node_run_id=%s issues=%s",
+                self._node_run_id,
+                problems[:6],
+            )
+            return None
+        salvage_rows = [
+            {"group_id": group_id, **dict(row)}
+            for group_id, row in sorted(folded_docs.items())
+        ]
+        logger.info(
+            "NODE_GROUP_REVISION_SALVAGED node_run_id=%s groups=%s",
+            self._node_run_id,
+            editable_groups,
+        )
+        return {
+            "plan": projected,
+            "plan_hash": canonical_plan_hash(projected),
+            "finding_resolutions": list(finding_resolutions),
+            "salvaged_group_ids": editable_groups,
+            "salvaged_group_rows": salvage_rows,
+        }
 
     def _join_item_revise(self, results, worker_payloads):
         """Merge one-patch-per-item worker replies into the revised plan.

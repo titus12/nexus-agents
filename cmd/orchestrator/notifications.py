@@ -375,6 +375,12 @@ def _human_reason_text(
 ) -> str:
     """Translate a gate reason code into one operator-readable sentence."""
 
+    if reason_code == "PLAN_REVIEW":
+        return (
+            "中书省方案已定稿，方案文档为任务目录下的 zhongshu-plan-review.md，"
+            "请审阅：回复「批准」（或任意内容）交门下省实施；"
+            "回复「拒绝：<批注>」退回规划修订"
+        )
     if reason_code == "ZHONGSHU_DISCARD_NEEDS_HUMAN":
         return (
             "品菜师建议丢弃、规划师已复核并从计划中移除了覆盖 must 级需求的任务；"

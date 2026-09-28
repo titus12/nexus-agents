@@ -29,14 +29,18 @@ def _context() -> WorkflowContext:
 class AcceptanceStandardBlockTests(unittest.TestCase):
     """The standard is single-sourced and shipped with the producing roles."""
 
-    def test_block_contains_the_eight_distilled_rules(self) -> None:
+    def test_block_contains_the_three_scenario_rules(self) -> None:
         lines = acceptance_standard_block().strip().splitlines()
 
         self.assertEqual(len(lines), len(ZHONGSHU_ACCEPTANCE_CHECKLIST))
         self.assertIn("[Acceptance standard]", lines[0])
         numbered = [line for line in lines[1:] if line[:1].isdigit()]
-        self.assertEqual(len(numbered), 8)
-        self.assertIn("可测性闸门", acceptance_standard_block())
+        self.assertEqual(len(numbered), 3)
+        self.assertIn("可打勾", acceptance_standard_block())
+        self.assertIn("待实测", acceptance_standard_block())
+        self.assertIn("口径", acceptance_standard_block())
+        # The five-element recipe moved to the Menxia execution phase.
+        self.assertNotIn("验证方法：」及", acceptance_standard_block())
 
     def test_producing_states_carry_the_block(self) -> None:
         for state in ("ZHONGSHU_ANALYST", "ZHONGSHU_SOLVER"):
@@ -44,8 +48,8 @@ class AcceptanceStandardBlockTests(unittest.TestCase):
 
             self.assertTrue(acceptance_standard_applies_to(state))
             self.assertIn("[Acceptance standard]", prompt.content)
-            self.assertIn("度量口径", prompt.content)
-            self.assertIn("UNKNOWN", prompt.content)
+            self.assertIn("口径定义表", prompt.content)
+            self.assertIn("待实测", prompt.content)
 
     def test_judging_states_do_not_carry_the_full_block(self) -> None:
         for state in ("ZHONGSHU_CRITIC", "ZHONGSHU_FREEZE_CHECK", "MENXIA_ITEM_SOLVER"):

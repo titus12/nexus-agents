@@ -132,6 +132,8 @@ Include `schema_hash`, parse error, position, first/last character, and response
 
 Read `structured_output_schema_hash` from the request and reject a file whose hash is missing or different. Continue verifying task ID, request ID, phase, role, UTF-8, BOM policy, and SHA-256.
 
+> 2026-09-27 修订：echo 校验降级为诊断信息（`*_SCHEMA_HASH_ECHO_MISMATCH` 告警后 stamp 期望值，不再拒收）。模型手抄 64 位哈希的转写错误曾整包丢弃合法结果（task-20260927-de54aa CRITIC:6 group-01）；结构契约校验才是真闸门。上文的 "reject" 描述为当时实现记录。
+
 - [x] **Step 4: Remove business-result fallback from arbitrary comment JSON.**
 
 Accept only a result that came through the structured result source or the explicitly bound result-file pointer. Keep the raw comment as bounded diagnostics and audit data.

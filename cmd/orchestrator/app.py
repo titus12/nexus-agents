@@ -140,6 +140,16 @@ class _FanoutNodeExecutor:
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off"})
 
+# Plan-review gate answers: an explicit rejection marker sends the plan back to
+# the planner; any other reply signs the plan off to Menxia ("reply anything to
+# continue" stays the approval semantics of every other gate).
+_PLAN_REVIEW_REJECT_MARKERS = ("拒绝", "不同意", "退回", "修改", "reject", "refuse")
+
+
+def _is_plan_review_rejection(answer: str) -> bool:
+    text = str(answer or "").strip().casefold()
+    return any(marker in text for marker in _PLAN_REVIEW_REJECT_MARKERS)
+
 
 def _env_flag(name: str) -> bool | None:
     """Read an opt-in boolean env flag; None means "not set" (keep as-is)."""
@@ -162,6 +172,8 @@ def _with_parallel_flag_overrides(context: WorkflowContext) -> WorkflowContext:
     item_flag = _env_flag("ZHONGSHU_ITEM_WORKFLOW_ENABLED")
     menxia_flag = _env_flag("NEXUS_MENXIA_ENABLED")
     fast_track_flag = _env_flag("NEXUS_FAST_TRACK")
+    plan_review_flag = _env_flag("ZHONGSHU_PLAN_REVIEW_GATE")
+    review_unit = os.environ.get("ZHONGSHU_REVIEW_UNIT", "").strip().lower()
     # The Menxia group pipeline is on by default: when the env flag is unset,
     # new and resumed tasks both get enabled=True.  An explicit
     # NEXUS_MENXIA_ENABLED=0 still opts out.  The equality check in the caller
@@ -171,8 +183,12 @@ def _with_parallel_flag_overrides(context: WorkflowContext) -> WorkflowContext:
     zhongshu = context.parallel.zhongshu
     if item_flag is not None:
         zhongshu = replace(zhongshu, item_workflow_enabled=item_flag)
+    if review_unit in ("group", "item"):
+        zhongshu = replace(zhongshu, review_unit=review_unit)
     if fast_track_flag is not None:
         zhongshu = replace(zhongshu, fast_track=fast_track_flag)
+    if plan_review_flag is not None:
+        zhongshu = replace(zhongshu, plan_review_gate=plan_review_flag)
     menxia = context.parallel.menxia
     if menxia_flag is not None:
         menxia = replace(menxia, enabled=menxia_flag)
@@ -302,13 +318,14 @@ class OrchestratorApp:
             self.runner.agent_pool_summary(),
         )
         self.node_effects = NodeEffectRunner(executor_factory=self._build_node_executor)
-        self.plan_effects = PlanArtifactRunner(self.artifacts)
+        self.plan_effects = PlanArtifactRunner(self.artifacts, task_root=self.root)
         self.effects = EffectManager(
             self.repository,
             {
                 "agent_dispatch": self.runner,
                 "node_dispatch": self.node_effects,
                 "plan_artifact": self.plan_effects,
+                "plan_review_doc": self.plan_effects,
                 "fast_track": FastTrackRunner(),
             },
         )
@@ -347,14 +364,14 @@ class OrchestratorApp:
         )
         fanout_critic = (
             node_context.state == "ZHONGSHU_CRITIC"
-            and node_context.dispatch_mode == "task_review"
+            and node_context.dispatch_mode in ("task_review", "group_review")
             and total > 1
             and pool_size == 1
             and child_supported
         )
         fanout_item_revise = (
             node_context.state == "ZHONGSHU_SOLVER"
-            and node_context.dispatch_mode == "item_revise"
+            and node_context.dispatch_mode in ("item_revise", "group_revise")
             and total > 1
             and pool_size == 1
             and child_supported
@@ -370,7 +387,11 @@ class OrchestratorApp:
             fanout_analyst or fanout_critic or fanout_item_revise or fanout_menxia
         )
         if fanout:
-            cap = total if (fanout_analyst or fanout_item_revise or fanout_menxia) else self._critic_max_workers
+            cap = (
+                total
+                if (fanout_analyst or fanout_item_revise or fanout_menxia)
+                else self._critic_max_workers
+            )
             max_workers = min(self._node_max_workers, cap, total)
         else:
             max_workers = min(
@@ -752,9 +773,17 @@ class OrchestratorApp:
             "PERSISTENCE_DEGRADED",
         }:
             return False
+        event_name = "RESUME"
+        gate = snapshot.context.human_gate
+        if (
+            gate is not None
+            and str(getattr(gate, "reason_code", "") or "") == "PLAN_REVIEW"
+            and _is_plan_review_rejection(answer)
+        ):
+            event_name = "PLAN_REVIEW_REJECTED"
         self.inbox.publish(
             DomainEvent(
-                name="RESUME",
+                name=event_name,
                 task_id=snapshot.task_id,
                 sequence=snapshot.context.progression.sequence,
                 payload={"answer": answer} if answer else {},

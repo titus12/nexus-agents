@@ -13,6 +13,7 @@ from ...acceptance_standards import (
     acceptance_standard_applies_to,
     acceptance_standard_block,
 )
+from ...contracts import contract_for_state
 from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
 from .zhongshu import select_solver_batch
 
@@ -81,8 +82,11 @@ def solver_revision_task(context: WorkflowContext) -> str:
         "",
         "[Revision task] Resolve only this round's batch of "
         f"{len(selected)} of {len(active)} open findings. For each listed finding "
-        "return one finding_resolution (response, changed_fields, owner_role, "
-        "next_action) and adjust the plan only as far as that finding requires:",
+        "return one finding_resolution (response, changed_fields, evidence, "
+        "owner_role, next_action) and adjust the plan only as far as that "
+        "finding requires. Set mode to "
+        "TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME: answering this revision "
+        "with the formalization mode is a protocol violation:",
     ]
     for finding_id in selected:
         finding = by_id.get(finding_id)
@@ -188,6 +192,20 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
     evidence_task = (
         analyst_evidence_task(context) if state == "ZHONGSHU_ANALYST" else ""
     )
+    # The contract's prompt_rules carry hard deliverable demands (e.g. the
+    # nine-section group document in ``group_docs``).  They used to live only
+    # on the contract object and never reached the dispatched prompt, so a
+    # worker could not know a field was mandatory (task-20260924-beb814).
+    try:
+        contract_rules = contract_for_state(state).prompt_rules
+    except KeyError:
+        contract_rules = ()
+    rules_block = (
+        "\n[Contract rules]\n"
+        + "\n".join(f"- {rule}" for rule in contract_rules)
+        if contract_rules
+        else ""
+    )
     # The acceptance-quality standard rides with every producing dispatch, so
     # acceptance signals are written observably the first time instead of
     # being negotiated inside the Critic revision loop.
@@ -201,9 +219,12 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
         f"State: {state}\n"
         f"Request:\n{context.request.raw_request}\n"
         f"Current review finding count: {findings}\n"
-        "Return exactly one complete structured result for the bound state."
+        "Return exactly one complete structured result for the bound state. "
+        "The result must be strictly valid JSON: no trailing commas, no "
+        "comments, no markdown fences, no text outside the JSON document."
         f"{revision_task}"
         f"{evidence_task}"
+        f"{rules_block}"
         f"{acceptance_block}"
         f"{retry_feedback(context, state)}"
     )

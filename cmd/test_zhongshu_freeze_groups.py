@@ -17,6 +17,7 @@ import unittest
 from orchestrator.domain.context import (
     MenxiaParallelLimits,
     ParallelState,
+    ZhongshuParallelLimits,
     ProgressState,
     ReviewState,
     ReviewTaskGroup,
@@ -158,6 +159,7 @@ def _context(
             zhongshu_groups=rows,
         ),
         parallel=ParallelState(
+            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
             menxia=MenxiaParallelLimits(
                 enabled=True, max_concurrent_groups=2, max_concurrent_items=3
             )

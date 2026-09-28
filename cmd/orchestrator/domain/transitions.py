@@ -88,6 +88,12 @@ _ROLE_EDGES = (
     ("ZHONGSHU_FREEZE_CHECK", "FREEZE_REJECTED", "ZHONGSHU_SOLVER"),
     ("ZHONGSHU_FREEZE_CHECK", "REQUEST_ANALYST_EVIDENCE", "ZHONGSHU_ANALYST"),
     ("ZHONGSHU_FREEZE_CHECK", "REQUEST_SOLVER_REVISION", "ZHONGSHU_SOLVER"),
+    # 2026-09-27 thin plan doc: freeze approval pauses at the human gate so
+    # the operator reviews the plan-review document before the Menxia
+    # hand-over (RESUME routes to the recorded resume_state =
+    # MENXIA_GROUP_SOLVER; a rejection routes back to the planner).
+    ("ZHONGSHU_FREEZE_CHECK", "PLAN_REVIEW", "HUMAN_GATE"),
+    ("HUMAN_GATE", "PLAN_REVIEW_REJECTED", "ZHONGSHU_SOLVER"),
     ("MENXIA_ITEM_SOLVER", "FEASIBLE", "MENXIA_ITEM_ANALYST"),
     ("MENXIA_ITEM_SOLVER", "READY_FOR_CRITIC", "MENXIA_ITEM_CRITIC"),
     ("MENXIA_ITEM_ANALYST", "EVIDENCE_SUFFICIENT", "MENXIA_ITEM_CRITIC"),

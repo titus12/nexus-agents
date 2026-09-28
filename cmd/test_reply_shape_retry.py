@@ -49,6 +49,17 @@ class ReplyFailureCodeTests(unittest.TestCase):
         self.assertTrue(is_reply_failure("AGENT_REPLY_UNSTRUCTURED"))
         self.assertTrue(is_reply_failure("agent_reply_unstructured"))
 
+    def test_solver_shape_slips_are_reply_failures(self) -> None:
+        # The retryable Solver shape family must also count as reply failures
+        # so the re-ask restates the rejection (task-20260924-beb814).
+        for code in (
+            "SOLVER_GROUP_DOC_MISSING:all",
+            "SOLVER_RESOLUTION_COVERAGE_INCOMPLETE:missing=['f-1']",
+            "SOLVER_FINDING_BATCH_COVERAGE_INCOMPLETE:missing=['f-1']",
+        ):
+            with self.subTest(code=code):
+                self.assertTrue(is_reply_failure(code))
+
     def test_other_classes_are_not_reply_failures(self) -> None:
         for code in (
             "REMOTE_RUN_FAILED",

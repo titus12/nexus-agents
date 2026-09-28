@@ -12,6 +12,7 @@ from .contracts.common import (
     STRUCTURED_OUTPUT_PROTOCOL,
     PhaseContract,
     coerce_enum_values,
+    coerce_scalar_strings,
     empty_payload,
     validate_schema,
 )
@@ -135,7 +136,10 @@ def role_mode_for(
     if contract.state == "ZHONGSHU_SOLVER":
         return "TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME" if context.get("solver_resume_mode") else "TASK_GRAPH_FORMALIZATION_READ_ONLY"
     if contract.state == "ZHONGSHU_CRITIC":
-        return "REVIEW_ONE_TASK" if str(context.get("zhongshu_dispatch_mode") or "") == "task_review" else "REVIEW_CURRENT_TASK_GRAPH"
+        dispatch_mode = str(context.get("zhongshu_dispatch_mode") or "")
+        if dispatch_mode == "group_review":
+            return "REVIEW_GROUP"
+        return "REVIEW_ONE_TASK" if dispatch_mode == "task_review" else "REVIEW_CURRENT_TASK_GRAPH"
     return contract.modes[0] if contract.modes else ""
 
 
@@ -247,7 +251,8 @@ def role_result_template(
             "role": contract.role,
             "mode": role_mode or contract.modes[0],
             "structured_output_protocol": STRUCTURED_OUTPUT_PROTOCOL,
-            "structured_output_schema_hash": schema_hash or "<exact hash supplied in prompt_ref>",
+            "structured_output_schema_hash": schema_hash
+            or "<exact structured_output_schema_hash from the injected contract; copy verbatim>",
         }
     )
     return template
@@ -284,11 +289,17 @@ def normalize_role_payload(
     role: str,
     state: str = "",
 ) -> dict[str, Any]:
-    """Canonicalize tolerant enum fields before contract validation."""
+    """Canonicalize tolerant fields before contract validation.
+
+    Runs the scalar identity pass (``item_id`` as null/number becomes text)
+    and the enum-label pass, so one model type slip cannot discard a
+    substantially complete result.
+    """
 
     contract = _contract_for(phase, role, state=state)
     if contract is None:
         return payload
+    coerce_scalar_strings(payload, contract.schema)
     return coerce_enum_values(payload, contract.schema)
 
 
@@ -343,8 +354,10 @@ def validate_role_result_shape(
     actual_schema_hash = str(payload.get("structured_output_schema_hash") or "")
     if len(actual_schema_hash) != 64 or any(char not in "0123456789abcdef" for char in actual_schema_hash.lower()):
         return "STRUCTURED_ROLE_SCHEMA_HASH_INVALID"
-    if expected_schema_hash and actual_schema_hash != expected_schema_hash:
-        return "STRUCTURED_ROLE_SCHEMA_HASH_MISMATCH"
+    # Echo mismatch is deliberately not rejected here: the agent hand-copies
+    # the 64-char hash and transcription typos are routine (task-20260927-de54aa
+    # CRITIC:6 group-01).  Callers stamp the expected hash onto the stored
+    # payload, and the structural validation below is the real gate.
     if not isinstance(payload.get("action"), str) or not payload["action"]:
         return "STRUCTURED_ROLE_ACTION_MISSING"
     errors: list[str] = []

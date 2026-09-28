@@ -15,6 +15,7 @@ from orchestrator.domain.context import (
     MenxiaItemState,
     MenxiaParallelLimits,
     ParallelState,
+    ZhongshuParallelLimits,
     ProgressState,
     ReviewState,
     ReviewTaskGroup,
@@ -90,6 +91,7 @@ def make_context(
         progression=ProgressState(state, sequence, "2026-09-21T00:00:00Z"),
         review=review,
         parallel=ParallelState(
+            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
             menxia=MenxiaParallelLimits(
                 enabled=menxia_enabled,
                 max_concurrent_groups=2,
@@ -432,8 +434,15 @@ class MenxiaWaveDispatchTests(unittest.TestCase):
             context, make_event({"aggregate": {"action": "FREEZE_APPROVED"}})
         )
         self.assertEqual(decision.transition.action, "FREEZE_APPROVED")
-        self.assertEqual(len(decision.effects), 1)
-        effect = decision.effects[0]
+        # The approval also sinks the plan-review document (thin-doc, 2026-09-27);
+        # the wave dispatch is the one node_dispatch effect.
+        dispatches = [
+            effect
+            for effect in decision.effects
+            if effect.effect_type == "node_dispatch"
+        ]
+        self.assertEqual(len(dispatches), 1)
+        effect = dispatches[0]
         self.assertEqual(effect.effect_type, "node_dispatch")
         payload = effect.payload
         # The freeze entry now opens the shared-document group pipeline.
@@ -910,8 +919,11 @@ class ZhongshuMenxiaPingPongTests(unittest.TestCase):
         effect = decision.effects[0]
         self.assertEqual(effect.effect_type, "node_dispatch")
         self.assertEqual(
-            [binding["item_id"] for binding in effect.payload["bindings"]],
-            ["item-003"],
+            [binding["group_id"] for binding in effect.payload["bindings"]],
+            ["group-002"],
+        )
+        self.assertEqual(
+            effect.payload["dispatch_mode"], "group_review"
         )
 
     def test_critic_wave_skips_frozen_group_items(self):

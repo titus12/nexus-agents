@@ -92,7 +92,7 @@ responsibilities.
 - 未改变的任务沿用 item_id；合并或拆分用 source_candidate_ids（如存在历史来源）明确对应来源，不能丢掉需求、证据、未知项或风险。
 - groups 的每个任务恰好出现一次，依赖存在且无环。必须用 group.item_ids 引用 plan.items 完整对象；Solver 不得输出 group.items，Orchestrator 会在内部展开。
 - 任务定义独立可验收的结果，不设计模块、接口、迁移、回滚或函数级实现。需要未来调研/测量时定义任务与验收，不捏造已经完成的结果。
-- **可测性闸门（机械校验）**：验收信号声称度量结论（百分比、提升/降低/缩短/加速等对比）时必须二选一，否则计划会被 `ACCEPTANCE_SIGNAL_UNVERIFIABLE` 机械拒绝：(a) 在信号文本中写明「验证方法：」+ 五要素——测量对象（含 file:line）、具体命令/步骤、指标与单位、基线来源、预期观测量；(b) 改写为「核实该声称有无实证，无则标注 UNKNOWN」。只写单位（如 elapsed_ms 字段名）不触发闸门。
+- **数值结论二选一（机械校验）**：验收信号声称度量结论（百分比、提升/降低/缩短/加速等对比）时必须二选一，否则计划会被 `ACCEPTANCE_SIGNAL_UNVERIFIABLE` 机械拒绝：(a) 给出实测数字并注明来源；(b) 明确写「待实测」。具体怎么测（测量对象、命令、指标、基线）由门下省实施计划负责，不在需求文档展开。只写单位（如 elapsed_ms 字段名）不触发闸门。
 
 ## 丢弃建议复核（task_discard finding）
 
@@ -105,6 +105,22 @@ responsibilities.
 ## 输出与修订
 
 初次 `TASK_GRAPH_FORMALIZATION_READ_ONLY` 下 READY_FOR_CRITIC 返回完整任务图；具体响应字段以注入的 Solver 契约为准。
+
+### 组需求文档（group_docs，机械校验）
+
+任务图必须随包提交 `group_docs`：**每个 `plan.groups` 条目一份** `{group_id, markdown}`，缺一组即整包以 `SOLVER_GROUP_DOC_MISSING` 退回重问（`null`/缺省等同未交）。markdown 为九节需求文档，逐字节形态由机械校验强制：
+
+- 标题行 `# <group_id> 需求文档 [v<N>]`；初次提交 N=1，修订轮恰好 +1（跳版非法）。升版说明不写入正文，版本只在标题行。
+- 九节按序齐备：`## 1. 背景`、`## 2. 目标`、`## 3. 标识与范围`、`## 4. 状态与边界语义`、`## 5. 行为要求`、`## 6. 责任边界`、`## 7. 交叉不变量`、`## 8. 验收标准`、`## 9. 非目标`。
+- §1 背景只写现状与问题，**禁写修订史**（"v2 修订了 finding-x"之类的叙事非法；修订记录由 Orchestrator 记账）。
+- §4 末尾含**口径定义**子节：易混口径（计量范围/单位/边界）用 3-5 行术语表钉死，信号中引用表内口径，不写长段解释。
+- §8 验收标准与组内成员 item 的 `acceptance_signals` **双向闭合**：每条信号逐字列出，不增不减不改写。
+- §8 归属闭合：验收小节只能挂组内成员 `### <item_id>`，信号行逐字对应该 item 的 `acceptance_signals`。引用不存在的 item_id、无主验收行或对不上 signals 的行会以 `acceptance_orphan` 退回。
+- §8 每行一条**可打勾断言**（单行 ≤300 字符）：过长行以 `acceptance_signal_too_long` 退回。测量配方（怎么测）写门下省实施计划，不写进这里。
+- §2 目标禁用未定稿措辞（尽量/尽可能/应该更好/酌情/视情况/大概）；全文禁实现标记（代码围栏、`def `/`class ` 行首）。
+- 修订轮：批次 scope 内的组必须重交升版文档；scope 外的组**不得改动**（省略或与权威逐字节一致，否则 `SOLVER_GROUP_DOC_FROZEN` 整包退回）。
+
+形态违规以 `SOLVER_GROUP_DOC_INVALID` 带明细退回，与缺失一样走 reply-retry：只修文档形态，不改任务图结论。
 
 已有 current_formal_plan 时使用 `TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME`，优先处理 bounded changes 和 finding resolutions。支持的变更操作由 Orchestrator 注入的契约定义；需要新增/删除分组或合并/拆分而操作不支持时返回完整任务图，不把拓扑限制误报成缺证据。
 

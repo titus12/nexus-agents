@@ -10,6 +10,7 @@ from orchestrator.domain.context import (
     ReviewState,
     TaskIdentity,
     WorkflowContext,
+    ZhongshuGroupState,
 )
 from orchestrator.domain.decisions import EffectRequest
 from orchestrator.domain.events import DomainEvent
@@ -92,6 +93,10 @@ def _group_doc(group_id: str = "group-1", version: int = 1) -> str:
         lines.append(f"## {number}. {name}")
         if name == "背景":
             lines.append(f"{group_id} 的上下文。")
+        if name == "验收标准":
+            # The projection now derives real membership from the plan, so
+            # the doc must close with the fixture items' signals.
+            lines.append("observable")
     return "\n".join(lines)
 
 
@@ -884,6 +889,110 @@ class DeferredBlockerRetryTests(unittest.TestCase):
             ),
             decision.update.recovery.last_failure.error_code,
         )
+
+
+class GroupRevisionFreezeZoneTests(unittest.TestCase):
+    """Group revision patch: finding-owning members only (2026-09-26)."""
+
+    def _two_group_plan(self) -> dict:
+        def grouped(item_id: str, group_id: str, objective: str) -> dict:
+            entry = _item(item_id, objective)
+            entry["group_id"] = group_id
+            return entry
+
+        return {
+            "requirements": [],
+            "items": [
+                grouped("item-000001", "group-000001", "do 1"),
+                grouped("item-000002", "group-000001", "do 2"),
+                grouped("item-000003", "group-000002", "do 3"),
+            ],
+            "groups": [
+                {"group_id": "group-000001", "item_ids": ["item-000001", "item-000002"]},
+                {"group_id": "group-000002", "item_ids": ["item-000003"]},
+            ],
+            "dependencies": [],
+            "scope": {},
+            "unknowns": [],
+            "risks": [],
+        }
+
+    @staticmethod
+    def _patched(item_id: str, group_id: str, objective: str) -> dict:
+        entry = _item(item_id, objective)
+        entry["group_id"] = group_id
+        return entry
+
+    def _merge(self, patched, editable, *, plan=None, group_id="group-000001"):
+        from orchestrator.domain.policies.solver_plan import merge_group_revision_items
+
+        return merge_group_revision_items(
+            plan if plan is not None else self._two_group_plan(),
+            group_id=group_id,
+            patched_items=patched,
+            editable_item_ids=editable,
+        )
+
+    def test_patched_member_with_finding_is_applied(self) -> None:
+        merged, error = self._merge(
+            [self._patched("item-000001", "group-000001", "fixed 1")],
+            {"item-000001"},
+        )
+        self.assertEqual(error, "")
+        by_id = {entry["item_id"]: entry for entry in merged["items"]}
+        self.assertEqual(by_id["item-000001"]["objective"], "fixed 1")
+        self.assertEqual(by_id["item-000002"]["objective"], "do 2")
+
+    def test_unowned_member_reword_is_rejected(self) -> None:
+        merged, error = self._merge(
+            [self._patched("item-000002", "group-000001", "reworded 2")],
+            {"item-000001"},
+        )
+        self.assertIsNone(merged)
+        self.assertEqual(error, "SOLVER_ITEM_FROZEN:item-000002")
+        from orchestrator.domain.policies.solver_plan import (
+            is_retryable_solver_reply_error,
+        )
+
+        self.assertTrue(is_retryable_solver_reply_error(error))
+
+    def test_unowned_member_echo_is_accepted(self) -> None:
+        merged, error = self._merge(
+            [self._patched("item-000002", "group-000001", "do 2")], {"item-000001"}
+        )
+        self.assertEqual(error, "")
+        by_id = {entry["item_id"]: entry for entry in merged["items"]}
+        self.assertEqual(by_id["item-000002"]["objective"], "do 2")
+
+    def test_foreign_group_item_is_rejected(self) -> None:
+        merged, error = self._merge(
+            [self._patched("item-000003", "group-000002", "fixed 3")],
+            {"item-000001"},
+        )
+        self.assertIsNone(merged)
+        self.assertEqual(error, "SOLVER_ITEM_FROZEN:item-000003")
+
+    def test_foreign_group_item_identical_echo_is_accepted(self) -> None:
+        merged, error = self._merge(
+            [self._patched("item-000003", "group-000002", "do 3")],
+            {"item-000001"},
+        )
+        self.assertEqual(error, "")
+        by_id = {entry["item_id"]: entry for entry in merged["items"]}
+        self.assertEqual(by_id["item-000003"]["objective"], "do 3")
+
+    def test_foreign_doc_is_rejected(self) -> None:
+        from orchestrator.domain.policies.solver_plan import carry_forward_group_docs
+
+        row = ZhongshuGroupState(
+            group_id="group-000002", doc_markdown="# authoritative\n", doc_version=1
+        )
+        _, error = carry_forward_group_docs(
+            [{"group_id": "group-000002", "markdown": "# tweaked\n"}],
+            (row,),
+            editable_group_ids=("group-000001",),
+        )
+        self.assertEqual(error, "SOLVER_GROUP_DOC_FROZEN:['group-000002']")
 
 
 if __name__ == "__main__":

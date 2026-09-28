@@ -8,6 +8,7 @@ from orchestrator.app import OrchestratorApp
 from orchestrator.domain.context import (
     MenxiaParallelLimits,
     ParallelState,
+    ZhongshuParallelLimits,
     ProgressState,
     RequestState,
     TaskIdentity,
@@ -113,16 +114,11 @@ class _ScriptedMultica(GroupWaveScripting, FakeMulticaAdapter):
             self._reply(
                 request,
                 {
-                    "action": "TASK_APPROVED",
-                    "item_id": str(context.get("item_id") or ""),
+                    "action": "APPROVE_GROUP",
                     "group_id": str(context.get("group_id") or ""),
                     "reviewed_plan_hash": str(context.get("plan_hash") or ""),
-                    "reviewed_task_hash": str(context.get("task_hash") or ""),
-                    "reviewed_dependency_hash": str(
-                        context.get("dependency_hash") or ""
-                    ),
-                    "worker_id": request.request_id,
                     "findings": [],
+                    "finding_responses": [],
                     "review_checks": {},
                 },
             )
@@ -156,6 +152,7 @@ def _context() -> WorkflowContext:
         progression=ProgressState("REQUEST_INTAKE", 0, "2026-09-10T00:00:00Z"),
         request=RequestState(raw_request="run a review", project_type="go", task_type="review"),
         parallel=ParallelState(
+            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
             menxia=MenxiaParallelLimits(
                 enabled=True,
                 max_concurrent_groups=2,
@@ -182,10 +179,11 @@ class LinearEntrypointTests(unittest.TestCase):
 
         self.assertEqual(snapshot.context.progression.state, "DONE")
         self.assertEqual(snapshot.context.progression.sequence, 10)
-        # Analyst contract + lens wave, solver, per-item Critic wave (2
-        # items), freeze-check, the menxia group waves (solver/analyst/critic
-        # for the single group) and the group gate.
-        self.assertEqual(len(adapter.dispatched), 12)
+        # Analyst contract + lens wave, solver, the group Critic wave (one
+        # review job for the single group), freeze-check, the menxia group
+        # waves (solver/analyst/critic for the single group) and the group
+        # gate.
+        self.assertEqual(len(adapter.dispatched), 11)
         self.assertTrue(all(request.request_id for request in adapter.dispatched))
 
 

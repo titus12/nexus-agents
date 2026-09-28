@@ -4,12 +4,14 @@ import json
 import unittest
 
 from orchestrator.domain.context import (
+    ParallelState,
     ProgressState,
     ReviewState,
     ReviewTaskItem,
     ReviewTaskRecord,
     TaskIdentity,
     WorkflowContext,
+    ZhongshuParallelLimits,
 )
 from orchestrator.domain.events import DomainEvent
 from orchestrator.domain.findings import Finding
@@ -55,6 +57,9 @@ def _context(
     return WorkflowContext(
         identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
         progression=ProgressState("ZHONGSHU_CRITIC", 6, "2026-09-16T00:00:00Z"),
+        # The bounded batch rides the single-writer Solver revision; this
+        # suite pins the legacy item unit (rollback path).
+        parallel=ParallelState(zhongshu=ZhongshuParallelLimits(review_unit="item")),
         review=ReviewState(
             revision_id="task-1:ZHONGSHU_ANALYST:2",
             plan=_plan() if has_plan else None,

@@ -237,5 +237,94 @@ class MaterializeGroupDocGateTests(unittest.TestCase):
         self.assertEqual(error, "SOLVER_GROUP_DOC_MISSING:group-000002")
 
 
+class PlanMembershipProjectionTests(unittest.TestCase):
+    """§8 closure must read membership from ``groups[].item_ids`` as fallback.
+
+    Regression (task-20260928-bc58c1 SOLVER:3): a contract-legal plan carried
+    membership only in ``groups[].item_ids`` — the items had no ``group_id``
+    field — so the projection built an empty member set and orphaned every
+    §8 subsection, burning a full solver round on a false rejection.
+    """
+
+    def _plan(self) -> dict:
+        def _item(item_id: str) -> dict:
+            return {
+                "item_id": item_id,
+                "objective": "目标。",
+                "acceptance_signals": [],
+                "dependencies": [],
+            }
+
+        return {
+            "items": [_item("item-000001"), _item("item-000002")],
+            "groups": [
+                {"group_id": "group-000001", "item_ids": ["item-000001"]},
+                {"group_id": "group-000002", "item_ids": ["item-000002"]},
+            ],
+        }
+
+    def _doc_with_subsections(self, group_id: str, item_ids: tuple) -> str:
+        sections = (
+            "背景", "目标", "标识与范围", "状态与边界语义", "行为要求",
+            "责任边界", "交叉不变量", "验收标准", "非目标",
+        )
+        lines = [f"# {group_id} 需求文档 [v1]"]
+        for number, name in enumerate(sections, start=1):
+            lines.append(f"## {number}. {name}")
+            if name == "背景":
+                lines.append(f"{group_id} 的上下文。")
+            if name == "验收标准":
+                for item_id in item_ids:
+                    lines.append(f"### {item_id}")
+                    lines.append("结果可观测。")
+        return "\n".join(lines)
+
+    def test_membership_from_group_list_closes(self):
+        folded, error = carry_forward_group_docs(
+            [
+                {
+                    "group_id": "group-000001",
+                    "markdown": self._doc_with_subsections(
+                        "group-000001", ("item-000001",)
+                    ),
+                },
+                {
+                    "group_id": "group-000002",
+                    "markdown": self._doc_with_subsections(
+                        "group-000002", ("item-000002",)
+                    ),
+                },
+            ],
+            (),
+            editable_group_ids=("group-000001", "group-000002"),
+            required_group_ids=("group-000001", "group-000002"),
+            plan=self._plan(),
+        )
+        self.assertEqual(error, "", error)
+        self.assertEqual(set(folded), {"group-000001", "group-000002"})
+
+    def test_item_level_group_id_still_wins(self):
+        plan = self._plan()
+        plan["items"][0]["group_id"] = "group-000002"
+        folded, error = carry_forward_group_docs(
+            [
+                {
+                    "group_id": "group-000001",
+                    "markdown": self._doc_with_subsections(
+                        "group-000001", ("item-000001",)
+                    ),
+                },
+            ],
+            (),
+            editable_group_ids=("group-000001",),
+            required_group_ids=("group-000001",),
+            plan=plan,
+        )
+        self.assertTrue(
+            error.startswith("SOLVER_GROUP_DOC_INVALID:acceptance_orphan"),
+            error,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

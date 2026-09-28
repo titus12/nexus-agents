@@ -15,7 +15,13 @@ from types import MappingProxyType
 from typing import ClassVar, Protocol, runtime_checkable
 
 from ..zhongshu_parallel import canonical_plan_hash
-from ..zhongshu_review_queue import build_review_jobs, structural_gate
+from ..zhongshu_review_queue import (
+    build_group_capsule,
+    build_group_review_jobs,
+    build_review_jobs,
+    group_surface_hash,
+    structural_gate,
+)
 from ..zhongshu_review_queue import _dependency_cycles
 from ..zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
 from ..acceptance_standards import acceptance_standard_hint
@@ -45,6 +51,7 @@ from .errors import (
     is_reply_failure,
 )
 from .events import DomainEvent, TransitionRequest
+from .findings import resolve_finding_item_id
 from .policies.solver_plan import is_retryable_solver_reply_error
 from .policies.item_workflows import update_item_workflows
 from .policies.zhongshu import (
@@ -63,17 +70,21 @@ from .policies.zhongshu import (
     unapproved_item_ids,
 )
 from .policies.zhongshu_group import (
+    apply_group_verdict,
     apply_zhongshu_group_resets,
     apply_zhongshu_round,
+    current_member_hashes,
     freeze_ready_groups,
+    group_approval_held,
     group_item_ids,
     group_of_item,
     group_open_blockers,
+    review_preflight_violations,
     zhongshu_drainout_parked,
     zhongshu_group_resets_from_payload,
 )
 from .zhongshu_doc import group_doc_violations
-from .policies.prompts import build_prompt
+from .policies.prompts import build_prompt, retry_feedback
 from .transitions import ALL_STATES, BUSINESS_STATES, SYSTEM_STATES, TransitionRegistry
 from .zhongshu import (
     GateVerdict,
@@ -408,13 +419,20 @@ class _ConcreteWorkflowState:
                     last_failure=failure,
                 )
             update = replace(update, recovery=recovery)
-        if event.name == "NODE_COMPLETED" and action not in {
+        if (
+            event.name == "NODE_COMPLETED"
+            or str(getattr(event, "event_id", "") or "").endswith(":SUCCEEDED")
+        ) and action not in {
             "RETRY", "BLOCK", "BLOCKED", "OPEN_HUMAN_GATE", "HUMAN_GATE",
         }:
             # A clean join pays the wave's reply debt: the reply-retry budget
             # is scoped to one dispatch wave, not a whole-run allowance, or a
             # late-phase role inherits the retries an earlier role already
-            # spent (Analyst slips would drain the Critic's first wave).
+            # spent (task-20260928-eaea40: three Solver doc retries drained
+            # the budget and the Critic's first wave hit the human gate after
+            # a single failure).  Both fan-in waves (NODE_COMPLETED) and
+            # single-dispatch successes (`effect:dispatch:...:SUCCEEDED`)
+            # count as clean joins.
             recovery = update.recovery or RecoveryUpdate()
             update = replace(
                 update,
@@ -643,6 +661,10 @@ class _ConcreteWorkflowState:
                 # workers' evidence payloads ride the FAIL aggregate so the
                 # retry only re-dispatches the missing workers.
                 "salvaged_worker_payloads",
+                # A partially salvaged group-revision wave folds the fully
+                # valid groups' patches and requirement documents; the retry
+                # then re-dispatches only the groups still missing.
+                "salvaged_group_rows",
             )
         )
         if not has_review_data:
@@ -764,6 +786,44 @@ class _ConcreteWorkflowState:
                 for record in ledger_value
                 if record.item_id not in discarded_items
             )
+        group_rows_value = None
+        group_reviews = payload.get("group_reviews")
+        if isinstance(group_reviews, list) and group_reviews and context.review is not None:
+            # One group verdict per row projects the whole member ledger
+            # (2026-09-26 group pipeline): APPROVE_GROUP marks every member
+            # approved, REVISE_GROUP resets the group for a revision wave.
+            acc_ledger = (
+                ledger_value
+                if ledger_value is not None
+                else tuple(context.review.task_review_ledger)
+            )
+            acc_rows = tuple(getattr(context.review, "zhongshu_groups", ()) or ())
+            if not acc_rows:
+                seed = getattr(context.review, "seed_zhongshu_groups", None)
+                if callable(seed):
+                    acc_rows = tuple(seed())
+            for row in group_reviews:
+                if not isinstance(row, Mapping):
+                    continue
+                group_id = str(row.get("group_id") or "")
+                action = str(row.get("action") or "")
+                if not group_id or action not in ("APPROVE_GROUP", "REVISE_GROUP"):
+                    continue
+                view = replace(
+                    context.review,
+                    task_review_ledger=acc_ledger,
+                    zhongshu_groups=acc_rows,
+                )
+                ledger_next, rows_next = apply_group_verdict(
+                    view,
+                    group_id,
+                    action,
+                    member_hashes=current_member_hashes(view, group_id),
+                )
+                acc_ledger = ledger_next
+                acc_rows = rows_next
+            ledger_value = acc_ledger
+            group_rows_value = acc_rows
         workflows_value = update_item_workflows(
             context.review.item_workflows if context.review else (),
             payload.get("task_reviews"),
@@ -853,6 +913,32 @@ class _ConcreteWorkflowState:
                 group_results,
                 max_rounds=context.review.max_menxia_group_rounds,
             )
+        salvaged_group_rows_payload = payload.get("salvaged_group_rows")
+        if isinstance(salvaged_group_rows_payload, list) and salvaged_group_rows_payload:
+            # A partially salvaged group-revision wave folds the fully valid
+            # groups' requirement documents as version-chain rows, matching
+            # what a successful wave would have produced.  Without this the
+            # next §8 projection would rewrite the salvaged items' acceptance
+            # signals back to the stale document (task-20260927-616863).
+            base_rows = (
+                group_rows_value
+                if group_rows_value is not None
+                else tuple(getattr(context.review, "zhongshu_groups", ()) or ())
+            )
+            by_group = {
+                str(getattr(row, "group_id", "") or ""): row for row in base_rows
+            }
+            for entry in salvaged_group_rows_payload:
+                if not isinstance(entry, Mapping):
+                    continue
+                group_id = str(entry.get("group_id") or "").strip()
+                if not group_id:
+                    continue
+                try:
+                    by_group[group_id] = ZhongshuGroupState.from_dict(entry)
+                except ValueError:
+                    continue
+            group_rows_value = tuple(by_group.values())
         return ReviewUpdate(
             revision_id=(
                 str(payload.get("revision_id") or "")
@@ -860,6 +946,7 @@ class _ConcreteWorkflowState:
                 or f"{context.identity.task_id}:{context.progression.sequence + 1}"
             ),
             task_review_ledger=ledger_value,
+            zhongshu_groups=group_rows_value,
             active_group_id=(
                 str(payload["group_id"])
                 if payload.get("group_id")
@@ -1023,9 +1110,17 @@ class _ConcreteWorkflowState:
                 },
             )
         if target == "ZHONGSHU_CRITIC":
-            task_bindings = _task_review_bindings(
-                context, revision_id, plan_hash, pending_review
-            )
+            review_unit = _review_dispatch_unit(context)
+            if review_unit == "group":
+                task_bindings = _group_review_bindings(
+                    context, revision_id, plan_hash, pending_review
+                )
+                critic_dispatch_mode = "group_review"
+            else:
+                task_bindings = _task_review_bindings(
+                    context, revision_id, plan_hash, pending_review
+                )
+                critic_dispatch_mode = "task_review"
             if task_bindings:
                 return EffectRequest(
                     effect_id=f"node:{request_id}",
@@ -1046,7 +1141,7 @@ class _ConcreteWorkflowState:
                         "revision_id": revision_id,
                         "plan_hash": plan_hash,
                         "sequence": context.progression.sequence,
-                        "dispatch_mode": "task_review",
+                        "dispatch_mode": critic_dispatch_mode,
                         "bindings": task_bindings,
                         "previous_review": _previous_review_snapshot(context),
                         "group_id": None,
@@ -1284,6 +1379,85 @@ class _ConcreteWorkflowState:
             )
         agent_id = f"{phase.lower()}-{role.split('-')[-1]}"
         if target == "ZHONGSHU_SOLVER":
+            review_unit = _review_dispatch_unit(context)
+            is_revision = (
+                resolve_dispatch_stage(
+                    context.progression.state,
+                    has_active_findings=review_has_active_findings(
+                        context.review
+                    ),
+                )
+                is SolverStage.REVISE
+            )
+            # 2026-09-26 group pipeline: one Solver worker per affected group,
+            # dispatched concurrently across groups (the group-revision wave).
+            # The demand is "active findings exist", not the transition edge:
+            # a solver retry edge re-enters this state and must not fall back
+            # to the single writer.  The explicit A2/P3 item-workflow flag
+            # keeps precedence for its own tests.
+            if (
+                review_unit == "group"
+                and not (
+                    context.parallel is not None
+                    and context.parallel.zhongshu.item_workflow_enabled
+                )
+                and effective_review is not None
+                and review_has_active_findings(effective_review)
+            ):
+                editable_by_group: dict[str, list[str]] = {}
+                for finding in getattr(effective_review, "findings", ()) or ():
+                    if not getattr(finding, "active", False):
+                        continue
+                    item_id = str(getattr(finding, "item_id", "") or "")
+                    if not item_id:
+                        continue
+                    group_id = group_of_item(effective_review, item_id)
+                    if group_id:
+                        editable_by_group.setdefault(group_id, [])
+                        if item_id not in editable_by_group[group_id]:
+                            editable_by_group[group_id].append(item_id)
+                if editable_by_group:
+                    group_bindings = _group_revise_bindings(
+                        context,
+                        revision_id,
+                        plan_hash,
+                        affected_groups=tuple(sorted(editable_by_group)),
+                        editable_by_group=editable_by_group,
+                        review_override=effective_review,
+                    )
+                    if group_bindings:
+                        return EffectRequest(
+                            effect_id=f"node:{request_id}",
+                            effect_type="node_dispatch",
+                            task_id=context.identity.task_id,
+                            idempotency_key=request_id,
+                            payload_ref=context.request.payload_ref,
+                            payload={
+                                "issue_id": context.identity.issue_id,
+                                "request_id": request_id,
+                                "phase": phase,
+                                "role": role,
+                                "target_state": target,
+                                "state": target,
+                                "node_run_id": f"node:{request_id}",
+                                "prompt_ref": prompt.content,
+                                "request_payload_ref": context.request.payload_ref or "",
+                                "revision_id": revision_id,
+                                "plan_hash": plan_hash,
+                                "sequence": context.progression.sequence,
+                                "dispatch_mode": "group_revise",
+                                "bindings": group_bindings,
+                                "previous_review": _previous_review_snapshot(context),
+                                "current_formal_plan": (
+                                    dict(context.review.plan)
+                                    if context.review is not None
+                                    and isinstance(context.review.plan, Mapping)
+                                    else None
+                                ),
+                                "group_id": None,
+                                "item_id": None,
+                            },
+                        )
             # A2/P3: with the item workflow enabled, a revision edge fans one
             # Solver worker out per contested item instead of routing the
             # whole batch through the single writer.  Formalization stays
@@ -1291,13 +1465,7 @@ class _ConcreteWorkflowState:
             if (
                 context.parallel is not None
                 and context.parallel.zhongshu.item_workflow_enabled
-                and resolve_dispatch_stage(
-                    context.progression.state,
-                    has_active_findings=review_has_active_findings(
-                        context.review
-                    ),
-                )
-                is SolverStage.REVISE
+                and is_revision
             ):
                 item_bindings = _item_revise_bindings(
                     context, revision_id, plan_hash, effective_review
@@ -2106,6 +2274,15 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
                 if update is not None and update.attempted_item_ids is not None
                 else review.attempted_item_ids
             ),
+            # Group rows folded by the same event (the group verdict
+            # projection) must survive into the group pipeline folds below:
+            # rebuilding from a row-less review would re-seed fresh rows and
+            # drop the approval ratchet hash.
+            zhongshu_groups=(
+                update.zhongshu_groups
+                if update is not None and update.zhongshu_groups is not None
+                else review.zhongshu_groups
+            ),
         )
 
     @staticmethod
@@ -2405,7 +2582,7 @@ class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
     supported_actions = (
         "FREEZE_APPROVED", "APPROVE_FREEZE", "FREEZE_OK", "FREEZE_REJECTED",
         "REQUEST_ANALYST_EVIDENCE", "REQUEST_SOLVER_REVISION",
-        "HUMAN_GATE", "BLOCKED",
+        "HUMAN_GATE", "PLAN_REVIEW", "BLOCKED",
         "RETRY", "BLOCK", "OPEN_HUMAN_GATE",
     )
     exhausted_reason = "ZHONGSHU_FREEZE_BUDGET_EXHAUSTED"
@@ -2413,6 +2590,90 @@ class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
     global_check_reason = "ZHONGSHU_FREEZE_GLOBAL_INVALID"
 
     def handle(self, context: WorkflowContext, event: DomainEvent) -> StateDecision:
+        decision = self._handle_freeze(context, event)
+        return self._with_plan_review(context, decision)
+
+    def _with_plan_review(
+        self,
+        context: WorkflowContext,
+        decision: StateDecision,
+    ) -> StateDecision:
+        """Attach the plan-review document and pause for human sign-off.
+
+        Freeze approval is the Zhongshu completion point: the thin plan-review
+        document (zhongshu-plan-review.md) is persisted here, and with the
+        plan-review gate on the run pauses at HUMAN_GATE so the operator can
+        read and sign off before the Menxia hand-over (2026-09-27 thin doc).
+        """
+
+        if decision.transition.action not in (
+            "FREEZE_APPROVED",
+            "APPROVE_FREEZE",
+            "FREEZE_OK",
+        ):
+            return decision
+        from ..zhongshu_plan_doc import (
+            plan_review_doc_effect,
+            render_plan_review_doc,
+        )
+
+        doc_text = ""
+        try:
+            doc_text = render_plan_review_doc(context)
+        except Exception:  # a rendering slip must not block the freeze path
+            logger.exception(
+                "ZHONGSHU_PLAN_DOC_RENDER_FAILED task_id=%s",
+                context.identity.task_id,
+            )
+        effects = list(decision.effects)
+        if doc_text:
+            effects.append(
+                plan_review_doc_effect(
+                    context.identity.task_id,
+                    context.progression.sequence,
+                    doc_text,
+                )
+            )
+        gate_on = (
+            context.parallel is None or context.parallel.zhongshu.plan_review_gate
+        ) and not (
+            context.parallel is not None and context.parallel.zhongshu.fast_track
+        )
+        if not gate_on:
+            return replace(decision, effects=tuple(effects))
+        # The approval decision already carries the Menxia dispatch effect
+        # built for its original target; drop it here or the wave completes
+        # into the gate and crashes it.  RESUME rebuilds the dispatch when the
+        # run actually hands over.
+        effects = [
+            effect
+            for effect in effects
+            if getattr(effect, "effect_type", "")
+            not in ("node_dispatch", "agent_dispatch")
+        ]
+        decision_id = (
+            f"{context.identity.task_id}:plan-review:"
+            f"{context.progression.sequence + 1}"
+        )
+        return replace(
+            decision,
+            transition=TransitionRequest(
+                action="PLAN_REVIEW",
+                reason_code="PLAN_REVIEW",
+            ),
+            effects=tuple(effects),
+            update=replace(
+                decision.update,
+                progression=ProgressUpdate(resume_state="MENXIA_GROUP_SOLVER"),
+                human_gate=HumanGateUpdate(
+                    decision_id=decision_id,
+                    resume_state="MENXIA_GROUP_SOLVER",
+                    reason_code="PLAN_REVIEW",
+                ),
+            ),
+        )
+
+    def _handle_freeze(self, context: WorkflowContext, event: DomainEvent) -> StateDecision:
         self._require_current_state(context)
         self._require_event_task(context, event)
         action = self._event_action(event)
@@ -2915,8 +3176,52 @@ class DoneState(_ConcreteWorkflowState):
 
 class HumanGateWorkflowState(_ConcreteWorkflowState):
     name = "HUMAN_GATE"
-    supported_actions = ("RESUME", "CANCEL")
+    supported_actions = ("RESUME", "CANCEL", "PLAN_REVIEW_REJECTED")
     requires_resume_state = True
+
+    def handle(
+        self,
+        context: WorkflowContext,
+        event: DomainEvent,
+    ) -> StateDecision:
+        if event.name == "PLAN_REVIEW_REJECTED":
+            # The operator reviewed the thin plan document and sent it back:
+            # route to the planner with the note recorded as an active finding
+            # so the next revision round sees it (2026-09-27 thin doc).
+            self._require_current_state(context)
+            self._require_event_task(context, event)
+            payload = event.payload if isinstance(event.payload, Mapping) else {}
+            answer = str(payload.get("answer") or "").strip()
+            from .findings import Finding
+
+            finding = Finding(
+                finding_id=f"human-review-{context.progression.sequence}",
+                severity="P1",
+                status="OPEN",
+                category="human_review",
+                claim=answer[:400] or "人工预审退回：方案需修订",
+                required_action="按人工批注修订方案后重新送审",
+            )
+            existing = context.review.findings if context.review else ()
+            revision_id = (
+                context.review.revision_id
+                if context.review
+                else f"{context.identity.task_id}:{context.progression.sequence + 1}"
+            )
+            return StateDecision(
+                transition=TransitionRequest(
+                    action="PLAN_REVIEW_REJECTED",
+                    reason_code="PLAN_REVIEW_REJECTED",
+                ),
+                update=ContextUpdate(
+                    human_gate=HumanGateUpdate(clear_gate=True),
+                    review=ReviewUpdate(
+                        revision_id=revision_id,
+                        findings=tuple(existing) + (finding,),
+                    ),
+                ),
+            )
+        return super().handle(context, event)
 
     def on_resume(self, context: WorkflowContext) -> StateDecision:
         self._require_current_state(context)
@@ -3894,6 +4199,7 @@ def _previous_review_snapshot(context: WorkflowContext) -> dict[str, object] | N
     findings = [asdict(finding) for finding in review.findings]
     ledger = [asdict(record) for record in review.task_review_ledger]
     salvaged = [dict(row) for row in review.salvaged_task_reviews]
+    group_rows = [asdict(row) for row in getattr(review, "zhongshu_groups", ()) or ()]
     packet = (
         review.evidence_packet
         if isinstance(getattr(review, "evidence_packet", None), Mapping)
@@ -3904,13 +4210,20 @@ def _previous_review_snapshot(context: WorkflowContext) -> dict[str, object] | N
         for entry in packet.get("finding_responses") or []
         if isinstance(entry, Mapping) and str(entry.get("finding_id") or "").strip()
     ]
-    if not findings and not ledger and not salvaged and not responses:
+    if (
+        not findings
+        and not ledger
+        and not salvaged
+        and not responses
+        and not group_rows
+    ):
         return None
     return {
         "findings": findings,
         "task_review_ledger": ledger,
         "salvaged_task_reviews": salvaged,
         "finding_responses": responses,
+        "zhongshu_groups": group_rows,
     }
 
 
@@ -4113,6 +4426,407 @@ def _task_review_bindings(
     return bindings
 
 
+def _review_dispatch_unit(context: WorkflowContext) -> str:
+    """Review wave granularity: "group" (2026-09-26) or legacy "item".
+
+    The explicit A2/P3 item-workflow flag pins the whole item-granular path
+    (per-item revision stoves and per-item task review) regardless of the
+    review unit, so its dedicated suites keep exercising the rollback path.
+    """
+
+    if context.parallel is None:
+        return "group"
+    if context.parallel.zhongshu.item_workflow_enabled:
+        return "item"
+    return str(getattr(context.parallel.zhongshu, "review_unit", "") or "group")
+
+
+def _group_member_dicts(review: object, group_id: str) -> list[dict[str, object]]:
+    members = []
+    for item in getattr(review, "task_items", ()) or ():
+        if str(getattr(item, "group_id", "") or "") != group_id:
+            continue
+        members.append(
+            {
+                "item_id": item.item_id,
+                "group_id": item.group_id,
+                "title": item.title,
+                "objective": item.objective,
+                "dependencies": list(item.dependencies),
+                "source_requirement_ids": list(item.source_requirement_ids),
+                "acceptance_signals": list(item.acceptance_signals),
+            }
+        )
+    return members
+
+
+def _group_capsule_inputs(
+    review: object, group_id: str
+) -> tuple[list[dict[str, object]], list[tuple[str, str]], dict[str, str]]:
+    """Split members into changed (verbatim) and held (surface+hash)."""
+
+    ledger = {
+        record.item_id: record
+        for record in getattr(review, "task_review_ledger", ()) or ()
+    }
+    hashes = current_member_hashes(review, group_id)
+    full: list[dict[str, object]] = []
+    surface: list[tuple[str, str]] = []
+    for entry in _group_member_dicts(review, group_id):
+        item_id = str(entry["item_id"])
+        digest = hashes.get(item_id, "")
+        record = ledger.get(item_id)
+        if (
+            record is not None
+            and str(getattr(record, "status", "") or "") == "APPROVED"
+            and str(getattr(record, "task_hash", "") or "") == digest
+        ):
+            surface.append((item_id, digest))
+        else:
+            full.append(entry)
+    return full, surface, hashes
+
+
+def _group_review_bindings(
+    context: WorkflowContext,
+    revision_id: str,
+    plan_hash: str,
+    review_override: object | None = None,
+) -> list[dict[str, object]] | None:
+    """Build one review binding per group for the REVIEW_GROUP wave.
+
+    Frozen groups (handed to Menxia) and groups whose surface hash still
+    matches their last approval never dispatch (the group approval
+    ratchet); groups failing the LLM-free preflight are routed out of the
+    review wave so a doomed dispatch costs no worker round.
+    """
+
+    review = review_override if review_override is not None else context.review
+    if review is None or not review.task_items:
+        return None
+    revision = revision_id or review.revision_id
+    if not revision:
+        return None
+    effective_plan_hash = plan_hash or (review.plan_hash or "")
+    plan = {
+        "items": [
+            {
+                "item_id": item.item_id,
+                "group_id": item.group_id,
+                "title": item.title,
+                "objective": item.objective,
+                "dependencies": list(item.dependencies),
+                "source_requirement_ids": list(item.source_requirement_ids),
+                "acceptance_signals": list(item.acceptance_signals),
+            }
+            for item in review.task_items
+        ],
+        "groups": [
+            {"group_id": group.group_id, "item_ids": list(group.item_ids)}
+            for group in review.task_groups
+        ],
+        "requirements": [],
+    }
+    doc_hashes = {
+        row.group_id: str(getattr(row, "doc_hash", "") or "")
+        for row in getattr(review, "zhongshu_groups", ()) or ()
+    }
+    doc_markdown = {
+        row.group_id: str(getattr(row, "doc_markdown", "") or "")
+        for row in getattr(review, "zhongshu_groups", ()) or ()
+    }
+    jobs = build_group_review_jobs(
+        plan,
+        revision,
+        plan_hash=effective_plan_hash,
+        doc_hashes=doc_hashes,
+    )
+    for entry in review_preflight_violations(review):
+        logger.warning(
+            "ZHONGSHU_REVIEW_PREFLIGHT task_id=%s violation=%s",
+            context.identity.task_id,
+            entry,
+        )
+    unfit = {
+        entry.split(":", 1)[0]
+        for entry in review_preflight_violations(review)
+        if entry.startswith("group-")
+    }
+    frozen_groups = {
+        row.group_id
+        for row in getattr(review, "zhongshu_groups", ()) or ()
+        if getattr(row, "stage", "") == "FROZEN"
+    }
+    selected = []
+    for job in jobs:
+        if job.group_id in frozen_groups or job.group_id in unfit:
+            continue
+        if group_approval_held(review, job.group_id):
+            logger.info(
+                "ZHONGSHU_GROUP_APPROVAL_HELD task_id=%s group_id=%s",
+                context.identity.task_id,
+                job.group_id,
+            )
+            continue
+        selected.append(job)
+    if not selected:
+        # Nothing is contested but the wave still must produce a verdict
+        # (the Menxia gate bounce re-entering the Critic, for one): fall
+        # back to re-reviewing every fit, non-frozen group, mirroring the
+        # legacy ``_select_review_jobs`` empty-selection fallback.  A wave
+        # with nothing fit at all falls back to the non-frozen groups so the
+        # FSM always gets a verdict to route.
+        selected = [
+            job
+            for job in jobs
+            if job.group_id not in frozen_groups and job.group_id not in unfit
+        ]
+    if not selected:
+        selected = [
+            job for job in jobs if job.group_id not in frozen_groups
+        ]
+    logger.info(
+        "ZHONGSHU_GROUP_REVIEW_SCOPE task_id=%s revision_id=%s total=%s "
+        "to_review=%s carried=%s",
+        context.identity.task_id,
+        revision,
+        len(jobs),
+        len(selected),
+        len(jobs) - len(selected),
+    )
+    if not selected:
+        return []
+    findings_by_item: dict[str, list[object]] = {}
+    for finding in getattr(review, "findings", ()) or ():
+        if getattr(finding, "active", False) and getattr(finding, "item_id", ""):
+            findings_by_item.setdefault(str(finding.item_id), []).append(finding)
+    base_request_id = (
+        f"{context.identity.task_id}:ZHONGSHU_CRITIC:{context.progression.sequence + 1}"
+    )
+    expected_lenses = (
+        context.parallel.zhongshu.analyst_default_workers
+        if context.parallel is not None
+        else 0
+    )
+    bindings: list[dict[str, object]] = []
+    for index, job in enumerate(selected, start=1):
+        members_full, members_surface, member_hashes = _group_capsule_inputs(
+            review, job.group_id
+        )
+        member_ids = [
+            str(entry["item_id"]) for entry in _group_member_dicts(review, job.group_id)
+        ]
+        item_by_id = {
+            item.item_id: item
+            for item in getattr(review, "task_items", ()) or ()
+            if str(getattr(item, "group_id", "") or "") == job.group_id
+        }
+        evidence_by_item: dict[str, list[dict[str, object]]] = {}
+        finding_responses: list[dict[str, object]] = []
+        evidence_rows: list[tuple[str, tuple[str, ...]]] = []
+        for item_id in member_ids:
+            evidence = _item_evidence_context(
+                review, item_by_id.get(item_id), expected_lenses
+            )
+            evidence_by_item[item_id] = evidence["records"]
+            finding_responses.extend(evidence["finding_responses"])
+            evidence_rows.append(
+                (
+                    item_id,
+                    tuple(
+                        str(record.get("evidence_id") or "")
+                        for record in evidence["records"]
+                        if isinstance(record, dict)
+                    ),
+                )
+            )
+        group_findings = [
+            _finding_payload(finding)
+            for item_id in member_ids
+            for finding in findings_by_item.get(item_id, [])
+        ]
+        dispatch_context: dict[str, object] = {
+            "zhongshu_dispatch_mode": "group_review",
+            "review_job_id": job.review_job_id,
+            "revision_id": revision,
+            "plan_hash": effective_plan_hash,
+            "group_id": job.group_id,
+            "group_hash": job.task_hash,
+            "doc_hash": job.doc_hash,
+            "member_ids": member_ids,
+            "member_hashes": member_hashes,
+            "active_findings": group_findings,
+            "item_evidence_by_item": evidence_by_item,
+            "finding_responses": finding_responses,
+                "envelope": build_envelope(
+                    ingredients=[
+                        {"key": "group_capsule", "source": "prompt.txt", "lifetime": "persisted",
+                         "slice": f"group:{job.group_id}"},
+                        {"key": "review.group_doc", "source": "context.json",
+                         "lifetime": "persisted", "slice": f"group:{job.group_id}"},
+                        {"key": "review.findings", "source": "context.json",
+                         "lifetime": "persisted", "slice": f"group:{job.group_id}+active"},
+                        {"key": "acceptance_standards", "source": "prompt.txt",
+                         "lifetime": "persisted"},
+                        {"key": "retry_feedback", "source": "prompt.txt",
+                         "lifetime": "transient"},
+                    ],
+                    tools={"editable": "none", "contract": "group_review"},
+                    product={"type": "group_review_verdict", "contract": "group_review"},
+                ),
+            }
+        bindings.append(
+            {
+                "worker_id": f"zhongshu_critic-worker-{index:02d}",
+                "agent_id": f"zhongshu-critic-{index:02d}",
+                "task_id": context.identity.task_id,
+                "request_id": f"{base_request_id}:group-{index:02d}",
+                "role": "review-critic",
+                "phase": "ZHONGSHU",
+                "group_id": job.group_id,
+                "item_id": "",
+                # The capsule is the whole prompt.txt for a group worker, so
+                # the re-ask feedback must ride inside it: without this a
+                # rejected reply is re-sampled blind and the run re-pays the
+                # same failure on the reply budget (task-20260927-de54aa
+                # waves 8/10 died unstructured with an empty feedback channel).
+                "prompt_ref": build_group_capsule(
+                    group_id=job.group_id,
+                    revision_id=revision,
+                    doc_markdown=doc_markdown.get(job.group_id, ""),
+                    members_full=members_full,
+                    members_surface=members_surface,
+                    findings=group_findings,
+                    finding_responses=finding_responses,
+                    evidence=evidence_rows,
+                ) + retry_feedback(context, "ZHONGSHU_CRITIC"),
+                "dispatch_context": dispatch_context,
+            }
+        )
+    return bindings
+
+
+def _group_revise_bindings(
+    context: WorkflowContext,
+    revision_id: str,
+    plan_hash: str,
+    *,
+    affected_groups: Iterable[str],
+    editable_by_group: Mapping[str, Iterable[str]],
+    review_override: object | None = None,
+) -> list[dict[str, object]]:
+    """One group-revision solver binding per affected group (parallel wave)."""
+
+    review = review_override if review_override is not None else context.review
+    revision = revision_id or (review.revision_id if review else "")
+    effective_plan_hash = plan_hash or (review.plan_hash if review else "")
+    findings_by_item: dict[str, list[object]] = {}
+    for finding in getattr(review, "findings", ()) or ():
+        if getattr(finding, "active", False) and getattr(finding, "item_id", ""):
+            findings_by_item.setdefault(str(finding.item_id), []).append(finding)
+    doc_markdown = {
+        row.group_id: str(getattr(row, "doc_markdown", "") or "")
+        for row in getattr(review, "zhongshu_groups", ()) or ()
+    }
+    base_request_id = (
+        f"{context.identity.task_id}:ZHONGSHU_SOLVER:{context.progression.sequence + 1}"
+    )
+    bindings: list[dict[str, object]] = []
+    for index, group_id in enumerate(
+        dict.fromkeys(str(value).strip() for value in affected_groups if str(value).strip()),
+        start=1,
+    ):
+        editable = sorted(
+            {
+                str(value).strip()
+                for value in editable_by_group.get(group_id, ())
+                if str(value).strip()
+            }
+        )
+        editable_set = set(editable)
+        member_dicts = _group_member_dicts(review, group_id)
+        members_full, members_surface, member_hashes = _group_capsule_inputs(
+            review, group_id
+        )
+        batch_findings = [
+            _finding_payload(finding)
+            for entry in member_dicts
+            for finding in findings_by_item.get(str(entry["item_id"]), [])
+        ]
+        bindings.append(
+            {
+                "worker_id": f"zhongshu_solver-worker-{index:02d}",
+                "agent_id": f"zhongshu-solver-{index:02d}",
+                "task_id": context.identity.task_id,
+                "request_id": f"{base_request_id}:group-{index:02d}",
+                "role": "review-solver",
+                "phase": "ZHONGSHU",
+                "group_id": group_id,
+                "item_id": "",
+                "prompt_ref": build_group_capsule(
+                    group_id=group_id,
+                    revision_id=revision,
+                    doc_markdown=doc_markdown.get(group_id, ""),
+                    members_full=[
+                        entry
+                        for entry in members_full
+                        if str(entry["item_id"]) in editable_set
+                    ],
+                    members_surface=[
+                        (item_id, digest)
+                        for item_id, digest in members_surface
+                        if item_id not in editable_set
+                    ],
+                    findings=batch_findings,
+                    finding_responses=(),
+                    evidence=(),
+                    header=(
+                        f"Group revision job: group {group_id} (revision "
+                        f"{revision}). Rewrite only the editable member tasks "
+                        "listed below and this group's requirement document "
+                        "(§8 must close over the member acceptance signals). "
+                        "Every other member and every other group is frozen: "
+                        "return them byte-identical or omit them. Each patched "
+                        "member must keep its item_id and group_id unchanged. "
+                        "Reply with "
+                        "action READY_FOR_CRITIC plus the patched member items "
+                        "and this group's document."
+                    ),
+                ) + retry_feedback(context, "ZHONGSHU_SOLVER"),
+                "dispatch_context": {
+                    "zhongshu_dispatch_mode": "group_revise",
+                    "revision_id": revision,
+                    "plan_hash": effective_plan_hash,
+                    "group_id": group_id,
+                    "group_hash": group_surface_hash(
+                        group_id,
+                        member_hashes.values(),
+                        doc_hash=doc_markdown.get(group_id, ""),
+                    )
+                    if member_hashes
+                    else "",
+                    "editable_item_ids": editable,
+                    "batch_findings": batch_findings,
+                    "member_hashes": member_hashes,
+                    "envelope": build_envelope(
+                        ingredients=[
+                            {"key": "group_capsule", "source": "prompt.txt", "lifetime": "persisted",
+                             "slice": f"group:{group_id}"},
+                            {"key": "review.group_doc", "source": "context.json",
+                             "lifetime": "persisted", "slice": f"group:{group_id}"},
+                            {"key": "retry_feedback", "source": "prompt.txt",
+                             "lifetime": "transient"},
+                        ],
+                        tools={"editable": "items:" + (",".join(editable) or "none"),
+                               "contract": "group_revise"},
+                        product={"type": "group_revision_patch", "contract": "group_revise"},
+                    ),
+                },
+            }
+        )
+    return bindings
+
+
 def _select_review_jobs(
     jobs: object,
     review: object,
@@ -4270,6 +4984,18 @@ def _attempted_item_ids(
     """
 
     batch = payload.get("finding_batch")
+    group_reviews = payload.get("group_reviews")
+    if isinstance(group_reviews, list) and group_reviews:
+        # Group-verdict wave: a REVISE_GROUP row attempts every member of
+        # that group, so the group revision budget charges exactly the
+        # groups the wave sent back to the Solver.
+        attempted: list[str] = []
+        for row in group_reviews:
+            if isinstance(row, Mapping) and str(row.get("action") or "") == "REVISE_GROUP":
+                attempted.extend(
+                    str(value) for value in (row.get("member_ids") or ()) if str(value)
+                )
+        return tuple(dict.fromkeys(attempted))
     if not isinstance(batch, Mapping):
         return None
     selected = batch.get("selected_finding_ids")
@@ -4283,9 +5009,7 @@ def _attempted_item_ids(
         finding_id = str(getattr(finding, "finding_id", "") or "")
         if not finding_id:
             continue
-        item_id = str(getattr(finding, "item_id", "") or "").strip()
-        if not item_id:
-            item_id = str(getattr(finding, "target", "") or "").strip().split("/")[-1]
+        item_id = resolve_finding_item_id(finding)
         if item_id:
             item_of[finding_id] = item_id
     return tuple(
@@ -4667,7 +5391,9 @@ def _task_capsule_text(
         "Analyst collects evidence, while the Solver can only edit plan text "
         "and cannot manufacture evidence. Otherwise return "
         "TASK_CHANGES_REQUIRED with review_checks and task-scoped findings. "
-        "Do not echo revision ids or hashes; the orchestrator stamps them."
+        "Do not echo revision ids or hashes; the orchestrator stamps them. "
+        "Copy the envelope's structured_output_schema_hash verbatim from the "
+        "injected contract."
     )
     lines.append(
         "When you return TASK_CHANGES_REQUIRED, every finding MUST carry "

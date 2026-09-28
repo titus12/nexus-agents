@@ -30,7 +30,9 @@ CONTRACT = make_contract(
         "REQUEST_ANALYST_EVIDENCE; if the plan itself needs edits before it can "
         "freeze, return REQUEST_SOLVER_REVISION.",
         "Do not echo revision ids, plan hashes or task/dependency hashes: "
-        "the orchestrator stamps those fields from the dispatch record.",
+        "the orchestrator stamps those fields from the dispatch record. "
+        "The envelope field structured_output_schema_hash is the one exception: "
+        "copy it verbatim from the injected contract.",
     ),
     example_overrides={
         "action": "APPROVE_FREEZE", "mode": "REVIEW_CURRENT_TASK_GRAPH",

@@ -25,6 +25,11 @@ RETRYABLE = "RETRYABLE"
 CANCELLED = "CANCELLED"
 HUMAN_GATE = "HUMAN_GATE"
 
+# A group review job carries every member item in one capsule; beyond this
+# many members the capsule stops being a bounded review unit and the plan
+# must split the group (requirements 2026-09-26, Task 3).
+GROUP_MAX_ITEMS = 6
+
 
 class ReviewQueueError(RuntimeError):
     """Raised when a queue operation is structurally invalid."""
@@ -158,6 +163,169 @@ def flatten_plan_items(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def task_surface_hash(item: Mapping[str, Any], group_item_ids: Iterable[str]) -> str:
+    """Deterministic hash of the review surface of one task item."""
+
+    return canonical_hash(review_surface(item, group_item_ids=group_item_ids))
+
+
+def group_surface_hash(
+    group_id: str,
+    member_hashes: Iterable[str],
+    *,
+    doc_hash: str = "",
+) -> str:
+    """Deterministic hash of one group's review surface.
+
+    Covers the requirement document and every member task surface, so a
+    change to either invalidates the group approval ratchet while a
+    formatting-only edit does not.
+    """
+
+    return canonical_hash(
+        {
+            "group_id": str(group_id or ""),
+            "members": sorted(str(value) for value in member_hashes if str(value)),
+            "doc_hash": str(doc_hash or ""),
+        }
+    )
+
+
+@dataclass(frozen=True)
+class GroupReviewJob:
+    """One durable review job for a whole group (2026-09-26 group pipeline)."""
+
+    review_job_id: str
+    revision_id: str
+    group_id: str
+    status: str = PENDING
+    task_hash: str = ""
+    doc_hash: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def build_group_review_jobs(
+    plan: Mapping[str, Any],
+    revision_id: str,
+    *,
+    plan_hash: str = "",
+    doc_hashes: Mapping[str, str] | None = None,
+) -> tuple[GroupReviewJob, ...]:
+    """Flatten a plan into one PENDING review job per group."""
+
+    revision = str(revision_id or "").strip()
+    if not revision:
+        raise ReviewQueueError("revision_id is required")
+    records = flatten_plan_items(plan)
+    members: dict[str, list[Mapping[str, Any]]] = {}
+    order: list[str] = []
+    for record in records:
+        group_id = str(record["group_id"])
+        if group_id not in members:
+            members[group_id] = []
+            order.append(group_id)
+        members[group_id].append(record["raw"])
+    jobs: list[GroupReviewJob] = []
+    for group_id in order:
+        raw_items = members[group_id]
+        member_ids = [
+            str(item.get("item_id") or "") for item in raw_items if item.get("item_id")
+        ]
+        member_hashes = [
+            task_surface_hash(item, member_ids) for item in raw_items
+        ]
+        doc_hash = str((doc_hashes or {}).get(group_id) or "")
+        jobs.append(
+            GroupReviewJob(
+                review_job_id=f"zhongshu:{revision}:{group_id}",
+                revision_id=revision,
+                group_id=group_id,
+                task_hash=group_surface_hash(
+                    group_id, member_hashes, doc_hash=doc_hash
+                ),
+                doc_hash=doc_hash,
+            )
+        )
+    return tuple(jobs)
+
+
+def build_group_capsule(
+    *,
+    group_id: str,
+    revision_id: str,
+    doc_markdown: str,
+    members_full: Iterable[Mapping[str, Any]],
+    members_surface: Iterable[tuple[str, str]] = (),
+    findings: Iterable[Mapping[str, Any]] = (),
+    finding_responses: Iterable[Mapping[str, Any]] = (),
+    evidence: Iterable[tuple[str, Iterable[str]]] = (),
+    header: str = "",
+) -> str:
+    """Assemble one group review capsule.
+
+    Changed members ride verbatim; unchanged members are projected as a
+    surface hash only (incremental capsule, requirements §6), so a group
+    re-review does not re-pay full text for members nobody touched.
+    """
+
+    lines = [
+        header
+        or (
+            f"Group review job: group {group_id} (revision {revision_id}). "
+            "One group verdict only: APPROVE_GROUP or REVISE_GROUP (plus the "
+            "escalation actions). Every finding must carry the owning item_id."
+        ),
+        "",
+        "[Delivery discipline] The reply body must be exactly one complete "
+        "structured JSON object matching the injected result contract: no "
+        "prose, no Markdown, no code fences, no extra comments.",
+        "",
+        "[Requirement document]",
+        str(doc_markdown or "").strip(),
+    ]
+    full = [dict(item) for item in members_full or ()]
+    if full:
+        lines += ["", "[Members - changed (verbatim)"]
+        for item in full:
+            lines.append(f"{item.get('item_id')} (group {group_id})")
+            for field in (
+                "title",
+                "objective",
+                "dependencies",
+                "source_requirement_ids",
+                "acceptance_signals",
+            ):
+                value = item.get(field)
+                if value:
+                    lines.append(f"  {field}: {value}")
+    surface = [(str(item_id), str(digest)) for item_id, digest in members_surface or ()]
+    if surface:
+        lines += ["", "[Members - unchanged (surface only)]"]
+        for item_id, digest in surface:
+            lines.append(f"  {item_id} surface_hash={digest}")
+    findings_list = [dict(entry) for entry in findings or ()]
+    if findings_list:
+        lines += ["", "[Active findings]"]
+        for entry in findings_list:
+            lines.append(
+                f"  {entry.get('finding_id')} [item {entry.get('item_id') or '-'}] "
+                f"{entry.get('claim') or entry.get('required_action') or ''}"
+            )
+    responses = [dict(entry) for entry in finding_responses or ()]
+    if responses:
+        lines += ["", "[Finding responses]"]
+        for entry in responses:
+            lines.append(f"  {entry.get('finding_id')}: {entry.get('response') or ''}")
+    evidence_rows = [(str(item_id), tuple(records)) for item_id, records in evidence or ()]
+    if evidence_rows:
+        lines += ["", "[Evidence by member]"]
+        for item_id, records in evidence_rows:
+            lines.append(f"  {item_id}: {', '.join(records) or 'none'}")
+    return "\n".join(lines) + "\n"
+
+
 def build_review_jobs(
     plan: Mapping[str, Any],
     revision_id: str,
@@ -174,11 +342,8 @@ def build_review_jobs(
     for record in records:
         group_members.setdefault(str(record["group_id"]), []).append(str(record["item_id"]))
     task_hashes = {
-        record["item_id"]: canonical_hash(
-            review_surface(
-                record["raw"],
-                group_item_ids=group_members.get(str(record["group_id"]), []),
-            )
+        record["item_id"]: task_surface_hash(
+            record["raw"], group_members.get(str(record["group_id"]), [])
         )
         for record in records
     }
@@ -334,6 +499,14 @@ def structural_gate(plan: Mapping[str, Any]) -> list[str]:
         if not assigned:
             issues.append(f"ITEM_WITHOUT_GROUP:{item_id}")
 
+    member_counts = Counter(
+        str(record["group_id"] or group_of.get(record["item_id"], ""))
+        for record in records
+    )
+    for group_id in sorted(member_counts):
+        if group_id and member_counts[group_id] > GROUP_MAX_ITEMS:
+            issues.append(f"GROUP_MAX_ITEMS:{group_id}:{member_counts[group_id]}")
+
     requirements = plan.get("requirements")
     known_requirements = {
         str(item.get("requirement_id"))
@@ -414,6 +587,8 @@ def _dependency_cycles(by_item: Mapping[str, dict[str, Any]]) -> list[list[str]]
 __all__ = [
     "CANCELLED",
     "COMPLETED",
+    "GROUP_MAX_ITEMS",
+    "GroupReviewJob",
     "HUMAN_GATE",
     "PENDING",
     "RETRYABLE",
@@ -421,10 +596,14 @@ __all__ = [
     "ReviewQueueError",
     "RUNNING",
     "TaskReviewQueue",
+    "build_group_capsule",
+    "build_group_review_jobs",
     "build_review_jobs",
     "canonical_hash",
     "flatten_plan_items",
+    "group_surface_hash",
     "queue_from_dispatch_contexts",
     "review_job_id",
     "structural_gate",
+    "task_surface_hash",
 ]

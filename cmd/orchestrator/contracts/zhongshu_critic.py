@@ -4,10 +4,97 @@ from __future__ import annotations
 from .common import array, make_contract, object_schema, string
 
 
-_ACTIONS = ("APPROVE_FREEZE", "REQUEST_ANALYST_EVIDENCE", "REQUEST_SOLVER_REVISION", "REQUEST_REGROUP", "HUMAN_GATE", "BLOCKED", "TASK_APPROVED", "TASK_CHANGES_REQUIRED", "REQUEST_TASK_DISCARD")
-_MODES = ("REVIEW_CURRENT_TASK_GRAPH", "REVIEW_ONE_TASK")
+_ACTIONS = (
+    "APPROVE_FREEZE",
+    "REQUEST_ANALYST_EVIDENCE",
+    "REQUEST_SOLVER_REVISION",
+    "REQUEST_REGROUP",
+    "HUMAN_GATE",
+    "BLOCKED",
+    "TASK_APPROVED",
+    "TASK_CHANGES_REQUIRED",
+    "REQUEST_TASK_DISCARD",
+    "APPROVE_GROUP",
+    "REVISE_GROUP",
+)
+_MODES = ("REVIEW_CURRENT_TASK_GRAPH", "REVIEW_ONE_TASK", "REVIEW_GROUP")
+
+# The group review wave (2026-09-26 group pipeline) emits exactly one group
+# verdict per job; item-level verdicts are gone and findings keep their item
+# coordinates only for revision targeting and evidence routing.
+GROUP_MODE_ACTIONS = (
+    "APPROVE_GROUP",
+    "REVISE_GROUP",
+    "REQUEST_ANALYST_EVIDENCE",
+    "HUMAN_GATE",
+    "BLOCKED",
+)
+
+# The action enum is the union of every review mode's vocabulary, so a group
+# reviewer may legally answer with a legacy whole-plan name (live run
+# task-20260927-862584 answered REVISE_GROUP as REQUEST_SOLVER_REVISION and
+# the wave was rejected).  Map the synonyms onto the closed group vocabulary
+# instead of punishing vocabulary drift.
+_GROUP_ACTION_SYNONYMS = {
+    "APPROVE_GROUP": "APPROVE_GROUP",
+    "APPROVE_CRITIC": "APPROVE_GROUP",
+    "APPROVE_FREEZE": "APPROVE_GROUP",
+    "TASK_APPROVED": "APPROVE_GROUP",
+    "REVISE_GROUP": "REVISE_GROUP",
+    "REQUEST_SOLVER_REVISION": "REVISE_GROUP",
+    "TASK_CHANGES_REQUIRED": "REVISE_GROUP",
+    "REQUEST_ANALYST_EVIDENCE": "REQUEST_ANALYST_EVIDENCE",
+    "HUMAN_GATE": "HUMAN_GATE",
+    "BLOCKED": "BLOCKED",
+}
+
+
+def normalize_group_action(action: object) -> str:
+    """Map a worker's group verdict onto the closed REVIEW_GROUP vocabulary.
+
+    Empty means the action is not a group verdict under any known name.
+    """
+
+    return _GROUP_ACTION_SYNONYMS.get(str(action or "").strip().upper(), "")
+
+
+def allowed_actions_for_mode(mode: str) -> tuple[str, ...]:
+    """Action allowlist for one review mode (group verdicts are closed)."""
+
+    if str(mode or "").strip() == "REVIEW_GROUP":
+        return GROUP_MODE_ACTIONS
+    return _ACTIONS
+
+
+def group_finding_scope(finding: object, known_item_ids: object) -> tuple[str, str]:
+    """Resolve the owning item of one group-review finding.
+
+    Returns ``(item_id, error)``: the explicit ``item_id`` wins, a free-text
+    ``target`` is normalized through the shared resolver (the incident shape
+    `group-000003/item-000004.acceptance_signals and task_review_ledger`), and
+    a finding that names no member item is rejected as
+    ``GROUP_FINDING_UNSCOPED:<finding_id>`` instead of drifting out of the
+    revision scope.
+    """
+
+    from ..domain.findings import resolve_finding_item_id
+
+    known = {
+        str(value).strip()
+        for value in (known_item_ids or ())
+        if str(value).strip()
+    }
+    item_id = resolve_finding_item_id(finding, known or None)
+    if not item_id or (known and item_id not in known):
+        finding_id = ""
+        if isinstance(finding, dict):
+            finding_id = str(finding.get("finding_id") or "")
+        else:
+            finding_id = str(getattr(finding, "finding_id", "") or "")
+        return "", f"GROUP_FINDING_UNSCOPED:{finding_id}"
+    return item_id, ""
 _FINDING = object_schema(
-    {"finding_id": string(), "category": string(), "target": string(), "claim": string(), "decision": string(), "severity": string(), "evidence_strength": string(), "evidence_ids": array(string()), "required_action": string(), "evidence_targets": array(object_schema({"path": string(), "symbol": string()}, required=("path",)))},
+    {"finding_id": string(), "category": string(), "target": string(), "claim": string(), "decision": string(), "severity": string(), "evidence_strength": string(), "evidence_ids": array(string()), "required_action": string(), "evidence_targets": array(object_schema({"path": string(), "symbol": string()}, required=("path",))), "item_id": string(), "group_id": string()},
     required=("finding_id", "category", "target", "claim", "decision", "severity", "evidence_strength"),
 )
 _REVIEW_CHECKS = object_schema(
@@ -31,13 +118,27 @@ CONTRACT = make_contract(
     modes=_MODES, actions=_ACTIONS, fields=FIELDS,
     prompt_rules=(
         "Review only the supplied graph or task.",
+        "REVIEW_GROUP mode: review the whole group capsule and return exactly "
+        "one group action (APPROVE_GROUP / REVISE_GROUP / "
+        "REQUEST_ANALYST_EVIDENCE / HUMAN_GATE / BLOCKED). Every finding must "
+        "carry the owning item_id of a member task; item_id is the coordinate "
+        "for revision targeting, not a separate verdict.",
         "Do not echo revision ids, plan hashes or task/dependency hashes: "
-        "the orchestrator stamps those fields from the dispatch record.",
+        "the orchestrator stamps those fields from the dispatch record. "
+        "The envelope field structured_output_schema_hash is the one exception: "
+        "copy it verbatim from the injected contract.",
         "Every finding must be traceable to an evidence-backed claim.",
-        "A signal claiming a measured outcome must embed「验证方法：」with all five "
-        "recipe elements (target with file:line, exact steps, metric+unit, baseline "
-        "source, expected observation); a recipe missing elements is rejected with "
-        "the missing elements named.",
+        "Every finding must name its owning task: set item_id to the exact "
+        "plan item id (and group_id when the item belongs to one). target is "
+        "display text, never the identity source.",
+        "Review on four axes only: (1) requirement decidability -- every "
+        "demand is checkable as written; (2) scenario coverage -- the "
+        "acceptance assertions cover the requirement; (3) boundary clarity -- "
+        "scope, non-goals and ownership leave no ambiguity; (4) metric "
+        "consistency -- units and scopes agree with the §4 glossary. "
+        "Missing measurement recipes are NOT findings (recipes belong to the "
+        "Menxia execution phase); only a comparative numeric claim that is "
+        "neither measured-with-source nor marked 待实测 is a finding.",
         "A claim that cannot be verified within this run closes with "
         "decision=WONT_VERIFY and the verification recipe in the resolution text; "
         "do not keep it blocking for more rounds.",

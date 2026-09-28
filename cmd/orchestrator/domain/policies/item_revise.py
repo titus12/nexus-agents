@@ -91,14 +91,23 @@ def materialize_item_patch(
     budget, not content disagreements.
     """
 
-    if str(reply.get("item_id") or "").strip() != item_id:
-        return None, f"ITEM_PATCH_IDENTITY:expected {item_id}"
+    supplied_id = str(reply.get("item_id") or "").strip()
+    if supplied_id != item_id:
+        # expected/actual detail so a re-ask fixes the exact drift instead of
+        # guessing at "identity" (task-20260927-616863 SOLVER:11-17).
+        return None, (
+            f"ITEM_PATCH_IDENTITY:expected {item_id} actual={supplied_id or 'none'}"
+        )
     raw_item = reply.get("item")
     if not isinstance(raw_item, Mapping):
         return None, "ITEM_PATCH_MISSING:reply must carry the patched item object"
     patched_item = dict(raw_item)
     if str(patched_item.get("item_id") or "").strip() != item_id:
-        return None, f"ITEM_PATCH_IDENTITY:item.item_id must stay {item_id}"
+        supplied_item_id = str(patched_item.get("item_id") or "").strip()
+        return None, (
+            f"ITEM_PATCH_IDENTITY:item.item_id must stay {item_id} "
+            f"actual={supplied_item_id or 'none'}"
+        )
     group_id = str(patched_item.get("group_id") or "").strip()
     if not group_id:
         return None, "ITEM_PATCH_GROUP_MISSING:item.group_id is required"

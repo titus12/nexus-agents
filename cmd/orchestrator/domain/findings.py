@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+import re
+from typing import Any, Iterable, Mapping
 
 
 _CRITIC_DECISION_STATUS = {
@@ -53,6 +54,70 @@ def normalize_finding_status(status: Any = None, decision: Any = None) -> str:
             return mapped
         return raw_status
     return mapped or "OPEN"
+
+
+# A finding whose owner is only named inside the free-text ``target`` (the
+# critic contract historically omitted ``item_id``) must still resolve to the
+# exact plan item id.  Anything parsed from ``target`` is matched as a whole
+# token: a truncated fragment like ``item-000004.acceptance_signals and
+# task_review_ledger`` is not an item id and must never be mistaken for one.
+_ITEM_ID_PATTERN = re.compile(r"\b(item-[A-Za-z0-9][A-Za-z0-9_-]*)\b")
+_GROUP_ID_PATTERN = re.compile(r"\b(group-[A-Za-z0-9][A-Za-z0-9_-]*)\b")
+
+
+def _finding_field(finding: object, name: str) -> str:
+    if isinstance(finding, Mapping):
+        value = finding.get(name)
+    else:
+        value = getattr(finding, name, None)
+    return str(value or "").strip()
+
+
+def _is_clean_token(value: str) -> bool:
+    """True for a bare id token, False for a truncated free-text fragment."""
+
+    return bool(value) and not any(ch.isspace() or ch in "/" for ch in value)
+
+
+def resolve_finding_item_id(
+    finding: object,
+    known_item_ids: Iterable[str] | None = None,
+) -> str:
+    """Return the plan item id a finding owns.
+
+    Prefers the explicit ``item_id`` field; falls back to extracting an
+    ``item-...`` token from the free-text ``target``.  When ``known_item_ids``
+    is supplied, candidates are intersected with it so a target that mentions
+    several ids resolves to the one the plan actually owns.  The historical
+    ``target.split("/")[-1]`` fallback returned garbage like
+    ``item-000004.acceptance_signals and task_review_ledger``, which silently
+    excluded the item from scoped solver revisions (live incident
+    task-20260926-35833d).
+    """
+
+    explicit = _finding_field(finding, "item_id")
+    if _is_clean_token(explicit):
+        return explicit
+    target = _finding_field(finding, "target")
+    candidates = list(dict.fromkeys(_ITEM_ID_PATTERN.findall(target)))
+    if known_item_ids is not None:
+        known = {str(value).strip() for value in known_item_ids if str(value).strip()}
+        for candidate in candidates:
+            if candidate in known:
+                return candidate
+    if candidates:
+        return candidates[0]
+    return ""
+
+
+def resolve_finding_group_id(finding: object) -> str:
+    """Return the group id named by the finding, deriving it from ``target``."""
+
+    explicit = _finding_field(finding, "group_id")
+    if _is_clean_token(explicit):
+        return explicit
+    match = _GROUP_ID_PATTERN.search(_finding_field(finding, "target"))
+    return match.group(1) if match else ""
 
 
 @dataclass(frozen=True)
@@ -108,8 +173,8 @@ class Finding:
             status=data.get("status"),
             decision=data.get("decision"),
         )
-        data["group_id"] = str(data.get("group_id") or "").strip()
-        data["item_id"] = str(data.get("item_id") or "").strip()
+        data["group_id"] = resolve_finding_group_id(data)
+        data["item_id"] = resolve_finding_item_id(data)
         data["scope"] = str(data.get("scope") or "").strip()
         for name in ("category", "target", "claim", "required_action", "impact"):
             data[name] = str(data.get(name) or "").strip()
@@ -165,4 +230,9 @@ class Finding:
         return self.status in {"RESOLVED", "WONT_FIX", "DEFERRED", "WONT_VERIFY"}
 
 
-__all__ = ["Finding", "normalize_finding_status"]
+__all__ = [
+    "Finding",
+    "normalize_finding_status",
+    "resolve_finding_group_id",
+    "resolve_finding_item_id",
+]

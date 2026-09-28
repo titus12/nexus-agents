@@ -8,45 +8,47 @@ lineage -- never on the plan's substance.  Because the standard previously
 lived only inside the Critic's head, each revision round re-negotiated it at
 ~9-10 minutes per round.  Feeding the same text to Analyst, Solver, and Critic
 moves the negotiation to plan-writing time, where it costs nothing.
+
+2026-09-27 thin-doc revision: the five-element measurement recipe moved to the
+Menxia execution phase (its skill owns "how to measure").  Zhongshu only pins
+WHAT must be observable -- one signal = one checkable assertion, comparative
+numeric claims either measured-with-source or explicitly 待实测, and ambiguous
+metric scopes live in the §4 glossary.  The mechanical gate keeps only the
+anti-fake-measurement rule.
 """
 
 from collections.abc import Mapping
 
 ZHONGSHU_ACCEPTANCE_CHECKLIST = (
-    "[Acceptance standard] 每条验收信号（acceptance_signal / acceptance_signals）必须可观测，逐条对照：",
-    "1. 逐条可核验：列表中每项措施/结论单独给出核验方法，不得合并成一句「确认X正确」。",
-    "2. 度量口径：凡涉及大小/数量/比例，写明统一单位与统计方式（如 UTF-8 字节数、字段数、样本量、P50/P95）。",
-    "3. 证据来源：写明证据取自哪里（文件:行号、日志字段、配置项、测试名），不得只给结论。",
-    "4. 运行时事实不可得时显式标注 UNKNOWN 并列出补采信号；不得以代码推断替代实测，也不得声称已验证。",
-    "5. 验收声明与已有证据一致：不得声称未实现的机制（如 exponential backoff）已有证据支持。",
-    "6. 溯源闭合：每个 item 的 source_requirement_ids 必须能追溯到 requirement；无来源的项写明理由。",
-    "7. 图文一致：文字中声明的依赖/前置必须体现在任务图 dependencies 中，或明确声明仅为参考信息。",
-    "8. 可测性闸门：信号声称运行时度量结论（百分比、提升/降低/缩短/加速等对比）却无法在本轮内实测的，"
-    "必须标注 UNKNOWN 并列出补采信号，不得以方向性描述替代。若本轮内确实可实测，可写明「验证方法：」及"
-    "测量对象（含 file:line）、命令/步骤、指标与单位、基线来源、预期观测量。既无可行验证方法又未标注 "
-    "UNKNOWN 的信号会被机械闸门以 ACCEPTANCE_SIGNAL_UNVERIFIABLE 拒绝。",
+    "[Acceptance standard] 每条验收信号（acceptance_signal）必须是一个可打勾的场景断言，逐条对照：",
+    "1. 可打勾：一条信号一个断言（给定-当-则或简单谓词），审阅时能直接判定过/不过；不写过程描述，不把多条断言合并成一段。",
+    "2. 数值结论二选一：对比性数值结论（百分比、提升/降低/缩短/加速等）要么给实测数字并注明来源，要么明确写「待实测」；估算不得冒充实测。既无实测来源又未标注的信号会被机械闸门以 ACCEPTANCE_SIGNAL_UNVERIFIABLE 拒绝。具体怎么测（测量对象、命令、指标、基线）由门下省实施计划负责，不在需求文档展开。",
+    "3. 口径与出处：计量范围/单位等易混口径写入 §4 口径定义表并在信号中引用，不写长段解释；断言引用的证据（文件:行、日志字段、测试名）须真实存在且支撑该断言；每条信号归属的 item 须能追溯到 requirement。",
 )
 
-# Signals asserting a measured *outcome* (comparison or ratio) need a recipe or
-# an UNKNOWN demotion.  Bare unit words are deliberately excluded: rule 2
-# demands units even on statically checkable claims (e.g. a field named
-# elapsed_ms), so units alone must not trigger the gate.
+# Signals asserting a measured *outcome* (comparison or ratio) need a
+# measured source or an explicit demotion.  Bare unit words are deliberately
+# excluded: units must appear even on statically checkable claims (e.g. a
+# field named elapsed_ms), so units alone must not trigger the gate.
 _MEASUREMENT_CLAIM_MARKERS = (
     "%", "％", "提升", "降低", "缩短", "加速", "减少", "提高",
     "倍增", "倍", "优化幅度", "吞吐", "faster", "slower",
 )
-_RECIPE_ESCAPE_MARKERS = ("UNKNOWN", "ＵＮＫＮＯＷＮ", "验证方法")
+# Escape markers: the claim is honestly demoted (待实测/UNKNOWN) or carries a
+# verification recipe / measured source.  The gate is a coarse pre-filter
+# against fake measurements, not a recipe format check.
+_RECIPE_ESCAPE_MARKERS = ("UNKNOWN", "ＵＮＫＮＯＷＮ", "待实测", "未实测", "验证方法", "实测")
 
 
 def acceptance_signal_gate(plan: object) -> list[str]:
-    """Reject measurement claims that carry neither a recipe nor UNKNOWN.
+    """Reject measurement claims that carry neither a measured source nor 待实测.
 
-    A signal that promises a measured improvement/percentage cannot be closed
-    by static review; leaving it verifiable-in-name-only sent real runs into
+    A signal promising a measured improvement/percentage cannot be closed by
+    static review; leaving it verifiable-in-name-only sent real runs into
     five-round evidence fights (task-20260918-0b7867 items 003/007/008/009).
-    The demand must be satisfiable inside the capability set: either the
-    signal embeds a five-element verification recipe (statically checkable)
-    or it demotes the claim to UNKNOWN.
+    The thin-doc rule is a binary: the claim cites measured results, or it is
+    explicitly demoted to 待实测/UNKNOWN.  Recipe formatting is the Menxia
+    execution phase's business, not this gate's.
     """
 
     issues: list[str] = []
@@ -96,11 +98,12 @@ def acceptance_standard_hint() -> str:
 
     return (
         "Judge each acceptance_signal against the shared acceptance standard: "
-        "per-item observability, explicit measurement units, cited evidence "
-        "sources, claims consistent with evidence, and closed "
+        "one signal = one checkable assertion, explicit measurement units and "
+        "metric scope from the §4 glossary, cited evidence sources, claims "
+        "consistent with evidence, and closed "
         "source_requirement_ids lineage.  A signal claiming a measured outcome "
-        "that cannot be measured this round must carry UNKNOWN with follow-up "
-        "signals; do NOT require a five-element verification recipe -- recipes "
+        "that cannot be measured this round must carry 待实测/UNKNOWN; do NOT "
+        "require a five-element verification recipe -- recipes "
         "belong to the execution phase, not the task-list review.  Close an "
         "unverifiable claim with decision=WONT_VERIFY instead of keeping it "
         "blocking."

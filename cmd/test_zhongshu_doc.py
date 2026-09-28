@@ -47,6 +47,7 @@ def _doc_markdown(
     group_id: str = "group-000001",
     version: int = 1,
     acceptance_lines: tuple[str, ...] = ("A is observable", "B is observable"),
+    acceptance_by_item: dict[str, tuple[str, ...]] | None = None,
     section_overrides: dict[int, tuple[str, str]] | None = None,
     drop_sections: tuple[int, ...] = (),
 ) -> str:
@@ -57,7 +58,14 @@ def _doc_markdown(
             continue
         name, body = overrides.get(number, (name, body))
         if number == 8:
-            body = "\n".join(acceptance_lines)
+            if acceptance_by_item is not None:
+                body_lines: list[str] = []
+                for item_id, signals in acceptance_by_item.items():
+                    body_lines.append(f"### {item_id}")
+                    body_lines.extend(signals)
+                body = "\n".join(body_lines)
+            else:
+                body = "\n".join(acceptance_lines)
         lines.append(f"## {number}. {name}")
         if body:
             lines.append(body)
@@ -438,6 +446,359 @@ class FoldGroupDocTests(unittest.TestCase):
         self.assertTrue(
             error.startswith("SOLVER_GROUP_DOC_INVALID:doc_version_jump:1->3"),
             error,
+        )
+
+
+class Section8ProjectionTests(unittest.TestCase):
+    """§8 item subsections are the single author of acceptance_signals."""
+
+    def _plan(self, signals_a: tuple[str, ...] = ("WRONG model text",)) -> dict:
+        def item(item_id: str, signals: list) -> dict:
+            return {
+                "item_id": item_id,
+                "group_id": "group-000001",
+                "title": item_id,
+                "objective": "do it",
+                "source_requirement_ids": ["req-000001"],
+                "dependencies": [],
+                "acceptance_signals": signals,
+                "unknowns": [],
+                "risks": [],
+                "parallelizable": True,
+            }
+
+        return {
+            "requirements": [],
+            "items": [
+                item("item-000001", list(signals_a)),
+                item("item-000002", ["B is observable"]),
+            ],
+            "groups": [
+                {"group_id": "group-000001", "item_ids": ["item-000001", "item-000002"]}
+            ],
+            "dependencies": [],
+            "scope": {},
+            "unknowns": [],
+            "risks": [],
+        }
+
+    def _by_item(self) -> dict:
+        return {
+            "item-000001": ("A is observable", "A latency budget is observable"),
+            "item-000002": ("B is observable",),
+        }
+
+    def test_parse_section8_item_subsections(self) -> None:
+        from orchestrator.domain.zhongshu_doc import ZhongshuRequirementDoc
+
+        doc = ZhongshuRequirementDoc.parse(
+            _doc_markdown(acceptance_by_item=self._by_item())
+        )
+        self.assertEqual(
+            doc.acceptance_item_signals(),
+            {
+                "item-000001": ("A is observable", "A latency budget is observable"),
+                "item-000002": ("B is observable",),
+            },
+        )
+
+    def test_project_signals_overwrites_plan_field(self) -> None:
+        from orchestrator.domain.zhongshu_doc import project_acceptance_signals
+
+        plan, error = project_acceptance_signals(
+            self._plan(),
+            {"group-000001": _doc_markdown(acceptance_by_item=self._by_item())},
+        )
+        self.assertEqual(error, "")
+        by_id = {entry["item_id"]: entry for entry in plan["items"]}
+        self.assertEqual(
+            by_id["item-000001"]["acceptance_signals"],
+            ["A is observable", "A latency budget is observable"],
+        )
+        self.assertEqual(by_id["item-000002"]["acceptance_signals"], ["B is observable"])
+
+    def test_project_signals_missing_item_section_rejected(self) -> None:
+        from orchestrator.domain.zhongshu_doc import project_acceptance_signals
+
+        plan, error = project_acceptance_signals(
+            self._plan(),
+            {
+                "group-000001": _doc_markdown(
+                    acceptance_by_item={"item-000001": ("A is observable",)}
+                )
+            },
+        )
+        self.assertIsNone(plan)
+        self.assertEqual(error, "PLAN_HAS_NO_ACCEPTANCE:item-000002")
+
+    def test_project_is_retryable(self) -> None:
+        from orchestrator.domain.policies.solver_plan import (
+            is_retryable_solver_reply_error,
+        )
+
+        self.assertTrue(
+            is_retryable_solver_reply_error("PLAN_HAS_NO_ACCEPTANCE:item-000002")
+        )
+
+    def test_legacy_doc_without_subsections_keeps_model_signals(self) -> None:
+        from orchestrator.domain.zhongshu_doc import project_acceptance_signals
+
+        plan, error = project_acceptance_signals(
+            self._plan(),
+            {"group-000001": _doc_markdown()},
+        )
+        self.assertEqual(error, "")
+        by_id = {entry["item_id"]: entry for entry in plan["items"]}
+        self.assertEqual(by_id["item-000001"]["acceptance_signals"], ["WRONG model text"])
+
+    def test_orphan_subsection_is_reported(self) -> None:
+        from orchestrator.domain.zhongshu_doc import group_doc_violations
+
+        violations = group_doc_violations(
+            _doc_markdown(
+                acceptance_by_item={
+                    "item-000001": ("A is observable",),
+                    "item-000002": ("B is observable",),
+                    "item-000099": ("ghost",),
+                }
+            ),
+            previous_version=None,
+            review=_review(),
+            group_id="group-000001",
+        )
+        self.assertIn("acceptance_orphan:item-000099", violations)
+
+    def test_process_reply_projects_signals(self) -> None:
+        from orchestrator.domain.zhongshu.solver import process_solver_reply
+
+        outcome = process_solver_reply(
+            {
+                "action": "READY_FOR_CRITIC",
+                "mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY",
+                "plan": self._plan(),
+                "changes": [],
+                "group_docs": [
+                    {
+                        "group_id": "group-000001",
+                        "markdown": _doc_markdown(acceptance_by_item=self._by_item()),
+                    }
+                ],
+            },
+            ReviewState(revision_id="R1", plan={"items": [], "groups": []}),
+        )
+        self.assertEqual(outcome.error, "")
+        by_id = {entry["item_id"]: entry for entry in outcome.materialized["items"]}
+        self.assertEqual(
+            by_id["item-000001"]["acceptance_signals"],
+            ["A is observable", "A latency budget is observable"],
+        )
+
+    def test_contract_acceptance_signals_optional(self) -> None:
+        from orchestrator.contracts.zhongshu_solver import _TASK
+
+        self.assertNotIn("acceptance_signals", _TASK["required"])
+
+
+class ViolationDetailAndFeedbackTests(unittest.TestCase):
+    """Mechanical rejections carry an expected/actual diff for the re-ask."""
+
+    def _details(self):
+        from orchestrator.domain.zhongshu_doc import doc_violation_details
+
+        return doc_violation_details(
+            _doc_markdown(
+                acceptance_lines=("A is observable", "ORPHAN line"),
+            ),
+            previous_version=None,
+            review=_review(),
+            group_id="group-000001",
+        )
+
+    def test_details_carry_kind_item_expected_actual(self) -> None:
+        orphan = [d for d in self._details() if d.kind == "acceptance_orphan"]
+        self.assertTrue(orphan)
+        self.assertEqual(orphan[0].actual, "ORPHAN line")
+        self.assertEqual(orphan[0].item_id, "")
+        self.assertIn("B is observable", orphan[0].expected)
+
+    def test_invalid_doc_error_carries_expected_rows(self) -> None:
+        from orchestrator.domain.policies.solver_plan import carry_forward_group_docs
+
+        _, error = carry_forward_group_docs(
+            [
+                {
+                    "group_id": "group-000001",
+                    "markdown": _doc_markdown(
+                        acceptance_lines=("A is observable", "ORPHAN line")
+                    ),
+                }
+            ],
+            (),
+            editable_group_ids=("group-000001",),
+            required_group_ids=("group-000001",),
+            review=_review(),
+            plan={"items": []},
+        )
+        self.assertTrue(error.startswith("SOLVER_GROUP_DOC_INVALID:"), error)
+        self.assertIn("expected_rows=", error)
+        self.assertIn("B is observable", error)
+
+
+class ReviewPreflightTests(unittest.TestCase):
+    """LLM-free pre-dispatch gate: unfit groups never cost a review round."""
+
+    def _review(self, markdown: str, plan: dict | None = None):
+        return ReviewState(
+            revision_id="R1",
+            plan=plan if plan is not None else {"items": [], "groups": []},
+            task_items=(
+                ReviewTaskItem(
+                    item_id="item-000001",
+                    group_id="group-000001",
+                    order=1,
+                    acceptance_signals=("A is observable",),
+                ),
+            ),
+            zhongshu_groups=(
+                ZhongshuGroupState(
+                    group_id="group-000001", doc_markdown=markdown, doc_version=1
+                ),
+            ),
+        )
+
+    def test_preflight_flags_unfit_group(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import (
+            review_preflight_violations,
+        )
+
+        violations = review_preflight_violations(
+            self._review(
+                _doc_markdown(
+                    drop_sections=(6,), acceptance_lines=("A is observable",)
+                )
+            )
+        )
+        self.assertTrue(
+            any(v.startswith("group-000001:missing_section:6") for v in violations),
+            violations,
+        )
+
+    def test_preflight_clean_review_passes(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import (
+            review_preflight_violations,
+        )
+
+        violations = review_preflight_violations(
+            self._review(_doc_markdown(acceptance_lines=("A is observable",)))
+        )
+        self.assertEqual(violations, ())
+
+    def test_preflight_flags_blocking_structural(self) -> None:
+        from orchestrator.domain.policies.zhongshu_group import (
+            review_preflight_violations,
+        )
+
+        plan = {
+            "items": [
+                {
+                    "item_id": "item-000001",
+                    "group_id": "group-000001",
+                    "source_requirement_ids": [],
+                    "dependencies": ["item-000002"],
+                    "acceptance_signals": [],
+                },
+                {
+                    "item_id": "item-000002",
+                    "group_id": "group-000001",
+                    "source_requirement_ids": [],
+                    "dependencies": ["item-000001"],
+                    "acceptance_signals": [],
+                },
+            ],
+            "groups": [
+                {"group_id": "group-000001", "item_ids": ["item-000001", "item-000002"]}
+            ],
+        }
+        violations = review_preflight_violations(
+            self._review(
+                _doc_markdown(acceptance_lines=("A is observable",)), plan=plan
+            )
+        )
+        self.assertTrue(
+            any(v.startswith("plan:DEPENDENCY_CYCLE") for v in violations),
+            violations,
+        )
+
+
+class MarkdownEmphasisToleranceTests(unittest.TestCase):
+    """Id tokens wrapped in bold/backticks must resolve to the bare id.
+
+    Regression (task-20260928-f13561): the solver wrote ``### **item-00001**``
+    and a bolded title line; the raw tokens mismatched the member set and
+    every signal under them was orphaned / the whole document was rejected as
+    unparseable.
+    """
+
+    def _wrapped_doc(self) -> str:
+        sections = (
+            ("背景", "任务来自 issue 需求。"),
+            ("目标", "输出 A 与 B。"),
+            ("标识与范围", "group-000001 覆盖 item-000001。"),
+            ("状态与边界语义", "仅在依赖组冻结后生效。"),
+            ("行为要求", "必须返回结构化结果。"),
+            ("责任边界", "Solver 撰写，Critic 裁决。"),
+            ("交叉不变量", "依赖组冻结前本组不得冻结。"),
+            ("验收标准", ""),
+            ("非目标", "不包含部署。"),
+        )
+        lines = ["# **group-000001 需求文档 [v1]**"]
+        for number, (name, body) in enumerate(sections, start=1):
+            lines.append(f"## {number}. {name}")
+            if body:
+                lines.append(body)
+            if name == "验收标准":
+                lines.append("### **item-000001**")
+                lines.append("A is observable")
+                lines.append("### `item-000002` 要点")
+                lines.append("B is observable")
+        return "\n".join(lines)
+
+    def test_bold_title_and_ids_parse_to_bare_tokens(self) -> None:
+        from orchestrator.domain.zhongshu_doc import ZhongshuRequirementDoc
+
+        doc = ZhongshuRequirementDoc.parse(self._wrapped_doc())
+
+        self.assertEqual(doc.group_id, "group-000001")
+        self.assertEqual(doc.version, 1)
+        self.assertEqual(
+            doc.acceptance_item_signals(),
+            {
+                "item-000001": ("A is observable",),
+                "item-000002": ("B is observable",),
+            },
+        )
+
+    def test_wrapped_ids_close_against_the_members(self) -> None:
+        from orchestrator.domain.zhongshu_doc import doc_violation_details
+
+        review = ReviewState(
+            revision_id="R1",
+            task_items=(
+                ReviewTaskItem("item-000001", "group-000001"),
+                ReviewTaskItem("item-000002", "group-000001"),
+            ),
+            task_groups=(
+                ReviewTaskGroup("group-000001", ("item-000001", "item-000002")),
+            ),
+        )
+        violations = doc_violation_details(
+            self._wrapped_doc(), review=review, group_id="group-000001"
+        )
+
+        codes = [entry.code for entry in violations]
+        self.assertNotIn("doc_unparseable", codes)
+        self.assertFalse(
+            any(code == "acceptance_orphan" for code in codes), violations
         )
 
 

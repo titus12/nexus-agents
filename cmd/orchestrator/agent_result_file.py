@@ -113,9 +113,21 @@ def write_agent_result_file(
     if expected_schema_hash:
         supplied_schema_hash = str(normalized.get("structured_output_schema_hash") or "")
         if supplied_schema_hash and supplied_schema_hash != expected_schema_hash:
-            raise AgentResultFileError(
-                "inline result schema hash mismatch: "
-                f"expected={expected_schema_hash} actual={supplied_schema_hash}"
+            # The echo is diagnostics, not a gate: models hand-copy the 64-char
+            # hash and transposition typos are routine (live incident
+            # task-20260927-de54aa CRITIC:6 group-01 -- a structurally perfect
+            # review was discarded over `b0c3`/`c0b3`).  The structural
+            # validation below is the real gate; stamp the expected hash and
+            # keep the mismatch visible in the log.
+            logger.warning(
+                "INLINE_RESULT_SCHEMA_HASH_ECHO_MISMATCH task_id=%s request_id=%s "
+                "phase=%s role=%s expected=%s actual=%s action=stamped",
+                task_id,
+                request_id,
+                phase,
+                role,
+                expected_schema_hash,
+                supplied_schema_hash,
             )
         supplied_protocol = str(normalized.get("structured_output_protocol") or "")
         if supplied_protocol and supplied_protocol != STRUCTURED_OUTPUT_PROTOCOL:
@@ -315,7 +327,6 @@ def read_agent_result_file(
         "state": expected_state,
         "role": role,
         "structured_output_protocol": STRUCTURED_OUTPUT_PROTOCOL,
-        "structured_output_schema_hash": expected_schema_hash,
     }
     backfilled_fields: list[str] = []
     for field, expected_value in expected_transport.items():
@@ -330,6 +341,27 @@ def read_agent_result_file(
         if allow_transport_backfill:
             payload[field] = expected_text
             backfilled_fields.append(field)
+
+    # The schema-hash echo is advisory diagnostics, never a rejection: the
+    # agent hand-copies the 64-char hash and transcription typos are routine.
+    # The orchestrator stamps the expected value and the structural contract
+    # validation below is the real gate (task-20260927-de54aa CRITIC:6
+    # group-01 was discarded over a two-character echo transposition).
+    if expected_schema_hash:
+        supplied_echo = str(payload.get("structured_output_schema_hash") or "")
+        if supplied_echo and supplied_echo != expected_schema_hash:
+            logger.warning(
+                "AGENT_REPLY_FILE_SCHEMA_HASH_ECHO_MISMATCH task_id=%s request_id=%s "
+                "phase=%s role=%s path=%s expected=%s actual=%s action=stamped",
+                task_id,
+                request_id,
+                phase,
+                role,
+                path,
+                expected_schema_hash,
+                supplied_echo,
+            )
+        payload["structured_output_schema_hash"] = expected_schema_hash
 
     # ``mode`` labels which formalization the agent used.  Several modes are
     # declared for the role, and the reply content decides which one applies, so
@@ -398,6 +430,10 @@ def read_agent_result_file(
             )
         actual_schema_hash = str(payload.get("structured_output_schema_hash") or "")
         if actual_schema_hash != expected_schema_hash:
+            # Unreachable through the public entry points: the echo is stamped
+            # to the expected value above.  Kept as a loud invariant guard so a
+            # future caller that bypasses the stamp cannot let a stale schema
+            # hash masquerade as the expected one.
             logger.warning(
                 "AGENT_REPLY_FILE_SCHEMA_HASH_MISMATCH task_id=%s request_id=%s "
                 "phase=%s role=%s path=%s expected=%s actual=%s",
@@ -419,6 +455,11 @@ def read_agent_result_file(
             raise AgentResultFileError("result role mismatch")
     if not payload.get("action"):
         raise AgentResultFileError("result action is missing")
+    # Same tolerant normalization the inline path applies: enum labels and
+    # scalar identity strings (item_id as null/number) are canonicalized
+    # before the contract validator runs, so the two entry points accept the
+    # same reply shapes.
+    normalize_role_payload(payload, phase=phase, role=role, state=expected_state)
     _validate_structured_shape(
         payload,
         phase=phase,

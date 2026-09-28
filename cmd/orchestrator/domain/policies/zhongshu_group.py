@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 
-from ..context import ReviewState, ZhongshuGroupState
+from ..context import ReviewState, ReviewTaskRecord, ZhongshuGroupState
 from .zhongshu import _ACTIVE_STATUSES, _BLOCKING_SEVERITIES, approved_item_ids
 
 # Consecutive revision rounds without a shrinking open-blocker count before
@@ -247,15 +247,189 @@ def apply_zhongshu_group_resets(
     return tuple(by_id.values())
 
 
+def _group_row(review: ReviewState, group_id: str) -> ZhongshuGroupState | None:
+    for row in getattr(review, "zhongshu_groups", ()) or ():
+        if row.group_id == group_id:
+            return row
+    return None
+
+
+def _member_surface_dict(item: object) -> dict:
+    return {
+        "item_id": str(getattr(item, "item_id", "") or ""),
+        "group_id": str(getattr(item, "group_id", "") or ""),
+        "title": str(getattr(item, "title", "") or ""),
+        "objective": str(getattr(item, "objective", "") or ""),
+        "dependencies": list(getattr(item, "dependencies", ()) or ()),
+        "source_requirement_ids": list(
+            getattr(item, "source_requirement_ids", ()) or ()
+        ),
+        "acceptance_signals": list(getattr(item, "acceptance_signals", ()) or ()),
+    }
+
+
+def current_member_hashes(review: ReviewState, group_id: str) -> dict[str, str]:
+    """Review-surface hash of every member item of ``group_id``."""
+
+    from ...zhongshu_review_queue import task_surface_hash
+
+    members = [
+        item
+        for item in getattr(review, "task_items", ()) or ()
+        if str(getattr(item, "group_id", "") or "") == group_id
+    ]
+    member_ids = [str(item.item_id) for item in members]
+    return {
+        str(item.item_id): task_surface_hash(_member_surface_dict(item), member_ids)
+        for item in members
+    }
+
+
+def current_group_surface_hash(review: ReviewState, group_id: str) -> str:
+    """Live group surface hash (requirement doc + member task surfaces)."""
+
+    from ...zhongshu_review_queue import group_surface_hash
+
+    row = _group_row(review, group_id)
+    doc_hash = str(getattr(row, "doc_hash", "") or "") if row else ""
+    return group_surface_hash(
+        group_id,
+        current_member_hashes(review, group_id).values(),
+        doc_hash=doc_hash,
+    )
+
+
+def apply_group_verdict(
+    review: ReviewState,
+    group_id: str,
+    action: str,
+    *,
+    member_hashes: Mapping[str, str] | None = None,
+) -> tuple[tuple[ReviewTaskRecord, ...], tuple[ZhongshuGroupState, ...]]:
+    """Project one group verdict onto the ledger and the group rows.
+
+    ``APPROVE_GROUP`` mechanically projects every member item to APPROVED
+    and parks the group as CONVERGED (requirements §5.2); ``REVISE_GROUP``
+    resets the whole group for a revision wave.  Findings keep their item
+    coordinates untouched: they route revisions and evidence but never
+    carry a per-item verdict.  Revision budget and stall accounting stay
+    with :func:`apply_zhongshu_round`.
+    """
+
+    from ...zhongshu_review_queue import group_surface_hash
+
+    if str(action or "").strip() not in ("APPROVE_GROUP", "REVISE_GROUP"):
+        raise ValueError(f"unsupported group verdict action: {action!r}")
+    approved = str(action).strip() == "APPROVE_GROUP"
+    members = [
+        str(item.item_id)
+        for item in getattr(review, "task_items", ()) or ()
+        if str(getattr(item, "group_id", "") or "") == group_id
+    ]
+    hashes = {
+        str(key): str(value) for key, value in (member_hashes or {}).items()
+    }
+    records = {
+        record.item_id: record
+        for record in getattr(review, "task_review_ledger", ()) or ()
+    }
+    for item_id in members:
+        previous = records.get(item_id)
+        records[item_id] = ReviewTaskRecord(
+            item_id=item_id,
+            task_hash=str(
+                hashes.get(item_id) or getattr(previous, "task_hash", "") or ""
+            ),
+            dependency_hash=str(getattr(previous, "dependency_hash", "") or ""),
+            status="APPROVED" if approved else "CHANGES_REQUIRED",
+            changes_rounds=(
+                0 if approved else int(getattr(previous, "changes_rounds", 0) or 0)
+            ),
+        )
+    rows: list[ZhongshuGroupState] = []
+    for row in getattr(review, "zhongshu_groups", ()) or ():
+        if row.group_id != group_id:
+            rows.append(row)
+            continue
+        member_hash_values = [
+            records[item_id].task_hash for item_id in members if item_id in records
+        ]
+        rows.append(
+            replace(
+                row,
+                stage="CONVERGED" if approved else "REVIEWING",
+                last_verdict=str(action).strip(),
+                approved_surface_hash=(
+                    group_surface_hash(
+                        group_id, member_hash_values, doc_hash=row.doc_hash
+                    )
+                    if approved
+                    else ""
+                ),
+            )
+        )
+    return tuple(records.values()), tuple(rows)
+
+
+def group_approval_held(review: ReviewState, group_id: str) -> bool:
+    """The group approval ratchet: CONVERGED while the surface is unchanged."""
+
+    row = _group_row(review, group_id)
+    if row is None or str(getattr(row, "stage", "") or "") != "CONVERGED":
+        return False
+    approved = str(getattr(row, "approved_surface_hash", "") or "")
+    return bool(approved) and approved == current_group_surface_hash(review, group_id)
+
+
+def review_preflight_violations(review: ReviewState) -> tuple[str, ...]:
+    """LLM-free pre-dispatch gate for the review wave.
+
+    Structural plan defects and per-group document-form/closure violations
+    are mechanically detectable before any worker runs; routing the unfit
+    groups straight to a revision round keeps a doomed review dispatch from
+    costing an LLM round (requirements §9.2 pre-check rule).  Empty means
+    every group is fit for review.
+    """
+
+    from ..zhongshu_doc import ZhongshuDocError, ZhongshuRequirementDoc
+    from .solver_plan import structural_integrity_errors
+
+    errors: list[str] = []
+    plan = getattr(review, "plan", None)
+    if isinstance(plan, Mapping) and plan.get("items"):
+        errors.extend(
+            f"plan:{issue}" for issue in structural_integrity_errors(plan)
+        )
+    for row in getattr(review, "zhongshu_groups", ()) or ():
+        markdown = str(getattr(row, "doc_markdown", "") or "")
+        if not markdown.strip():
+            continue
+        try:
+            doc = ZhongshuRequirementDoc.parse(markdown)
+        except ZhongshuDocError as error:
+            errors.append(f"{row.group_id}:doc_unparseable:{error}")
+            continue
+        errors.extend(
+            f"{row.group_id}:{code}"
+            for code in doc.verify(review, row.group_id)
+        )
+    return tuple(errors)
+
+
 __all__ = [
     "ZHONGSHU_GROUP_STALL_LIMIT",
+    "apply_group_verdict",
     "apply_zhongshu_group_resets",
     "apply_zhongshu_round",
+    "current_group_surface_hash",
+    "current_member_hashes",
     "freeze_ready_groups",
+    "group_approval_held",
     "group_dependencies",
     "group_item_ids",
     "group_of_item",
     "group_open_blockers",
+    "review_preflight_violations",
     "zhongshu_drainout_parked",
     "zhongshu_group_converged",
     "zhongshu_group_resets_from_payload",

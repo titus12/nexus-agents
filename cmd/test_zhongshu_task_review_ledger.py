@@ -4,6 +4,7 @@ from dataclasses import replace
 import unittest
 
 from orchestrator.domain.context import (
+    ParallelState,
     ProgressState,
     RequestState,
     ReviewState,
@@ -12,6 +13,7 @@ from orchestrator.domain.context import (
     ReviewTaskRecord,
     TaskIdentity,
     WorkflowContext,
+    ZhongshuParallelLimits,
     context_from_dto,
     context_to_dto,
 )
@@ -26,6 +28,9 @@ def _context(ledger: tuple[ReviewTaskRecord, ...] = ()) -> WorkflowContext:
         identity=TaskIdentity("task-1", "issue-1", "", "request-1"),
         progression=ProgressState("ZHONGSHU_CRITIC", 5, "2026-09-11T00:00:00Z"),
         request=RequestState(raw_request="review"),
+        # This suite covers the item-granular task-review wave (the rollback
+        # path kept for one version after the 2026-09-26 group pipeline).
+        parallel=ParallelState(zhongshu=ZhongshuParallelLimits(review_unit="item")),
         review=ReviewState(
             revision_id="rev-1",
             plan_hash="plan-hash",

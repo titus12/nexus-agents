@@ -14,10 +14,13 @@ history.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import logging
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..context import ReviewState, WorkflowContext, ZhongshuGroupState
 from ..decisions import EffectRequest
+from ..findings import resolve_finding_item_id
+from ..zhongshu_doc import project_acceptance_signals
 from ..policies.solver_plan import (
     carry_forward_group_docs,
     materialize_solver_reply,
@@ -37,6 +40,8 @@ from .stages import (
     resolve_reply_stage,
     review_has_active_findings,
 )
+
+logger = logging.getLogger("review_orchestrator_fsm")
 
 # Fields a revising Solver needs per finding.  The full finding record carries
 # round history and verification traces that only bloat the revision context
@@ -102,6 +107,20 @@ def revision_finding_payload(finding: object) -> dict[str, object]:
     return {key: record[key] for key in _REVISION_FINDING_FIELDS if key in record}
 
 
+def _plan_item_ids(review: object) -> set[str] | None:
+    """Item ids the live plan owns, or ``None`` when no plan projection exists."""
+
+    plan = getattr(review, "plan", None)
+    if not isinstance(plan, Mapping):
+        return None
+    raw_items = plan.get("items") or plan.get("candidate_items") or []
+    return {
+        str(item.get("item_id") or "").strip()
+        for item in raw_items
+        if isinstance(item, Mapping) and str(item.get("item_id") or "").strip()
+    }
+
+
 def batch_item_scope(review: object, batch: SolverBatch) -> list[str]:
     """Items the dictated batch may change, as declared in the dispatch envelope.
 
@@ -111,16 +130,20 @@ def batch_item_scope(review: object, batch: SolverBatch) -> list[str]:
     """
 
     selected = set(batch.selected_finding_ids)
+    known = _plan_item_ids(review)
     scope: set[str] = set()
     for finding in getattr(review, "findings", ()) or ():
         finding_id = str(getattr(finding, "finding_id", "") or "")
         if finding_id not in selected:
             continue
-        item_id = str(getattr(finding, "item_id", "") or "").strip()
-        if not item_id:
-            item_id = str(getattr(finding, "target", "") or "").strip().split("/")[-1]
+        item_id = resolve_finding_item_id(finding, known)
         if item_id:
             scope.add(item_id)
+    if known and scope - known:
+        logger.warning(
+            "SOLVER_SCOPE_ITEM_UNKNOWN items=%s source=batch_item_scope",
+            sorted(scope - known),
+        )
     scope.difference_update(
         approved_item_ids(getattr(review, "task_review_ledger", ()) or ())
     )
@@ -212,18 +235,25 @@ def revision_scope(
     selected_ids = {str(value).strip() for value in selected if str(value).strip()}
     if not selected_ids:
         return None
+    known = _plan_item_ids(review)
     scope: set[str] = set()
     for finding in getattr(review, "findings", ()) or ():
         finding_id = str(getattr(finding, "finding_id", "") or "")
         if finding_id not in selected_ids:
             continue
-        item_id = str(getattr(finding, "item_id", "") or "").strip()
-        if not item_id:
-            item_id = str(getattr(finding, "target", "") or "").strip().split("/")[-1]
+        item_id = resolve_finding_item_id(finding, known)
         if item_id:
             scope.add(item_id)
     if not scope:
         return None
+    if known and scope - known:
+        # Keep the unresolved ids in the scope: materialize_solver_reply turns
+        # them into a retryable SOLVER_SCOPE_ITEM_UNKNOWN instead of silently
+        # carrying the reviewed plan over the solver's fixes.
+        logger.warning(
+            "SOLVER_SCOPE_ITEM_UNKNOWN items=%s source=revision_scope",
+            sorted(scope - known),
+        )
     scope.difference_update(
         approved_item_ids(getattr(review, "task_review_ledger", ()) or ())
     )
@@ -387,16 +417,46 @@ def process_solver_reply(
         logic = FormalizeSolverLogic()
 
     error = logic.validate(normalized, review)
-    materialized: Mapping[str, Any] | None = None
+    materialized: Mapping[str, object] | None = None
     if not error:
         materialized, error = logic.materialize(normalized, review)
+    group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
+    if not error and materialized is not None:
+        rows = _rows_with_group_docs(review, logic.folded_group_docs)
+        # §8 is the single author of acceptance_signals: the projection
+        # overwrites whatever the solver wrote in the plan field.
+        materialized, projection_error = project_acceptance_signals(
+            materialized,
+            {row.group_id: row.doc_markdown for row in rows},
+        )
+        if projection_error:
+            error = projection_error
+            materialized = None
+        else:
+            group_doc_rows = rows
     if not error and materialized is not None:
         integrity = structural_integrity_errors(materialized)
         if integrity:
             error = "SOLVER_PLAN_STRUCTURE_INVALID:" + ";".join(integrity[:10])
-    group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
-    if not error and materialized is not None:
-        group_doc_rows = _rows_with_group_docs(review, logic.folded_group_docs)
+    if (
+        not error
+        and materialized is not None
+        and stage is SolverStage.REVISE
+        and isinstance(getattr(review, "plan", None), Mapping)
+        and (isinstance(normalized.get("plan"), Mapping) or normalized.get("changes"))
+        and canonical_plan_hash(materialized) == canonical_plan_hash(review.plan)
+    ):
+        # The reply claimed edits but the materialized plan is byte-identical
+        # to the reviewed one: a scoped carry-forward silently discarded the
+        # revision.  Loud, because the critic round that follows can only
+        # re-reject the same stale capsule (live incident task-20260926-35833d).
+        logger.warning(
+            "SOLVER_REVISION_NOOP request_id=%s selected=%s",
+            str(normalized.get("request_id") or ""),
+            list((normalized.get("finding_batch") or {}).get("selected_finding_ids") or [])
+            if isinstance(normalized.get("finding_batch"), Mapping)
+            else [],
+        )
     return SolverReplyOutcome(stage, normalized, materialized, error, group_doc_rows)
 
 
@@ -540,6 +600,7 @@ def build_solver_dispatch(
             "solver_stage": stage.value,
             "zhongshu_dispatch_mode": "solver_revision",
             "solver_revision_mode": has_plan,
+            "expected_reply_mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME",
             "has_current_plan": has_plan,
             "solver_revision_round": review.zhongshu_revision_round if review else 0,
             "focus_finding_ids": list(batch.selected_finding_ids),
@@ -565,6 +626,7 @@ def build_solver_dispatch(
             "solver_stage": stage.value,
             "zhongshu_dispatch_mode": "solver_formalize",
             "solver_revision_mode": False,
+            "expected_reply_mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY",
             "has_current_plan": has_plan,
             "solver_revision_round": review.zhongshu_revision_round if review else 0,
             "focus_finding_ids": [],
