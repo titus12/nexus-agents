@@ -209,12 +209,26 @@ class EffectManager:
                         error_code = "AGENT_REPLY_OUTPUT_OVERFLOW"
                         default_message = OUTPUT_OVERFLOW_FEEDBACK
                 message = f"{default_message}: {reason}" if reason else default_message
+                # Stamp the dispatch target state, not the FSM state the
+                # effect was created in.  ``retry_feedback`` only restates the
+                # failure of the state being re-dispatched, so a
+                # creation-time stamp (REQUEST_INTAKE for the first hop,
+                # RETRY_WAIT for every retry) never matched and the single-
+                # dispatch re-asks went out byte-identical and blind
+                # (task-20260929-73fc9c: prompt1 == prompt3).
+                reply_state = effect.state
+                if isinstance(effect.request.payload, Mapping):
+                    reply_state = str(
+                        effect.request.payload.get("target_state")
+                        or effect.request.payload.get("state")
+                        or effect.state
+                    )
                 failure = FailureRecord(
                     failure_id=uuid.uuid4().hex,
                     stage="agent_result",
                     owner_component=effect.request.effect_type,
                     task_id=effect.task_id,
-                    state=effect.state,
+                    state=reply_state,
                     sequence=effect.sequence,
                     node_run_id=None,
                     worker_id=None,

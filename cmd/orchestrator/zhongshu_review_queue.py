@@ -280,11 +280,12 @@ def build_group_capsule(
         "",
         "[Delivery discipline] The reply body must be exactly one complete "
         "structured JSON object matching the injected result contract: no "
-        "prose, no Markdown, no code fences, no extra comments. Deliver the "
-        "complete result through the result file described in the prompt "
-        "bundle manifest first; the platform silently discards oversized "
-        "posted output, so keep any posted reply compact (a short summary is "
-        "enough) and cap long per-field texts (claims, conclusions, "
+        "prose, no Markdown, no code fences, no extra comments. The platform "
+        "silently discards oversized posted output: if your result is too "
+        "large to post, write the complete result to the result file "
+        "described in the prompt bundle manifest and keep the posted reply a "
+        "short summary (that fallback exists for overflow only; normal-size "
+        "results stay inline). Cap long per-field texts (claims, conclusions, "
         "assessments) at ~400 characters each.",
         "",
         "[Requirement document]",

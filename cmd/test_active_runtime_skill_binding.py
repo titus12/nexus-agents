@@ -58,6 +58,18 @@ class ActiveRuntimeSkillBindingTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertIn(state, _SKILLS)
 
+    def test_every_skill_allows_the_overflow_result_file_fallback(self) -> None:
+        # Delivery-channel alignment: the skills mandate inline-only delivery
+        # while the transport's overflow feedback routes oversized results to
+        # the result file; without the documented fallback the two contradict
+        # each other and a worker with an oversized verdict is stuck.
+        for state in sorted(_SKILLS):
+            lock = _skill_lock(state)
+            content = Path(str(lock.get("source") or "")).read_text(encoding="utf-8")
+            with self.subTest(skill=_SKILLS[state]):
+                self.assertIn("too large to post safely", content)
+                self.assertIn("结果文件", content)
+
     def test_agent_pool_map_covers_every_dispatch_state(self) -> None:
         # Regression: the agent_ids map in app.py was missing the three
         # MENXIA_GROUP_* states, so worker binding fell back to the payload's

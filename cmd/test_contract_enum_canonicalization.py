@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from orchestrator.structured_output import (
+    build_structured_output_spec,
     normalize_role_payload,
     role_result_template,
     validate_role_result_shape,
@@ -43,6 +44,99 @@ def _validate(payload: dict) -> str:
         state="ZHONGSHU_ANALYST",
         role_mode="EVIDENCE_COLLECTION_READ_ONLY",
     )
+
+
+class RoleModeSchemaNarrowingTests(unittest.TestCase):
+    """Each analyst hop's schema must only allow that hop's product.
+
+    task-20260929-73fc9c: the un-scoped schema advertised evidence actions on
+    a REQUIREMENT_CONTRACT_ONLY hop, the worker answered with an evidence
+    packet, and the reply died in the quote gate.
+    """
+
+    def test_contract_hop_forbids_evidence_actions_and_content(self) -> None:
+        spec = build_structured_output_spec(
+            "ZHONGSHU",
+            "review-analyst",
+            {"target_state": "ZHONGSHU_ANALYST", "contract_mode": True},
+        )
+        assert spec is not None
+
+        self.assertEqual(spec.role_mode, "REQUIREMENT_CONTRACT_ONLY")
+        action = spec.schema["properties"]["action"]
+        self.assertEqual(
+            action["enum"], ["REQUIREMENT_CONTRACT_READY", "HUMAN_GATE", "BLOCKED"]
+        )
+        self.assertEqual(spec.schema["properties"]["evidence_updates"]["maxItems"], 0)
+        self.assertEqual(spec.schema["properties"]["finding_responses"]["maxItems"], 0)
+
+    def test_evidence_hop_forbids_the_contract_action(self) -> None:
+        spec = build_structured_output_spec(
+            "ZHONGSHU",
+            "review-analyst",
+            {"target_state": "ZHONGSHU_ANALYST"},
+        )
+        assert spec is not None
+
+        self.assertEqual(spec.role_mode, "EVIDENCE_COLLECTION_READ_ONLY")
+        enum = spec.schema["properties"]["action"]["enum"]
+        self.assertIn("EVIDENCE_PACKET_READY", enum)
+        self.assertIn("READY_FOR_SOLVER", enum)
+        self.assertNotIn("REQUIREMENT_CONTRACT_READY", enum)
+        self.assertNotIn("maxItems", spec.schema["properties"]["evidence_updates"])
+
+    def test_validation_rejects_an_evidence_reply_on_a_contract_hop(self) -> None:
+        payload = role_result_template(
+            "ZHONGSHU",
+            "review-analyst",
+            task_id="task-1",
+            request_id="req-1",
+            state="ZHONGSHU_ANALYST",
+            role_mode="REQUIREMENT_CONTRACT_ONLY",
+            schema_hash=_HASH,
+            action="EVIDENCE_PACKET_READY",
+        )
+        payload["evidence_updates"] = [
+            {
+                "evidence_id": "ev-1",
+                "requirement_id": "req-1",
+                "decision_relevance": "coverage",
+                "source": "a.py:1",
+                "conclusion": "observed",
+            }
+        ]
+
+        error = validate_role_result_shape(
+            payload,
+            phase="ZHONGSHU",
+            role="review-analyst",
+            state="ZHONGSHU_ANALYST",
+            role_mode="REQUIREMENT_CONTRACT_ONLY",
+        )
+
+        self.assertIn("STRUCTURED_ROLE_CONTRACT_INVALID", error)
+
+    def test_validation_accepts_a_contract_reply_on_a_contract_hop(self) -> None:
+        payload = role_result_template(
+            "ZHONGSHU",
+            "review-analyst",
+            task_id="task-1",
+            request_id="req-1",
+            state="ZHONGSHU_ANALYST",
+            role_mode="REQUIREMENT_CONTRACT_ONLY",
+            schema_hash=_HASH,
+            action="REQUIREMENT_CONTRACT_READY",
+        )
+
+        error = validate_role_result_shape(
+            payload,
+            phase="ZHONGSHU",
+            role="review-analyst",
+            state="ZHONGSHU_ANALYST",
+            role_mode="REQUIREMENT_CONTRACT_ONLY",
+        )
+
+        self.assertEqual(error, "")
 
 
 class DecisionRelevanceCanonicalizationTests(unittest.TestCase):

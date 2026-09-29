@@ -184,6 +184,56 @@ class EffectManagerTests(unittest.TestCase):
         self.assertTrue(result.failure.retryable)
         self.assertIn("inline result role mode mismatch", result.failure.message)
 
+    def test_reply_failure_stamps_the_dispatch_target_state(self) -> None:
+        # retry_feedback only restates the failure of the state being
+        # re-dispatched; stamping the creation-time FSM state (REQUEST_INTAKE
+        # / RETRY_WAIT) never matched and the single-dispatch re-asks went out
+        # byte-identical and blind (task-20260929-73fc9c).
+        request = EffectRequest(
+            effect_id="effect-1",
+            effect_type="dispatch",
+            task_id="task-1",
+            idempotency_key="idem-effect-1",
+            payload_ref="payload-1",
+            payload={"target_state": "ZHONGSHU_ANALYST", "state": "ZHONGSHU_ANALYST"},
+        )
+        effect = EffectRecord(
+            "effect-1", "task-1", request, "PENDING", 0, "REQUEST_INTAKE", 5
+        )
+
+        class _OutcomeRunner:
+            def run_once(self, request: EffectRequest) -> EffectOutcome:
+                return EffectOutcome(
+                    status="SUCCEEDED",
+                    event_name="__CONTRACT_REJECTED__",
+                    event_payload={
+                        "action": "__CONTRACT_REJECTED__",
+                        "contract_rejection": "verbatim quote gate: QUOTE_MISMATCH",
+                    },
+                    request_id=request.idempotency_key,
+                )
+
+        repository = _Repository((effect,))
+        result = EffectManager(repository, {"dispatch": _OutcomeRunner()}).execute_pending("task-1")[0]
+
+        assert result.failure is not None
+        self.assertEqual(result.failure.state, "ZHONGSHU_ANALYST")
+        # the stamped state is what feeds the re-dispatch's feedback gate
+        from orchestrator.domain.context import (
+            ProgressState,
+            RecoveryState,
+            TaskIdentity,
+            WorkflowContext,
+        )
+        from orchestrator.domain.policies.prompts import retry_feedback
+
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "p", "r"),
+            progression=ProgressState("ZHONGSHU_ANALYST", 1, "2026-09-29T00:00:00Z"),
+            recovery=RecoveryState(last_failure=result.failure),
+        )
+        self.assertIn("[Retry feedback]", retry_feedback(context, "ZHONGSHU_ANALYST"))
+
     def test_unknown_runner_is_explicit_and_effect_stays_unstarted(self) -> None:
         repository = _Repository((_effect(effect_type="missing"),))
 

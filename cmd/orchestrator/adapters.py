@@ -258,6 +258,55 @@ def _normalized_text(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).split())
 
 
+def _expected_window(content: str, quote: object) -> str:
+    """The lines the quote most likely meant, for rejection echo.
+
+    A QUOTE_MISMATCH that only says "not found" leaves the worker guessing
+    which lines to re-transcribe (task-20260929-638bde: every retry fixed some
+    quotes and broke others).  When the quote names a line range, echo exactly
+    those lines; otherwise echo the best-matching line and its neighbours, so
+    the correction becomes copy-work instead of guess-work.
+    """
+
+    lines = content.splitlines()
+    if not lines:
+        return ""
+    start = None
+    end = None
+    if isinstance(quote, dict):
+        raw_start = quote.get("line_start")
+        raw_end = quote.get("line_end")
+        try:
+            if raw_start is not None:
+                start = max(0, int(raw_start) - 1)
+                end = max(start + 1, int(raw_end)) if raw_end is not None else start + 6
+        except (TypeError, ValueError):
+            start = None
+    if start is None:
+        text = str(quote.get("text") or "") if isinstance(quote, dict) else ""
+        target = _normalized_text(text.split("\n")[0] if text else "")
+        best_index, best_score = 0, -1
+        for index, line in enumerate(lines):
+            norm = _normalized_text(line)
+            if not norm:
+                continue
+            score = 0
+            if target and (norm in target or target in norm):
+                score += 10
+            for expected, actual in zip(target.split(), norm.split()):
+                if expected != actual:
+                    break
+                score += 1
+            if score > best_score:
+                best_index, best_score = index, score
+        start = max(0, best_index - 1)
+        end = min(len(lines), best_index + 2)
+    window = " | ".join(
+        line.strip() for line in lines[start:end] if line.strip()
+    )
+    return window[:300]
+
+
 def _quote_rejection(request: AgentRequest, payload: object) -> str:
     """Mechanical quote gate for file-citing evidence and finding responses.
 
@@ -321,7 +370,9 @@ def _quote_rejection(request: AgentRequest, payload: object) -> str:
         if len(quote_text) > _QUOTE_MAX_CHARS or quote_text.count("\n") + 1 > _QUOTE_MAX_LINES:
             problems.append(
                 f"{key}[{label}] quote exceeds {_QUOTE_MAX_LINES} lines or "
-                f"{_QUOTE_MAX_CHARS} chars; quote only the cited lines"
+                f"{_QUOTE_MAX_CHARS} chars; quote only the cited lines and "
+                "split multi-spot evidence into separate entries, each with "
+                "one contiguous quote"
             )
             continue
         quoted_path = str(quote.get("path") or "").strip()
@@ -336,9 +387,12 @@ def _quote_rejection(request: AgentRequest, payload: object) -> str:
         normalized_quote = _normalized_text(quote_text)
         if normalized_quote and normalized_quote in _normalized_text(content):
             continue
+        expected = _expected_window(content, quote)
         problems.append(
             f"{key}[{label}] quoted text not found in {quoted_path}; "
-            "transcribe the exact cited lines verbatim (QUOTE_MISMATCH)"
+            "transcribe the exact cited lines verbatim as one contiguous span "
+            "with no ellipsis and no skipped lines (QUOTE_MISMATCH)"
+            + (f"; the cited lines read: {expected}" if expected else "")
         )
     if not problems:
         return ""
@@ -348,8 +402,9 @@ def _quote_rejection(request: AgentRequest, payload: object) -> str:
     return (
         "verbatim quote gate: " + shown
         + ". Every file-citing evidence_update or finding_response needs a "
-        "verbatim quote transcribing the cited lines; interpret only what the "
-        "quote supports. Return one complete structured result."
+        "verbatim quote: one contiguous span copied exactly (no ellipsis, no "
+        "skipped lines, max 30 lines / 4096 chars); split multi-spot evidence "
+        "into separate entries. Return one complete structured result."
     )
 
 

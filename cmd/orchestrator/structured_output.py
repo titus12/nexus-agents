@@ -143,6 +143,46 @@ def role_mode_for(
     return contract.modes[0] if contract.modes else ""
 
 
+def narrow_schema_for_role_mode(
+    schema: Mapping[str, Any], *, state: str = "", role_mode: str = ""
+) -> Mapping[str, Any]:
+    """Narrow one role schema to the dispatched role mode.
+
+    The analyst contract covers two very different hops: requirement
+    extraction and evidence collection.  The un-scoped schema advertised
+    evidence actions and evidence arrays on a contract hop, so a worker
+    answered ``REQUIREMENT_CONTRACT_ONLY`` with an evidence packet and the
+    reply died in the quote gate (task-20260929-73fc9c).  The narrowed schema
+    keeps each hop's product unambiguous: the contract hop may only return
+    ``REQUIREMENT_CONTRACT_READY`` with empty evidence arrays, the evidence
+    hop may never claim the contract action.
+    """
+
+    if str(state).upper() != "ZHONGSHU_ANALYST" or not role_mode:
+        return schema
+    narrowed = copy.deepcopy(dict(schema))
+    properties = narrowed.get("properties")
+    if not isinstance(properties, dict):
+        return narrowed
+    action = properties.get("action")
+    if not isinstance(action, dict) or not isinstance(action.get("enum"), list):
+        return narrowed
+    if role_mode == "REQUIREMENT_CONTRACT_ONLY":
+        allowed = ("REQUIREMENT_CONTRACT_READY", "HUMAN_GATE", "BLOCKED")
+        for key in ("evidence_updates", "finding_responses"):
+            field = properties.get(key)
+            if isinstance(field, dict):
+                field["maxItems"] = 0
+    elif role_mode == "EVIDENCE_COLLECTION_READ_ONLY":
+        allowed = ("EVIDENCE_PACKET_READY", "READY_FOR_SOLVER", "HUMAN_GATE", "BLOCKED")
+    else:
+        return narrowed
+    kept = [member for member in action["enum"] if member in allowed]
+    if kept:
+        action["enum"] = kept
+    return narrowed
+
+
 def _schema_for(
     phase: str,
     role: str,
@@ -212,15 +252,17 @@ def build_structured_output_spec(
         return None
     schema = copy.deepcopy(contract.schema)
     _bind_solver_requirement_schema(schema, context)
-    encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     state = str(context.get("active_runtime_state") or context.get("target_state") or contract.state)
+    role_mode = role_mode_for(phase, role, context)
+    schema = narrow_schema_for_role_mode(schema, state=state, role_mode=role_mode)
+    encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return StructuredOutputSpec(
         mode=STRUCTURED_OUTPUT_MODE,
         protocol=STRUCTURED_OUTPUT_PROTOCOL,
         schema=schema,
         schema_hash=hashlib.sha256(encoded).hexdigest(),
         state=state,
-        role_mode=role_mode_for(phase, role, context),
+        role_mode=role_mode,
     )
 
 
@@ -362,6 +404,9 @@ def validate_role_result_shape(
         return "STRUCTURED_ROLE_ACTION_MISSING"
     errors: list[str] = []
     active_schema = schema if isinstance(schema, Mapping) else contract.schema
+    active_schema = narrow_schema_for_role_mode(
+        active_schema, state=contract.state, role_mode=role_mode
+    )
     validate_schema(payload, active_schema, "", errors)
     if errors:
         return "STRUCTURED_ROLE_CONTRACT_INVALID:" + ";".join(errors[:20])

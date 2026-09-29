@@ -76,7 +76,7 @@ responsibilities.
 
 ## 运行边界
 
-本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针，不要输出 Markdown、代码围栏、diff 或部分结果。
+本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针（唯一例外：当结果超大、平台以 "too large to post safely" 占位符顶替了原文时，把完整结果写入 prompt bundle manifest 所列的结果文件、评论只留一句摘要——这只是超限兜底，正常体量的结果仍走 inline 交付），不要输出 Markdown、代码围栏、diff 或部分结果。
 
 协议字段、字段集合、类型、枚举、hash 和错误修复路径以 Python 契约为准，本 skill 不重复维护。
 

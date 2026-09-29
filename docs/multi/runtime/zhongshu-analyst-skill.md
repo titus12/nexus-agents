@@ -4,7 +4,7 @@
 
 ## 运行边界
 
-本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针，不要输出 Markdown、代码围栏、diff 或部分结果。
+本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针（唯一例外：当结果超大、平台以 "too large to post safely" 占位符顶替了原文时，把完整结果写入 prompt bundle manifest 所列的结果文件、评论只留一句摘要——这只是超限兜底，正常体量的结果仍走 inline 交付），不要输出 Markdown、代码围栏、diff 或部分结果。
 
 协议字段、字段集合、类型、枚举、hash 和错误修复路径以注入的契约为准，本 skill 不重复列出。
 
@@ -138,8 +138,9 @@ tasks. Every item-scoped `evidence_updates` entry must carry the assigned
 每条 `evidence_updates` 或 `finding_responses`，只要 `source` 指向一个真实存在的仓库文件路径，就必须携带 `quote` 对象（`{path, line_start, line_end, text}`，schema 层面仅 `text` 必填）**逐字抄录**所引行的原文。先抄录、后解读：结论里描述的代码行为必须是 quote 文本能直接支撑的。
 
 - 传输门做机械校验：引用存在的文件却没有 quote（QUOTE_REQUIRED），或 quote 文本在所指文件中找不到（QUOTE_MISMATCH，NFKC + 空白归一化后做包含匹配，行号漂移不影响判定），本轮回复会被整体退回重问。
+- **quote 必须是单段连续原文**：一个 quote 只抄一个连续区间，禁止省略号（`...`）、禁止跳行拼接、禁止改写；多处引用要拆成多条 evidence，各带自己的小 quote。整串包含匹配下，哪怕每一行都真实存在，只要中间夹了省略号就会判 QUOTE_MISMATCH。
 - 被引用的文件不存在时豁免：如实报"该文件不存在于工作区"是合法 UNKNOWN，无需伪造 quote。
-- quote 只抄所引行（≤30 行 / ≤4096 字符）；语义是否支撑结论由门下省判定，门只管"抄得对不对"。
+- quote 只抄所引行（≤30 行 / ≤4096 字符，超限整条拒绝）；语义是否支撑结论由门下省判定，门只管"抄得对不对"。
 
 ## 非成功结果与修复
 

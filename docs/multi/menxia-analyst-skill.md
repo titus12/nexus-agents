@@ -13,7 +13,7 @@
 本 skill 只描述当前条目的证据审计方法。机器字段、类型、枚举和结果结构由
 Orchestrator 注入的 Menxia Analyst Python 契约决定，不从本文件推导另一套协议。
 
-本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针，不要输出 Markdown、代码围栏、diff 或部分结果。
+本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针（唯一例外：当结果超大、平台以 "too large to post safely" 占位符顶替了原文时，把完整结果写入 prompt bundle manifest 所列的结果文件、评论只留一句摘要——这只是超限兜底，正常体量的结果仍走 inline 交付），不要输出 Markdown、代码围栏、diff 或部分结果。
 
 交付纪律：本轮只提交一份结果并结束。禁止使用 todo/计划清单（todo_write）：本轮是单结果交付，直接产出结构化 JSON 并结束，不要建立或维护任务清单。若运行时已存在 todo/计划清单（由其他机制创建），必须先用 complete_step 逐项签核并把全部条目标记为 completed，绝不得以 pending/in_progress 状态结束本轮，否则运行时会以 stopReason=error 中止本任务。本轮只允许产生一条结果评论，其正文必须是该 JSON 对象本身；禁止额外发布任何报告、进度或说明性质的过程评论。
 

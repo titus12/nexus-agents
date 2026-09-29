@@ -152,6 +152,54 @@ class QuoteGateUnitTests(unittest.TestCase):
             self.assertIn("QUOTE_MISMATCH", rejection)
             self.assertIn("ev-1", rejection)
 
+    def test_mismatch_rejection_echoes_the_cited_lines(self) -> None:
+        # The correction must be copy-work, not guess-work (task-20260929-638bde:
+        # every retry fixed some quotes and broke others because the rejection
+        # never showed what the cited lines actually read).
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "site.py"
+            site.write_text("def compute():\n    return X\n", encoding="utf-8")
+            payload = {
+                "evidence_updates": [
+                    _evidence(
+                        source=site.as_posix(),
+                        quote={
+                            "path": site.as_posix(),
+                            "line_start": 1,
+                            "line_end": 2,
+                            "text": "compute() writes X to a result file",
+                        },
+                    )
+                ]
+            }
+
+            rejection = _quote_rejection(_request(), payload)
+
+            self.assertIn("the cited lines read:", rejection)
+            self.assertIn("def compute()", rejection)
+            self.assertIn("return X", rejection)
+
+    def test_mismatch_rejection_without_line_range_echoes_nearest_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "site.py"
+            site.write_text("alpha = 1\ndef compute():\n    return X\n", encoding="utf-8")
+            payload = {
+                "evidence_updates": [
+                    _evidence(
+                        source=site.as_posix(),
+                        quote={
+                            "path": site.as_posix(),
+                            "text": "def compute():\n    return Y",
+                        },
+                    )
+                ]
+            }
+
+            rejection = _quote_rejection(_request(), payload)
+
+            self.assertIn("the cited lines read:", rejection)
+            self.assertIn("return X", rejection)
+
     def test_quote_path_falls_back_to_source_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             site = Path(tmp) / "site.py"

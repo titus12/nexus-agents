@@ -150,9 +150,13 @@ CONTRACT = make_contract(
         "must carry a verbatim `quote` ({path, line_start, line_end, text}) "
         "transcribing the exact cited lines: transcribe first, then interpret, "
         "and never describe code behavior the quoted text does not show. The "
-        "transport gate rejects file-citing entries without a quote "
-        "(QUOTE_REQUIRED) and quoted text absent from the cited file "
-        "(QUOTE_MISMATCH).",
+        "quote must be one contiguous span copied character-for-character: no "
+        "ellipsis, no skipped or paraphrased lines, at most 30 lines and 4096 "
+        "characters; when the evidence points at several separate spots, emit "
+        "one entry per spot, each with its own small quote. The transport gate "
+        "rejects file-citing entries without a quote (QUOTE_REQUIRED), quoted "
+        "text absent from the cited file (QUOTE_MISMATCH), and quotes over "
+        "that limit.",
         "Evidence conclusions must state what the code or document contains, "
         "with file:line sources. Engineering recommendations ('X should be "
         "added') are not evidence and will be rejected as unsupported claims.",
