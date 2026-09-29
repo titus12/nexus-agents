@@ -24,6 +24,7 @@ def aggregate_zhongshu_workers(
     plan_hash: str,
     worker_results: Sequence[Mapping[str, object]],
     canonical_requirements: Sequence[Mapping[str, object]] | None = None,
+    evidence_requester: str = "",
 ) -> dict[str, Any]:
     """Return one canonical decision from a bounded Zhongshu fan-in."""
 
@@ -38,6 +39,15 @@ def aggregate_zhongshu_workers(
 
     if state == "ZHONGSHU_ANALYST":
         if action == "EVIDENCE_PACKET_READY":
+            # 2026-09-28 Fix 3: a Critic-demanded evidence round folds and
+            # routes straight back to the Critic; every other requester
+            # (SOLVER, FREEZE_CHECK, legacy) keeps the READY_FOR_SOLVER
+            # channel byte-for-byte.
+            target_action = (
+                "EVIDENCE_PACKET_READY_FOR_CRITIC"
+                if str(evidence_requester or "").strip() == "ZHONGSHU_CRITIC"
+                else "READY_FOR_SOLVER"
+            )
             return merge_analyst_evidence(
                 task_id,
                 revision_id,
@@ -45,6 +55,7 @@ def aggregate_zhongshu_workers(
                 [dict(item) for item in canonical_requirements]
                 if canonical_requirements
                 else None,
+                target_action=target_action,
             )
         if action == "REQUIREMENT_CONTRACT_READY":
             return _merge_requirement_contract(revision_id, results)

@@ -48,6 +48,20 @@ _DECISION_RELEVANCE_ALIASES = {
     "verification": "acceptance",
     "verify": "acceptance",
 }
+# Verbatim transcription of the lines an evidence entry cites.  The transport
+# gate (_quote_rejection) bounces file-citing entries without one and quoted
+# text that does not appear in the cited file, so paraphrased or invented code
+# behavior dies at the reply boundary instead of surviving review rounds
+# (task-20260929-c261a8 problem A).
+_QUOTE = object_schema(
+    {
+        "path": string(),
+        "line_start": {"type": ["integer", "null"]},
+        "line_end": {"type": ["integer", "null"]},
+        "text": string(),
+    },
+    required=("text",),
+)
 _EVIDENCE_UPDATE = object_schema(
     {
         "evidence_id": string(), "requirement_id": string(),
@@ -56,7 +70,7 @@ _EVIDENCE_UPDATE = object_schema(
             aliases=_DECISION_RELEVANCE_ALIASES,
             fallback="coverage",
         ),
-        "source": string(), "conclusion": string(), "unknowns": array(),
+        "source": string(), "quote": _QUOTE, "conclusion": string(), "unknowns": array(),
     },
     required=("evidence_id", "requirement_id", "decision_relevance", "source", "conclusion"),
     forbidden=("relevance",),
@@ -74,6 +88,7 @@ _EVIDENCE_REQUEST = object_schema(
 _FINDING_RESPONSE = object_schema(
     {
         "finding_id": string(), "answer": string(), "evidence_ids": array(string()),
+        "quote": _QUOTE,
         "suggested_disposition": string(
             enum=("CLOSE", "REVISE", "DOWNGRADE", "NEEDS_RUNTIME_DATA"),
             fallback="REVISE",
@@ -125,6 +140,22 @@ CONTRACT = make_contract(
         "can prove it). The workspace is mounted read-only locally: locate "
         "files with local search, cite local paths, and never claim that git "
         "or remote access limits block the evidence.",
+        "When a finding demands a requirement's original text, quote the "
+        "requirement statement, priority and scope verbatim inside the answer "
+        "itself. When citing the contract by reference, use the exact anchor "
+        "`requirement_contract[<requirement_id>]`: that array ships in every "
+        "ZHONGSHU role's context.json, so the reader verifies it there. Never "
+        "cite a file or field you did not actually open.",
+        "Every evidence_update or finding_response whose source cites a file "
+        "must carry a verbatim `quote` ({path, line_start, line_end, text}) "
+        "transcribing the exact cited lines: transcribe first, then interpret, "
+        "and never describe code behavior the quoted text does not show. The "
+        "transport gate rejects file-citing entries without a quote "
+        "(QUOTE_REQUIRED) and quoted text absent from the cited file "
+        "(QUOTE_MISMATCH).",
+        "Evidence conclusions must state what the code or document contains, "
+        "with file:line sources. Engineering recommendations ('X should be "
+        "added') are not evidence and will be rejected as unsupported claims.",
         "Return the complete envelope even when an array is empty.",
     ),
     example_overrides={
@@ -132,6 +163,8 @@ CONTRACT = make_contract(
         "evidence_updates": [{
             "evidence_id": "ev-1", "requirement_id": "REQ-001",
             "decision_relevance": "coverage", "source": "a.py:1",
+            "quote": {"path": "a.py", "line_start": 1, "line_end": 2,
+                      "text": "def handler():\n    return verify(x)"},
             "conclusion": "verified", "unknowns": [],
         }],
     },

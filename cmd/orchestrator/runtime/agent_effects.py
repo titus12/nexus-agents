@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import os
 import time
 from typing import Callable
 
@@ -20,9 +21,11 @@ from ..domain.errors import (
     CONTRACT_REJECTED_EVENT,
     FailureRecord,
     LeaseLostError,
+    OUTPUT_OVERFLOW_FEEDBACK,
     TransportError,
     UNSTRUCTURED_REPLY_EVENT,
     is_infrastructure_failure,
+    is_output_overflow_reply,
 )
 from ..domain.policies.parallel import aggregate_zhongshu_workers
 from ..domain.policies.menxia import (
@@ -84,6 +87,56 @@ def _menxia_infra_failure(result: WorkerResult) -> bool:
 REMOTE_FAILURE_SALVAGE_POLLS = 3
 REMOTE_FAILURE_SALVAGE_INTERVAL = 2.0
 
+# Per-role dispatch timeouts (seconds).  Group revision and group review
+# workers re-read the full prompt bundle and routinely exceed a single
+# global cap (incident task-20260928-835a07: three deterministic 900.0s
+# AGENT_TIMEOUT hits on one solver revision), while analyst hops stay well
+# under it.  Roles are shared across phases (`_ROLE_BY_STATE` maps
+# ZHONGSHU_* and MENXIA_* workers onto the same review-* roles), so the
+# table is deliberately phase-agnostic: the same remote role does the same
+# kind of work wherever it runs.  ZHONGSHU_DISPATCH_TIMEOUT_OVERRIDES
+# (JSON role -> seconds) beats this table; an EffectRequest payload
+# ``timeout_seconds`` beats both; the runner-level timeout stays the
+# fallback for unknown roles.
+ROLE_DISPATCH_TIMEOUTS: dict[str, float] = {
+    "review-analyst": 900.0,
+    "review-critic": 1200.0,
+    "review-solver": 1800.0,
+}
+
+
+def resolve_dispatch_role_timeouts(*, include_defaults: bool = True) -> dict[str, float]:
+    """Merge the role table with ZHONGSHU_DISPATCH_TIMEOUT_OVERRIDES.
+
+    ``include_defaults=False`` keeps only the env-explicit roles: when the
+    operator runs with a non-default global timeout the baked-in table stays
+    out of the way, but an explicit env override is still honoured instead of
+    being silently dropped alongside it.
+    """
+
+    merged = dict(ROLE_DISPATCH_TIMEOUTS) if include_defaults else {}
+    raw = os.environ.get("ZHONGSHU_DISPATCH_TIMEOUT_OVERRIDES", "").strip()
+    if not raw:
+        return merged
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        logger.warning("DISPATCH_TIMEOUT_OVERRIDES_INVALID overrides=%r", raw)
+        return merged
+    if not isinstance(parsed, dict):
+        logger.warning("DISPATCH_TIMEOUT_OVERRIDES_INVALID overrides=%r", raw)
+        return merged
+    for role, seconds in parsed.items():
+        try:
+            merged[str(role)] = max(1.0, float(seconds))
+        except (TypeError, ValueError):
+            logger.warning(
+                "DISPATCH_TIMEOUT_OVERRIDE_INVALID role=%s value=%r",
+                role,
+                seconds,
+            )
+    return merged
+
 
 class AgentWorkerRunner:
     """Dispatch, observe, normalize, and archive one agent execution."""
@@ -100,6 +153,7 @@ class AgentWorkerRunner:
         poll_interval: float = 0.0,
         max_polls: int = 30,
         timeout_seconds: float = 900.0,
+        role_timeout_seconds: Mapping[str, float] | None = None,
         agent_ids: Mapping[str, str] | None = None,
     ) -> None:
         self._transport = transport
@@ -111,6 +165,10 @@ class AgentWorkerRunner:
         self._poll_interval = max(0.0, poll_interval)
         self._max_polls = max(1, max_polls)
         self._timeout_seconds = max(0.0, timeout_seconds)
+        self._role_timeout_seconds = {
+            str(role): max(1.0, float(seconds))
+            for role, seconds in (role_timeout_seconds or {}).items()
+        }
         self._agent_ids = dict(agent_ids or {})
         self._normalizer = ReplyNormalizer()
 
@@ -190,12 +248,51 @@ class AgentWorkerRunner:
         )
         return width
 
+    def _effective_dispatch_limits(
+        self, role: str, payload: Mapping[str, object]
+    ) -> tuple[float, int]:
+        """Resolve the ``(timeout, max_polls)`` pair for one dispatch.
+
+        Precedence: the EffectRequest payload ``timeout_seconds`` beats the
+        injected role table, which beats the runner-level timeout.  When the
+        poll interval is positive, ``max_polls`` is re-derived from the
+        effective timeout (deadline / interval + 2, the same formula the app
+        wiring uses for the global pair) so a longer deadline is not cut
+        short by poll-count exhaustion; the configured ``max_polls`` stays
+        the floor.  With no sleep between polls the loop is deadline-bound
+        and the configured ``max_polls`` is kept verbatim.
+        """
+
+        effective = self._timeout_seconds
+        override_raw = payload.get("timeout_seconds")
+        payload_override = None
+        if override_raw is not None:
+            try:
+                payload_override = max(1.0, float(override_raw))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "DISPATCH_TIMEOUT_OVERRIDE_INVALID value=%r", override_raw
+                )
+        if payload_override is not None:
+            effective = payload_override
+        else:
+            role_key = str(role or "").strip()
+            if role_key in self._role_timeout_seconds:
+                effective = self._role_timeout_seconds[role_key]
+        if self._poll_interval > 0 and effective > 0:
+            derived = int(effective / self._poll_interval) + 2
+            return effective, max(self._max_polls, derived)
+        return effective, self._max_polls
+
     def run_once(self, request: EffectRequest) -> EffectOutcome:
         payload = request.payload
         dispatch = self._dispatch_request(request, payload)
-        deadline = self._clock() + self._timeout_seconds
+        effective_timeout, effective_max_polls = self._effective_dispatch_limits(
+            dispatch.role, payload
+        )
+        deadline = self._clock() + effective_timeout
         deadline_at = request.deadline_at or datetime.fromtimestamp(
-            datetime.now(timezone.utc).timestamp() + self._timeout_seconds,
+            datetime.now(timezone.utc).timestamp() + effective_timeout,
             timezone.utc,
         ).isoformat()
         logger.info(
@@ -205,9 +302,9 @@ class AgentWorkerRunner:
             dispatch.request_id,
             dispatch.phase,
             dispatch.role,
-            self._timeout_seconds,
+            effective_timeout,
             deadline_at,
-            self._max_polls,
+            effective_max_polls,
             self._poll_interval,
         )
         lease_id: str | None = None
@@ -270,7 +367,7 @@ class AgentWorkerRunner:
                 receipt.operation_id,
             )
             last_status: RemoteRunStatus | None = None
-            for _ in range(self._max_polls):
+            for _ in range(effective_max_polls):
                 if self._clock() > deadline:
                     break
                 if lease_id is not None and not self._admission.refresh(lease_id):
@@ -799,6 +896,10 @@ def _rejected_reply_code(result: WorkerResult) -> tuple[str, str] | None:
     if mapped is None:
         return None
     error_code, default_message = mapped
+    if action == _UNSTRUCTURED_REPLY_ACTION and is_output_overflow_reply(payload):
+        # Oversized output was discarded by the platform wholesale: surface a
+        # dedicated code so the re-ask (and the operator) see the real cause.
+        return "AGENT_REPLY_OUTPUT_OVERFLOW", OUTPUT_OVERFLOW_FEEDBACK
     reason = str(payload.get("contract_rejection") or "")
     return error_code, f"{default_message}: {reason}" if reason else default_message
 
@@ -935,6 +1036,7 @@ class AgentNodeJoiner:
         base_plan: object | None = None,
         previous_review: object | None = None,
         salvaged_worker_payloads: tuple[dict[str, object], ...] = (),
+        evidence_requester: str = "",
         binding_contexts: Mapping[str, Mapping[str, object]] | None = None,
         menxia_stage_census: Mapping[str, object] | None = None,
     ) -> None:
@@ -958,6 +1060,7 @@ class AgentNodeJoiner:
             for row in (salvaged_worker_payloads or ())
             if isinstance(row, Mapping) and str(row.get("worker_id") or "")
         )
+        self._evidence_requester = str(evidence_requester or "")
         self._binding_contexts: dict[str, dict[str, object]] = {
             str(worker_id): dict(ctx)
             for worker_id, ctx in (binding_contexts or {}).items()
@@ -1063,6 +1166,12 @@ class AgentNodeJoiner:
                         {**row, "salvage_revision_id": self._revision_id}
                         for row in salvaged_rows
                     ]
+            if self._dispatch_mode == "group_revise":
+                # Fix 4 (2026-09-28): a sibling worker's timeout must not
+                # discard the groups whose patches are already fully valid.
+                group_salvage = self._salvage_failed_group_revision(results)
+                if group_salvage is not None:
+                    aggregate.update(group_salvage)
             return NodeResult(
                 self._node_run_id,
                 "FAILED",
@@ -1169,6 +1278,7 @@ class AgentNodeJoiner:
                     self._plan_hash,
                     worker_payloads,
                     self._canonical_requirements or None,
+                    evidence_requester=self._evidence_requester,
                 )
                 if analyst_salvage:
                     # The carried payloads were consumed by this fan-in;
@@ -1869,7 +1979,6 @@ class AgentNodeJoiner:
         from ..domain.policies.item_revise import merge_item_patches  # noqa: F401  (keeps import surface stable)
         from ..domain.policies.solver_plan import (
             carry_forward_group_docs,
-            merge_group_revision_items,
             structural_integrity_errors,
         )
         from ..domain.zhongshu_doc import project_acceptance_signals
@@ -1903,65 +2012,9 @@ class AgentNodeJoiner:
         finding_resolutions: list[object] = []
         patched_groups: list[str] = []
         patch_errors: list[tuple[str, str]] = []
-        group_by_worker = {
-            worker_id: str(context.get("group_id") or "")
-            for worker_id, context in self._binding_contexts.items()
-        }
-        for payload in worker_payloads:
-            worker_id = str(payload.get("worker_id") or "")
-            group_id = (
-                str(payload.get("group_id") or "").strip()
-                or group_by_worker.get(worker_id, "")
-            )
-            if str(payload.get("action") or "") != "READY_FOR_CRITIC":
-                patch_errors.append(
-                    (
-                        worker_id,
-                        f"{group_id or 'group'}: group-revision workers must "
-                        "return READY_FOR_CRITIC",
-                    )
-                )
-                continue
-            editable: set[str] = set()
-            for binding in self._binding_contexts.values():
-                if str(binding.get("group_id") or "") != group_id:
-                    continue
-                editable |= {
-                    str(value).strip()
-                    for value in (binding.get("editable_item_ids") or ())
-                    if str(value).strip()
-                }
-            plan = payload.get("plan")
-            raw_items = (
-                plan.get("items")
-                if isinstance(plan, Mapping)
-                else payload.get("items")
-            )
-            merged_plan, error = merge_group_revision_items(
-                merged,
-                group_id=group_id,
-                patched_items=raw_items if isinstance(raw_items, list) else [],
-                editable_item_ids=editable,
-            )
-            if error:
-                logger.warning(
-                    "NODE_GROUP_REVISION_PATCH_INVALID node_run_id=%s group_id=%s "
-                    "error=%s",
-                    self._node_run_id,
-                    group_id,
-                    error,
-                )
-                patch_errors.append((worker_id, error))
-                continue
-            merged = merged_plan
-            for entry in payload.get("group_docs") or ():
-                if isinstance(entry, dict):
-                    group_docs.append(entry)
-            for entry in payload.get("finding_resolutions") or ():
-                if isinstance(entry, dict):
-                    finding_resolutions.append(entry)
-            if group_id:
-                patched_groups.append(group_id)
+        merged, group_docs, finding_resolutions, patched_groups, patch_errors = (
+            self._fold_group_revision_payloads(worker_payloads, merged)
+        )
         if patch_errors:
             # A group-revision wave is one patch per group: a patch the joiner
             # refuses must not discard the patches that were valid (live run
@@ -2226,6 +2279,130 @@ class AgentNodeJoiner:
             "salvaged_group_ids": editable_groups,
             "salvaged_group_rows": salvage_rows,
         }
+
+    def _fold_group_revision_payloads(
+        self,
+        worker_payloads: list[dict[str, object]],
+        merged: object,
+    ) -> tuple[
+        object,
+        list[object],
+        list[object],
+        list[str],
+        list[tuple[str, str]],
+    ]:
+        """Apply one group patch per worker payload to the running plan.
+
+        Returns ``(merged, group_docs, finding_resolutions, patched_groups,
+        patch_errors)``.  A refused patch never aborts the loop: the caller
+        decides whether the valid sibling groups are salvageable.
+        """
+
+        from ..domain.policies.solver_plan import merge_group_revision_items
+
+        group_docs: list[object] = []
+        finding_resolutions: list[object] = []
+        patched_groups: list[str] = []
+        patch_errors: list[tuple[str, str]] = []
+        group_by_worker = {
+            worker_id: str(context.get("group_id") or "")
+            for worker_id, context in self._binding_contexts.items()
+        }
+        for payload in worker_payloads:
+            worker_id = str(payload.get("worker_id") or "")
+            group_id = (
+                str(payload.get("group_id") or "").strip()
+                or group_by_worker.get(worker_id, "")
+            )
+            if str(payload.get("action") or "") != "READY_FOR_CRITIC":
+                patch_errors.append(
+                    (
+                        worker_id,
+                        f"{group_id or 'group'}: group-revision workers must "
+                        "return READY_FOR_CRITIC",
+                    )
+                )
+                continue
+            editable: set[str] = set()
+            for binding in self._binding_contexts.values():
+                if str(binding.get("group_id") or "") != group_id:
+                    continue
+                editable |= {
+                    str(value).strip()
+                    for value in (binding.get("editable_item_ids") or ())
+                    if str(value).strip()
+                }
+            plan = payload.get("plan")
+            raw_items = (
+                plan.get("items")
+                if isinstance(plan, Mapping)
+                else payload.get("items")
+            )
+            merged_plan, error = merge_group_revision_items(
+                merged,
+                group_id=group_id,
+                patched_items=raw_items if isinstance(raw_items, list) else [],
+                editable_item_ids=editable,
+            )
+            if error:
+                logger.warning(
+                    "NODE_GROUP_REVISION_PATCH_INVALID node_run_id=%s group_id=%s "
+                    "error=%s",
+                    self._node_run_id,
+                    group_id,
+                    error,
+                )
+                patch_errors.append((worker_id, error))
+                continue
+            merged = merged_plan
+            for entry in payload.get("group_docs") or ():
+                if isinstance(entry, dict):
+                    group_docs.append(entry)
+            for entry in payload.get("finding_resolutions") or ():
+                if isinstance(entry, dict):
+                    finding_resolutions.append(entry)
+            if group_id:
+                patched_groups.append(group_id)
+        return merged, group_docs, finding_resolutions, patched_groups, patch_errors
+
+    def _salvage_failed_group_revision(
+        self,
+        results: tuple[WorkerResult, ...],
+    ) -> dict[str, object] | None:
+        """Carry a group-revision wave's finished groups across a failure.
+
+        One sibling's transport-level failure (timeout, agent crash) must not
+        discard the groups whose patches the joiner can still fully validate:
+        the same per-group fold and post-merge pipeline as the fold-phase
+        salvage runs over the surviving payloads, and the FAIL aggregate
+        carries the result so the retry re-dispatches only the groups still
+        missing (live run task-20260928-835a07 re-paid a finished group's
+        whole revision after a sibling timed out).
+        """
+
+        if not isinstance(self._base_plan, Mapping):
+            return None
+        worker_payloads: list[dict[str, object]] = []
+        for result in results:
+            payload = result.result_payload
+            if result.status != "SUCCEEDED" or not isinstance(payload, Mapping):
+                continue
+            if _is_unstructured_reply(result):
+                continue
+            worker_payloads.append({**dict(payload), "worker_id": result.worker_id})
+        if not worker_payloads:
+            return None
+        merged, group_docs, finding_resolutions, patched_groups, _errors = (
+            self._fold_group_revision_payloads(worker_payloads, self._base_plan)
+        )
+        # Patch errors here mean that group's own work was invalid; the group
+        # simply stays out of the salvage and is re-dispatched by the retry.
+        return self._salvage_group_revision(
+            merged,
+            group_docs=group_docs,
+            finding_resolutions=finding_resolutions,
+            patched_groups=patched_groups,
+        )
 
     def _join_item_revise(self, results, worker_payloads):
         """Merge one-patch-per-item worker replies into the revised plan.

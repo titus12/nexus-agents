@@ -32,6 +32,7 @@ ROLE_NAMES = {
 
 ACTION_LABELS = {
     "READY_FOR_SOLVER": "证据已提交给规划师",
+    "EVIDENCE_PACKET_READY_FOR_CRITIC": "证据已直通审查员",
     "READY_FOR_CRITIC": "方案已提交给审查员",
     "READY_FOR_ANALYST": "条目已提交给分析师",
     "EVIDENCE_SUFFICIENT": "证据审查通过",
@@ -408,6 +409,13 @@ def _human_reason_text(
                 f"/{context.review.max_zhongshu_revision_rounds}），仍有问题未解决"
             )
         return "整体修订轮数已达上限，仍有问题未解决"
+    if reason_code == "NODE_FAIL_STREAK_EXHAUSTED":
+        rounds = context.recovery.max_node_fail_streak
+        state = context.recovery.node_fail_state or context.progression.state
+        return (
+            f"{state} 连续 {rounds} 个执行波失败（错误码可能不同），"
+            "继续自动重试大概率重复同样的失败"
+        )
     return "系统自动处理已到边界，需要人工介入"
 
 

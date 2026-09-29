@@ -75,6 +75,11 @@ _ROLE_EDGES = (
     ("REQUEST_INTAKE", "HUMAN_GATE", "HUMAN_GATE"),
     ("REQUEST_INTAKE", "BLOCKED", "BLOCKED"),
     ("ZHONGSHU_ANALYST", "EVIDENCE_PACKET_READY", "ZHONGSHU_SOLVER"),
+    # 2026-09-28 Fix 3: the evidence packet routes straight back to the
+    # Critic that demanded it (mirrors the menxia bypass, transitions.py
+    # "without touching the solver").  The plain EVIDENCE_PACKET_READY edge
+    # above stays for Solver-demanded rounds and the legacy routing.
+    ("ZHONGSHU_ANALYST", "EVIDENCE_PACKET_READY_FOR_CRITIC", "ZHONGSHU_CRITIC"),
     ("ZHONGSHU_ANALYST", "REQUIREMENT_CONTRACT_READY", "ZHONGSHU_ANALYST"),
     ("ZHONGSHU_SOLVER", "REQUEST_ANALYST_EVIDENCE", "ZHONGSHU_ANALYST"),
     ("ZHONGSHU_SOLVER", "NEEDS_MORE_EVIDENCE", "ZHONGSHU_ANALYST"),

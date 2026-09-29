@@ -133,6 +133,14 @@ tasks. Every item-scoped `evidence_updates` entry must carry the assigned
 
 未知项已确认时可另给 unknown_resolutions，每条包含 unknown_id、status=RESOLVED、response、evidence_ids；原未知记录仍保留以供审查。
 
+## 逐字引用门（机械校验）
+
+每条 `evidence_updates` 或 `finding_responses`，只要 `source` 指向一个真实存在的仓库文件路径，就必须携带 `quote` 对象（`{path, line_start, line_end, text}`，schema 层面仅 `text` 必填）**逐字抄录**所引行的原文。先抄录、后解读：结论里描述的代码行为必须是 quote 文本能直接支撑的。
+
+- 传输门做机械校验：引用存在的文件却没有 quote（QUOTE_REQUIRED），或 quote 文本在所指文件中找不到（QUOTE_MISMATCH，NFKC + 空白归一化后做包含匹配，行号漂移不影响判定），本轮回复会被整体退回重问。
+- 被引用的文件不存在时豁免：如实报"该文件不存在于工作区"是合法 UNKNOWN，无需伪造 quote。
+- quote 只抄所引行（≤30 行 / ≤4096 字符）；语义是否支撑结论由门下省判定，门只管"抄得对不对"。
+
 ## 非成功结果与修复
 
 需要用户决策时说明问题和下一步；环境或协议阻塞时说明原因和解除条件。不要把分组修改推回 Analyst 调查。HUMAN_GATE/BLOCKED 也必须遵循注入的 Analyst 契约。

@@ -18,10 +18,12 @@ import uuid
 
 from ..domain.errors import (
     CONTRACT_REJECTED_EVENT,
+    OUTPUT_OVERFLOW_FEEDBACK,
     UNSTRUCTURED_REPLY_EVENT,
     FailureRecord,
     InvariantViolation,
     is_infrastructure_failure,
+    is_output_overflow_reply,
     is_reply_failure,
 )
 
@@ -88,6 +90,9 @@ class NodeContext:
     # round's wave; the joiner replays them at fan-in alongside the fresh
     # workers' results.
     salvaged_worker_payloads: tuple[dict[str, object], ...] = ()
+    # Analyst evidence nodes: the state that demanded this round; the fan-in
+    # routes the folded packet back to it (2026-09-28 Fix 3).
+    evidence_requester: str = ""
 
 
 @dataclass(frozen=True)
@@ -284,6 +289,10 @@ def _rejected_reply(result: WorkerResult) -> str | None:
     if result.status == "SUCCEEDED" and isinstance(payload, Mapping):
         action = str(payload.get("action") or "")
         if action == UNSTRUCTURED_REPLY_EVENT:
+            if is_output_overflow_reply(payload):
+                # The platform dropped an oversized output wholesale; the
+                # correction is the delivery channel, not JSON formatting.
+                return OUTPUT_OVERFLOW_FEEDBACK
             return (
                 "the reply body must be exactly one complete JSON object "
                 "(no prose, no Markdown, no code fences)"

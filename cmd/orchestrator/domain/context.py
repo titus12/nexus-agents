@@ -57,6 +57,14 @@ class ZhongshuParallelLimits:
     # the Menxia group pipeline right after Analyst + Solver finish.
     # Default off; flipped by --fast-track / NEXUS_FAST_TRACK.
     fast_track: bool = False
+    # 2026-09-28 mechanical freeze: when every group row is terminal with a
+    # fresh approval ratchet and the ledger closes, the freeze-check agent hop
+    # is replaced by a synthesized FREEZE_APPROVED event.  _group_freeze_decision
+    # still re-verifies the release (ready computation + document validation),
+    # so a failed precheck only costs the normal agent hop.  Flipped by
+    # ZHONGSHU_MECHANICAL_FREEZE=0; ignored when fast_track is on (fast track
+    # already synthesizes the event) and never fires on legacy non-group rounds.
+    mechanical_freeze: bool = True
     global_max_workers: int = 6
     per_task_max_workers: int = 6
 
@@ -76,6 +84,10 @@ class ParallelState:
 
     zhongshu: ZhongshuParallelLimits = field(default_factory=ZhongshuParallelLimits)
     menxia: MenxiaParallelLimits = field(default_factory=MenxiaParallelLimits)
+    # 2026-09-28 T3.2 role slicing: trim worker bundles to the owning group /
+    # item slice.  Default OFF — the cut points are decided from the T3.1
+    # per-section byte reports; flip via ZHONGSHU_PROMPT_SLICING=1 to trial.
+    prompt_slicing: bool = False
     group_index: int | None = None
     item_index: int | None = None
     menxia_snapshot_ref: str | None = None
@@ -133,6 +145,15 @@ class RecoveryState:
     # Consecutive Critic rounds one finding may stay open before the loop is
     # escalated to a human (0 disables the escalation).
     max_stuck_finding_rounds: int = 3
+    # Consecutive node-level FAILs inside one workflow state (state-keyed,
+    # error-code agnostic).  Back-to-back wave failures mean the state keeps
+    # failing deterministically on the same payload, so further budgeted
+    # retries are pure waste; the run escalates to the operator instead
+    # (incident task-20260928-835a07: waves 6/8/10/12).  A limit of 0
+    # disables the escalation.
+    node_fail_streak: int = 0
+    node_fail_state: str = ""
+    max_node_fail_streak: int = 2
 
 
 @dataclass(frozen=True)
@@ -184,6 +205,13 @@ class ReviewState:
     # requested evidence the run already had.  The task-review bindings slice
     # this per item; ``None`` until the first lens round folds.
     evidence_packet: dict[str, object] | None = None
+    # The state that demanded the current Analyst evidence round
+    # (REQUEST_ANALYST_EVIDENCE).  The evidence wave folds into the packet and
+    # routes back to this requester directly (2026-09-28 Fix 3): a Critic
+    # demand no longer detours through the Solver (one full solver hop, 13-24
+    # min in task-20260928-835a07, just to hand evidence over).  ``None``
+    # keeps the legacy READY_FOR_SOLVER routing.
+    evidence_requester: str | None = None
     # Per-item pipeline dispatch table (A2/P2).  Mirrors the ledger's verdicts
     # as pipeline phases; the ItemWorkflow executor consumes it to know which
     # stoves are open.  Empty until the first task-review round folds.
@@ -673,6 +701,11 @@ class ReviewUpdate:
     attempted_item_ids: tuple[str, ...] | None = None
     attempted_finding_ids: tuple[str, ...] | None = None
     evidence_packet: dict[str, object] | None = None
+    evidence_requester: str | None = None
+    # None means "keep" for evidence_requester, so a clean join needs this
+    # explicit sentinel to drop a consumed requester (a stale one would
+    # misroute the NEXT state's evidence demand to the wrong target).
+    clear_evidence_requester: bool = False
     item_workflows: tuple[ItemWorkflow, ...] | None = None
     menxia_items: tuple[MenxiaItemState, ...] | None = None
     menxia_groups: tuple[MenxiaGroupState, ...] | None = None
@@ -849,6 +882,18 @@ def apply_review_update(
             if update.evidence_packet is not None
             else current.evidence_packet if current else None
         ),
+        # Precedence mirrors last_failure: an explicit new requester wins,
+        # then the clear sentinel (clean joins drop a consumed requester),
+        # then keep.
+        evidence_requester=(
+            update.evidence_requester
+            if update.evidence_requester is not None
+            else (
+                None
+                if update.clear_evidence_requester
+                else current.evidence_requester if current else None
+            )
+        ),
         item_workflows=(
             update.item_workflows
             if update.item_workflows is not None
@@ -941,6 +986,11 @@ class RecoveryUpdate:
     timeout_retry_count: int | None = None
     last_failure: FailureRecord | None = None
     no_progress_count: int | None = None
+    node_fail_streak: int | None = None
+    node_fail_state: str | None = None
+    # None means "keep" for last_failure, so a success needs this explicit
+    # sentinel to drop the stale feedback text a later re-ask would inherit.
+    clear_last_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -1132,6 +1182,11 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             evidence_packet=(
                 dict(raw_evidence_packet)
                 if isinstance(raw_evidence_packet, Mapping)
+                else None
+            ),
+            evidence_requester=(
+                str(review_value.get("evidence_requester"))
+                if review_value.get("evidence_requester")
                 else None
             ),
             requirements=requirements,

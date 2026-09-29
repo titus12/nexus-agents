@@ -133,6 +133,33 @@ class EffectManagerTests(unittest.TestCase):
         self.assertEqual(result.failure.error_code, "AGENT_REPLY_UNSTRUCTURED")
         self.assertTrue(result.failure.retryable)
 
+    def test_oversized_output_placeholder_is_its_own_retryable_failure(self) -> None:
+        repository = _Repository((_effect(),))
+
+        class _OutcomeRunner:
+            def run_once(self, request: EffectRequest) -> EffectOutcome:
+                return EffectOutcome(
+                    status="SUCCEEDED",
+                    event_name="__UNSTRUCTURED_REPLY__",
+                    event_payload={
+                        "action": "__UNSTRUCTURED_REPLY__",
+                        "raw_reply": (
+                            "This task completed, but its output was too large "
+                            "to post safely. The raw output was not posted."
+                        ),
+                    },
+                    request_id=request.idempotency_key,
+                )
+
+        result = EffectManager(repository, {"dispatch": _OutcomeRunner()}).execute_pending("task-1")[0]
+
+        self.assertEqual(result.status, "FAILED")
+        assert result.failure is not None
+        self.assertEqual(result.failure.error_code, "AGENT_REPLY_OUTPUT_OVERFLOW")
+        self.assertTrue(result.failure.retryable)
+        self.assertIn("too large", result.failure.message)
+        self.assertIn("result file", result.failure.message)
+
     def test_contract_rejected_agent_reply_is_its_own_retryable_failure(self) -> None:
         repository = _Repository((_effect(),))
 

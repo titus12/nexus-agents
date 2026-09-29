@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict
+import json
 import logging
 from typing import Callable
 
@@ -40,6 +41,7 @@ class NodeEffectRunner:
     def run_once(self, request: EffectRequest) -> EffectOutcome:
         payload = request.payload
         node = self._node(payload, request)
+        self._log_capsules(node)
         revision_id = str(payload.get("revision_id") or request.idempotency_key)
         plan_hash = str(payload.get("plan_hash") or "")
         dispatch_mode = str(payload.get("dispatch_mode") or "")
@@ -103,6 +105,7 @@ class NodeEffectRunner:
                 if isinstance(payload.get("salvaged_worker_payloads"), (list, tuple))
                 else ()
             ),
+            evidence_requester=str(payload.get("evidence_requester") or ""),
         )
         executor = (
             self._executor_factory(node, context)
@@ -199,6 +202,34 @@ class NodeEffectRunner:
                 )
             )
         return ReviewNode(node_run_id, phase, tuple(bindings))
+
+    @staticmethod
+    def _log_capsules(node: ReviewNode) -> None:
+        """Per-worker capsule metering (2026-09-28 efficiency plan T3.1).
+
+        The capsule (prompt_ref) plus the dispatch context are what a worker
+        actually reads; their byte sizes decide where role slicing can cut.
+        """
+        for binding in node.bindings:
+            context_bytes = 0
+            if binding.dispatch_context:
+                try:
+                    context_bytes = len(
+                        json.dumps(
+                            binding.dispatch_context, ensure_ascii=False
+                        ).encode("utf-8")
+                    )
+                except (TypeError, ValueError):
+                    context_bytes = -1
+            logger.info(
+                "WORKER_CAPSULE_BYTES task_id=%s node_run_id=%s worker_id=%s "
+                "capsule_bytes=%s context_bytes=%s",
+                binding.task_id,
+                node.node_run_id,
+                binding.worker_id,
+                len(binding.prompt_ref.encode("utf-8")),
+                context_bytes,
+            )
 
 
 __all__ = ["NodeEffectRunner"]

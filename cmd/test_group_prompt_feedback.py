@@ -56,7 +56,7 @@ def _failure(code: str, state: str, message: str = "boom") -> FailureRecord:
     )
 
 
-def _context(failure: FailureRecord | None) -> WorkflowContext:
+def _context(failure: FailureRecord | None, doc_markdown: str = DOC) -> WorkflowContext:
     review = ReviewState(
         revision_id="R1",
         plan_hash="plan-hash",
@@ -89,8 +89,16 @@ def _context(failure: FailureRecord | None) -> WorkflowContext:
                 group_id="group-000001",
                 doc_version=1,
                 doc_hash="doc-hash",
-                doc_markdown=DOC,
+                doc_markdown=doc_markdown,
             ),
+        ),
+        requirements=(
+            {
+                "requirement_id": "req-000001",
+                "statement": "原始条款文本：验收信号必须可打勾",
+                "priority": "must",
+                "scope": "in",
+            },
         ),
     )
     return WorkflowContext(
@@ -99,6 +107,67 @@ def _context(failure: FailureRecord | None) -> WorkflowContext:
         recovery=RecoveryState(last_failure=failure),
         review=review,
     )
+
+
+class FindingResponseRenderingTests(unittest.TestCase):
+    """Analyst answers must render into the capsule (task-20260929-c261a8).
+
+    The renderer read only the Critic's ``response`` key while analyst answers
+    carry their text under ``answer``: every re-dispatched Critic saw blank
+    answer lines and re-demanded evidence the run already held.
+    """
+
+    def test_analyst_answer_field_is_rendered(self) -> None:
+        capsule = build_group_capsule(
+            group_id="group-000001",
+            revision_id="R1",
+            doc_markdown=DOC,
+            members_full=(),
+            finding_responses=[
+                {
+                    "finding_id": "finding-000001",
+                    "answer": "req-000001 权威原文：原始条款文本",
+                },
+            ],
+        )
+
+        self.assertIn("finding-000001: req-000001 权威原文", capsule)
+
+    def test_critic_response_field_still_renders(self) -> None:
+        capsule = build_group_capsule(
+            group_id="group-000001",
+            revision_id="R1",
+            doc_markdown=DOC,
+            members_full=(),
+            finding_responses=[
+                {"finding_id": "finding-000001", "response": "RESOLVED"},
+            ],
+        )
+
+        self.assertIn("finding-000001: RESOLVED", capsule)
+
+
+class RequirementContractVisibilityTests(unittest.TestCase):
+    """The Critic must see the contract its answers cite."""
+
+    def test_group_review_binding_carries_the_requirement_contract(self) -> None:
+        bindings = _group_review_bindings(_context(None), "R1", "plan-hash")
+
+        assert bindings
+        contract = bindings[0]["dispatch_context"].get("requirement_contract")
+        self.assertIsNotNone(contract)
+        self.assertEqual(contract[0]["requirement_id"], "req-000001")
+        self.assertIn("原始条款文本", contract[0]["statement"])
+
+    def test_task_review_binding_carries_the_requirement_contract(self) -> None:
+        from orchestrator.domain.states import _task_review_bindings
+
+        bindings = _task_review_bindings(_context(None), "R1", "plan-hash")
+
+        assert bindings
+        contract = bindings[0]["dispatch_context"].get("requirement_contract")
+        self.assertIsNotNone(contract)
+        self.assertEqual(contract[0]["requirement_id"], "req-000001")
 
 
 class GroupCapsuleDisciplineTests(unittest.TestCase):
@@ -122,6 +191,12 @@ class GroupCapsuleDisciplineTests(unittest.TestCase):
         self.assertIn("[Delivery discipline]", capsule)
         self.assertIn("exactly one complete", capsule)
         self.assertIn("no prose", capsule)
+        # Oversized posted output is silently discarded by the platform
+        # (task-20260928-21fe26): the capsule must steer delivery to the
+        # result file and give a size budget instead of promising the channel.
+        self.assertIn("result file", capsule)
+        self.assertIn("silently discards oversized", capsule)
+        self.assertIn("400 characters", capsule)
 
     def test_discipline_applies_to_custom_headers_too(self) -> None:
         capsule = build_group_capsule(
@@ -195,6 +270,45 @@ class GroupReviewBindingFeedbackTests(unittest.TestCase):
         self.assertIn("[Delivery discipline]", prompt)
         self.assertIn("[Retry feedback]", prompt)
         self.assertIn("acceptance_orphan", prompt)
+
+
+class RequirementContractCapsuleBackfillTests(unittest.TestCase):
+    """Empty doc slots carry the authoritative contract (task-20260929-c261a8).
+
+    While the group document has not been authored the capsule's [Requirement
+    document] slot was empty, so a Critic demanding "the authoritative
+    requirement text" could not be answered from the bundle.
+    """
+
+    def test_review_capsule_backfills_the_contract_when_doc_is_empty(self) -> None:
+        bindings = _group_review_bindings(_context(None, doc_markdown=""), "R1", "plan-hash")
+
+        assert bindings
+        prompt = str(bindings[0]["prompt_ref"])
+        self.assertIn("[Authoritative requirement contract]", prompt)
+        self.assertIn("req-000001 (must/in): 原始条款文本：验收信号必须可打勾", prompt)
+
+    def test_review_capsule_prefers_the_group_doc_when_present(self) -> None:
+        bindings = _group_review_bindings(_context(None), "R1", "plan-hash")
+
+        assert bindings
+        prompt = str(bindings[0]["prompt_ref"])
+        self.assertNotIn("[Authoritative requirement contract]", prompt)
+        self.assertIn("## 1. 背景", prompt)
+
+    def test_revise_binding_carries_the_requirement_contract(self) -> None:
+        bindings = _group_revise_bindings(
+            _context(None),
+            "R1",
+            "plan-hash",
+            affected_groups=("group-000001",),
+            editable_by_group={"group-000001": ("item-000001", "item-000002")},
+        )
+
+        assert bindings
+        contract = bindings[0]["dispatch_context"].get("requirement_contract")
+        self.assertIsNotNone(contract)
+        self.assertEqual(contract[0]["requirement_id"], "req-000001")
 
 
 if __name__ == "__main__":

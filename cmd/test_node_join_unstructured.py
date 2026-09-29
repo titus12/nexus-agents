@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from orchestrator.domain.errors import is_reply_failure
 from orchestrator.runtime.agent_effects import AgentNodeJoiner
 from orchestrator.runtime.nodes import WorkerResult
 
@@ -41,6 +42,31 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
         self.assertEqual(node.failure.error_code, "AGENT_REPLY_UNSTRUCTURED")
         self.assertTrue(node.failure.retryable)
         self.assertEqual(node.failure.worker_id, "worker-01")
+
+    def test_oversized_output_placeholder_gets_its_own_error_code(self) -> None:
+        results = (
+            _result(
+                "worker-01",
+                "__UNSTRUCTURED_REPLY__",
+                extra={
+                    "raw_reply": (
+                        "This task completed, but its output was too large "
+                        "to post safely. The raw output was not posted."
+                    ),
+                },
+            ),
+            _result("worker-02", "EVIDENCE_PACKET_READY"),
+        )
+        node = self._joiner("ZHONGSHU_ANALYST").join(results)
+
+        self.assertEqual(node.status, "FAILED")
+        assert node.failure is not None
+        self.assertEqual(node.failure.error_code, "AGENT_REPLY_OUTPUT_OVERFLOW")
+        self.assertTrue(node.failure.retryable)
+        self.assertIn("too large", node.failure.message)
+        self.assertIn("result file", node.failure.message)
+        # The overflow code rides the reply budget like every unusable reply.
+        self.assertTrue(is_reply_failure("AGENT_REPLY_OUTPUT_OVERFLOW"))
 
     def test_contract_rejected_reply_keeps_its_own_error_code(self) -> None:
         results = (

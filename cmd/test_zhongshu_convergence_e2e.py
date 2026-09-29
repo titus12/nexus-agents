@@ -332,7 +332,9 @@ def _context() -> WorkflowContext:
             raw_request="run a review", project_type="python", task_type="review"
         ),
         parallel=ParallelState(
-            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
+            zhongshu=ZhongshuParallelLimits(
+                plan_review_gate=False, mechanical_freeze=False
+            ),
             menxia=MenxiaParallelLimits(
                 enabled=True,
                 max_concurrent_groups=2,
@@ -601,7 +603,9 @@ class StubbornBlockerIsFrozenWithFollowUpsTests(unittest.TestCase):
             progression=_context().progression,
             request=_context().request,
             parallel=ParallelState(
-                zhongshu=ZhongshuParallelLimits(review_unit="item", plan_review_gate=False),
+                zhongshu=ZhongshuParallelLimits(
+                    review_unit="item", plan_review_gate=False, mechanical_freeze=False
+                ),
                 menxia=MenxiaParallelLimits(
                     enabled=True,
                     max_concurrent_groups=2,
@@ -775,7 +779,9 @@ def _pingpong_context() -> WorkflowContext:
             raw_request="run a review", project_type="python", task_type="review"
         ),
         parallel=ParallelState(
-            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
+            zhongshu=ZhongshuParallelLimits(
+                plan_review_gate=False, mechanical_freeze=False
+            ),
             menxia=MenxiaParallelLimits(
                 enabled=True,
                 max_concurrent_groups=2,

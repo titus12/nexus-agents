@@ -89,6 +89,7 @@ CONTRACT = make_contract(
         "(dispatch_context.solver_stage=revise). Answering a revision with the "
         "formalization mode is a protocol violation.",
         "plan.requirements is the immutable Analyst contract; use only the supplied requirement_id values and put evidence-derived work in plan.items.",
+        "`requirement_contract` in dispatch_context is the same authoritative requirement array; when echoing requirement text into group_docs, answers, or documents, transcribe it verbatim from that array and cite the anchor `requirement_contract[<requirement_id>]`.",
         "Analyst candidate_items and candidate_groups are empty in the current evidence-only handoff; Solver creates the formal task graph from evidence.",
         "Dependencies are one-way execution prerequisites only. The complete plan.items dependency graph must be a directed acyclic graph: direct and transitive cycles are invalid, and related-but-not-blocking work must not be encoded as depends_on.",
         "plan.items is the only complete task-object index. Every group must use item_ids to reference plan.items; never emit groups[*].items or duplicate task objects.",

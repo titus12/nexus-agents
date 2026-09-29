@@ -686,13 +686,24 @@ def merge_analyst_evidence(
     revision_id: str,
     worker_results: list[dict[str, Any]],
     canonical_requirements: list[dict[str, Any]] | None = None,
+    target_action: str = "READY_FOR_SOLVER",
 ) -> dict[str, Any]:
     """Merge Analyst observations into an evidence packet only.
 
     This function deliberately has no task/group merge path. Any task graph is
     created later by the single Solver, which prevents parallel Analysts from
     multiplying candidate tasks before Critic review.
+
+    ``target_action`` picks the return channel (2026-09-28 Fix 3):
+    ``READY_FOR_SOLVER`` (default, the legacy behavior) or
+    ``EVIDENCE_PACKET_READY_FOR_CRITIC`` when the Critic demanded this round.
+    The Critic channel omits the ``plan`` key: the packet is an empty graph
+    (``task_proposals: []``) and would otherwise clobber the real plan in
+    ``review.plan`` now that the fold no longer detours through the Solver
+    (which used to rewrite the plan right after every packet).
     """
+    if target_action not in ("READY_FOR_SOLVER", "EVIDENCE_PACKET_READY_FOR_CRITIC"):
+        raise ValueError(f"unknown evidence fan-in target action: {target_action!r}")
     if not worker_results:
         raise ValueError("no Analyst results available for evidence merge")
     requirement_by_id = {
@@ -922,10 +933,13 @@ def merge_analyst_evidence(
         "candidate_verification_questions": [],
         "questions_for_user": questions_for_user,
     }
-    return {
-        "action": "READY_FOR_SOLVER",
-        "notification": "Analyst evidence packet is ready for Solver task decomposition.",
-        "plan": packet,
+    aggregate = {
+        "action": target_action,
+        "notification": (
+            "Analyst evidence packet is ready for Solver task decomposition."
+            if target_action == "READY_FOR_SOLVER"
+            else "Analyst evidence packet routed back to the requesting Critic."
+        ),
         "evidence_packet": copy.deepcopy(packet),
         "analyst_evidence": copy.deepcopy(packet),
         "task_id": task_id,
@@ -935,6 +949,12 @@ def merge_analyst_evidence(
         "revision_id": revision_id,
         "worker_ids": sorted({str(item.get("worker_id") or "") for item in worker_results if item.get("worker_id")}),
     }
+    if target_action == "READY_FOR_SOLVER":
+        # Solver channel: the packet rides under ``plan`` as before — the
+        # solver stage resolution reads it (domain/zhongshu/stages.py).  The
+        # Critic channel must not clobber ``review.plan`` with an empty graph.
+        aggregate["plan"] = packet
+    return aggregate
 
 
 def _compact_solver_evidence_record(value: Any) -> Any:
@@ -943,7 +963,7 @@ def _compact_solver_evidence_record(value: Any) -> Any:
         return copy.deepcopy(value)
     fields = (
         "evidence_id", "requirement_id", "item_id", "finding_id",
-        "decision_relevance", "source", "source_type", "conclusion",
+        "decision_relevance", "source", "quote", "source_type", "conclusion",
         "statement", "confidence", "unknowns", "worker_id", "worker_ids",
     )
     compact = {

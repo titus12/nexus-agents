@@ -12,12 +12,13 @@ import subprocess
 import threading
 import time
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .prompt_bundle import PromptBundleBuilder
+from .prompt_bundle import PromptBundleBuilder, emit_prompt_bundle_report
 from .agent_result_file import (
     AgentResultFileError,
     read_agent_result_file,
@@ -242,6 +243,113 @@ def _evidence_demand_rejection(request: AgentRequest, payload: object) -> str:
         "filename / grepping the symbol; the workspace is mounted read-only "
         "and remote git has no credentials by design). Return one complete "
         "structured result."
+    )
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FILE_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9_./\\-]+\.(?:py|md|json|txt|toml|yaml|yml|cfg|ini|rst)"
+)
+_QUOTE_MAX_CHARS = 4096
+_QUOTE_MAX_LINES = 30
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", text).split())
+
+
+def _quote_rejection(request: AgentRequest, payload: object) -> str:
+    """Mechanical quote gate for file-citing evidence and finding responses.
+
+    task-20260929-c261a8 problem A: the Analyst paraphrased file behavior and
+    the wrong reading survived review rounds until the Critic caught it.  Any
+    evidence_update or finding_response whose source cites a file path must
+    carry a ``quote`` object transcribing the cited lines.  The quoted text
+    must appear in the cited file (NFKC + whitespace-normalized containment,
+    so honest line drift passes); invented text is bounced at the reply
+    boundary.  A cited path that does not exist is exempt: claiming a file is
+    missing is a legitimate UNKNOWN the gate cannot disprove.  It verifies
+    transcription only — whether the quote supports the conclusion stays a
+    semantic judgement for the Critic.
+    """
+
+    if str(getattr(request, "phase", "") or "") != "ZHONGSHU":
+        return ""
+    body = payload if isinstance(payload, dict) else {}
+    entries: list[tuple[str, dict]] = []
+    for key in ("evidence_updates", "finding_responses"):
+        rows = body.get(key)
+        if isinstance(rows, list):
+            entries.extend((key, row) for row in rows if isinstance(row, dict))
+    if not entries:
+        return ""
+
+    file_cache: dict[str, "str | None"] = {}
+
+    def _load(path_text: str) -> "str | None":
+        normalized = path_text.replace("\\", "/").strip()
+        if normalized in file_cache:
+            return file_cache[normalized]
+        candidates = [Path(path_text)]
+        for root in (_REPO_ROOT, Path.cwd()):
+            candidates.append(root / normalized)
+        resolved = next((c for c in candidates if c.is_file()), None)
+        content = None
+        if resolved is not None:
+            try:
+                content = resolved.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = None
+        file_cache[normalized] = content
+        return content
+
+    problems: list[str] = []
+    for key, entry in entries:
+        label = str(entry.get("evidence_id") or entry.get("finding_id") or "?")
+        source = str(entry.get("source") or "")
+        quote = entry.get("quote")
+        quote_text = str(quote.get("text") or "") if isinstance(quote, dict) else ""
+        if not quote_text.strip():
+            match = _FILE_TOKEN_RE.search(source)
+            if match and _load(match.group(0)) is not None:
+                problems.append(
+                    f"{key}[{label}] cites {match.group(0)} but carries no "
+                    "verbatim quote {path, line_start, line_end, text} "
+                    "transcribing the cited lines (QUOTE_REQUIRED)"
+                )
+            continue
+        if len(quote_text) > _QUOTE_MAX_CHARS or quote_text.count("\n") + 1 > _QUOTE_MAX_LINES:
+            problems.append(
+                f"{key}[{label}] quote exceeds {_QUOTE_MAX_LINES} lines or "
+                f"{_QUOTE_MAX_CHARS} chars; quote only the cited lines"
+            )
+            continue
+        quoted_path = str(quote.get("path") or "").strip()
+        if not quoted_path:
+            match = _FILE_TOKEN_RE.search(source)
+            if not match:
+                continue
+            quoted_path = match.group(0)
+        content = _load(quoted_path)
+        if content is None:
+            continue
+        normalized_quote = _normalized_text(quote_text)
+        if normalized_quote and normalized_quote in _normalized_text(content):
+            continue
+        problems.append(
+            f"{key}[{label}] quoted text not found in {quoted_path}; "
+            "transcribe the exact cited lines verbatim (QUOTE_MISMATCH)"
+        )
+    if not problems:
+        return ""
+    shown = "; ".join(problems[:3])
+    if len(problems) > 3:
+        shown += f"; (+{len(problems) - 3} more quote problems)"
+    return (
+        "verbatim quote gate: " + shown
+        + ". Every file-citing evidence_update or finding_response needs a "
+        "verbatim quote transcribing the cited lines; interpret only what the "
+        "quote supports. Return one complete structured result."
     )
 
 
@@ -892,6 +1000,8 @@ class MulticaCliAdapter:
             role=request.role,
             prompt=request.prompt,
             revision_id=str(request.context.get("revision_id", "")),
+            state=request.target_state
+            or str(request.context.get("target_state") or ""),
             context={
                 **request.context,
                 "task_id": request.task_id,
@@ -906,6 +1016,16 @@ class MulticaCliAdapter:
             },
         )
         prompt_ref = bundle.reference()
+        target_state = (
+            request.target_state
+            or str(request.context.get("target_state") or "")
+        )
+        if target_state in {"ZHONGSHU_FREEZE_CHECK", "MENXIA_GROUP_GATE"}:
+            # Freeze / gate dispatches are the phase boundaries where the hop
+            # metering gets summarized (2026-09-28 efficiency plan T3.1).
+            emit_prompt_bundle_report(
+                request.task_id, reason=f"dispatch:{target_state}"
+            )
         # Some worker models fail to decode the manifest path out of the
         # doubly-escaped issue body (live incident task-20260920-bbd659
         # CRITIC worker-02), so restate the raw absolute locations as a
@@ -1264,6 +1384,21 @@ class MulticaCliAdapter:
             if rejections is not None:
                 rejections.append(rejection)
             return None
+        quote_rejection = _quote_rejection(request, file_result.payload)
+        if quote_rejection:
+            logger.warning(
+                "AGENT_REPLY_QUOTE_REJECTED task_id=%s request_id=%s "
+                "phase=%s role=%s path=%s reason=%s",
+                request.task_id,
+                request.request_id,
+                request.phase,
+                request.role,
+                file_result.path,
+                quote_rejection,
+            )
+            if rejections is not None:
+                rejections.append(quote_rejection)
+            return None
         return ExternalMessage(
             request.agent_id,
             file_result.payload,
@@ -1294,6 +1429,18 @@ class MulticaCliAdapter:
                 rejection,
             )
             raise AgentResultFileError(rejection)
+        quote_rejection = _quote_rejection(request, inline_payload)
+        if quote_rejection:
+            logger.warning(
+                "AGENT_REPLY_QUOTE_REJECTED task_id=%s request_id=%s "
+                "phase=%s role=%s reason=%s",
+                request.task_id,
+                request.request_id,
+                request.phase,
+                request.role,
+                quote_rejection,
+            )
+            raise AgentResultFileError(quote_rejection)
         if not self.orchestrator_result_write_enabled:
             return payload
         encoded_size = len(

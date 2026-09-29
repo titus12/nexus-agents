@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import uuid
 
@@ -92,6 +93,14 @@ REPLY_FAILURE_CODES = frozenset(
     {
         "AGENT_REPLY_UNSTRUCTURED",
         "AGENT_REPLY_CONTRACT_REJECTED",
+        # The platform discarded an oversized output before the orchestrator
+        # could read it ("too large to post safely" placeholder).  Same remedy
+        # class -- re-ask on the reply budget -- but the correction is to move
+        # the result to the result file, not to fix JSON formatting
+        # (task-20260928-21fe26: two group-review verdicts were dropped and
+        # re-paid whole because the generic "one JSON object" feedback
+        # misdiagnosed the loss).
+        "AGENT_REPLY_OUTPUT_OVERFLOW",
         # A2/P3: an item-revision worker returned a patch the joiner refused
         # (identity/field violations, or a merged plan that fails the
         # structural gate).  Same remedy: re-ask on the reply budget with the
@@ -121,6 +130,34 @@ SOLVER_STRUCTURE_REPLY_PREFIX = "SOLVER_PLAN_STRUCTURE_INVALID"
 # formatting slip from a contract disagreement.
 UNSTRUCTURED_REPLY_EVENT = "__UNSTRUCTURED_REPLY__"
 CONTRACT_REJECTED_EVENT = "__CONTRACT_REJECTED__"
+
+# The multica platform replaces an agent output that exceeds its postable
+# comment size with a fixed placeholder ("This task completed, but its output
+# was too large to post safely..."): the real result never reaches the comment
+# feed and is unrecoverable from it.  The placeholder text is a stable marker
+# the transport layers can recognize, so the re-ask tells the worker what
+# actually happened instead of misdiagnosing a formatting slip.
+OUTPUT_OVERFLOW_MARKER = "too large to post safely"
+OUTPUT_OVERFLOW_FEEDBACK = (
+    "your previous output was too large for the platform to post and was "
+    "discarded before the orchestrator could read it; deliver the complete "
+    "structured result through the result file described in the prompt "
+    "bundle manifest and keep any posted reply a short summary"
+)
+
+
+def is_output_overflow_reply(payload: object) -> bool:
+    """True when a delivered reply body is the platform's overflow placeholder."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    parts = [str(payload.get("raw_reply") or "")]
+    reports = payload.get("supplemental_reports")
+    if isinstance(reports, (list, tuple)):
+        parts.extend(str(value) for value in reports)
+    else:
+        parts.append(str(reports or ""))
+    return OUTPUT_OVERFLOW_MARKER in " ".join(parts).casefold()
 
 
 def is_reply_failure(error_code: object) -> bool:

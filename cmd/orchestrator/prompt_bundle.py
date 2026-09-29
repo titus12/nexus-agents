@@ -13,7 +13,129 @@ from typing import Any, Mapping
 
 from .dispatch_envelope import validate_envelope
 
-logger = logging.getLogger(__name__)
+# The service log file only carries the canonical "review_orchestrator_fsm"
+# logger (logging_setup.configure_logging attaches handlers to it alone), so
+# every module must log under that name for ops visibility.
+logger = logging.getLogger("review_orchestrator_fsm")
+
+_PROMPT_SECTION_MARKER_RE = re.compile(r"^\[([^\[\]]{1,80})\]\s*$", re.MULTILINE)
+_CONTEXT_SECTION_MIN_BYTES = 1024
+
+
+def _prompt_sections(prompt: str) -> dict[str, int]:
+    """Split prompt.txt into its named ``[Block]`` sections, bytes each.
+
+    The composed prompts use bracketed block markers (``[Contract rules]``,
+    ``[Retry feedback]``, ...); the text before the first marker is the
+    ``header``.  Sections are what role slicing can cut independently.
+    """
+
+    matches = list(_PROMPT_SECTION_MARKER_RE.finditer(prompt))
+    sections: dict[str, int] = {}
+    header_end = matches[0].start() if matches else len(prompt)
+    if prompt[:header_end].strip():
+        sections["header"] = len(prompt[:header_end].encode("utf-8"))
+    for index, match in enumerate(matches):
+        name = match.group(1).strip() or f"section-{index}"
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(prompt)
+        sections[name] = len(prompt[match.start():end].encode("utf-8"))
+    return sections
+
+
+def _context_sections(context: Mapping[str, Any]) -> dict[str, int]:
+    """Per-key byte weight of context.json (two levels, small keys bucketed).
+
+    context.json carries the heavy review material (plan, evidence, capsules,
+    dispatch contexts); its top-level keys and — for mappings — their biggest
+    sub-keys are the slicing candidates the section report is for.
+    """
+
+    def _size(value: Any) -> int:
+        try:
+            payload = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            payload = str(value)
+        return len(payload.encode("utf-8"))
+
+    sections: dict[str, int] = {}
+    small_total = 0
+    for key, value in context.items():
+        size = _size(value)
+        name = str(key)
+        if size < _CONTEXT_SECTION_MIN_BYTES:
+            small_total += size
+            continue
+        sections[f"context#/{name}"] = size
+        if isinstance(value, Mapping):
+            for sub_key, sub_value in value.items():
+                sub_size = _size(sub_value)
+                if sub_size >= _CONTEXT_SECTION_MIN_BYTES:
+                    sections[f"context#/{name}.{sub_key}"] = sub_size
+    if small_total:
+        sections["context#/other"] = small_total
+    return sections
+
+
+class PromptBundleMeter:
+    """In-process hop meter feeding the PROMPT_BUNDLE_REPORT aggregation.
+
+    Records one entry per dispatched bundle (task, state, sections); the
+    report groups hops by state with byte averages and the heaviest sections.
+    Process-local by design: a restart starts a fresh measurement window.
+    """
+
+    def __init__(self) -> None:
+        self._hops: dict[str, list[dict[str, Any]]] = {}
+
+    def record(
+        self,
+        task_id: str,
+        state: str,
+        request_id: str,
+        sections: Mapping[str, int],
+    ) -> None:
+        self._hops.setdefault(task_id, []).append(
+            {
+                "state": state,
+                "request_id": request_id,
+                "sections": dict(sections),
+            }
+        )
+
+    def report(self, task_id: str) -> dict[str, dict[str, Any]]:
+        by_state: dict[str, dict[str, Any]] = {}
+        for hop in self._hops.get(task_id, ()):
+            entry = by_state.setdefault(hop["state"], {"hops": 0, "bytes_total": 0})
+            entry["hops"] += 1
+            entry["bytes_total"] += sum(hop["sections"].values())
+            totals = entry.setdefault("section_totals", {})
+            for name, size in hop["sections"].items():
+                totals[name] = totals.get(name, 0) + size
+        for entry in by_state.values():
+            hops = max(1, entry["hops"])
+            entry["bytes_avg"] = entry["bytes_total"] // hops
+            totals = entry.pop("section_totals")
+            entry["top_sections"] = dict(
+                sorted(totals.items(), key=lambda item: -item[1])[:5]
+            )
+        return by_state
+
+
+BUNDLE_METER = PromptBundleMeter()
+
+
+def emit_prompt_bundle_report(task_id: str, *, reason: str) -> None:
+    """Log the aggregated PROMPT_BUNDLE_REPORT for one task (if any hops)."""
+
+    report = BUNDLE_METER.report(task_id)
+    if not report:
+        return
+    logger.info(
+        "PROMPT_BUNDLE_REPORT task_id=%s reason=%s by_state=%s",
+        task_id,
+        reason,
+        json.dumps(report, ensure_ascii=False, sort_keys=True),
+    )
 
 
 class PromptBundleError(RuntimeError):
@@ -125,6 +247,7 @@ class PromptBundleBuilder:
         revision_id: str = "",
         context: Mapping[str, Any] | None = None,
         prompt: str,
+        state: str = "",
     ) -> PromptBundle:
         if not prompt:
             raise PromptBundleError("prompt must not be empty")
@@ -211,6 +334,26 @@ class PromptBundleBuilder:
             context_file.bytes,
             context_file.sha256,
         )
+        # T3.1 (2026-09-28): per-section byte weight of the bundle — the
+        # prompt's named blocks plus context.json's heaviest keys — so the
+        # role-slicing cut is decided on data instead of guesses.
+        bundle_sections: dict[str, int] = {
+            "prompt.txt": len(prompt_bytes),
+            "context.json": len(context_bytes),
+        }
+        bundle_sections.update(
+            {f"prompt#/{name}": size for name, size in _prompt_sections(prompt).items()}
+        )
+        bundle_sections.update(_context_sections(context_value))
+        meter_state = state or str(context_value.get("target_state") or "") or phase
+        logger.info(
+            "PROMPT_BUNDLE_SECTIONS task_id=%s request_id=%s state=%s sections=%s",
+            task_id,
+            request_id,
+            meter_state,
+            json.dumps(bundle_sections, ensure_ascii=False, sort_keys=True),
+        )
+        BUNDLE_METER.record(task_id, meter_state, request_id, bundle_sections)
 
         files = [prompt_file, context_file]
         skill_lock = context_value.get("active_runtime_skill_lock")

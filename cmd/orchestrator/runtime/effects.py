@@ -13,7 +13,9 @@ from ..domain.errors import (
     DomainError,
     FailureRecord,
     InvariantViolation,
+    OUTPUT_OVERFLOW_FEEDBACK,
     UNSTRUCTURED_REPLY_EVENT,
+    is_output_overflow_reply,
 )
 from .event_inbox import effect_result_event
 from .repository import EffectRecord, EffectResult, WorkflowRepository
@@ -201,6 +203,11 @@ class EffectManager:
                 reason = ""
                 if isinstance(outcome.event_payload, Mapping):
                     reason = str(outcome.event_payload.get("contract_rejection") or "")
+                    if is_output_overflow_reply(outcome.event_payload):
+                        # The platform dropped an oversized output wholesale:
+                        # the correction is the delivery channel, not formatting.
+                        error_code = "AGENT_REPLY_OUTPUT_OVERFLOW"
+                        default_message = OUTPUT_OVERFLOW_FEEDBACK
                 message = f"{default_message}: {reason}" if reason else default_message
                 failure = FailureRecord(
                     failure_id=uuid.uuid4().hex,

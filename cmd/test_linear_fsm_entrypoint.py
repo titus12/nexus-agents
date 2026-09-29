@@ -152,7 +152,9 @@ def _context() -> WorkflowContext:
         progression=ProgressState("REQUEST_INTAKE", 0, "2026-09-10T00:00:00Z"),
         request=RequestState(raw_request="run a review", project_type="go", task_type="review"),
         parallel=ParallelState(
-            zhongshu=ZhongshuParallelLimits(plan_review_gate=False),
+            zhongshu=ZhongshuParallelLimits(
+                plan_review_gate=False, mechanical_freeze=False
+            ),
             menxia=MenxiaParallelLimits(
                 enabled=True,
                 max_concurrent_groups=2,

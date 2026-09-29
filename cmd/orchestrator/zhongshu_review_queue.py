@@ -280,7 +280,12 @@ def build_group_capsule(
         "",
         "[Delivery discipline] The reply body must be exactly one complete "
         "structured JSON object matching the injected result contract: no "
-        "prose, no Markdown, no code fences, no extra comments.",
+        "prose, no Markdown, no code fences, no extra comments. Deliver the "
+        "complete result through the result file described in the prompt "
+        "bundle manifest first; the platform silently discards oversized "
+        "posted output, so keep any posted reply compact (a short summary is "
+        "enough) and cap long per-field texts (claims, conclusions, "
+        "assessments) at ~400 characters each.",
         "",
         "[Requirement document]",
         str(doc_markdown or "").strip(),
@@ -317,7 +322,18 @@ def build_group_capsule(
     if responses:
         lines += ["", "[Finding responses]"]
         for entry in responses:
-            lines.append(f"  {entry.get('finding_id')}: {entry.get('response') or ''}")
+            # Analyst answers carry the text under ``answer``; the Critic's own
+            # disposition rows use ``response``.  Reading only ``response``
+            # rendered every analyst answer blank, so the re-dispatched Critic
+            # saw "no answer" and re-demanded evidence it already held
+            # (task-20260929-c261a8: four evidence round-trips).
+            text = str(
+                entry.get("answer")
+                or entry.get("response")
+                or entry.get("note")
+                or ""
+            )
+            lines.append(f"  {entry.get('finding_id')}: {text}")
     evidence_rows = [(str(item_id), tuple(records)) for item_id, records in evidence or ()]
     if evidence_rows:
         lines += ["", "[Evidence by member]"]

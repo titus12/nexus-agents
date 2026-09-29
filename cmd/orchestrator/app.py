@@ -29,6 +29,7 @@ from .domain.policies.menxia import MENXIA_ITEM_TARGETS
 from .feishu_command_parser import normalize_task_request
 from .logging_setup import configure_logging
 from .locks import TaskLock
+from .runtime.agent_effects import resolve_dispatch_role_timeouts
 from .runtime import (
     AgentNodeJoiner,
     AgentNodeWorkerRunner,
@@ -173,6 +174,8 @@ def _with_parallel_flag_overrides(context: WorkflowContext) -> WorkflowContext:
     menxia_flag = _env_flag("NEXUS_MENXIA_ENABLED")
     fast_track_flag = _env_flag("NEXUS_FAST_TRACK")
     plan_review_flag = _env_flag("ZHONGSHU_PLAN_REVIEW_GATE")
+    mechanical_freeze_flag = _env_flag("ZHONGSHU_MECHANICAL_FREEZE")
+    prompt_slicing_flag = _env_flag("ZHONGSHU_PROMPT_SLICING")
     review_unit = os.environ.get("ZHONGSHU_REVIEW_UNIT", "").strip().lower()
     # The Menxia group pipeline is on by default: when the env flag is unset,
     # new and resumed tasks both get enabled=True.  An explicit
@@ -189,13 +192,15 @@ def _with_parallel_flag_overrides(context: WorkflowContext) -> WorkflowContext:
         zhongshu = replace(zhongshu, fast_track=fast_track_flag)
     if plan_review_flag is not None:
         zhongshu = replace(zhongshu, plan_review_gate=plan_review_flag)
-    menxia = context.parallel.menxia
-    if menxia_flag is not None:
-        menxia = replace(menxia, enabled=menxia_flag)
-    return replace(
-        context,
-        parallel=replace(context.parallel, zhongshu=zhongshu, menxia=menxia),
+    if mechanical_freeze_flag is not None:
+        zhongshu = replace(zhongshu, mechanical_freeze=mechanical_freeze_flag)
+    menxia = replace(context.parallel.menxia, enabled=menxia_flag)
+    parallel = replace(
+        context.parallel, zhongshu=zhongshu, menxia=menxia
     )
+    if prompt_slicing_flag is not None:
+        parallel = replace(parallel, prompt_slicing=prompt_slicing_flag)
+    return replace(context, parallel=parallel)
 
 
 def _agent_pool_by_state() -> dict[str, str]:
@@ -299,6 +304,27 @@ class OrchestratorApp:
         else:
             interval = self.poll_interval if self.poll_interval > 0 else 15.0
             max_polls = max(30, int(self.timeout_seconds / interval) + 2)
+        # Per-role timeout differentiation: the default table applies to the
+        # default global configuration only (an explicit non-default
+        # ``timeout_seconds`` means the operator owns the dispatch deadlines
+        # outright, and the scripted-adapter test suites rely on their own
+        # small caps), but an explicit ZHONGSHU_DISPATCH_TIMEOUT_OVERRIDES is
+        # always honoured instead of being silently dropped with it.
+        include_default_role_timeouts = self.timeout_seconds == 900.0
+        role_timeouts: dict[str, float] = {}
+        if (
+            include_default_role_timeouts
+            or os.environ.get("ZHONGSHU_DISPATCH_TIMEOUT_OVERRIDES", "").strip()
+        ):
+            role_timeouts = resolve_dispatch_role_timeouts(
+                include_defaults=include_default_role_timeouts
+            )
+        if not include_default_role_timeouts:
+            logger.info(
+                "DISPATCH_ROLE_TIMEOUT_DEFAULTS_SKIPPED timeout_seconds=%s role_timeouts=%s",
+                self.timeout_seconds,
+                role_timeouts,
+            )
         self.runner = AgentWorkerRunner(
             self.transport,
             admission=self.admission,
@@ -306,6 +332,7 @@ class OrchestratorApp:
             poll_interval=self.poll_interval,
             max_polls=max_polls,
             timeout_seconds=self.timeout_seconds,
+            role_timeout_seconds=role_timeouts,
             agent_ids=_agent_pool_by_state(),
         )
         self._node_max_workers = max(1, int(os.environ.get("NODE_MAX_WORKERS", "6")))
@@ -327,6 +354,7 @@ class OrchestratorApp:
                 "plan_artifact": self.plan_effects,
                 "plan_review_doc": self.plan_effects,
                 "fast_track": FastTrackRunner(),
+                "mechanical_freeze": FastTrackRunner(),
             },
         )
         self.inbox = JsonDomainEventInbox(self.repository)
@@ -441,6 +469,7 @@ class OrchestratorApp:
                 base_plan=node_context.base_plan,
                 previous_review=node_context.previous_review,
                 salvaged_worker_payloads=node_context.salvaged_worker_payloads,
+                evidence_requester=node_context.evidence_requester,
                 menxia_stage_census=node_context.menxia_stage_census,
                 binding_contexts={
                     binding.worker_id: dict(binding.dispatch_context)

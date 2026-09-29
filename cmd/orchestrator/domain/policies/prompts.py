@@ -15,7 +15,7 @@ from ...acceptance_standards import (
 )
 from ...contracts import contract_for_state
 from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
-from .zhongshu import select_solver_batch
+from .zhongshu import MAX_EVIDENCE_RECORDS, project_evidence_record, select_solver_batch
 
 
 @dataclass(frozen=True)
@@ -164,6 +164,93 @@ def analyst_evidence_task(context: WorkflowContext) -> str:
     return "\n".join(lines) + "\n"
 
 
+def critic_evidence_task(context: WorkflowContext) -> str:
+    """Render the Analyst evidence packet for a plan-level Critic dispatch.
+
+    The group/task review bindings already carry per-item evidence slices
+    (``states._item_evidence_context``); the single-dispatch Critic prompt had
+    no evidence section at all, so after Fix 3 routes the Analyst packet
+    straight back the Critic could not see it and re-demanded evidence the run
+    already held.  Same slicing rules as the bindings, projected against the
+    whole plan instead of one item: demand-first selection, shared record
+    projection, and the same 8-record cap so the section stays bounded.
+    """
+
+    review = context.review
+    if review is None:
+        return ""
+    packet = getattr(review, "evidence_packet", None)
+    if not isinstance(packet, Mapping):
+        return ""
+    active = tuple(
+        finding
+        for finding in getattr(review, "findings", ())
+        if bool(getattr(finding, "active", True))
+    )
+    demanded_blob = " ".join(
+        " ".join(part.split())
+        for finding in active
+        for part in (
+            str(getattr(finding, "claim", "") or ""),
+            str(getattr(finding, "required_action", "") or ""),
+            *(str(eid) for eid in getattr(finding, "supporting_evidence", ()) or ()),
+        )
+    )
+    raw_updates = packet.get("evidence_updates")
+    prioritized: list[tuple[int, dict[str, object]]] = []
+    for value in raw_updates if isinstance(raw_updates, list) else ():
+        record = project_evidence_record(value)
+        if not record:
+            continue
+        evidence_id = str(record.get("evidence_id") or "")
+        if evidence_id and evidence_id in demanded_blob:
+            tier = 0
+        elif record.get("item_id"):
+            tier = 1
+        else:
+            tier = 2
+        prioritized.append((tier, record))
+    prioritized.sort(key=lambda pair: pair[0])
+    records = [record for _, record in prioritized[:MAX_EVIDENCE_RECORDS]]
+    active_ids = {str(getattr(finding, "finding_id", "") or "") for finding in active}
+    responses: list[tuple[str, str]] = []
+    raw_responses = packet.get("finding_responses")
+    if isinstance(raw_responses, list):
+        for value in raw_responses:
+            if not isinstance(value, Mapping) or len(responses) >= MAX_EVIDENCE_RECORDS:
+                continue
+            finding_id = str(value.get("finding_id") or "")
+            if not finding_id or finding_id not in active_ids:
+                continue
+            answer = " ".join(str(value.get("answer") or "").split())[:400]
+            if not answer:
+                continue
+            responses.append((finding_id, answer))
+    if not records and not responses:
+        return ""
+    lines = [
+        "",
+        "[Evidence packet] The Analyst already delivered this investigation; "
+        "judge against it instead of re-requesting evidence it already answers:",
+    ]
+    for record in records:
+        scope = str(
+            record.get("item_id") or record.get("requirement_id") or "plan"
+        )
+        source = str(record.get("source") or "")
+        lines.append(
+            f"- {record.get('evidence_id') or '?'} "
+            f"[{record.get('decision_relevance') or 'evidence'}, {scope}] "
+            f"{record.get('conclusion') or ''}"
+            + (f" (source: {source})" if source else "")
+        )
+    if responses:
+        lines.append("Answers to the open findings:")
+        for finding_id, answer in responses:
+            lines.append(f"- {finding_id}: {answer}")
+    return "\n".join(lines) + "\n"
+
+
 def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -> PromptSpec:
     """Project immutable context into a bounded role prompt.
 
@@ -191,6 +278,9 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
     )
     evidence_task = (
         analyst_evidence_task(context) if state == "ZHONGSHU_ANALYST" else ""
+    )
+    critic_evidence = (
+        critic_evidence_task(context) if state == "ZHONGSHU_CRITIC" else ""
     )
     # The contract's prompt_rules carry hard deliverable demands (e.g. the
     # nine-section group document in ``group_docs``).  They used to live only
@@ -224,6 +314,7 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
         "comments, no markdown fences, no text outside the JSON document."
         f"{revision_task}"
         f"{evidence_task}"
+        f"{critic_evidence}"
         f"{rules_block}"
         f"{acceptance_block}"
         f"{retry_feedback(context, state)}"
@@ -241,4 +332,4 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
     )
 
 
-__all__ = ["PromptSpec", "build_prompt"]
+__all__ = ["PromptSpec", "build_prompt", "critic_evidence_task"]

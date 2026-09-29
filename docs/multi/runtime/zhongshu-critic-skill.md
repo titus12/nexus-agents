@@ -175,6 +175,13 @@ and tasks whose dependency endpoint content changed are dispatched again.
 Missing or unreadable task results are execution-integrity failures and must
 not be converted into Solver changes or freeze approval.
 
+## 需求契约锚（requirement_contract）
+
+`context.json` 顶层携带 `requirement_contract` 数组——本次运行的需求权威原文（与 Analyst/Solver bundle 同源）。判定需求可满足性、要求"需求原文"或论证"需求不存在/不可验证"之前，先核对这个数组：
+
+- 引用契约条目用锚 `requirement_contract[<requirement_id>]`；需要原文时把 statement/priority/scope 逐字写进 finding 或回答。
+- 不要因为自己的 bundle 切片里没看到某段需求文本就断言"运行中不存在该需求"——切片是裁剪过的；以 `requirement_contract` 数组为准，数组里也没有时才可通过 finding 要求权威原文，由 Orchestrator 路由补证。
+
 ## Runtime Contract v3.3: task-scoped evidence routing
 
 In task-queue review mode, a Critic `REQUEST_ANALYST_EVIDENCE` response must

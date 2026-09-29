@@ -43,7 +43,12 @@ class PromptBundleTests(unittest.TestCase):
 
     def test_bundle_logs_reference(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            with self.assertLogs(level=logging.INFO) as captured:
+            # prompt_bundle logs under the canonical service logger (the
+            # hourly log file only carries "review_orchestrator_fsm"), so
+            # assert there instead of on the root logger.
+            with self.assertLogs(
+                "review_orchestrator_fsm", level=logging.INFO
+            ) as captured:
                 PromptBundleBuilder(Path(temporary)).build(
                     task_id="task-2",
                     request_id="request-2",

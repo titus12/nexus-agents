@@ -170,6 +170,14 @@ CONTRACT = make_contract(
         "evidence must cite. Paths are relative to the mounted review "
         "workspace; runtime facts that no file can prove stay out of "
         "evidence_targets and close as WONT_VERIFY instead.",
+        "Requirement verifiability rule: `requirement_contract` ships in your "
+        "context.json — the authoritative requirement array this run was "
+        "built from. Before declaring a claim unverifiable or a requirement "
+        "absent, check it against that array and cite the anchor "
+        "`requirement_contract[<requirement_id>]`. Do not judge requirement "
+        "text nonexistent just because your own bundle slice lacks it; demand "
+        "the original text through the finding and let the orchestrator "
+        "route the demand.",
         "Answered-finding rule: finding_responses from the analyst or solver "
         "arrive inside the evidence slice. A response backed by file:line "
         "evidence that covers the demanded targets MUST be explicitly "

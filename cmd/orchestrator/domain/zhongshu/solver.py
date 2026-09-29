@@ -619,6 +619,13 @@ def build_solver_dispatch(
                     review.seed_zhongshu_groups() if review is not None else ()
                 )
             },
+            # Same authoritative array the Critic's bundle carries: requirement
+            # text is quoted from here, never re-derived from memory
+            # (task-20260929-c261a8 problem B).
+            "requirement_contract": [
+                dict(entry)
+                for entry in (getattr(review, "requirements", ()) or ())
+            ],
             "envelope": envelope,
         }
     else:
@@ -634,6 +641,10 @@ def build_solver_dispatch(
             "current_formal_plan": dict(review.plan) if has_plan else None,
             "current_plan_ref": review.plan_ref or "" if review else "",
             "current_plan_hash": review.plan_hash or "" if review else "",
+            "requirement_contract": [
+                dict(entry)
+                for entry in (getattr(review, "requirements", ()) or ())
+            ],
             "envelope": build_envelope(
                 ingredients=[
                     {"key": "review.plan", "source": "context.json", "lifetime": "persisted",

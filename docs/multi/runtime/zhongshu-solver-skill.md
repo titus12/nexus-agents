@@ -48,6 +48,10 @@ may be normalized, but semantic duplicate tasks must be reported for an
 explicit Solver merge decision and then reviewed again; they must never be
 silently merged after Critic approval.
 
+### 需求原文出处（requirement_contract）
+
+`dispatch_context.requirement_contract` 是与 `plan.requirements` 同源的权威需求数组（组修订模式同样注入）。向 `group_docs`、回答或 finding_resolutions 转写需求原文时，从该数组逐字抄写，并用锚 `requirement_contract[<requirement_id>]` 标注出处；不要凭记忆改写需求文本。
+
 ### Dependency DAG invariant
 
 Dependencies are allowed, but they are one-way execution prerequisites only:

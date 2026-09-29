@@ -180,15 +180,31 @@ class LinearContextReducer:
                 if update.recovery.timeout_retry_count is not None
                 else current.timeout_retry_count
             ),
+            # Precedence: an explicit new failure wins, then the clear
+            # sentinel (clean joins drop stale feedback), then keep.
             last_failure=(
                 update.recovery.last_failure
                 if update.recovery.last_failure is not None
-                else current.last_failure
+                else (
+                    None
+                    if update.recovery.clear_last_failure
+                    else current.last_failure
+                )
             ),
             no_progress_count=(
                 update.recovery.no_progress_count
                 if update.recovery.no_progress_count is not None
                 else current.no_progress_count
+            ),
+            node_fail_streak=(
+                update.recovery.node_fail_streak
+                if update.recovery.node_fail_streak is not None
+                else current.node_fail_streak
+            ),
+            node_fail_state=(
+                update.recovery.node_fail_state
+                if update.recovery.node_fail_state is not None
+                else current.node_fail_state
             ),
         )
 

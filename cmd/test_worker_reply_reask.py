@@ -78,6 +78,23 @@ def _prose() -> WorkerResult:
     )
 
 
+def _overflow() -> WorkerResult:
+    """The platform placeholder for an output too large to post (task-20260928-21fe26)."""
+
+    return WorkerResult(
+        worker_id="worker-01",
+        status="SUCCEEDED",
+        payload_ref=None,
+        result_payload={
+            "action": UNSTRUCTURED_REPLY_EVENT,
+            "raw_reply": (
+                "This task completed, but its output was too large to post "
+                "safely. The raw output was not posted."
+            ),
+        },
+    )
+
+
 def _contract_rejected(reason: str) -> WorkerResult:
     return WorkerResult(
         worker_id="worker-01",
@@ -129,6 +146,13 @@ class RejectedReplyTests(unittest.TestCase):
         self.assertIn("reply body was not usable", _rejected_reply(_failed_reply()) or "")
         self.assertIsNone(_rejected_reply(_good()))
 
+    def test_oversized_output_placeholder_is_diagnosed_not_misread(self) -> None:
+        rejection = _rejected_reply(_overflow())
+        self.assertIn("too large", rejection or "")
+        self.assertIn("result file", rejection or "")
+        # The loss was the delivery channel, not JSON formatting.
+        self.assertNotIn("one complete JSON object", rejection or "")
+
 
 class WorkerReplyReAskTests(unittest.TestCase):
     def _run(self, runner, binding=None, context=None):
@@ -155,6 +179,16 @@ class WorkerReplyReAskTests(unittest.TestCase):
         self._run(runner)
 
         self.assertIn("item_id expected string", runner.bindings[1].prompt_ref)
+
+    def test_oversized_output_re_ask_points_at_the_result_file(self) -> None:
+        runner = _ScriptedRunner(_overflow(), _good())
+
+        self._run(runner)
+
+        retried = runner.bindings[1]
+        self.assertIn("[Retry feedback]", retried.prompt_ref)
+        self.assertIn("too large", retried.prompt_ref)
+        self.assertIn("result file", retried.prompt_ref)
 
     def test_valid_reply_is_not_re_asked(self) -> None:
         runner = _ScriptedRunner(_good())

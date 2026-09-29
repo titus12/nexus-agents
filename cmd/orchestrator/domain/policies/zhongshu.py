@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import replace
 import hashlib
 import re
+import unicodedata
 
 from ..context import ReviewState
 from ..findings import Finding
@@ -40,6 +41,39 @@ MENXIA_FREEZE_ENTRY_ACTIONS = frozenset(
 APPROVAL_ACTIONS = frozenset(
     {"APPROVE_CRITIC", "APPROVE_FREEZE", "TASK_APPROVED", "FREEZE_APPROVED"}
 )
+
+# Shared evidence-packet projection (2026-09-28): the per-item review binding
+# slices (states._item_evidence_context) and the plan-level Critic prompt
+# section must show the same records with the same truncation, or one side
+# re-demands evidence the other side already displayed.
+EVIDENCE_RECORD_FIELDS = (
+    "evidence_id", "requirement_id", "item_id", "decision_relevance",
+    "conclusion", "source", "confidence",
+)
+EVIDENCE_TEXT_LIMITS = {"conclusion": 400, "source": 200}
+MAX_EVIDENCE_RECORDS = 8
+
+
+def project_evidence_record(value: object) -> dict[str, object]:
+    """Project one evidence-packet row onto the bounded record fields."""
+
+    record: dict[str, object] = {}
+    if not isinstance(value, Mapping):
+        return record
+    for key in EVIDENCE_RECORD_FIELDS:
+        raw = value.get(key)
+        if raw in (None, "", [], {}):
+            continue
+        if isinstance(raw, str):
+            limit = EVIDENCE_TEXT_LIMITS.get(key)
+            record[key] = (
+                " ".join(raw.split())[:limit] if limit else " ".join(raw.split())
+            )
+        else:
+            record[key] = raw
+    return record
+
+
 
 _BLOCKER_FINGERPRINT_PREFIX = "blockers="
 _ACTIVE_STATUSES = frozenset(
@@ -193,6 +227,158 @@ def rebind_restatement_findings(
                 break
         rebound.append(finding)
     return tuple(rebound), rebinds
+
+
+# --- finding id remint (2026-09-28 efficiency plan Task 2) ------------------
+#
+# Critic rounds fold findings whose ids the workers (or the Critic re-raising
+# an older observation) minted independently.  When both sides lack a
+# canonical_key the ledger folds by the structural key ``group|item|id``, and
+# two failure shapes appear: the same opinion returns under a fresh id (the
+# ledger accumulates twins that split the batch references and reset the stall
+# counter) and — worse — one id names two different claims (batch/disposition
+# references become ambiguous; live run c0cd83 folded 14 findings onto 8 ids).
+# The remint re-addresses the incoming observations before anything else
+# folds: rule (a) recognizes the same claim and rebinds it onto the stored
+# id, rule (b) remints a fresh content-derived id for a structural collision
+# that carries a different claim.  Critic rounds only: Solver rounds echo ids
+# their own dispositions reference, and reminting those would orphan them.
+
+_CLAIM_PUNCT_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+_CLAIM_SPACE_RE = re.compile(r"\s+")
+
+
+def _claim_text_key(claim: object) -> str:
+    """Normalized claim text used to recognize one and the same opinion.
+
+    Deliberately NOT ``finding_semantic_key``: that key excludes the claim on
+    purpose (two different claims about one target share it), so reusing it
+    here would fuse distinct opinions.  Normalization is mechanical — NFKC,
+    casefold, strip list markers and punctuation, collapse whitespace — so
+    the same claim text always yields the same key (replay-stable) while
+    rewordings keep distinct keys.
+    """
+
+    text = unicodedata.normalize("NFKC", str(claim or ""))
+    lines = [
+        re.sub(r"^[\s\-*•·>]+", "", line) for line in text.casefold().splitlines()
+    ]
+    text = " ".join(line for line in lines if line)
+    text = _CLAIM_PUNCT_RE.sub(" ", text)
+    return _CLAIM_SPACE_RE.sub(" ", text).strip()
+
+
+def _finding_content_hash(finding: object) -> str:
+    """Content hash of one finding observation (group|item|claim text)."""
+
+    material = "|".join(
+        (
+            str(_finding_attr(finding, "group_id", "") or ""),
+            str(_finding_attr(finding, "item_id", "") or ""),
+            _claim_text_key(_finding_attr(finding, "claim", "")),
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def remint_incoming_finding_ids(
+    existing: Iterable[object],
+    incoming: Iterable[object],
+) -> tuple[tuple[Finding, ...], list[dict[str, str]]]:
+    """Re-address incoming finding ids onto unambiguous, stable identities.
+
+    Returns the (possibly re-keyed) incoming findings plus a report of every
+    change for the caller to log.  Per finding, in order:
+
+    (a) the ledger already holds an entry whose content hash matches this
+        finding's (group|item|claim text) — the same opinion returning under
+        a fresh id or a revived old id — so rebind onto the stored id; the
+        pre-merge rebind is what lets ``age_unresolved_findings`` keep
+        counting the chronic complaint instead of resetting it;
+    (b) the structural key ``group|item|finding_id`` collides with a ledger
+        entry that carries a *different* claim — remint a content-derived id
+        (``finding-<hash12>`` with a ``-N`` suffix loop) so one id can never
+        name two opinions;
+    (c) everything else keeps the id the Critic minted — including
+        canonical-key hits, which ``merge_findings`` folds by content anyway.
+
+    Deterministic: the same (ledger, batch) pair always remints the same ids.
+    """
+
+    ledger = [
+        finding if isinstance(finding, Finding) else Finding.from_dict(dict(finding))
+        for finding in existing or ()
+    ]
+    content_by_hash: dict[str, str] = {}
+    structural_keys: dict[tuple[str, str, str], str] = {}
+    taken_ids: set[str] = {
+        str(finding.finding_id or "") for finding in ledger if finding.finding_id
+    }
+    for finding in ledger:
+        finding_id = str(finding.finding_id or "")
+        if not finding_id:
+            continue
+        content_by_hash.setdefault(_finding_content_hash(finding), finding_id)
+        structural_keys.setdefault(
+            (
+                str(finding.group_id or ""),
+                str(finding.item_id or ""),
+                finding_id,
+            ),
+            finding_id,
+        )
+    reports: list[dict[str, str]] = []
+    reminted: list[Finding] = []
+    for value in incoming or ():
+        finding = (
+            value if isinstance(value, Finding) else Finding.from_dict(dict(value))
+        )
+        finding_id = str(finding.finding_id or "")
+        item_id = str(finding.item_id or "").strip()
+        content_hash = _finding_content_hash(finding)
+        if finding_id:
+            stored_id = content_by_hash.get(content_hash)
+            if stored_id and stored_id != finding_id:
+                reports.append(
+                    {
+                        "rule": "a",
+                        "item_id": item_id,
+                        "from": finding_id,
+                        "to": stored_id,
+                    }
+                )
+                finding = replace(finding, finding_id=stored_id)
+                reminted.append(finding)
+                continue
+            structural = (
+                str(finding.group_id or ""),
+                item_id,
+                finding_id,
+            )
+            if (
+                structural in structural_keys
+                and content_hash not in content_by_hash
+            ):
+                base = f"finding-{content_hash[:12]}"
+                fresh = base
+                suffix = 2
+                while fresh in taken_ids or fresh == finding_id:
+                    fresh = f"{base}-{suffix}"
+                    suffix += 1
+                reports.append(
+                    {
+                        "rule": "b",
+                        "item_id": item_id,
+                        "from": finding_id,
+                        "to": fresh,
+                    }
+                )
+                taken_ids.add(fresh)
+                finding = replace(finding, finding_id=fresh)
+                reminted.append(finding)
+                continue
+        reminted.append(finding)
+    return tuple(reminted), reports
 
 
 def age_unresolved_findings(
@@ -699,7 +885,10 @@ def settle_rejected_findings(
 
 __all__ = [
     "APPROVAL_ACTIONS",
+    "EVIDENCE_RECORD_FIELDS",
+    "EVIDENCE_TEXT_LIMITS",
     "FREEZE_RETRY_ACTIONS",
+    "MAX_EVIDENCE_RECORDS",
     "MENXIA_FREEZE_ENTRY_ACTIONS",
     "REVISION_ACTIONS",
     "active_blocker_count",
@@ -713,6 +902,7 @@ __all__ = [
     "freeze_retry_allowed",
     "merge_findings",
     "parse_blocker_fingerprint",
+    "project_evidence_record",
     "revision_allowed",
     "revision_made_progress",
     "select_solver_batch",

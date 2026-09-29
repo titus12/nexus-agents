@@ -297,7 +297,9 @@ def _context() -> WorkflowContext:
             raw_request="run a review", project_type="python", task_type="review"
         ),
         parallel=ParallelState(
-            zhongshu=ZhongshuParallelLimits(review_unit="group", plan_review_gate=False),
+            zhongshu=ZhongshuParallelLimits(
+                review_unit="group", plan_review_gate=False, mechanical_freeze=False
+            ),
             menxia=MenxiaParallelLimits(
                 enabled=True, max_concurrent_groups=2, max_concurrent_items=3
             ),

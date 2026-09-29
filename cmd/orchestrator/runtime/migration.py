@@ -159,6 +159,9 @@ def legacy_dto_to_snapshot(
             no_progress_count=_int(value, "no_progress_count", 0),
             max_no_progress=_int(value, "max_no_progress", 3),
             max_stuck_finding_rounds=_int(value, "max_stuck_finding_rounds", 3),
+            node_fail_streak=_int(value, "node_fail_streak", 0),
+            node_fail_state=str(value.get("node_fail_state") or ""),
+            max_node_fail_streak=_int(value, "max_node_fail_streak", 2),
         ),
         review=ReviewState(
             revision_id=revision_id,
@@ -184,11 +187,13 @@ def legacy_dto_to_snapshot(
             task_items=task_items,
             task_groups=task_groups,
             completed_item_ids=completed_item_ids,
-            plan=(
-                dict(value["plan"])
-                if isinstance(value.get("plan"), Mapping)
+            plan=(dict(value["plan"]) if isinstance(value.get("plan"), Mapping) else None),
+            evidence_packet=(
+                dict(value["evidence_packet"])
+                if isinstance(value.get("evidence_packet"), Mapping)
                 else None
             ),
+            evidence_requester=_text_or_none(value.get("evidence_requester")),
         ),
         human_gate=(
             HumanGateState(
@@ -209,6 +214,7 @@ def legacy_dto_to_snapshot(
         parallel=ParallelState(
             zhongshu=_zhongshu_limits(value.get("zhongshu_parallel")),
             menxia=_menxia_limits(value.get("menxia_parallel")),
+            prompt_slicing=bool(value.get("prompt_slicing", False)),
             group_index=_optional_int(value.get("group_index")),
             item_index=_optional_int(value.get("item_index")),
             menxia_snapshot_ref=_artifact_ref(
@@ -410,7 +416,10 @@ def _zhongshu_limits(value: object) -> ZhongshuParallelLimits:
         critic_max_workers=_positive_int(data, "critic_max_workers", 4),
         critic_default_workers=_positive_int(data, "critic_default_workers", 4),
         item_workflow_enabled=bool(data.get("item_workflow_enabled", False)),
+        review_unit=str(data.get("review_unit") or "group"),
+        plan_review_gate=bool(data.get("plan_review_gate", True)),
         fast_track=bool(data.get("fast_track", False)),
+        mechanical_freeze=bool(data.get("mechanical_freeze", True)),
         global_max_workers=_positive_int(data, "global_max_workers", 6),
         per_task_max_workers=_positive_int(data, "per_task_max_workers", 6),
     )

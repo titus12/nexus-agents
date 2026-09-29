@@ -57,6 +57,7 @@ from .policies.item_workflows import update_item_workflows
 from .policies.zhongshu import (
     APPROVAL_ACTIONS,
     FREEZE_RETRY_ACTIONS,
+    MAX_EVIDENCE_RECORDS,
     MENXIA_FREEZE_ENTRY_ACTIONS,
     REVISION_ACTIONS,
     age_unresolved_findings,
@@ -64,7 +65,9 @@ from .policies.zhongshu import (
     blocker_fingerprint,
     freeze_retry_allowed,
     merge_findings,
+    project_evidence_record,
     rebind_restatement_findings,
+    remint_incoming_finding_ids,
     revision_allowed,
     settle_rejected_findings,
     unapproved_item_ids,
@@ -257,6 +260,18 @@ class _ConcreteWorkflowState:
             self._require_recorded_resume_state(context)
         return StateDecision()
 
+    def _next_node_fail_streak(self, context: WorkflowContext) -> int:
+        """Consecutive-FAIL count this state would reach with one more FAIL.
+
+        The streak is keyed by state and deliberately ignores the error code:
+        a fold rejection followed by a timeout is still one state failing
+        deterministically twice in a row (task-20260928-835a07, waves 6→8).
+        """
+
+        if context.recovery.node_fail_state == self.name:
+            return context.recovery.node_fail_streak + 1
+        return 1
+
     def handle(
         self,
         context: WorkflowContext,
@@ -282,6 +297,32 @@ class _ConcreteWorkflowState:
             and isinstance(event.payload, Mapping)
             and bool(event.payload.get("retryable"))
         ):
+            # Deterministic-failure brake: back-to-back wave failures in one
+            # state mean the same payload keeps producing the same outcome,
+            # so spending another budgeted wave is pure waste (incident
+            # task-20260928-835a07: waves 10/12/14 re-ran a solver revision
+            # that could never finish inside its dispatch deadline).  A
+            # max_node_fail_streak of 0 disables the escalation.
+            streak = self._next_node_fail_streak(context)
+            if (
+                context.recovery.max_node_fail_streak > 0
+                and streak >= context.recovery.max_node_fail_streak
+            ):
+                decision = self._human_gate_decision(
+                    context, event, "NODE_FAIL_STREAK_EXHAUSTED"
+                )
+                recovery = decision.update.recovery or RecoveryUpdate()
+                return replace(
+                    decision,
+                    update=replace(
+                        decision.update,
+                        recovery=replace(
+                            recovery,
+                            node_fail_streak=streak,
+                            node_fail_state=self.name,
+                        ),
+                    ),
+                )
             error_code = _failure_error_code(event.payload)
             budget = _failure_budget(error_code)
             if budget == "reply":
@@ -403,20 +444,30 @@ class _ConcreteWorkflowState:
             budget = _failure_budget(
                 failure.error_code if failure is not None else ""
             )
+            # The streak must persist on the retry itself: the next FAIL in
+            # this state has to see "one failure already happened here" to
+            # trip the deterministic-failure brake.
+            streak = self._next_node_fail_streak(context)
             if budget == "reply":
                 recovery = RecoveryUpdate(
                     reply_retry_count=context.recovery.reply_retry_count + 1,
                     last_failure=failure,
+                    node_fail_streak=streak,
+                    node_fail_state=self.name,
                 )
             elif budget == "external":
                 recovery = RecoveryUpdate(
                     external_retry_count=context.recovery.external_retry_count + 1,
                     last_failure=failure,
+                    node_fail_streak=streak,
+                    node_fail_state=self.name,
                 )
             else:
                 recovery = RecoveryUpdate(
                     retry_count=context.recovery.retry_count + 1,
                     last_failure=failure,
+                    node_fail_streak=streak,
+                    node_fail_state=self.name,
                 )
             update = replace(update, recovery=recovery)
         if (
@@ -436,8 +487,31 @@ class _ConcreteWorkflowState:
             recovery = update.recovery or RecoveryUpdate()
             update = replace(
                 update,
-                recovery=replace(recovery, reply_retry_count=0),
+                recovery=replace(
+                    recovery,
+                    reply_retry_count=0,
+                    # A clean join proves the state is not failing
+                    # deterministically: start the node-FAIL brake over.
+                    node_fail_streak=0,
+                    node_fail_state="",
+                    # Drop the stale [Retry feedback] so a later FAIL in
+                    # this state re-asks with its own error text, not the
+                    # previous wave's.
+                    clear_last_failure=True,
+                ),
             )
+            if context.review is not None:
+                # The evidence round this wave answered (if any) is consumed:
+                # drop the requester so the NEXT state's demand is not
+                # misrouted by a stale value.  An update that both sets and
+                # clears resolves by the reducer precedence (set wins).
+                review = update.review or ReviewUpdate(
+                    revision_id=context.review.revision_id
+                )
+                update = replace(
+                    update,
+                    review=replace(review, clear_evidence_requester=True),
+                )
         if action == "RESUME" and self.name == "HUMAN_GATE":
             update = replace(
                 update,
@@ -570,6 +644,20 @@ class _ConcreteWorkflowState:
             payload.setdefault("item_id", context.review.active_item_id)
             payload.setdefault("completed_item_id", context.review.active_item_id)
         review_update = self._review_update(context, payload)
+        if (
+            event.name == "NODE_COMPLETED"
+            and self._event_action(event) == "REQUEST_ANALYST_EVIDENCE"
+            and context.review is not None
+        ):
+            # Record who demanded this evidence round (2026-09-28 Fix 3): the
+            # Analyst's evidence wave folds and routes back to this state
+            # directly instead of detouring through the Solver.  Generic so
+            # all three requesters (SOLVER/CRITIC/FREEZE_CHECK) are recorded
+            # by the same rule.
+            base = review_update or ReviewUpdate(
+                revision_id=context.review.revision_id
+            )
+            review_update = replace(base, evidence_requester=self.name)
         recovery_update = None
         delivery_update = None
         if event.name not in {
@@ -665,6 +753,11 @@ class _ConcreteWorkflowState:
                 # valid groups' patches and requirement documents; the retry
                 # then re-dispatches only the groups still missing.
                 "salvaged_group_rows",
+                # The Analyst evidence packet folds on its own key: the
+                # Critic-routed packet carries no ``plan`` (Fix 3 keeps it
+                # away from review.plan), so the packet key alone must
+                # trigger the fold.
+                "evidence_packet",
             )
         )
         if not has_review_data:
@@ -858,6 +951,10 @@ class _ConcreteWorkflowState:
             attempted_finding_ids=(
                 context.review.attempted_finding_ids if context.review else None
             ),
+            remint_findings=bool(
+                payload.get("task_reviews") or payload.get("group_reviews")
+            ),
+            task_id=context.identity.task_id if context.identity else "",
         )
         raw_resolutions = payload.get("finding_resolutions")
         if isinstance(raw_resolutions, list) and raw_resolutions:
@@ -1108,6 +1205,63 @@ class _ConcreteWorkflowState:
                     "group_id": None,
                     "item_id": None,
                 },
+            )
+        if (
+            target == "ZHONGSHU_FREEZE_CHECK"
+            and context.parallel is not None
+            and context.parallel.zhongshu.mechanical_freeze
+            and context.review is not None
+            and context.review.zhongshu_groups
+        ):
+            # Mechanical freeze (2026-09-28): when the objective preconditions
+            # already hold, the freeze-check agent hop adds no information —
+            # synthesize the same FREEZE_APPROVED event a live worker would
+            # return.  The real release semantics stay with
+            # _group_freeze_decision (ready computation + document
+            # verification), which re-checks everything on the way in.
+            ready, failures = mechanical_freeze_ready(context)
+            if ready:
+                logger.info(
+                    "ZHONGSHU_FREEZE_MECHANICAL_APPROVED task_id=%s revision_id=%s skipped_agent_hop=1",
+                    context.identity.task_id,
+                    revision_id,
+                )
+                return EffectRequest(
+                    effect_id=f"mechanical-freeze:{request_id}",
+                    effect_type="mechanical_freeze",
+                    task_id=context.identity.task_id,
+                    idempotency_key=request_id,
+                    payload_ref=context.request.payload_ref,
+                    payload={
+                        "issue_id": context.identity.issue_id,
+                        "request_id": request_id,
+                        "phase": phase,
+                        "role": role,
+                        "target_state": target,
+                        "state": target,
+                        "node_run_id": f"node:{request_id}",
+                        "action": "FREEZE_APPROVED",
+                        "revision_id": revision_id,
+                        "plan_hash": plan_hash,
+                        "sequence": context.progression.sequence,
+                        "group_id": None,
+                        "item_id": None,
+                    },
+                )
+            logger.info(
+                "ZHONGSHU_FREEZE_MECHANICAL_PRECHECK_FAILED task_id=%s revision_id=%s failures=%s",
+                context.identity.task_id,
+                revision_id,
+                failures,
+            )
+            prompt = replace(
+                prompt,
+                content=(
+                    prompt.content
+                    + "\n[Freeze precheck] Mechanical freeze preconditions unmet: "
+                    + "; ".join(failures)
+                    + "\nRe-verify each condition above before issuing your freeze verdict.\n"
+                ),
             )
         if target == "ZHONGSHU_CRITIC":
             review_unit = _review_dispatch_unit(context)
@@ -1364,6 +1518,12 @@ class _ConcreteWorkflowState:
             }
             if target == "ZHONGSHU_ANALYST" and contract_payload:
                 payload["canonical_requirements"] = contract_payload
+            if target == "ZHONGSHU_ANALYST":
+                # Who demanded this evidence round decides where the folded
+                # packet routes back (2026-09-28 Fix 3).
+                payload["evidence_requester"] = str(
+                    getattr(context.review, "evidence_requester", "") or ""
+                )
             if salvaged_workers:
                 payload["salvaged_worker_payloads"] = [
                     salvaged_workers[worker_id]
@@ -1570,6 +1730,9 @@ class _ConcreteWorkflowState:
             evidence_demand = _analyst_evidence_demand(context)
             if evidence_demand is not None:
                 payload["dispatch_context"] = {"evidence_demand": evidence_demand}
+            payload["evidence_requester"] = str(
+                getattr(context.review, "evidence_requester", "") or ""
+            )
         return EffectRequest(
             effect_id=f"dispatch:{request_id}",
             effect_type="agent_dispatch",
@@ -1632,7 +1795,13 @@ class _ConcreteWorkflowState:
         human_gate = decision.update.human_gate
         if human_gate is not None:
             human_gate = replace(human_gate, reason_code=reason)
-        recovery = RecoveryUpdate(blocked_reason=reason)
+        # Preserve whatever the payload fold already staged (e.g. the FAIL
+        # event's last_failure record) and stamp the reason on top: a fresh
+        # RecoveryUpdate would silently drop the failure evidence the operator
+        # needs at the gate.
+        recovery = replace(
+            decision.update.recovery or RecoveryUpdate(), blocked_reason=reason
+        )
         if no_progress_count is not None:
             # The round that raised the gate still happened: persist its
             # no-progress age, or every resume restarts the counter at zero
@@ -1814,6 +1983,9 @@ class ZhongshuAnalystState(_ConcreteWorkflowState):
     name = "ZHONGSHU_ANALYST"
     supported_actions = (
         "READY_FOR_SOLVER", "EVIDENCE_PACKET_READY", "REQUIREMENT_CONTRACT_READY",
+        # The evidence packet folding back to the Critic that demanded it
+        # (2026-09-28 Fix 3) instead of detouring through the Solver.
+        "EVIDENCE_PACKET_READY_FOR_CRITIC",
         "HUMAN_GATE", "BLOCKED", "RETRY", "OPEN_HUMAN_GATE",
     )
 
@@ -3285,12 +3457,10 @@ class PersistenceDegradedState(_ConcreteWorkflowState):
         )
 
 
-_EVIDENCE_RECORD_FIELDS = (
-    "evidence_id", "requirement_id", "item_id", "decision_relevance",
-    "conclusion", "source", "confidence",
-)
-_EVIDENCE_TEXT_LIMITS = {"conclusion": 400, "source": 200}
-_MAX_ITEM_EVIDENCE_RECORDS = 8
+# Evidence-packet projection fields/limits live in policies.zhongshu and are
+# shared with the plan-level Critic prompt section; keep the local alias so the
+# per-item slice keeps its historical bound name.
+_MAX_ITEM_EVIDENCE_RECORDS = MAX_EVIDENCE_RECORDS
 
 
 def _menxia_evidence_packet_update(
@@ -3369,18 +3539,7 @@ def _item_evidence_context(
             continue
         if not record_item and requirement not in item.source_requirement_ids:
             continue
-        record: dict[str, object] = {}
-        for key in _EVIDENCE_RECORD_FIELDS:
-            raw = value.get(key)
-            if raw in (None, "", [], {}):
-                continue
-            if isinstance(raw, str):
-                limit = _EVIDENCE_TEXT_LIMITS.get(key)
-                record[key] = (
-                    " ".join(raw.split())[:limit] if limit else " ".join(raw.split())
-                )
-            else:
-                record[key] = raw
+        record = project_evidence_record(value)
         if not record:
             continue
         evidence_id = str(record.get("evidence_id") or "")
@@ -4384,6 +4543,14 @@ def _task_review_bindings(
             ],
             "item_evidence": evidence["records"],
             "finding_responses": evidence["finding_responses"],
+            # The Analyst answers cite the requirement contract (statement /
+            # priority / scope per requirement); without it here the Critic
+            # cannot verify those citations and re-demands evidence it already
+            # holds (task-20260929-c261a8).
+            "requirement_contract": [
+                dict(entry)
+                for entry in (getattr(review, "requirements", ()) or ())
+            ],
             "envelope": build_envelope(
                 ingredients=[
                     {"key": "task_capsule", "source": "prompt.txt", "lifetime": "persisted",
@@ -4458,6 +4625,52 @@ def _group_member_dicts(review: object, group_id: str) -> list[dict[str, object]
             }
         )
     return members
+
+
+def _requirement_contract_markdown(review: object, limit: int = 6000) -> str:
+    """Backfill a group capsule's empty requirement document slot.
+
+    The capsule's [Requirement document] section normally carries the group's
+    own document; until the Solver has authored one the slot was empty, so a
+    Critic demanding "the authoritative requirement text" could not be
+    answered from the bundle (task-20260929-c261a8).  Ship the canonical
+    requirement contract instead — the same entries every ZHONGSHU bundle
+    already carries — so every role reads one source of truth.
+    """
+
+    lines = ["[Authoritative requirement contract]"]
+    for entry in getattr(review, "requirements", ()) or ():
+        if isinstance(entry, dict):
+            row = entry
+        else:
+            row = {
+                key: getattr(entry, key, "")
+                for key in (
+                    "requirement_id", "statement", "priority", "scope",
+                    "kind", "source", "acceptance_signal",
+                )
+            }
+        requirement_id = str(row.get("requirement_id") or "").strip()
+        statement = str(row.get("statement") or "").strip()
+        if not requirement_id and not statement:
+            continue
+        meta = "/".join(
+            str(row.get(key) or "").strip()
+            for key in ("priority", "scope", "kind")
+        ).strip("/")
+        lines.append(f"- {requirement_id} ({meta}): {statement}")
+        source = str(row.get("source") or "").strip()
+        if source:
+            lines.append(f"  source: {source}")
+        signal = str(row.get("acceptance_signal") or "").strip()
+        if signal:
+            lines.append(f"  acceptance: {signal}")
+    if len(lines) == 1:
+        return ""
+    text = "\n".join(lines)
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "\n…(truncated)"
+    return text
 
 
 def _group_capsule_inputs(
@@ -4658,6 +4871,13 @@ def _group_review_bindings(
             "active_findings": group_findings,
             "item_evidence_by_item": evidence_by_item,
             "finding_responses": finding_responses,
+            # Analyst answers quote/cite this contract; the Critic must be
+            # able to open the same entries to verify them (see the
+            # task-review sibling above).
+            "requirement_contract": [
+                dict(entry)
+                for entry in (getattr(review, "requirements", ()) or ())
+            ],
                 "envelope": build_envelope(
                     ingredients=[
                         {"key": "group_capsule", "source": "prompt.txt", "lifetime": "persisted",
@@ -4693,7 +4913,10 @@ def _group_review_bindings(
                 "prompt_ref": build_group_capsule(
                     group_id=job.group_id,
                     revision_id=revision,
-                    doc_markdown=doc_markdown.get(job.group_id, ""),
+                    doc_markdown=(
+                        str(doc_markdown.get(job.group_id, "") or "")
+                        or _requirement_contract_markdown(review)
+                    ),
                     members_full=members_full,
                     members_surface=members_surface,
                     findings=group_findings,
@@ -4766,7 +4989,10 @@ def _group_revise_bindings(
                 "prompt_ref": build_group_capsule(
                     group_id=group_id,
                     revision_id=revision,
-                    doc_markdown=doc_markdown.get(group_id, ""),
+                    doc_markdown=(
+                        str(doc_markdown.get(group_id, "") or "")
+                        or _requirement_contract_markdown(review)
+                    ),
                     members_full=[
                         entry
                         for entry in members_full
@@ -4808,6 +5034,13 @@ def _group_revise_bindings(
                     "editable_item_ids": editable,
                     "batch_findings": batch_findings,
                     "member_hashes": member_hashes,
+                    # Same authoritative array the Critic's bundle carries:
+                    # the revising Solver quotes requirement text from here
+                    # instead of guessing (task-20260929-c261a8 problem B).
+                    "requirement_contract": [
+                        dict(entry)
+                        for entry in (getattr(review, "requirements", ()) or ())
+                    ],
                     "envelope": build_envelope(
                         ingredients=[
                             {"key": "group_capsule", "source": "prompt.txt", "lifetime": "persisted",
@@ -4876,9 +5109,29 @@ def _merge_and_close_findings(
     task_reviews: object,
     *,
     attempted_finding_ids: Iterable[str] | None = None,
+    remint_findings: bool = False,
+    task_id: str = "",
 ) -> tuple[object, ...]:
-    """Merge findings and close those owned by a task the Critic approved."""
+    """Merge findings and close those owned by a task the Critic approved.
 
+    ``remint_findings`` (critic rounds only) re-addresses incoming finding
+    ids *before* anything folds, so an id can never name two opinions and a
+    re-raised opinion rebinds onto the id its earlier round already owns
+    (2026-09-28 efficiency plan Task 2).  Solver rounds must not remint:
+    their dispositions reference the ids they echo.
+    """
+
+    if remint_findings:
+        incoming, remints = remint_incoming_finding_ids(existing, incoming)
+        for entry in remints:
+            logger.warning(
+                "FINDING_ID_REMINTED task_id=%s item_id=%s from=%s to=%s rule=%s",
+                task_id or "-",
+                entry["item_id"] or "-",
+                entry["from"] or "<none>",
+                entry["to"],
+                entry["rule"],
+            )
     incoming, rebinds = rebind_restatement_findings(existing, incoming)
     for rebind in rebinds:
         logger.warning(
@@ -4969,6 +5222,82 @@ def _zhongshu_graph_issues(review: ReviewState) -> tuple[str, ...]:
         "DEPENDENCY_CYCLE:" + ",".join(cycle)
         for cycle in _dependency_cycles(by_item)
     )
+
+
+def mechanical_freeze_ready(context: WorkflowContext) -> tuple[bool, list[str]]:
+    """Objective freeze preconditions a group round must already satisfy.
+
+    Group rounds only — a legacy (non-group) round never qualifies: it has
+    neither the surface ratchet nor the ``_group_freeze_decision``
+    re-verification as a backstop, so the freeze-check agent's holistic
+    judgment is the only safety net and the mechanical path must not fire.
+
+    Conditions, all re-derived from committed state at dispatch time:
+    1. every group row is terminal — ``FROZEN``, or ``CONVERGED`` with the
+       approval ratchet intact (``group_approval_held`` re-verifies the
+       member/doc surface hash, so a Solver patch after approval breaks it);
+    2. the item ledger closes with fresh review-surface hashes — the exact
+       material the group fold wrote (``current_member_hashes``), so a stale
+       APPROVED row forces the agent hop instead of a mechanical release;
+    3. the dependency graph is sane — no cycles, and every item dependency
+       resolves to a known item (group_dependencies drops unknown endpoints,
+       so the resolution check must run at item granularity).
+
+    Which groups actually freeze NOW stays with ``_group_freeze_decision``
+    (``freeze_ready_groups`` requires dependency rows FROZEN, plus document
+    verification): the mechanical precheck only decides whether the agent hop
+    could add any information, so it is deliberately looser and relies on
+    that decision as the defense in depth (worst case: partial release).
+    """
+
+    review = context.review
+    if review is None or not review.zhongshu_groups:
+        return False, ["NON_GROUP_ROUND"]
+    failures: list[str] = []
+    rows = {row.group_id: row for row in review.zhongshu_groups}
+    member_hashes: dict[str, str] = {}
+    for group_id, row in rows.items():
+        stage = str(getattr(row, "stage", "") or "")
+        if stage == "FROZEN" or (
+            stage == "CONVERGED" and group_approval_held(review, group_id)
+        ):
+            member_hashes[group_id] = current_member_hashes(review, group_id)
+            continue
+        failures.append(f"GROUP_NOT_TERMINAL:{group_id}:{stage or 'EMPTY'}")
+    if failures:
+        return False, failures
+    ledger = {
+        record.item_id: record
+        for record in getattr(review, "task_review_ledger", ()) or ()
+    }
+    seen_items: set[str] = set()
+    for group_id, group_hashes in member_hashes.items():
+        for item_id, task_hash in group_hashes.items():
+            seen_items.add(item_id)
+            record = ledger.get(item_id)
+            if (
+                record is None
+                or str(record.status or "") != "APPROVED"
+                or str(record.task_hash or "") != task_hash
+            ):
+                failures.append(f"LEDGER_STALE:{item_id}")
+    for item in review.task_items or ():
+        item_id = str(item.item_id)
+        if item_id and item_id not in seen_items:
+            failures.append(f"ITEM_UNGROUPED:{item_id}")
+    if failures:
+        return False, failures
+    issues = _zhongshu_graph_issues(review)
+    for issue in issues:
+        failures.append(issue)
+    item_ids = {str(item.item_id) for item in review.task_items or ()}
+    for item in review.task_items or ():
+        for dependency in item.dependencies or ():
+            if str(dependency) not in item_ids:
+                failures.append(
+                    f"DEPENDENCY_UNRESOLVED:{item.item_id}:{dependency}"
+                )
+    return not failures, failures
 
 
 def _attempted_item_ids(
