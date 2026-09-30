@@ -32,7 +32,7 @@ SECTION_PATTERN = re.compile(r"^##\s*(?P<index>\d+)\.\s*(?P<name>.+?)\s*$")
 ITEM_SUBSECTION_PATTERN = re.compile(r"^###\s+(?P<item_id>[^\s#]+).*$")
 
 
-def _strip_md_emphasis(text: str) -> str:
+def strip_md_emphasis(text: str) -> str:
     """Peel symmetric Markdown emphasis/code wrappers around an id token.
 
     Solvers wrapped identifiers in bold or backticks (``### **item-00001**``,
@@ -194,7 +194,7 @@ class ZhongshuRequirementDoc:
         for line in self.section(SECTION_ACCEPTANCE).splitlines():
             heading = ITEM_SUBSECTION_PATTERN.match(line)
             if heading is not None:
-                current = _strip_md_emphasis(heading.group("item_id")) or None
+                current = strip_md_emphasis(heading.group("item_id")) or None
                 if current is not None:
                     result.setdefault(current, [])
                 continue
@@ -292,13 +292,7 @@ class ZhongshuRequirementDoc:
     def _acceptance_closure(
         self, review: object, group_id: str
     ) -> list[DocViolation]:
-        members = {
-            str(getattr(item, "item_id", "") or "").strip()
-            for item in getattr(review, "task_items", ()) or ()
-            if str(getattr(item, "group_id", "") or "")
-            == (group_id or self.group_id)
-            and str(getattr(item, "item_id", "") or "").strip()
-        }
+        members = group_member_item_ids(review, group_id or self.group_id)
         by_item = self.acceptance_item_signals()
         if by_item:
             # Subsection format: §8 is the single author of the signals and
@@ -461,6 +455,17 @@ def group_doc_violations(
     )
 
 
+def group_member_item_ids(review: object, group_id: str) -> frozenset[str]:
+    """Item ids the review assigns to ``group_id``."""
+
+    return frozenset(
+        str(getattr(item, "item_id", "") or "").strip()
+        for item in getattr(review, "task_items", ()) or ()
+        if str(getattr(item, "group_id", "") or "") == group_id
+        and str(getattr(item, "item_id", "") or "").strip()
+    )
+
+
 def group_doc_signals(review: object, group_id: str) -> tuple[str, ...]:
     """The normalized acceptance signals owned by one group's items."""
 
@@ -547,5 +552,7 @@ __all__ = [
     "doc_violation_details",
     "group_doc_signals",
     "group_doc_violations",
+    "group_member_item_ids",
+    "strip_md_emphasis",
     "project_acceptance_signals",
 ]

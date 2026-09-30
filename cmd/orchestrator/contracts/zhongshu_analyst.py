@@ -49,9 +49,9 @@ _DECISION_RELEVANCE_ALIASES = {
     "verify": "acceptance",
 }
 # Verbatim transcription of the lines an evidence entry cites.  The transport
-# gate (_quote_rejection) bounces file-citing entries without one and quoted
-# text that does not appear in the cited file, so paraphrased or invented code
-# behavior dies at the reply boundary instead of surviving review rounds
+# gate (orchestrator.quote_gate) demotes file-citing entries without one, or
+# whose quoted text is not in the cited file, to unverified evidence so
+# paraphrased or invented code behavior cannot pass as verified
 # (task-20260929-c261a8 problem A).
 _QUOTE = object_schema(
     {
@@ -62,6 +62,15 @@ _QUOTE = object_schema(
     },
     required=("text",),
 )
+_QUOTE = {
+    **_QUOTE,
+    "description": (
+        "One contiguous span of the cited lines, transcribed verbatim: at "
+        "most 30 lines / 4096 chars, no ellipsis, no skipped lines. Evidence "
+        "about separate spots needs separate entries; an oversized or "
+        "non-verbatim quote marks its entry [UNVERIFIED-QUOTE]."
+    ),
+}
 _EVIDENCE_UPDATE = object_schema(
     {
         "evidence_id": string(), "requirement_id": string(),
@@ -154,9 +163,10 @@ CONTRACT = make_contract(
         "ellipsis, no skipped or paraphrased lines, at most 30 lines and 4096 "
         "characters; when the evidence points at several separate spots, emit "
         "one entry per spot, each with its own small quote. The transport gate "
-        "rejects file-citing entries without a quote (QUOTE_REQUIRED), quoted "
-        "text absent from the cited file (QUOTE_MISMATCH), and quotes over "
-        "that limit.",
+        "marks an entry [UNVERIFIED-QUOTE] and strips its CLOSE suggestion when "
+        "it cites a file without a quote (QUOTE_REQUIRED), quotes text absent "
+        "from the cited file (QUOTE_MISMATCH), or exceeds that limit "
+        "(QUOTE_OVERSIZE); such entries count as unverified evidence.",
         "Evidence conclusions must state what the code or document contains, "
         "with file:line sources. Engineering recommendations ('X should be "
         "added') are not evidence and will be rejected as unsupported claims.",

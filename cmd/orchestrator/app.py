@@ -29,7 +29,10 @@ from .domain.policies.menxia import MENXIA_ITEM_TARGETS
 from .feishu_command_parser import normalize_task_request
 from .logging_setup import configure_logging
 from .locks import TaskLock
-from .runtime.agent_effects import resolve_dispatch_role_timeouts
+from .runtime.agent_effects import (
+    COMPLETED_RESULT_GRACE_SECONDS,
+    resolve_dispatch_role_timeouts,
+)
 from .runtime import (
     AgentNodeJoiner,
     AgentNodeWorkerRunner,
@@ -334,6 +337,12 @@ class OrchestratorApp:
             timeout_seconds=self.timeout_seconds,
             role_timeout_seconds=role_timeouts,
             agent_ids=_agent_pool_by_state(),
+            completed_result_grace_seconds=float(
+                os.environ.get(
+                    "AGENT_COMPLETED_RESULT_GRACE_SEC",
+                    COMPLETED_RESULT_GRACE_SECONDS,
+                )
+            ),
         )
         self._node_max_workers = max(1, int(os.environ.get("NODE_MAX_WORKERS", "6")))
         self._critic_max_workers = max(

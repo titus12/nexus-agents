@@ -33,9 +33,19 @@ def aggregate_zhongshu_workers(
         raise ValueError("parallel node has no worker results")
     actions = {str(item.get("action") or "") for item in results}
     actions.discard("")
-    if len(actions) != 1:
+    # One escalated worker does not invalidate its peers' replies: BLOCKED /
+    # HUMAN_GATE win the wave (escalation-max, matching the group-review
+    # fan-in) instead of dying on action uniformity.  task-20260929-2f77e6:
+    # a quote-frustrated analyst returned BLOCKED beside two valid evidence
+    # peers and the whole wave died non-retryable on NODE_ACTION_CONFLICT.
+    if "BLOCKED" in actions:
+        action = "BLOCKED"
+    elif "HUMAN_GATE" in actions:
+        action = "HUMAN_GATE"
+    elif len(actions) != 1:
         raise ValueError("parallel workers returned conflicting actions")
-    action = next(iter(actions))
+    else:
+        action = next(iter(actions))
 
     if state == "ZHONGSHU_ANALYST":
         if action == "EVIDENCE_PACKET_READY":

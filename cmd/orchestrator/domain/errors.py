@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import json
 import uuid
 
 
@@ -25,6 +26,13 @@ class FailureRecord:
     message: str
     cause_type: str
     external_id: str | None = None
+    # Per-worker reply rejections from one failed wave (worker_id -> why that
+    # worker's reply bounced).  The wave message carries only one error, so a
+    # re-dispatched sibling used to receive a peer's error as its own feedback
+    # (task-20260929-dad75d wave 4: all three analysts were told about
+    # worker-02's oversized quote).  ``retry_feedback`` picks the owning
+    # worker's entry and stays silent for workers without one.
+    worker_rejections: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_effect_exception(cls, effect: object, error: Exception) -> "FailureRecord":
@@ -160,6 +168,42 @@ def is_output_overflow_reply(payload: object) -> bool:
     return OUTPUT_OVERFLOW_MARKER in " ".join(parts).casefold()
 
 
+# Comments the runtime, the model API or the platform post on the agent's behalf
+# when a run dies ("reasonix ended the prompt with stopReason=error", a provider
+# 400 body, the idle-watchdog notice).  They are not replies: treating them as
+# unstructured replies charged the reply budget and told the agent its JSON was
+# malformed when it had produced nothing.  Dropping them lets the run resolve
+# through the infrastructure path (REMOTE_RUN_FAILED / AGENT_RESULT_MISSING).
+RUNTIME_NOTICE_MAX_CHARS = 1000
+RUNTIME_NOTICE_MARKERS = (
+    "stopreason=error",
+    "force-stopped by idle watchdog",
+)
+
+
+def is_runtime_failure_notice(body: object) -> bool:
+    """True when a comment body is runtime/API failure text rather than a reply."""
+
+    text = str(body or "").strip()
+    if not text or len(text) > RUNTIME_NOTICE_MAX_CHARS:
+        return False
+    if not text.startswith(("{", "[")):
+        folded = text.casefold()
+        return any(marker in folded for marker in RUNTIME_NOTICE_MARKERS)
+    if not text.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return False
+    return (
+        isinstance(parsed, Mapping)
+        and "action" not in parsed
+        and parsed.get("type") == "error"
+        and isinstance(parsed.get("error"), Mapping)
+    )
+
+
 def is_reply_failure(error_code: object) -> bool:
     """True when a failure code describes an unusable agent reply body."""
 
@@ -280,4 +324,5 @@ __all__ = [
     "WorkerTimeoutError",
     "is_infrastructure_failure",
     "is_reply_failure",
+    "is_runtime_failure_notice",
 ]

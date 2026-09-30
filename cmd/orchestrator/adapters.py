@@ -12,12 +12,12 @@ import subprocess
 import threading
 import time
 import tempfile
-import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from .quote_gate import demote_unverified, find_quote_issues, format_rejection
 from .prompt_bundle import PromptBundleBuilder, emit_prompt_bundle_report
 from .agent_result_file import (
     AgentResultFileError,
@@ -25,7 +25,11 @@ from .agent_result_file import (
     write_agent_result_file,
 )
 from .comment_feed import IncrementalCommentFeed, comment_order_key, timestamp_order_key
-from .domain.errors import CONTRACT_REJECTED_EVENT, UNSTRUCTURED_REPLY_EVENT
+from .domain.errors import (
+    CONTRACT_REJECTED_EVENT,
+    UNSTRUCTURED_REPLY_EVENT,
+    is_runtime_failure_notice,
+)
 from .structured_output import (
     role_mode_for,
     state_actions,
@@ -53,11 +57,22 @@ def _fingerprint_text(text: str) -> dict[str, object]:
 
 
 def _json_parse_diagnostic(text: str) -> dict[str, object]:
-    _, status, error_message, error_position = _parse_json_candidate(text)
+    subject = str(text).lstrip("﻿​").strip()
+    _, status, error_message, error_position = _parse_json_candidate(subject)
+    if status == "invalid" and "```" in subject:
+        # Diagnose the body the extractor actually parses, not the fence line.
+        unfenced = subject.replace("```json", "").replace("```", "").strip()
+        _, status, error_message, error_position = _parse_json_candidate(unfenced)
+        subject = unfenced
+    context = ""
+    if status == "invalid" and error_position is not None:
+        start = max(0, error_position - 30)
+        context = subject[start : error_position + 30]
     return {
         "json_status": status,
         "json_error": error_message,
         "json_error_position": error_position,
+        "json_error_context": context,
     }
 
 
@@ -91,6 +106,121 @@ def _strip_trailing_commas(text: str) -> str | None:
             continue
         out.append(char)
     return "".join(out) if changed else None
+
+
+_VALUE_START = frozenset('"{[-0123456789tfn')
+
+
+def _escape_inner_quotes(text: str) -> str | None:
+    """Escape ASCII double quotes that sit inside a JSON string value.
+
+    A quote closes its string only when the next significant character is
+    structural (``: , } ]`` followed by a value start, or end of text); any
+    other quote is prose such as ``实施的"整体时长优化"进行审查`` and gets a
+    backslash.  Returns ``None`` when nothing was escaped, so the caller
+    retries a parse only when the transform changed something.
+    """
+
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    changed = False
+    for index, char in enumerate(text):
+        if not in_string:
+            out.append(char)
+            if char == '"':
+                in_string = True
+            continue
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            out.append(char)
+            escaped = True
+            continue
+        if char != '"':
+            out.append(char)
+            continue
+        rest = text[index + 1 :].lstrip()
+        following = rest[:1]
+        if following == ",":
+            after = rest[1:].lstrip()[:1]
+            closes = after in _VALUE_START or after in ("}", "]")
+        else:
+            closes = following in ("", ":", "}", "]")
+        if closes:
+            in_string = False
+            out.append(char)
+        else:
+            out.append('\\"')
+            changed = True
+    return "".join(out) if changed else None
+
+
+_VALID_JSON_ESCAPES = frozenset('"\\/bfnrt')
+_CONTROL_CHAR_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+_HEX4 = re.compile(r"[0-9a-fA-F]{4}")
+
+
+def _fix_string_escapes(text: str) -> str | None:
+    """Repair escape slips inside JSON strings.
+
+    Windows paths and regexes leave backslashes JSON does not know (``\\w``,
+    ``\\U``), and multi-line quotes leave raw newlines or tabs in a string.
+    Both are unambiguous to repair: an unknown backslash is doubled so it
+    survives as a literal backslash, a raw control character becomes its
+    escape.  Returns ``None`` when nothing changed.
+    """
+
+    out: list[str] = []
+    in_string = False
+    changed = False
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if not in_string:
+            out.append(char)
+            in_string = char == '"'
+            index += 1
+            continue
+        if char == '"':
+            in_string = False
+            out.append(char)
+            index += 1
+            continue
+        if char == "\\":
+            following = text[index + 1 : index + 2]
+            if following == "u" and _HEX4.fullmatch(text[index + 2 : index + 6]):
+                out.append(text[index : index + 6])
+                index += 6
+            elif following and following in _VALID_JSON_ESCAPES:
+                out.append(char + following)
+                index += 2
+            else:
+                out.append("\\\\")
+                changed = True
+                index += 1
+            continue
+        if ord(char) < 0x20:
+            out.append(_CONTROL_CHAR_ESCAPES.get(char) or f"\\u{ord(char):04x}")
+            changed = True
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out) if changed else None
+
+
+# Quote repair must run before escape repair: an unescaped inner quote flips
+# the in-string state, so the escape scan would misjudge what follows it.
+_ESCAPE_REPAIR_STAGES = (
+    ("INVALID_ESCAPE_OR_CONTROL_CHAR", (_fix_string_escapes,)),
+    (
+        "UNESCAPED_INNER_QUOTE+INVALID_ESCAPE",
+        (_escape_inner_quotes, _fix_string_escapes),
+    ),
+)
 
 
 def _parse_json_candidate(
@@ -129,6 +259,32 @@ def _parse_json_candidate(
             return json.loads(stripped), "repaired", "TRAILING_COMMA", None
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
+    escaped_quotes = _escape_inner_quotes(candidate)
+    if escaped_quotes is not None:
+        for attempt in (escaped_quotes, _strip_trailing_commas(escaped_quotes)):
+            if attempt is None:
+                continue
+            try:
+                return json.loads(attempt), "repaired", "UNESCAPED_INNER_QUOTE", None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+    for label, steps in _ESCAPE_REPAIR_STAGES:
+        repaired_text = candidate
+        changed = False
+        for step in steps:
+            step_result = step(repaired_text)
+            if step_result is not None:
+                repaired_text = step_result
+                changed = True
+        if not changed:
+            continue
+        for attempt in (repaired_text, _strip_trailing_commas(repaired_text)):
+            if attempt is None:
+                continue
+            try:
+                return json.loads(attempt), "repaired", label, None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
     return None, "invalid", strict_error.msg, strict_error.pos
 
 
@@ -246,166 +402,28 @@ def _evidence_demand_rejection(request: AgentRequest, payload: object) -> str:
     )
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_FILE_TOKEN_RE = re.compile(
-    r"[A-Za-z0-9_./\\-]+\.(?:py|md|json|txt|toml|yaml|yml|cfg|ini|rst)"
-)
-_QUOTE_MAX_CHARS = 4096
-_QUOTE_MAX_LINES = 30
+def _apply_quote_gate(request: AgentRequest, payload: object) -> object:
+    """Mark file-citing Analyst entries without a verbatim quote as unverified.
 
-
-def _normalized_text(text: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", text).split())
-
-
-def _expected_window(content: str, quote: object) -> str:
-    """The lines the quote most likely meant, for rejection echo.
-
-    A QUOTE_MISMATCH that only says "not found" leaves the worker guessing
-    which lines to re-transcribe (task-20260929-638bde: every retry fixed some
-    quotes and broke others).  When the quote names a line range, echo exactly
-    those lines; otherwise echo the best-matching line and its neighbours, so
-    the correction becomes copy-work instead of guess-work.
+    Only ZHONGSHU replies are gated.  A bad quote demotes its own entry
+    instead of bouncing the reply: a rejection re-dispatched a whole worker
+    (up to the analyst timeout) over one mis-transcribed line.
     """
 
-    lines = content.splitlines()
-    if not lines:
-        return ""
-    start = None
-    end = None
-    if isinstance(quote, dict):
-        raw_start = quote.get("line_start")
-        raw_end = quote.get("line_end")
-        try:
-            if raw_start is not None:
-                start = max(0, int(raw_start) - 1)
-                end = max(start + 1, int(raw_end)) if raw_end is not None else start + 6
-        except (TypeError, ValueError):
-            start = None
-    if start is None:
-        text = str(quote.get("text") or "") if isinstance(quote, dict) else ""
-        target = _normalized_text(text.split("\n")[0] if text else "")
-        best_index, best_score = 0, -1
-        for index, line in enumerate(lines):
-            norm = _normalized_text(line)
-            if not norm:
-                continue
-            score = 0
-            if target and (norm in target or target in norm):
-                score += 10
-            for expected, actual in zip(target.split(), norm.split()):
-                if expected != actual:
-                    break
-                score += 1
-            if score > best_score:
-                best_index, best_score = index, score
-        start = max(0, best_index - 1)
-        end = min(len(lines), best_index + 2)
-    window = " | ".join(
-        line.strip() for line in lines[start:end] if line.strip()
+    if str(getattr(request, "phase", "") or "") != "ZHONGSHU" or not isinstance(payload, dict):
+        return payload
+    issues = find_quote_issues(payload)
+    if not issues:
+        return payload
+    logger.warning(
+        "AGENT_REPLY_QUOTE_DEMOTED task_id=%s request_id=%s phase=%s role=%s reason=%s",
+        request.task_id,
+        request.request_id,
+        request.phase,
+        request.role,
+        format_rejection(issues),
     )
-    return window[:300]
-
-
-def _quote_rejection(request: AgentRequest, payload: object) -> str:
-    """Mechanical quote gate for file-citing evidence and finding responses.
-
-    task-20260929-c261a8 problem A: the Analyst paraphrased file behavior and
-    the wrong reading survived review rounds until the Critic caught it.  Any
-    evidence_update or finding_response whose source cites a file path must
-    carry a ``quote`` object transcribing the cited lines.  The quoted text
-    must appear in the cited file (NFKC + whitespace-normalized containment,
-    so honest line drift passes); invented text is bounced at the reply
-    boundary.  A cited path that does not exist is exempt: claiming a file is
-    missing is a legitimate UNKNOWN the gate cannot disprove.  It verifies
-    transcription only — whether the quote supports the conclusion stays a
-    semantic judgement for the Critic.
-    """
-
-    if str(getattr(request, "phase", "") or "") != "ZHONGSHU":
-        return ""
-    body = payload if isinstance(payload, dict) else {}
-    entries: list[tuple[str, dict]] = []
-    for key in ("evidence_updates", "finding_responses"):
-        rows = body.get(key)
-        if isinstance(rows, list):
-            entries.extend((key, row) for row in rows if isinstance(row, dict))
-    if not entries:
-        return ""
-
-    file_cache: dict[str, "str | None"] = {}
-
-    def _load(path_text: str) -> "str | None":
-        normalized = path_text.replace("\\", "/").strip()
-        if normalized in file_cache:
-            return file_cache[normalized]
-        candidates = [Path(path_text)]
-        for root in (_REPO_ROOT, Path.cwd()):
-            candidates.append(root / normalized)
-        resolved = next((c for c in candidates if c.is_file()), None)
-        content = None
-        if resolved is not None:
-            try:
-                content = resolved.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                content = None
-        file_cache[normalized] = content
-        return content
-
-    problems: list[str] = []
-    for key, entry in entries:
-        label = str(entry.get("evidence_id") or entry.get("finding_id") or "?")
-        source = str(entry.get("source") or "")
-        quote = entry.get("quote")
-        quote_text = str(quote.get("text") or "") if isinstance(quote, dict) else ""
-        if not quote_text.strip():
-            match = _FILE_TOKEN_RE.search(source)
-            if match and _load(match.group(0)) is not None:
-                problems.append(
-                    f"{key}[{label}] cites {match.group(0)} but carries no "
-                    "verbatim quote {path, line_start, line_end, text} "
-                    "transcribing the cited lines (QUOTE_REQUIRED)"
-                )
-            continue
-        if len(quote_text) > _QUOTE_MAX_CHARS or quote_text.count("\n") + 1 > _QUOTE_MAX_LINES:
-            problems.append(
-                f"{key}[{label}] quote exceeds {_QUOTE_MAX_LINES} lines or "
-                f"{_QUOTE_MAX_CHARS} chars; quote only the cited lines and "
-                "split multi-spot evidence into separate entries, each with "
-                "one contiguous quote"
-            )
-            continue
-        quoted_path = str(quote.get("path") or "").strip()
-        if not quoted_path:
-            match = _FILE_TOKEN_RE.search(source)
-            if not match:
-                continue
-            quoted_path = match.group(0)
-        content = _load(quoted_path)
-        if content is None:
-            continue
-        normalized_quote = _normalized_text(quote_text)
-        if normalized_quote and normalized_quote in _normalized_text(content):
-            continue
-        expected = _expected_window(content, quote)
-        problems.append(
-            f"{key}[{label}] quoted text not found in {quoted_path}; "
-            "transcribe the exact cited lines verbatim as one contiguous span "
-            "with no ellipsis and no skipped lines (QUOTE_MISMATCH)"
-            + (f"; the cited lines read: {expected}" if expected else "")
-        )
-    if not problems:
-        return ""
-    shown = "; ".join(problems[:3])
-    if len(problems) > 3:
-        shown += f"; (+{len(problems) - 3} more quote problems)"
-    return (
-        "verbatim quote gate: " + shown
-        + ". Every file-citing evidence_update or finding_response needs a "
-        "verbatim quote: one contiguous span copied exactly (no ellipsis, no "
-        "skipped lines, max 30 lines / 4096 chars); split multi-spot evidence "
-        "into separate entries. Return one complete structured result."
-    )
+    return demote_unverified(payload, issues)
 
 
 class MulticaAdapter(Protocol):
@@ -1439,24 +1457,9 @@ class MulticaCliAdapter:
             if rejections is not None:
                 rejections.append(rejection)
             return None
-        quote_rejection = _quote_rejection(request, file_result.payload)
-        if quote_rejection:
-            logger.warning(
-                "AGENT_REPLY_QUOTE_REJECTED task_id=%s request_id=%s "
-                "phase=%s role=%s path=%s reason=%s",
-                request.task_id,
-                request.request_id,
-                request.phase,
-                request.role,
-                file_result.path,
-                quote_rejection,
-            )
-            if rejections is not None:
-                rejections.append(quote_rejection)
-            return None
         return ExternalMessage(
             request.agent_id,
-            file_result.payload,
+            _apply_quote_gate(request, file_result.payload),
             f"file:{request.request_id}",
             "",
         )
@@ -1484,18 +1487,13 @@ class MulticaCliAdapter:
                 rejection,
             )
             raise AgentResultFileError(rejection)
-        quote_rejection = _quote_rejection(request, inline_payload)
-        if quote_rejection:
-            logger.warning(
-                "AGENT_REPLY_QUOTE_REJECTED task_id=%s request_id=%s "
-                "phase=%s role=%s reason=%s",
-                request.task_id,
-                request.request_id,
-                request.phase,
-                request.role,
-                quote_rejection,
-            )
-            raise AgentResultFileError(quote_rejection)
+        gated = _apply_quote_gate(request, inline_payload)
+        if gated is not inline_payload:
+            if inline_payload is not payload:
+                payload = {**payload, "result": gated}
+            else:
+                payload = gated
+            inline_payload = gated
         if not self.orchestrator_result_write_enabled:
             return payload
         encoded_size = len(
@@ -1531,6 +1529,31 @@ class MulticaCliAdapter:
             allowed_role_modes=_declared_role_modes(request.structured_output),
         )
         return file_result.payload
+
+    def _save_raw_reply(self, request: AgentRequest, comment_id: str, body: str) -> str:
+        """Keep an unusable reply verbatim; the event payload only carries a preview."""
+
+        try:
+            directory = self.log_dir / "raw-replies"
+            directory.mkdir(parents=True, exist_ok=True)
+            stem = re.sub(
+                r"[^A-Za-z0-9._-]+",
+                "_",
+                f"{request.task_id}_{request.request_id}_{comment_id}",
+            )
+            path = directory / f"{stem[:180]}.txt"
+            if not path.exists():
+                path.write_text(body, encoding="utf-8")
+            return str(path)
+        except OSError as error:
+            logger.warning(
+                "AGENT_RAW_REPLY_SAVE_FAILED task_id=%s request_id=%s comment_id=%s error=%s",
+                request.task_id,
+                request.request_id,
+                comment_id,
+                str(error)[:200],
+            )
+            return ""
 
     def poll(self, request: AgentRequest) -> list[ExternalMessage]:
         self.last_issue_id = request.issue_id or request.task_id
@@ -1710,6 +1733,20 @@ class MulticaCliAdapter:
                             continue
                     if body.strip():
                         supplemental_reports.append(body)
+                        if is_runtime_failure_notice(body):
+                            logger.warning(
+                                "AGENT_RUNTIME_NOTICE_IGNORED task_id=%s request_id=%s "
+                                "phase=%s role=%s comment_id=%s chars=%s notice=%r",
+                                request.task_id,
+                                request.request_id,
+                                request.phase,
+                                request.role,
+                                comment_id,
+                                body_meta["chars"],
+                                body.strip()[:160],
+                            )
+                            continue
+                        raw_reply_path = self._save_raw_reply(request, comment_id, body)
                         unstructured_candidates.append(
                             ExternalMessage(
                                 author_id,
@@ -1725,6 +1762,7 @@ class MulticaCliAdapter:
                                     ),
                                     "raw_reply": body[:500],
                                     "raw_reply_truncated": len(body) > 500,
+                                    "raw_reply_path": raw_reply_path,
                                     "raw_reply_chars": body_meta["chars"],
                                     "raw_reply_bytes": body_meta["bytes"],
                                     "raw_reply_sha256": body_meta["sha256"],
@@ -1733,6 +1771,7 @@ class MulticaCliAdapter:
                                     "json_status": parse_meta["json_status"],
                                     "json_error": parse_meta["json_error"],
                                     "json_error_position": parse_meta["json_error_position"],
+                                    "json_error_context": parse_meta["json_error_context"],
                                     "launch_failed": (
                                         "start opencode" in body.lower()
                                         and "too long" in body.lower()
@@ -1856,6 +1895,9 @@ class MulticaCliAdapter:
                                     "contract_rejection": str(error),
                                     "raw_reply": body[:500],
                                     "raw_reply_truncated": len(body) > 500,
+                                    "raw_reply_path": self._save_raw_reply(
+                                        request, comment_id, body
+                                    ),
                                     "raw_reply_chars": body_meta["chars"],
                                     "raw_reply_bytes": body_meta["bytes"],
                                     "raw_reply_sha256": body_meta["sha256"],

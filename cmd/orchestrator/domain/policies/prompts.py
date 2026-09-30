@@ -18,6 +18,20 @@ from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
 from .zhongshu import MAX_EVIDENCE_RECORDS, project_evidence_record, select_solver_batch
 
 
+# Replies are hand-written 10-30KB documents full of quoted code, Chinese prose
+# and Windows paths; the recurring parse failures were unescaped quotes,
+# backslashes and raw line breaks inside string values.
+JSON_STRING_RULES = (
+    "\n[JSON string rules] Inside every string value: escape each double quote "
+    'as \\" (or quote prose with 「」 instead); write each backslash as \\\\ '
+    "(a Windows path is D:\\\\workspace\\\\src); write line breaks and tabs as "
+    "\\n and \\t, never as raw characters. If you can run code, build the result "
+    "as a Python dict, write it with json.dump(ensure_ascii=False) to a UTF-8 "
+    "file, confirm json.load reads that file back, and only then submit exactly "
+    "that validated text."
+)
+
+
 @dataclass(frozen=True)
 class PromptSpec:
     state: str
@@ -30,18 +44,48 @@ class PromptSpec:
         object.__setattr__(self, "references", MappingProxyType(dict(self.references)))
 
 
-def retry_feedback(context: WorkflowContext, state: str) -> str:
+def retry_feedback(context: WorkflowContext, state: str, worker_id: str = "") -> str:
     """Restate the validator's rejection so a re-ask is not a blind re-sample.
 
     A reply budget only helps if the agent learns what was wrong: without this
     the model re-emits the same document, burns another full round, and the
     orchestrator reports the same rejection again.  Only the failure of the state
     being dispatched is restated, so a critic slip is never fed to the solver.
+
+    When the wave failure carries a per-worker ledger and a ``worker_id`` is
+    given, that worker's own rejection is restated and workers without one get
+    nothing: a sibling's error is noise that makes the re-ask fix the wrong
+    defect (task-20260929-dad75d wave 4).
     """
 
     failure = getattr(context, "recovery", None)
     failure = getattr(failure, "last_failure", None)
-    if failure is None or not is_reply_failure(getattr(failure, "error_code", "")):
+    if failure is None:
+        return ""
+    if worker_id:
+        rejections = tuple(getattr(failure, "worker_rejections", ()) or ())
+        own = [
+            str(text)
+            for entry_worker, text in rejections
+            if str(entry_worker) == str(worker_id)
+            and is_reply_failure(str(text).split(":", 1)[0])
+        ]
+        if own and str(getattr(failure, "state", "") or "") != str(state):
+            return ""
+        if own:
+            reason = " ".join(own[0].split())
+            if not reason:
+                return ""
+            return (
+                "\n[Retry feedback] The orchestrator rejected your previous reply: "
+                f"{reason[:600]}\n"
+                "Correct exactly that defect and return one complete structured result again.\n"
+            )
+        if rejections:
+            # A sibling failed this wave, or this worker failed for a reason
+            # that is not a bad reply (timeout, transport): nothing to correct.
+            return ""
+    if not is_reply_failure(getattr(failure, "error_code", "")):
         return ""
     if str(getattr(failure, "state", "") or "") != str(state):
         return ""
@@ -50,7 +94,7 @@ def retry_feedback(context: WorkflowContext, state: str) -> str:
         return ""
     return (
         "\n[Retry feedback] The orchestrator rejected your previous reply: "
-        f"{reason[:400]}\n"
+        f"{reason[:600]}\n"
         "Correct exactly that defect and return one complete structured result again.\n"
     )
 
@@ -116,7 +160,9 @@ def solver_revision_task(context: WorkflowContext) -> str:
     return "\n".join(lines) + "\n"
 
 
-def analyst_evidence_task(context: WorkflowContext) -> str:
+def analyst_evidence_task(
+    context: WorkflowContext, findings: tuple[object, ...] | None = None
+) -> str:
     """Render the Critic's active findings as the Analyst's directed brief.
 
     The Analyst used to see only ``Current review finding count: N`` -- the
@@ -130,15 +176,28 @@ def analyst_evidence_task(context: WorkflowContext) -> str:
     review = context.review
     if review is None:
         return ""
-    active = tuple(finding for finding in review.findings if finding.active)
-    if not active:
+    open_findings = tuple(finding for finding in review.findings if finding.active)
+    if not open_findings:
         return ""
+    # A fan-out worker answers only its slice; the other slices belong to the
+    # other Analyst workers of the same wave.
+    active = open_findings if findings is None else findings
+    scope = (
+        f"{len(open_findings)} open finding(s)"
+        if findings is None
+        else f"{len(open_findings)} open finding(s); your slice is "
+        f"{len(active)} of them and the other Analyst workers cover the rest"
+    )
     lines = [
         "",
-        "[Evidence task] The Critic holds "
-        f"{len(active)} open finding(s). Answer each one in finding_responses "
+        f"[Evidence task] The Critic holds {scope}. Answer each one listed below "
+        "in finding_responses "
         "(finding_id, answer, evidence_ids, suggested_disposition) with "
-        "file:line evidence; keep evidence_updates scoped to these demands:",
+        "file:line evidence; keep evidence_updates scoped to these demands. "
+        "Every quote is one contiguous span of the cited lines, at most 30 "
+        "lines and 4096 characters (usually far less): quote only the lines "
+        "that support the claim, and split evidence about separate spots into "
+        "separate evidence_updates entries:",
     ]
     for finding in active:
         severity = str(getattr(finding, "severity", "") or "?").strip().upper()
@@ -251,7 +310,13 @@ def critic_evidence_task(context: WorkflowContext) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -> PromptSpec:
+def build_prompt(
+    context: WorkflowContext,
+    *,
+    target_state: str | None = None,
+    worker_id: str = "",
+    evidence_findings: tuple[object, ...] | None = None,
+) -> PromptSpec:
     """Project immutable context into a bounded role prompt.
 
     ``target_state`` is the state the dispatched agent must act as.  Dispatching
@@ -277,7 +342,9 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
         solver_revision_task(context) if state == "ZHONGSHU_SOLVER" else ""
     )
     evidence_task = (
-        analyst_evidence_task(context) if state == "ZHONGSHU_ANALYST" else ""
+        analyst_evidence_task(context, evidence_findings)
+        if state == "ZHONGSHU_ANALYST"
+        else ""
     )
     critic_evidence = (
         critic_evidence_task(context) if state == "ZHONGSHU_CRITIC" else ""
@@ -312,12 +379,13 @@ def build_prompt(context: WorkflowContext, *, target_state: str | None = None) -
         "Return exactly one complete structured result for the bound state. "
         "The result must be strictly valid JSON: no trailing commas, no "
         "comments, no markdown fences, no text outside the JSON document."
+        f"{JSON_STRING_RULES}"
         f"{revision_task}"
         f"{evidence_task}"
         f"{critic_evidence}"
         f"{rules_block}"
         f"{acceptance_block}"
-        f"{retry_feedback(context, state)}"
+        f"{retry_feedback(context, state, worker_id)}"
     )
     return PromptSpec(
         state=state,

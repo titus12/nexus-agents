@@ -8,6 +8,7 @@ workflow snapshot.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -87,6 +88,12 @@ def _menxia_infra_failure(result: WorkerResult) -> bool:
 REMOTE_FAILURE_SALVAGE_POLLS = 3
 REMOTE_FAILURE_SALVAGE_INTERVAL = 2.0
 
+# Once the remote run is terminal no more work can happen, so a reply that is
+# still absent can only be comment-visibility lag.  Reading is bounded by this
+# grace instead of the full dispatch deadline (task-20260928-f13561: four
+# terminal runs without a result each burned the whole 2000s window).
+COMPLETED_RESULT_GRACE_SECONDS = 60.0
+
 # Per-role dispatch timeouts (seconds).  Group revision and group review
 # workers re-read the full prompt bundle and routinely exceed a single
 # global cap (incident task-20260928-835a07: three deterministic 900.0s
@@ -155,9 +162,11 @@ class AgentWorkerRunner:
         timeout_seconds: float = 900.0,
         role_timeout_seconds: Mapping[str, float] | None = None,
         agent_ids: Mapping[str, str] | None = None,
+        completed_result_grace_seconds: float = COMPLETED_RESULT_GRACE_SECONDS,
     ) -> None:
         self._transport = transport
         self._admission = admission
+        self._completed_result_grace = max(0.0, completed_result_grace_seconds)
         self._artifacts = artifacts
         self._role_decoder = role_decoder or (lambda payload: dict(payload))
         self._clock = clock
@@ -510,8 +519,17 @@ class AgentWorkerRunner:
         deadline: float,
         deadline_at: str,
     ) -> EffectOutcome:
-        replies = self._poll_completed(poll, deadline)
+        result_deadline = min(deadline, self._clock() + self._completed_result_grace)
+        replies = self._poll_completed(poll, result_deadline)
         if not replies:
+            logger.warning(
+                "AGENT_RESULT_MISSING_AFTER_TERMINAL task_id=%s request_id=%s "
+                "operation_id=%s grace_seconds=%s",
+                request.task_id,
+                poll.request_id,
+                receipt.operation_id,
+                self._completed_result_grace,
+            )
             failure = self._failure(
                 request,
                 stage="agent_result",
@@ -603,7 +621,7 @@ class AgentWorkerRunner:
         poll: PollRequest,
         deadline: float,
     ) -> tuple[RawTransportReply, ...]:
-        """Bound the post-terminal result read to tolerate comment visibility lag."""
+        """Read the result of a terminal run until ``deadline`` (visibility lag only)."""
         replies = tuple(self._transport.poll(poll))
         for _ in range(max(0, self._max_polls - 1)):
             if replies:
@@ -901,13 +919,46 @@ def _rejected_reply_code(result: WorkerResult) -> tuple[str, str] | None:
         # dedicated code so the re-ask (and the operator) see the real cause.
         return "AGENT_REPLY_OUTPUT_OVERFLOW", OUTPUT_OVERFLOW_FEEDBACK
     reason = str(payload.get("contract_rejection") or "")
+    if not reason and action == _UNSTRUCTURED_REPLY_ACTION:
+        reason = _json_parse_hint(payload)
     return error_code, f"{default_message}: {reason}" if reason else default_message
+
+
+def _json_parse_hint(payload: Mapping[str, object]) -> str:
+    """Tell the agent where its reply stopped being JSON and the usual cause."""
+
+    error = str(payload.get("json_error") or "").strip()
+    if not error or str(payload.get("json_status") or "") != "invalid":
+        return ""
+    position = payload.get("json_error_position")
+    where = f" at char {position}" if position is not None else ""
+    context = " ".join(str(payload.get("json_error_context") or "").split())
+    near = f" near {context!r}" if context else ""
+    return (
+        f"JSON parse error: {error}{where}{near}. Escape every double quote "
+        'inside a string value as \\" (or use 「」), write each backslash as '
+        "\\\\ and each line break as \\n, and send raw JSON with no code fence"
+    )
 
 
 def _is_unstructured_reply(result: WorkerResult) -> bool:
     """True when a worker result is a transport placeholder, not a domain action."""
 
     return _rejected_reply_code(result) is not None
+
+
+def _worker_rejection_entry(result: WorkerResult) -> tuple[str, str]:
+    """One worker's rejection line for the wave failure's per-worker ledger."""
+
+    worker_id = str(result.worker_id or "")
+    if result.failure is not None:
+        failure = result.failure
+        return worker_id, f"{failure.error_code}: {failure.message}"
+    rejected = _rejected_reply_code(result)
+    if rejected is not None:
+        error_code, message = rejected
+        return worker_id, f"{error_code}: {message}"
+    return worker_id, "worker delivered no usable reply"
 
 
 _TASK_REVIEW_ACTIONS = {"TASK_APPROVED", "TASK_CHANGES_REQUIRED"}
@@ -1100,7 +1151,15 @@ class AgentNodeJoiner:
             else []
         )
         if failed:
+            # Every failed worker's own rejection rides the wave failure, so
+            # the retry re-asks each one with its own defect instead of
+            # feeding all of them the first error found (task-20260929-dad75d).
+            worker_rejections = tuple(
+                _worker_rejection_entry(result) for result in failed
+            )
             failure = next((result.failure for result in failed if result.failure), None)
+            if failure is not None:
+                failure = replace(failure, worker_rejections=worker_rejections)
             if failure is None:
                 unstructured = next(
                     (result for result in failed if _is_unstructured_reply(result)),
@@ -1126,6 +1185,7 @@ class AgentNodeJoiner:
                         retryable=True,
                         message=message,
                         cause_type="WorkerResult",
+                        worker_rejections=worker_rejections,
                     )
                 else:
                     failure = FailureRecord(
@@ -1142,6 +1202,7 @@ class AgentNodeJoiner:
                         retryable=True,
                         message="one or more node workers failed",
                         cause_type="WorkerResult",
+                        worker_rejections=worker_rejections,
                     )
             aggregate: dict[str, object] = {"action": "FAIL"}
             if partial_reviews:
@@ -1248,27 +1309,33 @@ class AgentNodeJoiner:
                 ),
             )
         if len(actions) != 1:
-            return NodeResult(
-                self._node_run_id,
-                "FAILED",
-                results,
-                aggregate={"actions": actions},
-                failure=FailureRecord(
-                    failure_id=f"{self._node_run_id}:NODE_ACTION_CONFLICT",
-                    stage="node_join",
-                    owner_component="agent_node_joiner",
-                    task_id=self._task_id,
-                    state=self._state,
-                    sequence=self._sequence,
-                    node_run_id=self._node_run_id,
-                    worker_id=None,
-                    effect_id=None,
-                    error_code="NODE_ACTION_CONFLICT",
-                    retryable=False,
-                    message="node workers returned conflicting domain actions",
-                    cause_type="WorkerResult",
-                ),
-            )
+            # Escalations are wave-legitimate: one blocked/gated worker routes
+            # the whole wave up (escalation-max) instead of killing it as an
+            # action conflict (task-20260929-2f77e6).
+            escalations = [action for action in ("BLOCKED", "HUMAN_GATE") if action in actions]
+            if not escalations:
+                return NodeResult(
+                    self._node_run_id,
+                    "FAILED",
+                    results,
+                    aggregate={"actions": actions},
+                    failure=FailureRecord(
+                        failure_id=f"{self._node_run_id}:NODE_ACTION_CONFLICT",
+                        stage="node_join",
+                        owner_component="agent_node_joiner",
+                        task_id=self._task_id,
+                        state=self._state,
+                        sequence=self._sequence,
+                        node_run_id=self._node_run_id,
+                        worker_id=None,
+                        effect_id=None,
+                        error_code="NODE_ACTION_CONFLICT",
+                        retryable=False,
+                        message="node workers returned conflicting domain actions",
+                        cause_type="WorkerResult",
+                    ),
+                )
+            actions = escalations
         if self._state.startswith("ZHONGSHU_"):
             try:
                 aggregate = aggregate_zhongshu_workers(
@@ -2103,8 +2170,8 @@ class AgentNodeJoiner:
             )
             for row in previous_rows
         }
-        for entry in group_docs:
-            doc_map[str(entry.get("group_id") or "")] = str(entry.get("markdown") or "")
+        for group_id, row in folded_docs.items():
+            doc_map[str(group_id)] = str(row.get("markdown") or "")
         projected, projection_error = project_acceptance_signals(merged, doc_map)
         if projection_error:
             return NodeResult(

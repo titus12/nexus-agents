@@ -15,8 +15,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from orchestrator.adapters import _quote_rejection
+from orchestrator.adapters import _apply_quote_gate
 from orchestrator.domain.states import _requirement_contract_markdown
+from orchestrator.quote_gate import (
+    UNVERIFIED_MARK,
+    demote_unverified,
+    find_quote_issues,
+    format_rejection,
+)
 from orchestrator.transport.external import AgentRequest
 
 
@@ -31,6 +37,10 @@ def _request(phase: str = "ZHONGSHU") -> AgentRequest:
         idempotency_key="req-1",
         context={},
     )
+
+
+def _quote_rejection(_request_unused: AgentRequest, payload: dict) -> str:
+    return format_rejection(find_quote_issues(payload))
 
 
 def _evidence(**overrides) -> dict:
@@ -61,8 +71,10 @@ class QuoteGateUnitTests(unittest.TestCase):
     """Mechanical transcription checks, not semantic review."""
 
     def test_non_zhongshu_phase_is_not_gated(self) -> None:
-        payload = {"evidence_updates": [_evidence()]}
-        self.assertEqual(_quote_rejection(_request("MENXIA"), payload), "")
+        payload = {
+            "evidence_updates": [_evidence(source="cmd/orchestrator/quote_gate.py:1")]
+        }
+        self.assertIs(_apply_quote_gate(_request("MENXIA"), payload), payload)
 
     def test_payload_without_evidence_arrays_passes(self) -> None:
         self.assertEqual(_quote_rejection(_request(), {"summary": "ok"}), "")
@@ -72,12 +84,12 @@ class QuoteGateUnitTests(unittest.TestCase):
             _request(),
             {
                 "evidence_updates": [
-                    _evidence(source="cmd/orchestrator/adapters.py:261")
+                    _evidence(source="cmd/orchestrator/quote_gate.py:1")
                 ]
             },
         )
         self.assertIn("QUOTE_REQUIRED", rejection)
-        self.assertIn("adapters.py", rejection)
+        self.assertIn("quote_gate.py", rejection)
         self.assertIn("ev-1", rejection)
 
     def test_missing_cited_file_without_quote_is_exempt(self) -> None:
@@ -233,6 +245,11 @@ class QuoteGateUnitTests(unittest.TestCase):
             }
             rejection = _quote_rejection(_request(), payload)
             self.assertIn("30 lines", rejection)
+            # The actual size rides the rejection: "exceeds" alone left the
+            # worker guessing how much to cut (task-20260929-dad75d re-submitted
+            # the same oversized span on the retry).
+            self.assertIn("quote is 31 lines", rejection)
+            self.assertIn("cut it to only the cited lines", rejection)
 
     def test_nfkc_and_whitespace_normalization_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,12 +274,12 @@ class QuoteGateUnitTests(unittest.TestCase):
         payload = {
             "evidence_updates": [
                 _evidence(
-                    source="cmd/orchestrator/adapters.py:261",
+                    source="cmd/orchestrator/quote_gate.py:1",
                     quote={
-                        "path": "cmd/orchestrator/adapters.py",
-                        "line_start": 261,
-                        "line_end": 261,
-                        "text": "def _quote_rejection(request: AgentRequest, payload: object) -> str:",
+                        "path": "cmd/orchestrator/quote_gate.py",
+                        "line_start": 30,
+                        "line_end": 30,
+                        "text": "QUOTE_MAX_CHARS = 4096",
                     },
                 )
             ]
@@ -272,7 +289,7 @@ class QuoteGateUnitTests(unittest.TestCase):
     def test_finding_response_without_quote_is_rejected(self) -> None:
         payload = {
             "finding_responses": [
-                _response(source="cmd/orchestrator/adapters.py:261", answer="see site")
+                _response(source="cmd/orchestrator/quote_gate.py:1", answer="see site")
             ]
         }
         rejection = _quote_rejection(_request(), payload)
@@ -299,13 +316,99 @@ class QuoteGateUnitTests(unittest.TestCase):
             {
                 "evidence_updates": [
                     _evidence(
-                        source="cmd/orchestrator/adapters.py:261",
+                        source="cmd/orchestrator/quote_gate.py:1",
                         quote={"text": " "},
                     )
                 ]
             },
         )
         self.assertIn("QUOTE_REQUIRED", rejection)
+
+
+class QuoteDemotionTests(unittest.TestCase):
+    """One bad quote costs its entry verified status, not the whole reply."""
+
+    def _payload(self, site: Path) -> dict:
+        return {
+            "summary": "kept",
+            "evidence_updates": [
+                _evidence(
+                    evidence_id="ev-good",
+                    source=f"{site.as_posix()}:1",
+                    quote={"path": site.as_posix(), "text": "Z = 3"},
+                ),
+                _evidence(
+                    evidence_id="ev-bad",
+                    source=f"{site.as_posix()}:1",
+                    conclusion="writes Z to a file",
+                    quote={"path": site.as_posix(), "text": "Z is written out"},
+                ),
+            ],
+            "finding_responses": [
+                _response(
+                    finding_id="finding-bad",
+                    source="cmd/orchestrator/quote_gate.py:1",
+                    answer="see site",
+                ),
+            ],
+        }
+
+    def test_only_flagged_entries_are_demoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "site.py"
+            site.write_text("Z = 3\n", encoding="utf-8")
+            payload = self._payload(site)
+
+            result = _apply_quote_gate(_request(), payload)
+
+        good, bad = result["evidence_updates"]
+        self.assertIn("quote", good)
+        self.assertFalse(good["conclusion"].startswith(UNVERIFIED_MARK))
+        self.assertNotIn("quote", bad)
+        self.assertTrue(bad["conclusion"].startswith(UNVERIFIED_MARK))
+        self.assertIn("QUOTE_MISMATCH", bad["conclusion"])
+        self.assertIn("writes Z to a file", bad["conclusion"])
+        self.assertEqual(result["summary"], "kept")
+
+    def test_demoted_finding_response_cannot_suggest_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "site.py"
+            site.write_text("Z = 3\n", encoding="utf-8")
+
+            result = _apply_quote_gate(_request(), self._payload(site))
+
+        response = result["finding_responses"][0]
+        self.assertTrue(response["answer"].startswith(UNVERIFIED_MARK))
+        self.assertIn("QUOTE_REQUIRED", response["answer"])
+        self.assertEqual(response["suggested_disposition"], "REVISE")
+
+    def test_input_payload_is_not_mutated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "site.py"
+            site.write_text("Z = 3\n", encoding="utf-8")
+            payload = self._payload(site)
+            snapshot = repr(payload)
+
+            _apply_quote_gate(_request(), payload)
+
+        self.assertEqual(repr(payload), snapshot)
+
+    def test_clean_payload_is_returned_as_is(self) -> None:
+        payload = {"evidence_updates": [_evidence(source="runtime probe")]}
+
+        self.assertIs(_apply_quote_gate(_request(), payload), payload)
+
+    def test_demotion_is_stable_once_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "site.py"
+            site.write_text("Z = 3\n", encoding="utf-8")
+            first = demote_unverified(
+                self._payload(site), find_quote_issues(self._payload(site))
+            )
+
+            second = _apply_quote_gate(_request(), first)
+
+        self.assertEqual(find_quote_issues(first), find_quote_issues(second))
 
 
 class RequirementContractBackfillTests(unittest.TestCase):

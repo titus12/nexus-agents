@@ -400,6 +400,28 @@ class AnalystContractQuoteRuleTests(unittest.TestCase):
         self.assertIn("verbatim", rules)
         self.assertIn("not evidence", rules)
 
+    def test_quote_budget_reaches_the_first_notice(self) -> None:
+        # The 30-line/4096-char cap lived only in the skill and the rejection
+        # feedback; workers kept quoting whole functions (task-20260929-dad75d:
+        # five oversized-quote rejections in one run).  It must also ride the
+        # contract rules and the [Evidence task] block the worker answers.
+        from orchestrator.contracts import contract_for_state
+
+        rules = " ".join(contract_for_state("ZHONGSHU_ANALYST").prompt_rules)
+        self.assertIn("4096", rules)
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
+            progression=ProgressState("ZHONGSHU_ANALYST", 3, "2026-09-28T00:00:00Z"),
+            review=ReviewState(
+                revision_id="R1",
+                plan={"items": [{"item_id": "i1"}]},
+                findings=(Finding(finding_id="f-1", severity="P1", status="OPEN"),),
+            ),
+        )
+        content = build_prompt(context, target_state="ZHONGSHU_ANALYST").content
+        self.assertIn("4096", content)
+        self.assertIn("one contiguous span", content)
+
 
 class _EvidenceDetourMultica(_ConvergingMultica):
     """The Critic demands evidence once; the packet must come straight back.
@@ -561,10 +583,11 @@ class EvidenceDirectRoutingEndToEndTests(unittest.TestCase):
         snapshot, adapter = self._run()
 
         self.assertEqual(snapshot.context.progression.state, "DONE")
-        # One demand wave, one evidence wave (three parallel analyst workers
-        # share it: analyst_default_workers=3 in the shared e2e context).
+        # One demand wave, one evidence wave.  The single open finding is
+        # answered by one analyst worker, not repeated by all three
+        # (analyst_default_workers=3 in the shared e2e context).
         self.assertEqual(adapter.critic_review_waves, 2)
-        self.assertEqual(adapter.evidence_waves, 3)
+        self.assertEqual(adapter.evidence_waves, 1)
         dispatched = adapter.dispatched
         demand_index = next(
             index

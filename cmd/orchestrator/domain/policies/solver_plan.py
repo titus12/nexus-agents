@@ -12,10 +12,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 from collections.abc import Iterable, Mapping, Sequence
 
 from ...zhongshu_review_queue import canonical_hash, structural_gate
 from ..errors import SOLVER_STRUCTURE_REPLY_PREFIX
+
+logger = logging.getLogger("review_orchestrator_fsm")
 
 
 CHANGE_OPS = frozenset(
@@ -421,8 +424,14 @@ def carry_forward_group_docs(
     authoritative row.
     """
 
-    from ..zhongshu_doc import ZhongshuRequirementDoc, doc_violation_details
+    from ..zhongshu_doc import (
+        ZhongshuRequirementDoc,
+        doc_violation_details,
+        group_member_item_ids,
+    )
+    from ..zhongshu_doc_repair import repair_group_doc
 
+    doc_review = _review_for_doc_verify(review, plan)
     rows = {
         str(getattr(row, "group_id", "") or ""): row
         for row in current_rows or ()
@@ -459,10 +468,23 @@ def carry_forward_group_docs(
         row = rows.get(group_id)
         row_version = int(getattr(row, "doc_version", 0) or 0)
         previous_version = row_version if row_version > 0 else None
+        repair = repair_group_doc(
+            markdown,
+            group_id=group_id,
+            version=(previous_version or 0) + 1,
+            member_item_ids=group_member_item_ids(doc_review, group_id),
+        )
+        if repair.repairs:
+            logger.info(
+                "SOLVER_GROUP_DOC_REPAIRED group_id=%s repairs=%s",
+                group_id,
+                ",".join(repair.repairs),
+            )
+            markdown = repair.markdown
         violations = doc_violation_details(
             markdown,
             previous_version=previous_version,
-            review=_review_for_doc_verify(review, plan),
+            review=doc_review,
             group_id=group_id,
         )
         if violations:
@@ -696,6 +718,13 @@ def merge_group_revision_items(
         index, current = located
         owner = str(current.get("group_id") or "")
         supplied_owner = str(raw.get("group_id") or "")
+        if not owner and group_id and supplied_owner == group_id:
+            # The plan keeps membership in ``plan.groups``; its items carry no
+            # group_id.  A worker echoing the group it was dispatched for is
+            # not drift (task-20260930-395679 lost a 10-minute wave to it), so
+            # drop the label instead of rejecting the patch.
+            raw = {key: value for key, value in raw.items() if key != "group_id"}
+            supplied_owner = ""
         if supplied_owner != owner:
             # Feedback carries expected/actual: a bare ``ITEM_PATCH_IDENTITY``
             # left the re-ask guessing which identity field drifted, and live
@@ -703,7 +732,8 @@ def merge_group_revision_items(
             # the same mislabeled group_id (SOLVER:11/13/15/17).
             return None, (
                 f"ITEM_PATCH_IDENTITY:{item_id} "
-                f"group_id expected={owner or 'none'} actual={supplied_owner or 'none'}"
+                f"group_id expected={owner or group_id or 'none'} "
+                f"actual={supplied_owner or 'none'}"
             )
         in_scope = not group_id or not owner or owner == group_id
         if (

@@ -9,6 +9,7 @@ from orchestrator.domain.context import (
     TaskIdentity,
     WorkflowContext,
 )
+from orchestrator.domain.events import DomainEvent
 from orchestrator.domain.states import ZhongshuAnalystState
 from orchestrator.runtime.agent_effects import AgentNodeJoiner
 from orchestrator.runtime.nodes import WorkerResult
@@ -192,6 +193,50 @@ class AnalystWaveSalvageJoinTests(unittest.TestCase):
         # The carried payloads were consumed; the salvage set must reset so
         # the next wave starts clean.
         self.assertEqual(node_result.aggregate.get("salvaged_worker_payloads"), [])
+
+
+class AnalystFirstDispatchRevisionTests(unittest.TestCase):
+    """Salvage is stamped with the dispatch revision and matched on retry.
+
+    task-20260929-dad75d: the first evidence dispatch after the contract pass
+    carried an empty revision (no review existed yet), so the node fell back
+    to its request id and the stamp never matched the retry's live revision.
+    """
+
+    def test_first_evidence_dispatch_carries_the_new_revision(self) -> None:
+        context = WorkflowContext(
+            identity=TaskIdentity("task-1", "issue-1", "", "request-1"),
+            progression=ProgressState("ZHONGSHU_ANALYST", 1, "2026-09-11T00:00:00Z"),
+            request=RequestState(raw_request="review"),
+        )
+        event = DomainEvent(
+            "NODE_COMPLETED",
+            "task-1",
+            1,
+            {
+                "action": "REQUIREMENT_CONTRACT_READY",
+                "requirements": [
+                    {
+                        "requirement_id": "req-000001",
+                        "statement": "do X",
+                        "source": "issue-1",
+                        "priority": "must",
+                        "scope": "in",
+                        "kind": "task",
+                        "acceptance_signal": "signal",
+                    }
+                ],
+            },
+            "2026-09-11T00:00:01Z",
+        )
+
+        decision = ZhongshuAnalystState().handle(context, event)
+
+        live_revision = decision.update.review.revision_id
+        self.assertTrue(live_revision)
+        (dispatch,) = decision.effects
+        self.assertEqual(dispatch.effect_type, "node_dispatch")
+        self.assertEqual(dispatch.payload["revision_id"], live_revision)
 
 
 class AnalystWaveSalvageStateTests(unittest.TestCase):

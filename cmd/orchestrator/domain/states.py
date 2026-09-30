@@ -87,6 +87,10 @@ from .policies.zhongshu_group import (
     zhongshu_group_resets_from_payload,
 )
 from .zhongshu_doc import group_doc_violations
+from .policies.analyst_partition import (
+    expected_analyst_lenses,
+    partition_active_findings,
+)
 from .policies.prompts import build_prompt, retry_feedback
 from .transitions import ALL_STATES, BUSINESS_STATES, SYSTEM_STATES, TransitionRegistry
 from .zhongshu import (
@@ -542,8 +546,14 @@ class _ConcreteWorkflowState:
             effect = self._dispatch_effect(
                 context,
                 target,
+                # The revision that will be live once this decision commits:
+                # the pre-update review has none on the first dispatch, and
+                # the empty value made the node fall back to its request id,
+                # so salvage stamped under it never matched the retry's
+                # revision (task-20260929-dad75d).
                 revision_id=(
                     str(payload.get("revision_id") or "")
+                    or (effective_review.revision_id if effective_review else "")
                     or (context.review.revision_id if context.review else "")
                 ),
                 plan_hash=(
@@ -1461,12 +1471,31 @@ class _ConcreteWorkflowState:
                 if target == "ZHONGSHU_ANALYST"
                 else {}
             )
-            if len(salvaged_workers) >= worker_count:
+            # Evidence round answering the Critic: each worker takes its own
+            # slice of the open findings; workers without one are not dispatched.
+            finding_slices = (
+                partition_active_findings(context.review, worker_count)
+                if target == "ZHONGSHU_ANALYST"
+                and str(getattr(context.review, "evidence_requester", "") or "")
+                == "ZHONGSHU_CRITIC"
+                else {}
+            )
+            worker_indices = tuple(finding_slices) or tuple(range(1, worker_count + 1))
+            wave_worker_ids = {
+                f"{target.lower()}-worker-{index:02d}" for index in worker_indices
+            }
+            salvaged_workers = {
+                worker_id: row
+                for worker_id, row in salvaged_workers.items()
+                if worker_id in wave_worker_ids
+            }
+            if len(salvaged_workers) >= len(wave_worker_ids):
                 # Defensive: a salvage set covering every slot would dispatch
                 # an empty wave; a full re-run is the safe fallback.
                 salvaged_workers = {}
-            for index in range(1, worker_count + 1):
+            for index in worker_indices:
                 worker_id = f"{target.lower()}-worker-{index:02d}"
+                slice_findings = finding_slices.get(index)
                 if worker_id in salvaged_workers:
                     # This worker's evidence was salvaged from the failed
                     # round; only the missing slots are re-dispatched.
@@ -1478,6 +1507,14 @@ class _ConcreteWorkflowState:
                     "request_id": f"{request_id}:worker-{index:02d}",
                     "role": role,
                     "phase": phase,
+                    # Per-worker retry feedback: each re-asked lens must see
+                    # its own rejection, not the wave's first error.
+                    "prompt_ref": build_prompt(
+                        context,
+                        target_state=target,
+                        worker_id=worker_id,
+                        evidence_findings=slice_findings,
+                    ).content,
                 }
                 if target == "ZHONGSHU_ANALYST" and contract_payload:
                     analyst_binding_context: dict[str, object] = {
@@ -1494,7 +1531,9 @@ class _ConcreteWorkflowState:
                                      "contract": "evidence_lens"},
                         ),
                     }
-                    evidence_demand = _analyst_evidence_demand(context)
+                    evidence_demand = _analyst_evidence_demand(
+                        context, slice_findings
+                    )
                     if evidence_demand is not None:
                         analyst_binding_context["evidence_demand"] = evidence_demand
                     binding["dispatch_context"] = analyst_binding_context
@@ -3641,11 +3680,7 @@ def _item_revise_bindings(
     contested = contested_item_ids(review.task_review_ledger)
     if not contested:
         return None
-    expected_lenses = (
-        context.parallel.zhongshu.analyst_default_workers
-        if context.parallel is not None
-        else 0
-    )
+    expected_lenses = _expected_analyst_lenses(context)
     base_request_id = f"{context.identity.task_id}:ZHONGSHU_SOLVER:{context.progression.sequence + 1}"
     bindings: list[dict[str, object]] = []
     for index, item_id in enumerate(contested, start=1):
@@ -3891,11 +3926,7 @@ def _menxia_item_bindings(
         return []
     role, phase = _ROLE_BY_STATE[target]
     item_by_id = {item.item_id: item for item in review.task_items}
-    expected_lenses = (
-        context.parallel.zhongshu.analyst_default_workers
-        if context.parallel is not None
-        else 0
-    )
+    expected_lenses = _expected_analyst_lenses(context)
     bindings: list[dict[str, object]] = []
     for index, row in enumerate(rows, start=1):
         item = item_by_id.get(row.item_id)
@@ -4386,19 +4417,42 @@ def _previous_review_snapshot(context: WorkflowContext) -> dict[str, object] | N
     }
 
 
-def _analyst_evidence_demand(context: WorkflowContext) -> dict[str, object] | None:
+def _expected_analyst_lenses(context: WorkflowContext) -> int:
+    """Analyst lens workers an evidence wave over the open findings dispatches."""
+
+    if context.parallel is None:
+        return 0
+    review = context.review
+    return expected_analyst_lenses(
+        context.parallel.zhongshu.analyst_default_workers,
+        (
+            finding
+            for finding in (review.findings if review is not None else ())
+            if finding.active
+        ),
+    )
+
+
+def _analyst_evidence_demand(
+    context: WorkflowContext, findings: tuple[object, ...] | None = None
+) -> dict[str, object] | None:
     """Dispatch-time snapshot of the Critic's demands for the Analyst fan-out.
 
     The demand rides the dispatch record so the transport gate can verify
     fulfillment mechanically (the targets exist in the workspace and the
     reply cites them) without parsing any excuse wording, and so the reply
     contract can require one ``finding_responses`` entry per listed finding.
+    ``findings`` narrows the demand to one fan-out worker's slice.
     """
 
     review = context.review
     if review is None:
         return None
-    active = [finding for finding in review.findings if finding.active]
+    active = (
+        [finding for finding in review.findings if finding.active]
+        if findings is None
+        else list(findings)
+    )
     if not active:
         return None
     demand: list[dict[str, object]] = []
@@ -4517,11 +4571,7 @@ def _task_review_bindings(
         if getattr(finding, "active", False) and getattr(finding, "item_id", ""):
             findings_by_item.setdefault(str(finding.item_id), []).append(finding)
     base_request_id = f"{context.identity.task_id}:ZHONGSHU_CRITIC:{context.progression.sequence + 1}"
-    expected_lenses = (
-        context.parallel.zhongshu.analyst_default_workers
-        if context.parallel is not None
-        else 0
-    )
+    expected_lenses = _expected_analyst_lenses(context)
     bindings: list[dict[str, object]] = []
     for index, job in enumerate(selected, start=1):
         item = item_by_id.get(job.item_id)
@@ -4816,11 +4866,7 @@ def _group_review_bindings(
     base_request_id = (
         f"{context.identity.task_id}:ZHONGSHU_CRITIC:{context.progression.sequence + 1}"
     )
-    expected_lenses = (
-        context.parallel.zhongshu.analyst_default_workers
-        if context.parallel is not None
-        else 0
-    )
+    expected_lenses = _expected_analyst_lenses(context)
     bindings: list[dict[str, object]] = []
     for index, job in enumerate(selected, start=1):
         members_full, members_surface, member_hashes = _group_capsule_inputs(
@@ -4922,7 +4968,11 @@ def _group_review_bindings(
                     findings=group_findings,
                     finding_responses=finding_responses,
                     evidence=evidence_rows,
-                ) + retry_feedback(context, "ZHONGSHU_CRITIC"),
+                ) + retry_feedback(
+                    context,
+                    "ZHONGSHU_CRITIC",
+                    worker_id=f"zhongshu_critic-worker-{index:02d}",
+                ),
                 "dispatch_context": dispatch_context,
             }
         )
@@ -5013,12 +5063,17 @@ def _group_revise_bindings(
                         "(§8 must close over the member acceptance signals). "
                         "Every other member and every other group is frozen: "
                         "return them byte-identical or omit them. Each patched "
-                        "member must keep its item_id and group_id unchanged. "
+                        "member must keep its item_id unchanged; copy only the fields the "
+                        "member already has and do not add a group_id it lacks. "
                         "Reply with "
                         "action READY_FOR_CRITIC plus the patched member items "
                         "and this group's document."
                     ),
-                ) + retry_feedback(context, "ZHONGSHU_SOLVER"),
+                ) + retry_feedback(
+                    context,
+                    "ZHONGSHU_SOLVER",
+                    worker_id=f"zhongshu_solver-worker-{index:02d}",
+                ),
                 "dispatch_context": {
                     "zhongshu_dispatch_mode": "group_revise",
                     "revision_id": revision,

@@ -68,17 +68,20 @@ def _packet(
     }
 
 
-def _review(evidence_packet: dict[str, object] | None) -> ReviewState:
+def _review(
+    evidence_packet: dict[str, object] | None, *, finding_count: int = 1
+) -> ReviewState:
     return ReviewState(
         revision_id="task-1:2",
-        findings=(
+        findings=tuple(
             Finding(
-                finding_id="finding-000001",
+                finding_id=f"finding-{number:06d}",
                 severity="P1",
                 group_id="group-000001",
                 item_id="item-000001",
                 claim="claim",
-            ),
+            )
+            for number in range(1, finding_count + 1)
         ),
         task_items=(
             ReviewTaskItem(
@@ -191,7 +194,8 @@ class TaskReviewBindingEvidenceTests(unittest.TestCase):
     """Bindings carry the item evidence slice and the coverage marker."""
 
     def test_bindings_carry_item_evidence_and_gap_marker(self) -> None:
-        context = _context(_review(_packet(workers=1)))
+        # Three open findings split across three workers, one delivered.
+        context = _context(_review(_packet(workers=1), finding_count=3))
 
         bindings = _task_review_bindings(context, "task-1:2", "plan-hash")
 
@@ -206,6 +210,15 @@ class TaskReviewBindingEvidenceTests(unittest.TestCase):
         self.assertIn(
             "dispatch_context.item_evidence", bindings[0]["prompt_ref"]
         )
+
+    def test_no_gap_when_the_wave_had_fewer_findings_than_workers(self) -> None:
+        # One open finding is answered by one worker; the other two were
+        # never dispatched, so their absence is not a coverage gap.
+        context = _context(_review(_packet(workers=1), finding_count=1))
+
+        bindings = _task_review_bindings(context, "task-1:2", "plan-hash")
+
+        self.assertNotIn("evidence_gaps", bindings[0]["dispatch_context"])
 
     def test_no_gap_marker_when_every_lens_delivered(self) -> None:
         context = _context(_review(_packet(workers=3)))

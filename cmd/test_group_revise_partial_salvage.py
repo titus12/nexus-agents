@@ -59,7 +59,6 @@ def _plan() -> dict:
             items.append(
                 {
                     "item_id": item_id,
-                    "group_id": group_id,
                     "title": f"title-{item_id}",
                     "objective": f"objective-{item_id}",
                     "dependencies": [],
@@ -67,6 +66,7 @@ def _plan() -> dict:
                     "acceptance_signals": [f"accept-{item_id}"],
                 }
             )
+    # Real plans keep membership in ``groups``; items carry no group_id.
     return {"items": items, "groups": groups, "requirements": []}
 
 
@@ -177,6 +177,33 @@ class IdentityFeedbackDetailTests(unittest.TestCase):
             editable_item_ids=("item-000003", "item-000004"),
         )
         self.assertIn("ITEM_PATCH_IDENTITY:item-000003", error)
+        self.assertIn("group_id expected=group-000002 actual=group-000001", error)
+
+    def test_group_echo_on_item_without_owner_is_dropped(self) -> None:
+        plan = _plan()
+        for item in plan["items"]:
+            item.pop("group_id", None)
+        patched = _patched_item(plan, "item-000003", group_id="group-000002")
+        merged, error = merge_group_revision_items(
+            plan,
+            group_id="group-000002",
+            patched_items=[patched],
+            editable_item_ids=("item-000003", "item-000004"),
+        )
+        self.assertEqual(error, "")
+        merged_item = next(i for i in merged["items"] if i["item_id"] == "item-000003")
+        self.assertNotIn("group_id", merged_item)
+
+    def test_foreign_group_on_item_without_owner_is_still_rejected(self) -> None:
+        plan = _plan()
+        for item in plan["items"]:
+            item.pop("group_id", None)
+        _, error = merge_group_revision_items(
+            plan,
+            group_id="group-000002",
+            patched_items=[_patched_item(plan, "item-000003", group_id="group-000001")],
+            editable_item_ids=("item-000003", "item-000004"),
+        )
         self.assertIn("group_id expected=group-000002 actual=group-000001", error)
 
     def test_reply_item_id_mismatch_names_actual(self) -> None:

@@ -46,6 +46,13 @@ CORE_TESTS = (
     "test_zhongshu_task_review_wiring",
     "test_solver_plan_materialization",
     "test_structured_backfill",
+    "test_evidence_quote_gate",
+    "test_json_bom_v31",
+    "test_analyst_partition",
+    "test_completed_result_grace",
+    "test_zhongshu_doc_repair",
+    "test_retry_feedback_prompt",
+    "test_runtime_notice_reply",
 )
 
 
