@@ -43,7 +43,7 @@ def _finding(index: int, severity: str = "P2", item_id: str = "") -> Finding:
         finding_id=f"finding-{index:02d}",
         severity=severity,
         status="OPEN",
-        group_id="group-000001",
+        group_id="group-000001" if index <= 6 else "group-000002",
         item_id=item_id or f"item-{index:03d}",
         claim=f"claim {index}",
         required_action=f"resolve {index}",
@@ -55,10 +55,9 @@ def _plan(item_count: int = 7) -> dict:
         "requirements": [],
         "items": [{"item_id": f"item-{i:03d}"} for i in range(1, item_count + 1)],
         "groups": [
-            {
-                "group_id": "group-000001",
-                "item_ids": [f"item-{i:03d}" for i in range(1, item_count + 1)],
-            }
+            {"group_id": f"group-{start // 6 + 1:06d}",
+             "item_ids": [f"item-{i:03d}" for i in range(start + 1, min(start + 6, item_count) + 1)]}
+            for start in range(0, item_count, 6)
         ],
         "dependencies": [],
         "scope": {},
@@ -273,7 +272,7 @@ class SolverChannelIsolationTests(unittest.TestCase):
                 "mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY",
                 "action": "READY_FOR_CRITIC",
                 "plan": _plan(),
-                "group_docs": [_group_docs_entry()],
+                "group_docs": [_group_docs_entry(), _group_docs_entry("group-000002")],
             },
             review,
         )

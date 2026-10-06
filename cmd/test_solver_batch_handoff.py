@@ -25,7 +25,7 @@ def _finding(index: int, severity: str = "P2") -> Finding:
         finding_id=f"finding-{index:02d}",
         severity=severity,
         status="OPEN",
-        group_id="group-000001",
+        group_id="group-000001" if index <= 6 else "group-000002",
         item_id=f"item-{index:03d}",
         claim=f"claim {index}",
         required_action=f"resolve {index}",
@@ -37,10 +37,9 @@ def _plan(count: int = 7) -> dict:
         "requirements": [],
         "items": [{"item_id": f"item-{i:03d}"} for i in range(1, count + 1)],
         "groups": [
-            {
-                "group_id": "group-000001",
-                "item_ids": [f"item-{i:03d}" for i in range(1, count + 1)],
-            }
+            {"group_id": f"group-{start // 6 + 1:06d}",
+             "item_ids": [f"item-{i:03d}" for i in range(start + 1, min(start + 6, count) + 1)]}
+            for start in range(0, count, 6)
         ],
         "dependencies": [],
         "scope": {},
@@ -66,7 +65,7 @@ def _context(
             plan_hash="plan-hash",
             findings=findings,
             task_items=tuple(
-                ReviewTaskItem(f"item-{i:03d}", "group-000001", order=i - 1)
+                ReviewTaskItem(f"item-{i:03d}", "group-000001" if i <= 6 else "group-000002", order=i - 1)
                 for i in range(1, 8)
             ),
             task_review_ledger=tuple(

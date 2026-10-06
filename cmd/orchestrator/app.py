@@ -63,7 +63,7 @@ from .runtime import (
     WorkflowEngine,
 )
 from .runtime.migration import legacy_dto_to_snapshot
-from .runtime.effects import FastTrackRunner
+from .runtime.effects import FastTrackRunner, PlanStructurePreflightRunner
 from .runtime.plan_effects import PlanArtifactRunner
 from .transport.external import HumanGate
 
@@ -369,6 +369,7 @@ class OrchestratorApp:
                 "plan_review_doc": self.plan_effects,
                 "fast_track": FastTrackRunner(),
                 "mechanical_freeze": FastTrackRunner(),
+                "plan_structure_preflight": PlanStructurePreflightRunner(),
             },
         )
         self.inbox = JsonDomainEventInbox(self.repository)

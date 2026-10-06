@@ -15,7 +15,8 @@ import json
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 
-from ...zhongshu_review_queue import canonical_hash, structural_gate
+from ...zhongshu_review_queue import canonical_hash
+from .plan_structure import blocking_structure_errors
 from ..errors import SOLVER_STRUCTURE_REPLY_PREFIX
 
 logger = logging.getLogger("review_orchestrator_fsm")
@@ -34,31 +35,13 @@ CHANGE_OPS = frozenset(
 # operations, never through a free-form plan-level patch.
 FORBIDDEN_PLAN_FIELDS = frozenset({"items", "groups", "requirements"})
 
-# Structural-gate findings that make a plan unusable and must block a revision.
-# Coverage-style findings (source requirement / uncovered requirement) stay
-# advisory and are surfaced to the Critic rather than rejecting the plan.
-_BLOCKING_STRUCTURAL_ISSUES = (
-    "PLAN_NOT_OBJECT",
-    "PLAN_HAS_NO_ITEMS",
-    "ITEM_IN_MULTIPLE_GROUPS",
-    "ITEM_WITHOUT_GROUP",
-    "DEPENDENCY_UNKNOWN_ITEM",
-    "DEPENDENCY_CYCLE",
-    "GROUP_DEPENDENCY_CYCLE",
-    "GROUP_ID_INVALID",
-    # A measurement claim with neither a verification recipe nor an UNKNOWN
-    # marker is what five-round evidence fights are made of; reject it at
-    # plan-materialization time (recipe/demote is a one-line edit for the
-    # Solver, see the acceptance standard rule 8).
-    "ACCEPTANCE_SIGNAL_UNVERIFIABLE",
-)
-
 # The error code the Solver state composes from blocking structural issues
 # (``SOLVER_PLAN_STRUCTURE_INVALID:<issue>;<issue>``).  The literal lives in
 # ``domain.errors`` so the retryability predicate and the reply-failure
 # taxonomy agree on it.
 _GATE_STRUCTURAL_ENTRY_PREFIXES = (
     "ACCEPTANCE_SIGNAL_UNVERIFIABLE", "GROUP_DEPENDENCY_CYCLE:", "GROUP_ID_INVALID:",
+    "GROUP_MAX_ITEMS:", "GROUP_MEMBERSHIP_MISMATCH:",
 )
 
 # Reply-shape errors the Solver can trivially reformulate on a fresh attempt.
@@ -66,6 +49,8 @@ _GATE_STRUCTURAL_ENTRY_PREFIXES = (
 # not evidence that the plan is wrong, so the orchestrator re-asks instead of
 # blocking the whole task for a human.
 _RETRYABLE_SOLVER_REPLY_PREFIXES = (
+    "SOLVER_STRUCTURE_REPAIR_FROZEN:",
+    "SOLVER_STRUCTURE_REPAIR_PLAN_REQUIRED",
     "SOLVER_PLAN_AND_CHANGES_AMBIGUOUS",
     "SOLVER_CURRENT_PLAN_MISSING",
     "SOLVER_CHANGE_NOT_OBJECT",
@@ -163,26 +148,7 @@ def solver_revision_response_error(
 def structural_integrity_errors(plan: Mapping[str, object] | None) -> list[str]:
     """Return the blocking structural defects of a materialized plan."""
 
-    if not isinstance(plan, Mapping):
-        return ["PLAN_NOT_OBJECT"]
-    errors = [
-        issue
-        for issue in structural_gate(plan)
-        if issue.startswith(_BLOCKING_STRUCTURAL_ISSUES)
-    ]
-    item_ids = {
-        str(item.get("item_id"))
-        for item in (plan.get("items") or [])
-        if isinstance(item, Mapping) and item.get("item_id")
-    }
-    for group in plan.get("groups") or []:
-        if not isinstance(group, Mapping):
-            continue
-        group_id = str(group.get("group_id") or "")
-        for item_id in group.get("item_ids") or []:
-            if str(item_id) not in item_ids:
-                errors.append(f"GROUP_UNKNOWN_ITEM:{group_id}->{item_id}")
-    return errors
+    return blocking_structure_errors(plan)
 
 
 _FINDING_ID_WRAPPERS = " \t\r\n\"'`"

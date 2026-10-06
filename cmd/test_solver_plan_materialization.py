@@ -559,14 +559,16 @@ class SolverStateMaterializationTests(unittest.TestCase):
         plan = {
             "requirements": [],
             "items": [_item(f"item-{index}") for index in range(1, 8)],
-            "groups": [{"group_id": "group-1", "item_ids": [f"item-{i}" for i in range(1, 8)]}],
+            "groups": [{"group_id": "group-1", "item_ids": [f"item-{i}" for i in range(1, 7)]},
+                       {"group_id": "group-2", "item_ids": ["item-7"]}],
             "dependencies": [],
             "scope": {},
             "unknowns": [],
             "risks": [],
         }
         findings = tuple(
-            _finding(f"f-{index}", f"item-{index}", "P1" if index == 1 else "P2")
+            replace(_finding(f"f-{index}", f"item-{index}", "P1" if index == 1 else "P2"),
+                    group_id="group-1" if index <= 6 else "group-2")
             for index in range(1, 8)
         )
         # The orchestrator's batch: items 1-6 selected, item-7 carried over.

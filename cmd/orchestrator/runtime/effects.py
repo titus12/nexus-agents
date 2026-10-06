@@ -50,6 +50,17 @@ class EffectRunnerNotFound(InvariantViolation):
     error_code = "EFFECT_RUNNER_NOT_FOUND"
 
 
+class PlanStructurePreflightRunner:
+    """Persist a mechanical repair request without dispatching a model."""
+
+    def run_once(self, request: EffectRequest) -> EffectOutcome:
+        return EffectOutcome(status="SUCCEEDED", event_name="NODE_COMPLETED", event_payload={
+            "action": "REQUEST_STRUCTURE_REPAIR", "sequence": request.payload.get("sequence"),
+            "structure_issues": list(request.payload.get("structure_issues") or []),
+            "worker_results": [],
+        })
+
+
 class FastTrackRunner:
     """Synthesize the NODE_COMPLETED of an auto-approved stage.
 

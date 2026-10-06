@@ -2231,7 +2231,6 @@ class AgentNodeJoiner:
         )
         from ..domain.zhongshu_doc import project_acceptance_signals
         from ..zhongshu_parallel import canonical_plan_hash
-        from ..zhongshu_review_queue import structural_gate
 
         merged = self._base_plan
         if not isinstance(merged, Mapping):
@@ -2377,9 +2376,7 @@ class AgentNodeJoiner:
                 ),
             )
         merged = projected
-        integrity = structural_integrity_errors(merged)
-        gate_issues = structural_gate(merged)
-        problems = integrity + list(gate_issues)
+        problems = structural_integrity_errors(merged)
         if problems:
             logger.warning(
                 "NODE_ITEM_REVISION_STRUCTURE_INVALID node_run_id=%s issues=%s",
@@ -2457,7 +2454,6 @@ class AgentNodeJoiner:
         )
         from ..domain.zhongshu_doc import project_acceptance_signals
         from ..zhongshu_parallel import canonical_plan_hash
-        from ..zhongshu_review_queue import structural_gate
 
         previous_rows: tuple = ()
         previous = self._previous_review
@@ -2501,9 +2497,7 @@ class AgentNodeJoiner:
                 projection_error,
             )
             return None
-        problems = list(structural_integrity_errors(projected)) + list(
-            structural_gate(projected)
-        )
+        problems = structural_integrity_errors(projected)
         if problems:
             logger.warning(
                 "NODE_GROUP_REVISION_SALVAGE_SKIPPED node_run_id=%s issues=%s",
@@ -2668,7 +2662,6 @@ class AgentNodeJoiner:
         )
         from ..domain.policies.solver_plan import structural_integrity_errors
         from ..zhongshu_parallel import canonical_plan_hash
-        from ..zhongshu_review_queue import structural_gate
 
         patches = []
         for payload in worker_payloads:
@@ -2757,9 +2750,7 @@ class AgentNodeJoiner:
         # face — a worker patch must not introduce a dependency cycle or break
         # the graph shape.  Failure names the gate issues so the re-ask knows
         # exactly what to fix.
-        integrity = structural_integrity_errors(merged)
-        gate_issues = structural_gate(merged)
-        problems = integrity + list(gate_issues)
+        problems = structural_integrity_errors(merged)
         if problems:
             logger.warning(
                 "NODE_ITEM_REVISION_STRUCTURE_INVALID node_run_id=%s issues=%s",

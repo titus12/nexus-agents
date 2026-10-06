@@ -52,7 +52,8 @@ from .errors import (
 )
 from .events import DomainEvent, TransitionRequest
 from .findings import resolve_finding_item_id
-from .policies.solver_plan import is_retryable_solver_reply_error
+from .policies.solver_plan import is_retryable_solver_reply_error, structural_integrity_errors
+from .policies.plan_structure import group_repair_errors
 from .policies.item_workflows import update_item_workflows
 from .policies.zhongshu import (
     APPROVAL_ACTIONS,
@@ -1185,7 +1186,16 @@ class _ConcreteWorkflowState:
         role, phase = _ROLE_BY_STATE[target]
         request_id = f"{context.identity.task_id}:{target}:{context.progression.sequence + 1}"
         prompt = build_prompt(context, target_state=target)
-        if target == "ZHONGSHU_SOLVER" and context.review and context.review.plan_review.get("pending_feedback"):
+        if (target in {"ZHONGSHU_CRITIC", "ZHONGSHU_FREEZE_CHECK"} and context.review
+                and group_repair_errors(context.review.plan)):
+            return EffectRequest(effect_id=f"structure-preflight:{request_id}",
+                effect_type="plan_structure_preflight", task_id=context.identity.task_id,
+                idempotency_key=request_id, payload={"request_id": request_id, "target_state": target,
+                    "sequence": context.progression.sequence,
+                    "structure_issues": group_repair_errors(context.review.plan)})
+        if target == "ZHONGSHU_SOLVER" and context.review and (
+            context.review.plan_review.get("pending_feedback") or group_repair_errors(context.review.plan)
+        ):
             return build_solver_dispatch(context, request_id=request_id, prompt=prompt,
                                          revision_id=revision_id, plan_hash=plan_hash)
         next_item = (
@@ -2133,7 +2143,7 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
     name = "ZHONGSHU_SOLVER"
     supported_actions = (
         "READY_FOR_CRITIC", "PLAN_REVIEW", "REQUEST_ANALYST_EVIDENCE", "NEEDS_MORE_EVIDENCE",
-        "HUMAN_GATE", "BLOCKED", "RETRY", "OPEN_HUMAN_GATE",
+        "HUMAN_GATE", "BLOCKED", "RETRY", "OPEN_HUMAN_GATE", "REQUEST_STRUCTURE_REPAIR",
     )
     invalid_reason = "ZHONGSHU_SOLVER_REVISION_INVALID"
 
@@ -2141,6 +2151,14 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         self._require_current_state(context)
         self._require_event_task(context, event)
         action = self._event_action(event)
+        if (action == "FAIL" and context.review and group_repair_errors(context.review.plan)
+                and event.name != "TIMEOUT"
+                and self._failure_from_payload(context, event.payload).error_code == "NODE_ITEM_REVISION_INVALID"):
+            # An old in-flight scoped worker cannot fix the invalid base.
+            # Preserve that base and request regrouping instead of repeating
+            # the same local wave until the generic failure brake fires.
+            repair_event = replace(event, payload={"action": "REQUEST_STRUCTURE_REPAIR"})
+            return self._transition_decision(context, repair_event, action="REQUEST_STRUCTURE_REPAIR")
         plan_effect: EffectRequest | None = None
         materialized_plan: Mapping[str, object] | None = None
         group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
@@ -2162,6 +2180,12 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
                 },
             )
             materialized_plan = payload["plan"]
+            issues = structural_integrity_errors(materialized_plan)
+            if issues:
+                error = "SOLVER_PLAN_STRUCTURE_INVALID:" + ";".join(issues[:10])
+                if is_retryable_solver_reply_error(error) and context.recovery.reply_retry_count < context.recovery.max_reply_retries:
+                    return self._retry_solver_reply(context, event, error)
+                return self._blocked_solver_reply(context, event)
             plan_effect = plan_artifact_effect(
                 context.identity.task_id,
                 context.progression.sequence,
@@ -2290,7 +2314,9 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
                 update=replace(
                     decision.update,
                     review=replace(
-                        review_update, zhongshu_groups=group_doc_rows
+                        review_update, zhongshu_groups=group_doc_rows,
+                        structure_repair_validated=bool(context.review and group_repair_errors(context.review.plan)
+                                                       and not context.review.plan_review.get("pending_feedback")),
                     ),
                 ),
             )
@@ -2428,7 +2454,7 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
         "APPROVE_CRITIC", "APPROVE_FREEZE", "REQUEST_ANALYST_EVIDENCE",
         "REQUEST_SOLVER_REVISION", "REQUEST_REGROUP", "TASK_APPROVED",
         "TASK_CHANGES_REQUIRED", "HUMAN_GATE", "BLOCKED", "RETRY", "OPEN_HUMAN_GATE",
-        "CONTINUE_GROUP_REVIEW",
+        "CONTINUE_GROUP_REVIEW", "REQUEST_STRUCTURE_REPAIR",
     )
     exhausted_reason = "ZHONGSHU_REVISION_BUDGET_EXHAUSTED"
     no_progress_reason = "ZHONGSHU_NO_PROGRESS"
@@ -2441,6 +2467,12 @@ class ZhongshuCriticState(_ConcreteWorkflowState):
         self._require_current_state(context)
         self._require_event_task(context, event)
         action = self._event_action(event)
+        if (event.name != "TIMEOUT" and action in (APPROVAL_ACTIONS | REVISION_ACTIONS |
+                                                   {"CONTINUE_GROUP_REVIEW", "REQUEST_STRUCTURE_REPAIR"})
+                and context.review and group_repair_errors(context.review.plan)):
+            return self._transition_decision(
+                context, replace(event, payload={"action": "REQUEST_STRUCTURE_REPAIR"}),
+                action="REQUEST_STRUCTURE_REPAIR")
         if (
             event.name == "NODE_COMPLETED"
             and context.parallel is not None
@@ -3052,13 +3084,26 @@ class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
         "FREEZE_APPROVED", "APPROVE_FREEZE", "FREEZE_OK", "FREEZE_REJECTED",
         "REQUEST_ANALYST_EVIDENCE", "REQUEST_SOLVER_REVISION",
         "HUMAN_GATE", "PLAN_REVIEW", "BLOCKED",
-        "RETRY", "BLOCK", "OPEN_HUMAN_GATE",
+        "RETRY", "BLOCK", "OPEN_HUMAN_GATE", "REQUEST_STRUCTURE_REPAIR",
     )
     exhausted_reason = "ZHONGSHU_FREEZE_BUDGET_EXHAUSTED"
     doc_form_reason = "ZHONGSHU_DOC_FORM_INVALID"
     global_check_reason = "ZHONGSHU_FREEZE_GLOBAL_INVALID"
 
     def handle(self, context: WorkflowContext, event: DomainEvent) -> StateDecision:
+        self._require_current_state(context)
+        self._require_event_task(context, event)
+        if (event.name != "TIMEOUT" and self._event_action(event) in MENXIA_FREEZE_ENTRY_ACTIONS
+                and context.review):
+            issues = _zhongshu_graph_issues(context.review)
+            if issues:
+                logger.warning("ZHONGSHU_FREEZE_GLOBAL_INVALID task_id=%s issues=%s",
+                               context.identity.task_id, list(issues))
+                action = "REQUEST_STRUCTURE_REPAIR" if group_repair_errors(context.review.plan) else "FREEZE_REJECTED"
+                decision = self._transition_decision(context, replace(event, payload={"action": action}), action=action)
+                decision = self._attach_group_rows(context, decision, context.review.zhongshu_groups)
+                return self._with_effect_payload(decision, reason_code=self.global_check_reason,
+                                                extra={"zhongshu_global_issues": list(issues)})
         decision = self._handle_freeze(context, event)
         return self._with_plan_review(context, decision)
 
@@ -3197,8 +3242,8 @@ class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
 
         A group-aware run (explicit group rows, no fast track) releases only
         ready groups: CONVERGED with every dependency group FROZEN and a
-        re-verified document.  Global graph checks run once before the first
-        group freezes.  Ready groups freeze and hand over to Menxia in the
+        re-verified document. The handler checks global structure on every
+        approval, before this release logic. Ready groups hand over to Menxia in the
         same decision (early hand-over): the group pipeline wave only
         dispatches FROZEN groups while the rest keep grinding in Zhongshu
         and the gate bounces the run back once its waves wrap up.  Only a
@@ -3231,25 +3276,6 @@ class ZhongshuFreezeCheckState(_ConcreteWorkflowState):
                 for row in apply_zhongshu_group_resets(rows.values(), resets)
             }
         review_rows = replace(review, zhongshu_groups=tuple(rows.values()))
-        if not any(row.stage == "FROZEN" for row in rows.values()):
-            issues = _zhongshu_graph_issues(review)
-            if issues:
-                logger.warning(
-                    "ZHONGSHU_FREEZE_GLOBAL_INVALID task_id=%s issues=%s",
-                    context.identity.task_id,
-                    list(issues),
-                )
-                decision = self._transition_decision(
-                    context, event, action="FREEZE_REJECTED"
-                )
-                decision = self._attach_group_rows(
-                    context, decision, tuple(rows.values())
-                )
-                return self._with_effect_payload(
-                    decision,
-                    reason_code=self.global_check_reason,
-                    extra={"zhongshu_global_issues": list(issues)},
-                )
         ready = freeze_ready_groups(review_rows)
         configured_gate = context.parallel.zhongshu.plan_review_gate if context.parallel else None
         if configured_gate is not False:
@@ -5148,7 +5174,7 @@ def _group_review_bindings(
     unfit = {
         entry.split(":", 1)[0]
         for entry in review_preflight_violations(review)
-        if entry.startswith("group-")
+        if entry.split(":", 1)[0] in {group.group_id for group in review.task_groups}
     }
     frozen_groups = {
         row.group_id
@@ -5660,13 +5686,10 @@ def _attempted_finding_ids(
 
 
 def _zhongshu_graph_issues(review: ReviewState) -> tuple[str, ...]:
-    """Graph-level checks the freeze must satisfy before the first FROZEN row.
+    """Validate every canonical freeze; retain cycle checks for legacy projections."""
 
-    Mirrors the structural gate's dependency-cycle detection over the task
-    projection; runs once per run (skipped once any group is FROZEN) so a
-    late freeze approval cannot loop on the same global finding.
-    """
-
+    if isinstance(review.plan, Mapping) and review.plan.get("items"):
+        return tuple(structural_integrity_errors(review.plan))
     by_item = {
         item.item_id: {"dependencies": tuple(item.dependencies or ())}
         for item in review.task_items or ()
@@ -5707,6 +5730,9 @@ def mechanical_freeze_ready(context: WorkflowContext) -> tuple[bool, list[str]]:
     if review is None or not review.zhongshu_groups:
         return False, ["NON_GROUP_ROUND"]
     failures: list[str] = []
+    failures.extend(_zhongshu_graph_issues(review))
+    if failures:
+        return False, failures
     rows = {row.group_id: row for row in review.zhongshu_groups}
     member_hashes: dict[str, str] = {}
     for group_id, row in rows.items():

@@ -71,7 +71,8 @@ def make_review(**overrides) -> ReviewState:
                 {"item_id": "item-001"},
                 {"item_id": "item-002"},
                 {"item_id": "item-003"},
-            ]
+            ],
+            "groups": [{"group_id": g.group_id, "item_ids": list(g.item_ids)} for g in groups],
         },
         max_item_revision_rounds=5,
     )

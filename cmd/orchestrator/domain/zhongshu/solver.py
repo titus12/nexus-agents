@@ -30,6 +30,7 @@ from ..policies.solver_plan import (
     solver_revision_response_error,
     structural_integrity_errors,
 )
+from ..policies.plan_structure import group_repair_errors, plan_group_map, regrouping_boundary_error
 from ..policies.zhongshu import approved_item_ids, select_solver_batch
 from ...zhongshu_parallel import canonical_plan_hash
 from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
@@ -308,6 +309,35 @@ class FormalizeSolverLogic:
         return materialized, error
 
 
+class StructureRepairSolverLogic(FormalizeSolverLogic):
+    """Regroup an invalid base without opening a business-content rewrite."""
+
+    def validate(self, payload: Mapping[str, Any], review: object) -> str:
+        candidate = payload.get("plan")
+        if not isinstance(candidate, Mapping) or payload.get("changes"):
+            return "SOLVER_STRUCTURE_REPAIR_PLAN_REQUIRED"
+        frozen = [r.group_id for r in getattr(review, "zhongshu_groups", ()) if r.stage == "FROZEN"]
+        return regrouping_boundary_error(review.plan, candidate, frozen)
+
+    def materialize(self, payload: Mapping[str, Any], review: object):
+        materialized, error = materialize_solver_reply(payload, None)
+        if error:
+            return None, error
+        old, new = plan_group_map(review.plan), plan_group_map(materialized)
+        owners = {str(iid): gid for gid, group in new.items() for iid in group.get("item_ids") or []}
+        for item in materialized.get("items") or []:
+            if isinstance(item, dict) and not item.get("group_id"):
+                item["group_id"] = owners.get(str(item.get("item_id") or ""), "")
+        changed = {gid for gid, group in new.items() if old.get(gid) != group}
+        folded, error = carry_forward_group_docs(
+            payload.get("group_docs"), _seeded_group_rows(review),
+            editable_group_ids=changed, required_group_ids=changed,
+            review=review, plan=materialized,
+        )
+        self.folded_group_docs = folded
+        return (None, error) if error else (materialized, "")
+
+
 class ReviseSolverLogic:
     """Critic channel: apply the dictated batch to the reviewed plan.
 
@@ -401,7 +431,8 @@ def process_solver_reply(
     """Validate and materialize one Solver reply through its stage's logic."""
 
     human_revision = bool(review and review.plan_review.get("pending_feedback"))
-    stage = SolverStage.FORMALIZE if human_revision else resolve_reply_stage(payload, review)
+    structure_repair = bool(not human_revision and group_repair_errors(getattr(review, "plan", None)))
+    stage = SolverStage.FORMALIZE if human_revision or structure_repair else resolve_reply_stage(payload, review)
     active_ids = [
         str(getattr(finding, "finding_id", "") or "")
         for finding in getattr(review, "findings", ()) or ()
@@ -409,12 +440,18 @@ def process_solver_reply(
     ]
     # Canonicalize abbreviated finding ids once, before any policy reads them.
     normalized = normalize_solver_finding_ids(dict(payload), active_ids)
+    if structure_repair:
+        # This channel cannot adjudicate or close business findings.
+        for key in ("finding_batch", "finding_resolutions", "findings", "dispositions", "task_reviews", "group_reviews"):
+            normalized.pop(key, None)
     if human_revision:
         if not isinstance(normalized.get("plan"), Mapping):
             return SolverReplyOutcome(stage, normalized, None, "SOLVER_GROUP_DOC_MISSING:human_revision_full_plan")
         normalized["mode"] = "TASK_GRAPH_FORMALIZATION_READ_ONLY"
         normalized["changes"] = []
-    if stage is SolverStage.REVISE:
+    if structure_repair:
+        logic = StructureRepairSolverLogic()
+    elif stage is SolverStage.REVISE:
         logic = ReviseSolverLogic(SolverBatch.for_findings(
             getattr(review, "findings", ()) or (),
             ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND,
@@ -429,9 +466,13 @@ def process_solver_reply(
     group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
     if not error and materialized is not None:
         rows = _rows_with_group_docs(review, logic.folded_group_docs)
-        if human_revision:
+        if human_revision or structure_repair:
             group_ids = {str(group.get("group_id") or "") for group in materialized.get("groups", [])}
             rows = tuple(row for row in rows if row.group_id in group_ids)
+        if structure_repair:
+            old, new = plan_group_map(review.plan), plan_group_map(materialized)
+            rows = tuple(replace(row, stage="REVIEWING", approved_surface_hash="")
+                         if old.get(row.group_id) != new.get(row.group_id) else row for row in rows)
         # §8 is the single author of acceptance_signals: the projection
         # overwrites whatever the solver wrote in the plan field.
         materialized, projection_error = project_acceptance_signals(
@@ -443,6 +484,11 @@ def process_solver_reply(
             materialized = None
         else:
             group_doc_rows = rows
+            if structure_repair:
+                # §8 projection is a second write path; enforce the same
+                # content boundary after deriving signals from documents.
+                error = regrouping_boundary_error(review.plan, materialized,
+                    [r.group_id for r in review.zhongshu_groups if r.stage == "FROZEN"])
     if not error and materialized is not None:
         integrity = structural_integrity_errors(materialized)
         if integrity:
@@ -606,6 +652,34 @@ def build_solver_dispatch(
                 ingredients=[{"key": "human_review_feedback", "source": "context.json", "lifetime": "persisted"},
                              {"key": "current_requirements_document", "source": "context.json", "lifetime": "persisted"}],
                 tools={"editable": "plan.full", "contract": "nexus.zhongshu.solver.v1"},
+                product={"type": "solver_result", "contract": "nexus.zhongshu.solver.v1"}),
+        }
+    elif group_repair_errors(getattr(review, "plan", None)):
+        payload["prompt_ref"] = (
+            "Repair the group topology identified by structure_issues in context.json. "
+            "Return a complete plan with mode TASK_GRAPH_FORMALIZATION_READ_ONLY. "
+            "You may split, rename, or reorganize groups and update item.group_id to match. "
+            "Each group must have at most six members and the projected group dependencies must be acyclic. "
+            "Preserve every item ID, title, objective, dependency, acceptance signal, requirement, and other plan field. "
+            "Preserve FROZEN groups exactly. Submit group_docs for every new or changed group, advancing existing "
+            "document versions by one; omit unchanged documents or echo them exactly. "
+            "Address retry_feedback if a prior reply was rejected. "
+            "Do not resolve business findings in this repair; they will be reviewed after regrouping."
+        )
+        payload["dispatch_context"] = {
+            "solver_stage": "formalize", "zhongshu_dispatch_mode": "plan_structure_repair",
+            "expected_reply_mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY", "has_current_plan": True,
+            "structure_issues": group_repair_errors(review.plan),
+            "retry_feedback": context.recovery.last_failure.message if context.recovery.last_failure else "",
+            "current_formal_plan": dict(review.plan),
+            "protected_fields": ["items.* except group_id", "requirements", "plan.* except items/groups"],
+            "frozen_group_ids": [r.group_id for r in review.zhongshu_groups if r.stage == "FROZEN"],
+            "group_docs_authoritative": {r.group_id: r.doc_markdown for r in review.zhongshu_groups},
+            "requirement_contract": [dict(entry) for entry in review.requirements],
+            "envelope": build_envelope(
+                ingredients=[{"key": "current_formal_plan", "source": "context.json", "lifetime": "persisted"},
+                             {"key": "structure_issues", "source": "context.json", "lifetime": "transient"}],
+                tools={"editable": "plan.groups,item.group_id", "contract": "nexus.zhongshu.solver.v1"},
                 product={"type": "solver_result", "contract": "nexus.zhongshu.solver.v1"}),
         }
     elif stage is SolverStage.REVISE:

@@ -297,7 +297,7 @@ class FreezeGroupsTests(unittest.TestCase):
         self.assertEqual(rows["group-000001"].stage, "REVIEWING")
         self.assertEqual(decision.transition.action, "REQUEST_SOLVER_REVISION")
 
-    def test_global_checks_run_once_before_first_freeze(self) -> None:
+    def test_global_checks_run_even_after_a_prior_freeze(self) -> None:
         # (a) A dependency cycle intercepts the first freeze approval before
         # any group is FROZEN.
         context = _context(
@@ -320,8 +320,7 @@ class FreezeGroupsTests(unittest.TestCase):
         rows = self._rows(decision.update.review)
         self.assertEqual(rows["group-000001"].stage, "CONVERGED")
 
-        # (b) With a FROZEN row present the global graph check is not
-        # repeated: the remaining ready group freezes and Menxia opens.
+        # (b) A prior FROZEN row cannot exempt an invalid graph from checks.
         context = _context(
             (
                 _row("group-000001", stage="FROZEN", doc_version=1),
@@ -331,15 +330,14 @@ class FreezeGroupsTests(unittest.TestCase):
         )
         decision = self.state.handle(context, _event("FREEZE_APPROVED"))
 
-        self.assertEqual(decision.transition.action, "FREEZE_APPROVED")
+        self.assertEqual(decision.transition.action, "FREEZE_REJECTED")
         rows = self._rows(decision.update.review)
-        self.assertEqual(rows["group-000002"].stage, "FROZEN")
-        self.assertEqual(decision.effects[0].effect_type, "plan_review_doc")
+        self.assertEqual(rows["group-000002"].stage, "CONVERGED")
         payload = next(effect.payload for effect in decision.effects
                        if effect.effect_type in {"node_dispatch", "agent_dispatch"})
         self.assertEqual(
             payload.get("state") or payload.get("target_state"),
-            "MENXIA_GROUP_SOLVER",
+            "ZHONGSHU_SOLVER",
         )
 
     def test_gate_reset_named_group_only(self) -> None:

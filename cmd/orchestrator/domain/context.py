@@ -747,6 +747,7 @@ class ReviewUpdate:
     plan_review: dict[str, object] | None = None
     # Internal Solver-only human revision already validated/froze the new cut.
     human_revision_validated: bool = False
+    structure_repair_validated: bool = False
     salvaged_task_reviews: tuple[dict[str, object], ...] | None = None
     salvaged_worker_payloads: tuple[dict[str, object], ...] | None = None
 
@@ -776,7 +777,7 @@ def _regrouped_zhongshu_rows(
     old_cut = {
         group.group_id for group in current.task_groups if group.group_id
     }
-    if new_cut == old_cut:
+    if new_cut == old_cut and not update.structure_repair_validated:
         return None
     fresh = {
         group_id: ZhongshuGroupState(group_id=group_id)
@@ -786,6 +787,12 @@ def _regrouped_zhongshu_rows(
         base = fresh.get(row.group_id)
         if base is None:
             continue
+        if update.structure_repair_validated:
+            old_members = next((g.item_ids for g in current.task_groups if g.group_id == row.group_id), None)
+            new_members = next((g.item_ids for g in update.task_groups if g.group_id == row.group_id), None)
+            if old_members == new_members:
+                fresh[row.group_id] = row
+                continue
         fresh[row.group_id] = replace(
             base,
             stage=(row.stage if update.human_revision_validated else base.stage),
