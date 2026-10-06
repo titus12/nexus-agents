@@ -752,6 +752,12 @@ class _ConcreteWorkflowState:
         context: WorkflowContext,
         payload: Mapping[str, object],
     ) -> ReviewUpdate | None:
+        if context.request.plan_schema == "canonical-v1" and context.progression.state == "ZHONGSHU_SOLVER":
+            # The single writer authors plans and resolution responses, not
+            # peer verdicts or legacy fan-in salvage rows.
+            payload = {k: v for k, v in payload.items() if k not in (
+                "task_reviews", "group_reviews", "salvaged_group_rows", "salvaged_task_reviews",
+                "salvaged_worker_payloads")}
         raw_findings = payload.get("findings")
         raw_requirements = payload.get("requirements")
         has_review_data = any(
@@ -815,6 +821,17 @@ class _ConcreteWorkflowState:
             task_graph_ref = plan_ref
         graph = plan if isinstance(plan, Mapping) else task_graph
         task_items, task_groups = _task_graph_projection(graph)
+        canonical = context.request.plan_schema == "canonical-v1"
+        if canonical and context.progression.state != "ZHONGSHU_SOLVER" and (
+                isinstance(plan, Mapping) and "items" in plan or isinstance(task_graph, Mapping)):
+            plan = None
+            task_items = task_groups = None
+        if canonical and context.review and context.review.plan_revision and context.progression.state != "ZHONGSHU_SOLVER":
+            # Peers can supply verdicts and evidence, never a replacement plan.
+            plan = None
+            task_items = task_groups = None
+            requirements = None
+            plan_ref = task_graph_ref = None
         raw_menxia_results = payload.get("menxia_item_results")
         menxia_results = (
             [dict(row) for row in raw_menxia_results if isinstance(row, Mapping)]
@@ -1048,7 +1065,7 @@ class _ConcreteWorkflowState:
                 max_rounds=context.review.max_menxia_group_rounds,
             )
         salvaged_group_rows_payload = payload.get("salvaged_group_rows")
-        if isinstance(salvaged_group_rows_payload, list) and salvaged_group_rows_payload:
+        if not canonical and isinstance(salvaged_group_rows_payload, list) and salvaged_group_rows_payload:
             # A partially salvaged group-revision wave folds the fully valid
             # groups' requirement documents as version-chain rows, matching
             # what a successful wave would have produced.  Without this the
@@ -1074,6 +1091,9 @@ class _ConcreteWorkflowState:
                     continue
             group_rows_value = tuple(by_group.values())
         return ReviewUpdate(
+            plan_schema=context.request.plan_schema,
+            plan_base_ref=(payload.get("plan_base_ref") if context.progression.state == "ZHONGSHU_SOLVER"
+                           else context.review.plan_revision.reference if context.review and context.review.plan_revision else ""),
             revision_id=(
                 str(payload.get("revision_id") or "")
                 or (context.review.revision_id if context.review else "")
@@ -1093,7 +1113,7 @@ class _ConcreteWorkflowState:
             ),
             findings=merged_findings,
             plan_ref=str(plan_ref) if plan_ref else None,
-            plan_hash=_resolve_plan_hash(payload),
+            plan_hash=(None if canonical and context.progression.state != "ZHONGSHU_SOLVER" else _resolve_plan_hash(payload)),
             plan=dict(plan) if isinstance(plan, Mapping) else None,
             task_graph_ref=str(task_graph_ref) if task_graph_ref else None,
             task_items=task_items,
@@ -1194,7 +1214,8 @@ class _ConcreteWorkflowState:
                     "sequence": context.progression.sequence,
                     "structure_issues": group_repair_errors(context.review.plan)})
         if target == "ZHONGSHU_SOLVER" and context.review and (
-            context.review.plan_review.get("pending_feedback") or group_repair_errors(context.review.plan)
+            context.review.plan_schema == "canonical-v1"
+            or context.review.plan_review.get("pending_feedback") or group_repair_errors(context.review.plan)
         ):
             return build_solver_dispatch(context, request_id=request_id, prompt=prompt,
                                          revision_id=revision_id, plan_hash=plan_hash)
@@ -2151,6 +2172,13 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         self._require_current_state(context)
         self._require_event_task(context, event)
         action = self._event_action(event)
+        canonical = context.request.plan_schema == "canonical-v1"
+        if canonical and action == "READY_FOR_CRITIC":
+            revision = context.review.plan_revision if context.review else None
+            if event.payload.get("plan_base_ref") != (revision.reference if revision else ""):
+                if context.recovery.reply_retry_count < context.recovery.max_reply_retries:
+                    return self._retry_solver_reply(context, event, "SOLVER_PLAN_VERSION_CONFLICT:expected_base")
+                return self._blocked_solver_reply(context, event)
         if (action == "FAIL" and context.review and group_repair_errors(context.review.plan)
                 and event.name != "TIMEOUT"
                 and self._failure_from_payload(context, event.payload).error_code == "NODE_ITEM_REVISION_INVALID"):
@@ -2164,6 +2192,7 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
         group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
         if (
             event.name == "NODE_COMPLETED"
+            and not canonical
             and action == "READY_FOR_CRITIC"
             and isinstance(event.payload, Mapping)
             and isinstance(event.payload.get("plan"), Mapping)
@@ -2221,7 +2250,7 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
             group_doc_rows = outcome.group_doc_rows
             if outcome.error:
                 if (
-                    is_retryable_solver_reply_error(outcome.error)
+                    (canonical or is_retryable_solver_reply_error(outcome.error))
                     and context.recovery.reply_retry_count
                     < context.recovery.max_reply_retries
                 ):
@@ -2255,6 +2284,7 @@ class ZhongshuSolverState(_ConcreteWorkflowState):
                     context.progression.sequence,
                     outcome.materialized,
                     str(outcome.payload.get("revision_id") or ""),
+                    plan_revision=outcome.plan_revision,
                 )
         if (action == "READY_FOR_CRITIC" and materialized_plan is not None
                 and context.review and context.review.plan_review.get("pending_feedback")):

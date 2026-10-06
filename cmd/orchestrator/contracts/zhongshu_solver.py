@@ -102,7 +102,7 @@ CONTRACT = make_contract(
         "plan.items is the only complete task-object index. Every group must use item_ids to reference plan.items; never emit groups[*].items or duplicate task objects.",
         "Do not emit implementation-level design fields forbidden by the solver protocol.",
         "Every finding resolution must identify its owner and next action, and must carry a non-empty evidence array; an empty evidence list is a contract violation.",
-        "Every group must carry one nine-section requirement document in group_docs; the section headings must be exactly 「1. 背景」「2. 目标」「3. 标识与范围」「4. 状态与边界语义」「5. 行为要求」「6. 责任边界」「7. 交叉不变量」「8. 验收标准」「9. 非目标」 in that order, section 8 must list each member item acceptance_signal verbatim, and section 2 must not hedge.",
+        "When dispatch_context.plan_schema=canonical-v1, write nonempty acceptance_signals in plan.items and return group_docs=[]; documents are compiler generated. Otherwise every group must carry one nine-section requirement document in group_docs; the section headings must be exactly 「1. 背景」「2. 目标」「3. 标识与范围」「4. 状态与边界语义」「5. 行为要求」「6. 责任边界」「7. 交叉不变量」「8. 验收标准」「9. 非目标」 in that order, section 8 must list each member item acceptance_signal verbatim, and section 2 must not hedge.",
     ),
     example_overrides={
         "action": "READY_FOR_CRITIC",

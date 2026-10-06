@@ -89,6 +89,7 @@ _RETRYABLE_SOLVER_REPLY_PREFIXES = (
     # resubmit, whereas blocking the task for a human would not fix the form.
     "SOLVER_GROUP_DOC_MISSING:",
     "SOLVER_GROUP_DOC_INVALID:",
+    "SOLVER_PLAN_VERSION_CONFLICT:",
 )
 
 

@@ -12,6 +12,8 @@ def text_hash(text: str) -> str:
 
 
 def graph_hash(review: ReviewState) -> str:
+    if review.plan_revision:
+        return review.plan_revision.content_hash
     from ..zhongshu_parallel import canonical_plan_hash
     return canonical_plan_hash(review.plan or {})
 
@@ -25,6 +27,7 @@ def new_snapshot(context) -> dict[str, object]:
     previous = context.review.plan_review
     markdown = render_plan_review_packet(context, fresh=True)
     return {**previous, "markdown": markdown, "hash": text_hash(markdown),
+            "plan_revision_ref": context.review.plan_revision.reference if context.review.plan_revision else "",
             "version": int(previous.get("version") or 0) + 1,
             "plan_hash": graph_hash(context.review), "group_hashes": group_hashes(context.review),
             "approved_hash": "", "pending_feedback": []}
@@ -34,6 +37,7 @@ def matches_current(review: ReviewState, offered_hash: str = "") -> bool:
     packet = review.plan_review
     markdown = str(packet.get("markdown") or "")
     return bool(markdown and not packet.get("pending_feedback")
+                and (not review.plan_revision or packet.get("plan_revision_ref") == review.plan_revision.reference)
                 and text_hash(markdown) == packet.get("hash")
                 and (not offered_hash or offered_hash == packet.get("hash"))
                 and graph_hash(review) == packet.get("plan_hash")

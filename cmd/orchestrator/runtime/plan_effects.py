@@ -115,8 +115,16 @@ class PlanArtifactRunner:
             return EffectOutcome(status="SUCCEEDED")
         revision_id = str(payload.get("revision_id") or request.idempotency_key)
         try:
+            stored = plan
+            if isinstance(payload.get("plan_revision"), Mapping):
+                from ..domain.planning.model import PlanRevision
+                revision = PlanRevision.from_dict(payload["plan_revision"])
+                if revision.plan != plan or revision.content_hash != payload.get("plan_hash"):
+                    raise ValueError("canonical artifact revision mismatch")
+                stored = revision.to_dict()
+                revision_id = revision.reference
             content = json.dumps(
-                plan, ensure_ascii=False, sort_keys=True
+                stored, ensure_ascii=False, sort_keys=True
             ).encode("utf-8")
             receipt = self._artifacts.write(
                 ArtifactInput(

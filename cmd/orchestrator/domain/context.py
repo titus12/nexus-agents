@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field, replace
 
 from .findings import Finding
 from .errors import FailureRecord, InvariantViolation
+from .planning.model import PlanRevision, LEGACY_PLAN_SCHEMA, CANONICAL_PLAN_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class RequestState:
     payload_ref: str | None = None
     project_type: str = "unknown"
     task_type: str = "review"
+    plan_schema: str = LEGACY_PLAN_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -253,6 +255,8 @@ class ReviewState:
     # Each row is stamped with the revision it was salvaged under and only
     # replays while that revision is still current.
     salvaged_worker_payloads: tuple[dict[str, object], ...] = ()
+    plan_schema: str = LEGACY_PLAN_SCHEMA
+    plan_revision: PlanRevision | None = None
 
     def next_menxia_item(self) -> ReviewTaskItem | None:
         completed = set(self.completed_item_ids)
@@ -750,6 +754,8 @@ class ReviewUpdate:
     structure_repair_validated: bool = False
     salvaged_task_reviews: tuple[dict[str, object], ...] | None = None
     salvaged_worker_payloads: tuple[dict[str, object], ...] | None = None
+    plan_schema: str | None = None
+    plan_base_ref: str | None = None
 
 
 def _regrouped_zhongshu_rows(
@@ -819,6 +825,15 @@ def apply_review_update(
 
     if update is None:
         return current
+    plan_schema = update.plan_schema or (current.plan_schema if current else LEGACY_PLAN_SCHEMA)
+    if plan_schema not in (LEGACY_PLAN_SCHEMA, CANONICAL_PLAN_SCHEMA):
+        raise ValueError("unsupported plan schema")
+    if current and current.plan_schema != plan_schema:
+        raise ValueError("plan schema cannot change inside an existing review")
+    plan_revision = current.plan_revision if current else None
+    if plan_schema == CANONICAL_PLAN_SCHEMA:
+        from .planning.compiler import prepare_update
+        update, plan_revision = prepare_update(current, update)
     revision_id = update.revision_id or (current.revision_id if current else "")
     if not revision_id:
         raise InvariantViolation("review update requires revision_id")
@@ -827,11 +842,14 @@ def apply_review_update(
         if update.zhongshu_groups is not None
         else current.zhongshu_groups if current else ()
     )
-    regrouped = _regrouped_zhongshu_rows(current, update, zhongshu_rows)
+    regrouped = (_regrouped_zhongshu_rows(current, update, zhongshu_rows)
+                 if plan_schema == LEGACY_PLAN_SCHEMA else None)
     if regrouped is not None:
         zhongshu_rows = regrouped
     return ReviewState(
         revision_id=revision_id,
+        plan_schema=plan_schema,
+        plan_revision=plan_revision,
         plan_review=(dict(update.plan_review) if update.plan_review is not None
                      else dict(current.plan_review) if current else {}),
         active_group_id=(
@@ -1073,6 +1091,7 @@ def context_to_dto(context: WorkflowContext) -> dict[str, object]:
     review = None
     if context.review:
         review = asdict(context.review)
+        review["plan_revision"] = context.review.plan_revision.to_dict() if context.review.plan_revision else None
         review["findings"] = [asdict(finding) for finding in context.review.findings]
         review["task_items"] = [asdict(item) for item in context.review.task_items]
         review["task_groups"] = [asdict(group) for group in context.review.task_groups]
@@ -1251,6 +1270,9 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             evidence_required_changes=tuple(dict(row) for row in review_value.get("evidence_required_changes", []) if isinstance(row, Mapping)),
             requirements=requirements,
             plan=_plan_from_dto(review_value.get("plan")),
+            plan_schema=str(review_value.get("plan_schema") or LEGACY_PLAN_SCHEMA),
+            plan_revision=(PlanRevision.from_dict(review_value["plan_revision"])
+                           if isinstance(review_value.get("plan_revision"), Mapping) else None),
             plan_review=dict(review_value.get("plan_review") or {}),
             salvaged_task_reviews=tuple(
                 dict(row)
@@ -1264,6 +1286,20 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             ),
         )
 
+    if request.plan_schema not in (LEGACY_PLAN_SCHEMA, CANONICAL_PLAN_SCHEMA):
+        raise ValueError("unsupported request plan schema")
+    if review:
+        if review.plan_schema not in (LEGACY_PLAN_SCHEMA, CANONICAL_PLAN_SCHEMA):
+            raise ValueError("unsupported review plan schema")
+        if review_value.get("plan_revision") is not None and not isinstance(review_value["plan_revision"], Mapping):
+            raise ValueError("plan_revision must be null or an object")
+        if request.plan_schema != review.plan_schema:
+            raise ValueError("request and review plan schemas disagree")
+        if review.plan_schema == CANONICAL_PLAN_SCHEMA:
+            from .planning.compiler import validate_projection
+            validate_projection(review)
+        elif review.plan_revision is not None:
+            raise ValueError("legacy review cannot contain canonical revision")
     gate_value = value.get("human_gate")
     if gate_value is not None and not isinstance(gate_value, Mapping):
         raise ValueError("context.human_gate must be null or an object")

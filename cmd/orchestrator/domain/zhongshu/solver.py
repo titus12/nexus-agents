@@ -33,6 +33,7 @@ from ..policies.solver_plan import (
 from ..policies.plan_structure import group_repair_errors, plan_group_map, regrouping_boundary_error
 from ..policies.zhongshu import approved_item_ids, select_solver_batch
 from ...zhongshu_parallel import canonical_plan_hash
+from ..planning.model import PlanRevision
 from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
 from ...dispatch_envelope import build_envelope
 from .stages import (
@@ -290,7 +291,7 @@ class FormalizeSolverLogic:
         self, payload: Mapping[str, Any], review: object
     ) -> tuple[dict[str, object] | None, str]:
         materialized, error = materialize_solver_reply(payload, None)
-        if not error and review is not None:
+        if not error and review is not None and getattr(review, "plan_schema", "legacy-v1") != "canonical-v1":
             # Before the first plan folds there are no seeded rows to derive
             # the group set from, so the plan the reply itself declares is the
             # authority on which groups must ship a document.
@@ -329,6 +330,8 @@ class StructureRepairSolverLogic(FormalizeSolverLogic):
             if isinstance(item, dict) and not item.get("group_id"):
                 item["group_id"] = owners.get(str(item.get("item_id") or ""), "")
         changed = {gid for gid, group in new.items() if old.get(gid) != group}
+        if getattr(review, "plan_schema", "legacy-v1") == "canonical-v1":
+            return materialized, ""
         folded, error = carry_forward_group_docs(
             payload.get("group_docs"), _seeded_group_rows(review),
             editable_group_ids=changed, required_group_ids=changed,
@@ -382,6 +385,8 @@ class ReviseSolverLogic:
     def editable_item_ids(
         self, payload: Mapping[str, Any], review: object
     ) -> set[str] | None:
+        if getattr(review, "plan_schema", "legacy-v1") == "canonical-v1":
+            return set(batch_item_scope(review, self._batch))
         return revision_scope(review, payload)
 
     def editable_group_ids(self, review: object) -> list[str]:
@@ -395,7 +400,7 @@ class ReviseSolverLogic:
             getattr(review, "plan", None),
             editable_item_ids=self.editable_item_ids(payload, review),
         )
-        if not error and review is not None:
+        if not error and review is not None and getattr(review, "plan_schema", "legacy-v1") != "canonical-v1":
             editable_groups = self.editable_group_ids(review)
             folded, doc_error = carry_forward_group_docs(
                 payload.get("group_docs"),
@@ -422,6 +427,7 @@ class SolverReplyOutcome:
     # Group rows carrying the folded requirement documents (Task 5 fold):
     # empty unless the reply passed validation and submitted documents.
     group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
+    plan_revision: PlanRevision | None = None
 
 
 def process_solver_reply(
@@ -438,6 +444,9 @@ def process_solver_reply(
         for finding in getattr(review, "findings", ()) or ()
         if getattr(finding, "active", False)
     ]
+    canonical = getattr(review, "plan_schema", "legacy-v1") == "canonical-v1"
+    if canonical and getattr(review, "plan_revision", None) and not human_revision and not structure_repair:
+        stage = SolverStage.REVISE
     # Canonicalize abbreviated finding ids once, before any policy reads them.
     normalized = normalize_solver_finding_ids(dict(payload), active_ids)
     if structure_repair:
@@ -464,7 +473,27 @@ def process_solver_reply(
     if not error:
         materialized, error = logic.materialize(normalized, review)
     group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
-    if not error and materialized is not None:
+    candidate_revision = None
+    if not error and materialized is not None and canonical:
+        from ..planning.compiler import commit_plan, PlanCompileError
+        from ..planning.render import render_group_rows
+        try:
+            revision = getattr(review, "plan_revision", None)
+            candidate_revision = commit_plan(revision, materialized, expected_ref=revision.reference if revision else "",
+                requirements=getattr(review, "requirements", ()) or None,
+                frozen_group_ids=[r.group_id for r in getattr(review, "zhongshu_groups", ()) if r.stage == "FROZEN"])
+            materialized = candidate_revision.plan
+            if revision and not human_revision and not structure_repair:
+                from ..planning.compiler import revision_scope_error
+                scope_error = revision_scope_error(revision.plan, materialized,
+                    set(batch_item_scope(review, logic._batch)), set(batch_group_scope(review, logic._batch)))
+                if scope_error:
+                    raise PlanCompileError(scope_error)
+            group_doc_rows = render_group_rows(materialized, getattr(review, "zhongshu_groups", ()))
+        except PlanCompileError as exc:
+            error = str(exc)
+            materialized = None
+    if not error and materialized is not None and not canonical:
         rows = _rows_with_group_docs(review, logic.folded_group_docs)
         if human_revision or structure_repair:
             group_ids = {str(group.get("group_id") or "") for group in materialized.get("groups", [])}
@@ -512,7 +541,8 @@ def process_solver_reply(
             if isinstance(normalized.get("finding_batch"), Mapping)
             else [],
         )
-    return SolverReplyOutcome(stage, normalized, materialized, error, group_doc_rows)
+    return SolverReplyOutcome(stage, normalized, materialized, error, group_doc_rows,
+                              candidate_revision if not error else None)
 
 
 def fold_item_revise_group_docs(
@@ -610,6 +640,8 @@ def build_solver_dispatch(
         has_active_findings=review_has_active_findings(review),
     )
     has_plan = review is not None and isinstance(review.plan, Mapping)
+    if getattr(review, "plan_revision", None):
+        stage = SolverStage.REVISE
     active = tuple(
         finding for finding in getattr(review, "findings", ()) or () if finding.active
     ) if review is not None else ()
@@ -764,6 +796,13 @@ def build_solver_dispatch(
                 product={"type": "solver_result", "contract": "nexus.zhongshu.solver.v1"},
             ),
         }
+    if getattr(review, "plan_schema", "legacy-v1") == "canonical-v1":
+        revision = getattr(review, "plan_revision", None)
+        payload["dispatch_context"].update(plan_schema="canonical-v1",
+            plan_base_ref=revision.reference if revision else "", document_policy="derived_from_plan")
+        payload["prompt_ref"] += ("\nCanonical planning policy: plan is the only business authority. "
+            "Write nonempty structured acceptance_signals for every item. Return group_docs=[]; "
+            "group documents are generated by the compiler. Preserve the requirement baseline.\n")
     return EffectRequest(
         effect_id=f"dispatch:{request_id}",
         effect_type="agent_dispatch",
@@ -779,6 +818,7 @@ def plan_artifact_effect(
     sequence: int,
     materialized: Mapping[str, Any],
     revision_id: str,
+    plan_revision: PlanRevision | None = None,
 ) -> EffectRequest:
     """The orchestrator-owned plan artifact for a materialized Solver reply."""
 
@@ -792,6 +832,8 @@ def plan_artifact_effect(
             "plan_hash": canonical_plan_hash(materialized),
             "revision_id": revision_id,
             "sequence": sequence,
+            **({"plan_revision": plan_revision.to_dict(), "plan_revision_ref": plan_revision.reference}
+               if plan_revision else {}),
         },
     )
 

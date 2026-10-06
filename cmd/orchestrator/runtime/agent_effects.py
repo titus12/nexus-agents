@@ -622,6 +622,8 @@ class AgentWorkerRunner:
             "external_message_id": receipt.external_message_id,
             "idempotency_key": request.idempotency_key,
         }
+        if dispatch.target_state == "ZHONGSHU_SOLVER" and dispatch.context.get("plan_schema") == "canonical-v1":
+            result_payload["plan_base_ref"] = dispatch.context.get("plan_base_ref")
         return EffectOutcome(
             status="SUCCEEDED",
             event_name=event_name,
@@ -716,6 +718,8 @@ class AgentWorkerRunner:
             "external_message_id": receipt.external_message_id,
             "idempotency_key": request.idempotency_key,
         }
+        if dispatch.target_state == "ZHONGSHU_SOLVER" and dispatch.context.get("plan_schema") == "canonical-v1":
+            result_payload["plan_base_ref"] = dispatch.context.get("plan_base_ref")
         return EffectOutcome(
             status="SUCCEEDED",
             event_name=event_name,

@@ -952,6 +952,7 @@ def build_context(args: argparse.Namespace, issue_id: str, raw_request: str, tas
             raw_request=raw_request,
             project_type=str(args.project_type),
             task_type=str(args.task_type),
+            plan_schema=getattr(args, "plan_schema", None) or "legacy-v1",
         ),
     )
 
@@ -980,6 +981,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-duplicate", action="store_true")
     parser.add_argument("--project-type", default="unknown")
     parser.add_argument("--task-type", default="review")
+    parser.add_argument("--plan-schema", choices=("legacy-v1", "canonical-v1"), default=None,
+                        help="Select plan authority for a new task; resumes use the persisted schema.")
     parser.add_argument("--runs-root", default=os.environ.get("ORCHESTRATOR_RUNS_ROOT", "runs"))
     parser.add_argument("--poll-interval", type=float, default=float(os.environ.get("POLL_INTERVAL_SEC", "8")))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("PHASE_TIMEOUT_SEC", "900")))
@@ -1001,6 +1004,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    if args.plan_schema is not None and (args.resume or args.cancel or args.inspect_task):
+        parser.error("--plan-schema is only valid when creating a new task")
     if args.no_external_notifications:
         # Must be set before the app wires its notification port.
         os.environ["NEXUS_TEST_NO_EXTERNAL_NOTIFICATIONS"] = "1"
