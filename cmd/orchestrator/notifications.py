@@ -192,6 +192,44 @@ def build_agent_notification(
     return build_notification(state, event_name, event, workflow_context, limit=limit)
 
 
+def build_notification_parts(
+    state: str, event_name: str, event: DomainEvent, context: WorkflowContext,
+) -> tuple[str, ...]:
+    """PLAN_REVIEW has one brief notice; the full body travels as metadata."""
+    body = build_notification(state, event_name, event, context)
+    gate = context.human_gate
+    if state != "HUMAN_GATE" or not gate or gate.reason_code != "PLAN_REVIEW":
+        return (body,) if body else ()
+    version = int(context.review.plan_review.get("version") or 1) if context.review else 1
+    summary = str(context.review.plan_review.get("revision_summary") or "") if context.review else ""
+    notice = (f"【中书省方案待审｜v{version}】\n"
+              f"任务：{context.identity.task_id}\n决策编号：{gate.decision_id}\n"
+              "请打开完整文档审查，并回复这条消息。\n"
+              "仅回复「通过」交门下省；其他非空回复交 Solver 修订，再送你审查。")
+    if summary:
+        notice += "\n本轮修改：" + summary[:400]
+    return (notice,)
+
+
+def plan_review_notification_request(context: WorkflowContext, key: str | None = None,
+                                     body: str | None = None) -> NotificationRequest:
+    from .domain.plan_review import text_hash
+    from .zhongshu_plan_doc import render_plan_review_packet
+
+    gate = context.human_gate
+    if not gate or gate.reason_code != "PLAN_REVIEW":
+        raise ValueError("PLAN_REVIEW_GATE_REQUIRED")
+    if body is None:
+        event = DomainEvent("HUMAN_GATE", context.identity.task_id,
+                            context.progression.sequence, {}, context.progression.entered_at)
+        body = build_notification_parts("HUMAN_GATE", "HUMAN_GATE", event, context)[0]
+    packet = render_plan_review_packet(context)
+    version = int(context.review.plan_review.get("version") or 1) if context.review else 1
+    return NotificationRequest(context.identity.task_id,
+                               key or f"{context.identity.task_id}:{context.progression.sequence}:human-gate:HUMAN_GATE",
+                               body, packet, version, text_hash(packet), gate.decision_id)
+
+
 class DirectNotificationEmitter:
     """Send notifications at the workflow event boundary and return keys."""
 
@@ -218,11 +256,16 @@ class DirectNotificationEmitter:
 
         sent: list[str] = []
         already_sent = set(after.audit.sent_notification_keys)
+        parts: list[tuple[str, str, WorkflowContext, str]] = []
         for presentation_event, suffix, context, source in notifications:
             key = f"{event.task_id}:{after.progression.sequence}:{suffix}:{presentation_event}"
+            bodies = build_notification_parts(context.progression.state, presentation_event, source, context)
+            for index, body in enumerate(bodies, start=1):
+                part_key = f"{key}:part-{index:03d}" if len(bodies) > 1 else key
+                parts.append((presentation_event, part_key, context, body))
+        for presentation_event, key, context, body in parts:
             if key in already_sent:
                 continue
-            body = build_notification(context.progression.state, presentation_event, source, context)
             if not body:
                 continue
             logger.info(
@@ -235,13 +278,19 @@ class DirectNotificationEmitter:
                 len(body),
             )
             try:
-                receipt = self._port.send(NotificationRequest(event.task_id, key, body))
+                request = (plan_review_notification_request(context, key, body)
+                           if presentation_event == "HUMAN_GATE" and context.human_gate
+                           and context.human_gate.reason_code == "PLAN_REVIEW"
+                           else NotificationRequest(event.task_id, key, body))
+                receipt = self._port.send(request)
                 if receipt.delivered:
                     logger.info("FEISHU_NOTIFY_SUCCESS task_id=%s sequence=%s event=%s notification_key=%s", event.task_id, after.progression.sequence, presentation_event, key)
                 else:
                     logger.warning("FEISHU_NOTIFY_FAILED task_id=%s sequence=%s event=%s notification_key=%s reason=not_delivered", event.task_id, after.progression.sequence, presentation_event, key)
+                    continue
             except Exception:
                 logger.exception("FEISHU_NOTIFY_FAILED task_id=%s sequence=%s event=%s notification_key=%s", event.task_id, after.progression.sequence, presentation_event, key)
+                continue
             sent.append(key)
             already_sent.add(key)
         return tuple(sent)
@@ -338,6 +387,8 @@ def _human_gate_block(
         return structured
     if state != "HUMAN_GATE":
         return []
+    from .contracts.analyst_gate import analyst_questions
+    questions = analyst_questions(payload)
     human_gate = context.human_gate
     reason_code = (
         str(getattr(human_gate, "reason_code", "") or "").strip()
@@ -347,6 +398,16 @@ def _human_gate_block(
     lines: list[str] = []
     if reason_code:
         lines.append(f"需要人工决策：{_human_reason_text(reason_code, payload, context)}")
+    if questions:
+        summary = str(payload.get("summary") or "").strip()
+        if summary:
+            lines.append(f"决策原因：{_brief(summary, 600)}")
+        entries = payload.get("questions_for_user") or []
+        for entry in entries:
+            if isinstance(entry, Mapping) and isinstance(entry.get("reason"), str) and entry["reason"].strip():
+                lines.append(f"决策原因：{_brief(entry['reason'], 600)}")
+        lines.append("需要你回答的问题：")
+        lines.extend(f"- {_brief(question, 600)}" for question in questions)
     progress = _gate_progress_line(context)
     if progress:
         lines.append(progress)
@@ -365,7 +426,13 @@ def _human_gate_block(
         if human_gate is not None
         else ""
     )
-    lines.extend(_human_decision_guidance(context.identity.task_id, decision_id))
+    if reason_code == "PLAN_REVIEW":
+        lines.extend([
+            "怎么回复：审阅全部需求文档后，仅回复「通过」交门下省；其他非空回复作为修订意见交给 LLM，修订后再次送审。",
+            f"决策编号：{decision_id}",
+        ])
+    else:
+        lines.extend(_human_decision_guidance(context.identity.task_id, decision_id))
     return lines
 
 
@@ -378,9 +445,9 @@ def _human_reason_text(
 
     if reason_code == "PLAN_REVIEW":
         return (
-            "中书省方案已定稿，方案文档为任务目录下的 zhongshu-plan-review.md，"
-            "请审阅：回复「批准」（或任意内容）交门下省实施；"
-            "回复「拒绝：<批注>」退回规划修订"
+            "中书省方案已定稿，下面附完整审阅稿及各组需求文档原文，"
+            "请审阅：仅回复「通过」交门下省；"
+            "其他非空回复交 LLM 修订，完成后再次送你审查"
         )
     if reason_code == "ZHONGSHU_DISCARD_NEEDS_HUMAN":
         return (

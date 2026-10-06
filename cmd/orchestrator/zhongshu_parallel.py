@@ -332,7 +332,42 @@ def _unknown_requirement_ids(value: Any) -> list[str]:
     return result
 
 
-def validate_zhongshu_requirement_contract(payload: dict[str, Any]) -> str:
+_BOUNDED_QUANTITY = re.compile(
+    r"(?P<bound>至少|不少于|最多|不超过|恰好|正好|at\s+least|at\s+most|exactly)?\s*"
+    r"(?P<number>\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百]+)\s*"
+    r"(?P<unit>个|条|项|次|%|秒|毫秒|分钟|小时|directions?|options?|suggestions?|recommendations?|steps?|items?)",
+    re.IGNORECASE,
+)
+
+
+def _bounded_quantities(text: str) -> set[tuple[str, str, str]]:
+    result = set()
+    digits = {character: value for value, character in enumerate("零一二三四五六七八九")}
+    digits.update({"〇": 0, "两": 2})
+    for match in _BOUNDED_QUANTITY.finditer(text):
+        raw = match.group("number")
+        if not raw[0].isdigit():
+            total = current = 0
+            for character in raw:
+                if character in digits:
+                    current = digits[character]
+                else:
+                    total += (current or 1) * {"十": 10, "百": 100}[character]
+                    current = 0
+            raw = str(total + current)
+        number = str(float(raw)).removesuffix(".0")
+        bound = " ".join((match.group("bound") or "exact").lower().split())
+        bound = "min" if bound in {"至少", "不少于", "at least"} else (
+            "max" if bound in {"最多", "不超过", "at most"} else "exact")
+        unit = match.group("unit").lower()
+        unit = unit if unit in {"%", "秒", "毫秒", "分钟", "小时"} else "count"
+        result.add((bound, number, unit))
+    return result
+
+
+def validate_zhongshu_requirement_contract(
+    payload: dict[str, Any], *, original_request: str | None = None,
+) -> str:
     """Validate the single authoritative requirement contract for Zhongshu."""
     if payload.get("action") != "REQUIREMENT_CONTRACT_READY":
         return "ZHONGSHU_REQUIREMENT_CONTRACT_ACTION_INVALID"
@@ -361,6 +396,16 @@ def validate_zhongshu_requirement_contract(payload: dict[str, Any]) -> str:
             return f"ZHONGSHU_REQUIREMENT_CONTRACT_STATEMENT_MISSING:{index}"
         if not str(requirement.get("acceptance_signal") or "").strip():
             return f"ZHONGSHU_REQUIREMENT_CONTRACT_ACCEPTANCE_MISSING:{index}"
+        if original_request is not None:
+            quote = str(requirement.get("source_quote") or "").strip()
+            if not quote or quote not in original_request:
+                return f"ZHONGSHU_REQUIREMENT_CONTRACT_SOURCE_QUOTE_INVALID:{index}"
+            supported = _bounded_quantities(quote)
+            introduced = _bounded_quantities(str(requirement.get("statement") or "") + "\n"
+                                             + str(requirement.get("acceptance_signal") or ""))
+            if any(quantity not in supported and ("exact", quantity[1], quantity[2]) not in supported
+                   for quantity in introduced):
+                return f"ZHONGSHU_REQUIREMENT_CONTRACT_QUANTITY_UNSUPPORTED:{index}"
         if str(requirement.get("priority") or "").lower() not in {"must", "should", "could"}:
             return f"ZHONGSHU_REQUIREMENT_CONTRACT_PRIORITY_INVALID:{index}"
         if str(requirement.get("scope") or "").lower() not in {"in", "out", "conditional"}:
@@ -382,6 +427,7 @@ ZHONGSHU_REQUIREMENT_CONTRACT_FIELDS = (
     "scope",
     "kind",
     "acceptance_signal",
+    "source_quote",
 )
 
 # Cross-worker requirement identity fields.  ``source`` and ``acceptance_signal``
@@ -681,12 +727,54 @@ def _demote_evidence_update_overflow(
     return demoted
 
 
+def merge_zhongshu_evidence_packet(previous: Any, incoming: dict[str, Any]) -> dict[str, Any]:
+    """Persist supplements losslessly under the same authoritative contract.
+
+    A packet revision follows the plan, while observations retain their own
+    provenance. History is not a fresh verification of a changed code surface.
+    Storage is cumulative; worker and prompt projection budgets stay bounded.
+    """
+    packet = copy.deepcopy(incoming)
+    if (not isinstance(previous, dict) or previous.get("phase") != "ZHONGSHU"
+            or incoming.get("phase") != "ZHONGSHU"):
+        return packet
+    old_requirements = previous.get("requirements")
+    new_requirements = incoming.get("requirements")
+    if not old_requirements or not new_requirements:
+        return packet
+    def contract(value: list[dict[str, Any]]) -> dict[str, Any]:
+        return {normalize_requirement_id(row.get("requirement_id")): {
+            **row, "requirement_id": normalize_requirement_id(row.get("requirement_id"))
+        } for row in value if isinstance(row, dict)}
+    if contract(old_requirements) != contract(new_requirements):
+        return packet
+    for field in ("evidence_updates", "deferred_evidence_updates"):
+        packet[field] = merge_evidence_updates(previous.get(field), incoming.get(field))
+    for field in ("confirmed_facts", "constraints", "conflicts", "unknowns", "risks",
+                  "protected_paths", "assumptions", "unknown_requirement_ids", "unknown_requirements"):
+        packet[field] = union_records(previous.get(field), incoming.get(field))
+    packet["worker_evidence"] = copy.deepcopy(previous.get("worker_evidence") or {})
+    packet["worker_evidence"].update(copy.deepcopy(incoming.get("worker_evidence") or {}))
+    # Finding answers are current-round-first; retain answers to untouched findings.
+    responses = {str(row.get("finding_id")): copy.deepcopy(row)
+                 for row in previous.get("finding_responses") or [] if isinstance(row, dict)}
+    responses.update({str(row.get("finding_id")): copy.deepcopy(row)
+                      for row in incoming.get("finding_responses") or [] if isinstance(row, dict)})
+    packet["finding_responses"] = list(responses.values())
+    packet["evidence_packet_version"] = int(previous.get("evidence_packet_version") or 1) + 1
+    packet["evidence_history_revisions"] = union_records(
+        previous.get("evidence_history_revisions"), previous.get("plan_revision_id"),
+        incoming.get("plan_revision_id"))
+    return packet
+
+
 def merge_analyst_evidence(
     task_id: str,
     revision_id: str,
     worker_results: list[dict[str, Any]],
     canonical_requirements: list[dict[str, Any]] | None = None,
     target_action: str = "READY_FOR_SOLVER",
+    preserve_task_graph: bool = False,
 ) -> dict[str, Any]:
     """Merge Analyst observations into an evidence packet only.
 
@@ -949,7 +1037,7 @@ def merge_analyst_evidence(
         "revision_id": revision_id,
         "worker_ids": sorted({str(item.get("worker_id") or "") for item in worker_results if item.get("worker_id")}),
     }
-    if target_action == "READY_FOR_SOLVER":
+    if target_action == "READY_FOR_SOLVER" and not preserve_task_graph:
         # Solver channel: the packet rides under ``plan`` as before — the
         # solver stage resolution reads it (domain/zhongshu/stages.py).  The
         # Critic channel must not clobber ``review.plan`` with an empty graph.
@@ -965,6 +1053,7 @@ def _compact_solver_evidence_record(value: Any) -> Any:
         "evidence_id", "requirement_id", "item_id", "finding_id",
         "decision_relevance", "source", "quote", "source_type", "conclusion",
         "statement", "confidence", "unknowns", "worker_id", "worker_ids",
+        "source_evidence_id", "quote_group_id", "quote_part_index", "quote_part_count",
     )
     compact = {
         key: copy.deepcopy(value[key])

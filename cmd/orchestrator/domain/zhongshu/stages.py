@@ -97,6 +97,12 @@ def resolve_reply_stage(payload: Mapping[str, Any], review: object) -> SolverSta
         return SolverStage.FORMALIZE
     plan = getattr(review, "plan", None)
     if isinstance(plan, Mapping):
+        if (plan.get("evidence_packet_version") and not plan.get("items")
+                and not review_has_active_findings(review)):
+            # The initial Analyst packet occupies review.plan for legacy
+            # persistence, but contains no formal graph to revise. Missing
+            # mode must keep the initial dispatch's formalization channel.
+            return SolverStage.FORMALIZE
         return SolverStage.REVISE
     return SolverStage.FORMALIZE
 

@@ -47,14 +47,14 @@ class ZhongshuParallelLimits:
     # single group verdict (REVIEW_GROUP); "item" keeps the legacy per-item
     # task_review wave as the rollback path.
     review_unit: str = "group"
-    # 2026-09-27 thin plan doc: after the freeze check approves, the run
-    # pauses at a human gate carrying the plan-review document so the operator
-    # can review before the hand-over to Menxia.  Flipped by
-    # ZHONGSHU_PLAN_REVIEW_GATE=0 to keep the direct hand-over.
-    plan_review_gate: bool = True
+    # The shared requirements document is emitted after freeze approval.
+    # Production always requires human sign-off. False is retained for
+    # notification-isolated scripted fixtures.
+    # Default on for every task type; legacy None also requires human sign-off.
+    plan_review_gate: bool | None = True
     # Fast track: the Zhongshu Critic approves the whole plan without a review
     # wave and the freeze check releases it immediately, so the run reaches
-    # the Menxia group pipeline right after Analyst + Solver finish.
+    # the human plan-review gate right after Analyst + Solver finish.
     # Default off; flipped by --fast-track / NEXUS_FAST_TRACK.
     fast_track: bool = False
     # 2026-09-28 mechanical freeze: when every group row is terminal with a
@@ -145,8 +145,10 @@ class RecoveryState:
     # Consecutive Critic rounds one finding may stay open before the loop is
     # escalated to a human (0 disables the escalation).
     max_stuck_finding_rounds: int = 3
-    # Consecutive node-level FAILs inside one workflow state (state-keyed,
-    # error-code agnostic).  Back-to-back wave failures mean the state keeps
+    # Consecutive node-level FAILs inside one workflow state. Zhongshu also
+    # keys the streak by retry-budget class using last_failure; Menxia and
+    # legacy snapshots without a failure record remain class-agnostic.
+    # Back-to-back same-class wave failures mean the state keeps
     # failing deterministically on the same payload, so further budgeted
     # retries are pure waste; the run escalates to the operator instead
     # (incident task-20260928-835a07: waves 6/8/10/12).  A limit of 0
@@ -212,6 +214,8 @@ class ReviewState:
     # min in task-20260928-835a07, just to hand evidence over).  ``None``
     # keeps the legacy READY_FOR_SOLVER routing.
     evidence_requester: str | None = None
+    evidence_requires_solver_revision: bool = False
+    evidence_required_changes: tuple[dict[str, Any], ...] = ()
     # Per-item pipeline dispatch table (A2/P2).  Mirrors the ledger's verdicts
     # as pipeline phases; the ItemWorkflow executor consumes it to know which
     # stoves are open.  Empty until the first task-review round folds.
@@ -233,6 +237,8 @@ class ReviewState:
     # The orchestrator-owned canonical task graph.  It is the base the Solver
     # patches with bounded ``changes`` and the source of the plan hash.
     plan: dict[str, object] | None = None
+    # Immutable offered requirements bytes and their human revision history.
+    plan_review: dict[str, object] = field(default_factory=dict)
     # Full per-task review rows salvaged from a failed Critic wave (one worker
     # died after the others delivered usable verdicts).  A retry re-dispatches
     # only the tasks still missing; these rows stand in for the finished ones
@@ -377,6 +383,7 @@ class HumanGateState:
     # ids and unapproved items, so the operator (and the resume payload of the
     # directed unstick flow) can see exactly which groups need intervention.
     zhongshu_group_parks: tuple[dict[str, Any], ...] = ()
+    document_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -563,6 +570,11 @@ class MenxiaGroupState:
     blocked_reason: str = ""
     last_open_count: int = 0
     stalled_rounds: int = 0
+    reply_retry_count: int = 0
+    # None marks a legacy snapshot; () records a verified empty blocker set.
+    last_open_suggestion_ids: tuple[str, ...] | None = None
+    reply_rejection: str = ""
+    rejected_doc_markdown: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -595,6 +607,13 @@ class MenxiaGroupState:
             blocked_reason=str(value.get("blocked_reason") or ""),
             last_open_count=_int("last_open_count"),
             stalled_rounds=_int("stalled_rounds"),
+            last_open_suggestion_ids=(
+                tuple(str(suggestion_id) for suggestion_id in value.get("last_open_suggestion_ids", ()))
+                if isinstance(value.get("last_open_suggestion_ids"), (list, tuple)) else None
+            ),
+            reply_retry_count=_int("reply_retry_count"),
+            reply_rejection=str(value.get("reply_rejection") or ""),
+            rejected_doc_markdown=str(value.get("rejected_doc_markdown") or ""),
         )
 
 
@@ -607,8 +626,8 @@ class ZhongshuGroupState:
     form the version chain the joiner checks, ``revision_round`` is the
     group-wide budget (every revision demand on the group consumes the same
     counter against ``max_zhongshu_group_rounds``), and
-    ``last_open_count``/``stalled_rounds`` feed the stall rule (open blocker
-    count not shrinking for consecutive rounds parks the group as STALLED).
+    ``last_open_count``/``last_open_finding_ids``/``stalled_rounds`` measure
+    progress on active revision findings; unchanged rounds park as STALLED.
     ``doc_source_hash`` pins the hash of the source material the current
     document was compiled from, so a revision wave only re-compiles when the
     inputs actually changed.
@@ -629,6 +648,11 @@ class ZhongshuGroupState:
     # surfaces).  The group approval ratchet holds while the live surface
     # still hashes to this value (2026-09-26 group pipeline).
     approved_surface_hash: str = ""
+
+    last_open_finding_ids: tuple[str, ...] = ()
+    evidence_round: int = 0
+    evidence_stalled_rounds: int = 0
+    last_evidence_keys: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -660,6 +684,11 @@ class ZhongshuGroupState:
             doc_markdown=str(value.get("doc_markdown") or ""),
             doc_source_hash=str(value.get("doc_source_hash") or ""),
             approved_surface_hash=str(value.get("approved_surface_hash") or ""),
+            last_open_finding_ids=tuple(str(v) for v in (value.get("last_open_finding_ids") or ())),
+            evidence_round=_int("evidence_round"),
+            evidence_stalled_rounds=_int("evidence_stalled_rounds"),
+            last_evidence_keys=(tuple(str(key) for key in value["last_evidence_keys"])
+                                if isinstance(value.get("last_evidence_keys"), (list, tuple)) else None),
         )
 
 
@@ -689,6 +718,7 @@ class ReviewUpdate:
     active_item_id: str | None = None
     findings: tuple[Finding, ...] | None = None
     zhongshu_revision_round: int | None = None
+    item_revision_round: int | None = None
     freeze_check_attempt: int | None = None
     last_reply_fingerprint: str | None = None
     plan_ref: str | None = None
@@ -702,6 +732,8 @@ class ReviewUpdate:
     attempted_finding_ids: tuple[str, ...] | None = None
     evidence_packet: dict[str, object] | None = None
     evidence_requester: str | None = None
+    evidence_requires_solver_revision: bool | None = None
+    evidence_required_changes: tuple[dict[str, Any], ...] | None = None
     # None means "keep" for evidence_requester, so a clean join needs this
     # explicit sentinel to drop a consumed requester (a stale one would
     # misroute the NEXT state's evidence demand to the wrong target).
@@ -712,6 +744,9 @@ class ReviewUpdate:
     zhongshu_groups: tuple[ZhongshuGroupState, ...] | None = None
     requirements: tuple[dict[str, object], ...] | None = None
     plan: dict[str, object] | None = None
+    plan_review: dict[str, object] | None = None
+    # Internal Solver-only human revision already validated/froze the new cut.
+    human_revision_validated: bool = False
     salvaged_task_reviews: tuple[dict[str, object], ...] | None = None
     salvaged_worker_payloads: tuple[dict[str, object], ...] | None = None
 
@@ -753,6 +788,8 @@ def _regrouped_zhongshu_rows(
             continue
         fresh[row.group_id] = replace(
             base,
+            stage=(row.stage if update.human_revision_validated else base.stage),
+            last_verdict=(row.last_verdict if update.human_revision_validated else base.last_verdict),
             doc_version=row.doc_version,
             doc_hash=row.doc_hash,
             doc_markdown=row.doc_markdown,
@@ -788,6 +825,8 @@ def apply_review_update(
         zhongshu_rows = regrouped
     return ReviewState(
         revision_id=revision_id,
+        plan_review=(dict(update.plan_review) if update.plan_review is not None
+                     else dict(current.plan_review) if current else {}),
         active_group_id=(
             update.active_group_id
             if update.active_group_id is not None
@@ -819,7 +858,8 @@ def apply_review_update(
         max_freeze_check_attempts=(
             current.max_freeze_check_attempts if current else 2
         ),
-        item_revision_round=(current.item_revision_round if current else 0),
+        item_revision_round=(update.item_revision_round if update.item_revision_round is not None
+                             else current.item_revision_round if current else 0),
         max_item_revision_rounds=(current.max_item_revision_rounds if current else 5),
         max_menxia_group_rounds=(
             current.max_menxia_group_rounds if current else 5
@@ -894,6 +934,16 @@ def apply_review_update(
                 else current.evidence_requester if current else None
             )
         ),
+        evidence_requires_solver_revision=(
+            update.evidence_requires_solver_revision
+            if update.evidence_requires_solver_revision is not None
+            else False if update.clear_evidence_requester
+            else current.evidence_requires_solver_revision if current else False
+        ),
+        evidence_required_changes=(
+            update.evidence_required_changes if update.evidence_required_changes is not None
+            else current.evidence_required_changes if current else ()
+        ),
         item_workflows=(
             update.item_workflows
             if update.item_workflows is not None
@@ -958,6 +1008,7 @@ class HumanGateUpdate:
     resume_state: str | None = None
     reason_code: str | None = None
     message_id: str | None = None
+    document_hash: str | None = None
     clear_gate: bool = False
     zhongshu_group_parks: tuple[dict[str, Any], ...] = ()
 
@@ -1189,8 +1240,11 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
                 if review_value.get("evidence_requester")
                 else None
             ),
+            evidence_requires_solver_revision=bool(review_value.get("evidence_requires_solver_revision", False)),
+            evidence_required_changes=tuple(dict(row) for row in review_value.get("evidence_required_changes", []) if isinstance(row, Mapping)),
             requirements=requirements,
             plan=_plan_from_dto(review_value.get("plan")),
+            plan_review=dict(review_value.get("plan_review") or {}),
             salvaged_task_reviews=tuple(
                 dict(row)
                 for row in review_value.get("salvaged_task_reviews", [])

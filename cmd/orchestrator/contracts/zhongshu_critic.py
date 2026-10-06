@@ -58,6 +58,23 @@ def normalize_group_action(action: object) -> str:
     return _GROUP_ACTION_SYNONYMS.get(str(action or "").strip().upper(), "")
 
 
+def group_action_with_followups(action: str, findings: list[dict], prior: list[dict]) -> str:
+    """Keep P2/P3 observations without making them a group revision barrier.
+
+    Missing severity and previous open P0/P1 remain conservative. An empty
+    revision demand is not silently promoted to approval.
+    """
+    from ..domain.findings import normalize_finding_status
+    active = {"OPEN", "REOPENED", "ASSIGNED_TO_ANALYST", "ASSIGNED_TO_SOLVER", "IN_REVIEW", "REJECTED_PENDING"}
+    if action != "REVISE_GROUP" or not findings:
+        return action
+    if any(str(row.get("severity") or "").upper() not in {"P2", "P3"}
+           and normalize_finding_status(row.get("status"), row.get("decision")) in active
+           for row in [*prior, *findings]):
+        return action
+    return "APPROVE_GROUP"
+
+
 def allowed_actions_for_mode(mode: str) -> tuple[str, ...]:
     """Action allowlist for one review mode (group verdicts are closed)."""
 
@@ -128,6 +145,15 @@ CONTRACT = make_contract(
         "The envelope field structured_output_schema_hash is the one exception: "
         "copy it verbatim from the injected contract.",
         "Every finding must be traceable to an evidence-backed claim.",
+        "Use shared_evidence as reusable source facts with explicit relevance to this task. "
+        "Preserve original evidence IDs and source scope; another task's acceptance is not approval of this task. "
+        "In later group reviews, disposition prior findings explicitly with their canonical finding_id. "
+        "finding_responses.response=RESOLVED closes that finding; P0 requires an explicit evidence-backed note. "
+        "Never both close and re-raise the same finding in one reply.",
+        "For REQUEST_ANALYST_EVIDENCE, missing_evidence describes facts to investigate. "
+        "required_change lists only document/task/acceptance edits needed after the evidence arrives; "
+        "leave it empty for pure evidence requests. With required_change the orchestrator routes the "
+        "supplement through Solver revision before Critic review. Each finding must name its owning item_id.",
         "Every finding must name its owning task: set item_id to the exact "
         "plan item id (and group_id when the item belongs to one). target is "
         "display text, never the identity source.",

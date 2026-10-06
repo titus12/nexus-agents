@@ -10,6 +10,7 @@ signals (open count not shrinking, repeated tug-of-war).
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 
 from collections.abc import Iterable, Mapping
 from ..context import MenxiaGroupState, MenxiaParallelLimits, ReviewState
@@ -47,6 +48,7 @@ MENXIA_GROUP_STAGE_BY_ACTION = {
     "REQUEST_EVIDENCE": "ANALYZING",
     "BLOCKED": "BLOCKED",
     "HUMAN_GATE": None,
+    "REPAIR_SOLVER_REPLY": "SOLVING",
 }
 
 # Actions that send a group back to its Solver: each consumes one unit of the
@@ -139,7 +141,7 @@ def apply_menxia_group_results(
         if row.stage in MENXIA_GROUP_TERMINAL_STAGES:
             if not budget_reset:
                 continue
-            rows[group_id] = MenxiaGroupState(
+            rows[group_id] = replace(row,
                 group_id=row.group_id,
                 stage="SOLVING",
                 revision_round=0,
@@ -149,6 +151,9 @@ def apply_menxia_group_results(
                 doc_markdown=row.doc_markdown,
                 last_verdict=action,
                 fingerprint=str(raw.get("fingerprint") or row.fingerprint),
+                reply_retry_count=0, reply_rejection="", rejected_doc_markdown="",
+                stalled_rounds=0, last_open_count=0, blocked_reason="",
+                last_open_suggestion_ids=None,
             )
             continue
         next_stage = menxia_group_next_stage(action)
@@ -159,6 +164,20 @@ def apply_menxia_group_results(
         raw_open = raw.get("open_count")
         if isinstance(raw_open, int) and not isinstance(raw_open, bool):
             open_count = max(0, raw_open)
+        current_ids = raw.get("open_suggestion_ids")
+        current_ids = (tuple(sorted(set(str(value) for value in current_ids)))
+                       if isinstance(current_ids, (list, tuple)) else None)
+        if current_ids is not None:
+            open_count = len(current_ids)
+        previous_ids = row.last_open_suggestion_ids
+        if previous_ids is None and row.doc_markdown:
+            from ..menxia_doc import MenxiaGroupDoc, MenxiaDocError
+            try:
+                previous_doc = MenxiaGroupDoc.parse(row.doc_markdown)
+                previous_ids = tuple(sorted(s.suggestion_id for s in
+                                            (*previous_doc.open_blocking(), *previous_doc.pending_rejections())))
+            except MenxiaDocError:
+                pass
         if next_stage is None:
             stage = row.stage
         elif next_stage == "SOLVING" and action in MENXIA_GROUP_REVISION_DEMAND_ACTIONS:
@@ -167,7 +186,9 @@ def apply_menxia_group_results(
             # first revision demand only seeds the baseline (last_open_count
             # starts at 0, so ``>=`` alone would count a fresh suggestion
             # burst as "no progress").
-            if row.revision_round > 0 and open_count >= row.last_open_count:
+            resolved_old = (previous_ids is not None and current_ids is not None
+                            and bool(set(previous_ids) - set(current_ids)))
+            if row.revision_round > 0 and open_count >= row.last_open_count and not resolved_old:
                 stalled_rounds += 1
             else:
                 stalled_rounds = 0
@@ -180,8 +201,15 @@ def apply_menxia_group_results(
                 stage = next_stage
         else:
             stage = next_stage
-            stalled_rounds = 0
+            if action == "APPROVE_GROUP":
+                stalled_rounds = 0
         updates: dict[str, object] = {}
+        if action == "REPAIR_SOLVER_REPLY":
+            updates["reply_retry_count"] = row.reply_retry_count + 1
+            updates["reply_rejection"] = str(raw.get("reply_rejection") or "")
+            updates["rejected_doc_markdown"] = str(raw.get("rejected_doc_markdown") or "")
+        elif raw.get("clear_reply_repair"):
+            updates.update(reply_retry_count=0, reply_rejection="", rejected_doc_markdown="")
         for field in MENXIA_GROUP_DOC_FIELDS:
             value = raw.get(field)
             if value in (None, ""):
@@ -200,7 +228,7 @@ def apply_menxia_group_results(
             updates["blocked_reason"] = str(
                 raw.get("blocked_reason") or "MENXIA_GROUP_BLOCKED"
             )
-        rows[group_id] = MenxiaGroupState(
+        rows[group_id] = replace(row,
             group_id=row.group_id,
             stage=stage,
             revision_round=revision_round,
@@ -211,8 +239,16 @@ def apply_menxia_group_results(
             last_verdict=action,
             fingerprint=str(raw.get("fingerprint") or row.fingerprint),
             blocked_reason=str(updates.get("blocked_reason", row.blocked_reason)),
-            last_open_count=open_count,
+            last_open_count=(open_count if action in MENXIA_GROUP_REVISION_DEMAND_ACTIONS
+                             else row.last_open_count),
             stalled_rounds=stalled_rounds,
+            # Keep the last reviewer observation across Solver/Analyst hops:
+            # otherwise a repair replaces the baseline before progress is judged.
+            last_open_suggestion_ids=(current_ids if action in MENXIA_GROUP_REVISION_DEMAND_ACTIONS
+                                      and current_ids is not None else row.last_open_suggestion_ids),
+            reply_retry_count=int(updates.get("reply_retry_count", row.reply_retry_count)),
+            reply_rejection=str(updates.get("reply_rejection", row.reply_rejection)),
+            rejected_doc_markdown=str(updates.get("rejected_doc_markdown", row.rejected_doc_markdown)),
         )
     # Keep the seed order for deterministic snapshots.
     ordered_ids = [row.group_id for row in review.seed_menxia_groups()]
@@ -251,6 +287,8 @@ def menxia_group_wave_action(
             return "READY_FOR_ANALYST"
         if has("REVIEWING"):
             return "READY_FOR_CRITIC"
+        if has("SOLVING"):
+            return "RETRY"
         return "READY_FOR_ANALYST"
     if state == "MENXIA_GROUP_ANALYST":
         if has("SOLVING"):

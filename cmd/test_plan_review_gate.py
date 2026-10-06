@@ -2,16 +2,21 @@
 
 The Zhongshu deliverable for its human reviewer is one plan-review document;
 freeze approval pauses at a human gate so the operator can sign off before the
-Menxia hand-over.  Gate off (or fast track) keeps the direct hand-over.
+Menxia hand-over. Only explicit gate off keeps the direct hand-over.
 """
 
 from __future__ import annotations
 
 import unittest
+import tempfile
+from dataclasses import replace
+from unittest.mock import patch
 
-from orchestrator.app import _is_plan_review_rejection
+from orchestrator.app import OrchestratorApp, _is_plan_review_rejection, _is_plan_review_approval
+from orchestrator.adapters import FakeMulticaAdapter, FeishuHttpAdapter
 from orchestrator.domain.context import (
     MenxiaParallelLimits,
+    HumanGateState,
     ParallelState,
     ProgressState,
     RequestState,
@@ -29,6 +34,10 @@ from orchestrator.domain.states import (
 )
 from orchestrator.domain.transitions import TransitionRegistry
 from orchestrator.zhongshu_plan_doc import render_plan_review_doc
+from orchestrator.notifications import build_notification_parts, DirectNotificationEmitter
+from orchestrator.runtime.ports import NotificationReceipt
+from orchestrator.transport.external import HumanGate, HumanReply
+from test_human_gate_reply_poll import _allow_adapter_poll
 
 TASK = "task-1"
 
@@ -144,7 +153,7 @@ class PlanReviewDocTests(unittest.TestCase):
         self.assertIn("- [ ] 报告给出至少 3 条建议", text)
         self.assertIn("FastTrack 为何默认关闭", text)
         self.assertIn("放宽并发可能触发限流", text)
-        self.assertIn("预审批注区", text)
+        self.assertIn("仅回复「通过」", text)
 
     def test_no_revision_history_and_bounded(self) -> None:
         text = render_plan_review_doc(_context())
@@ -171,7 +180,7 @@ class PlanReviewGateTests(unittest.TestCase):
             ["plan_review_doc"],
         )
         self.assertIn(
-            "# 中书省方案（审阅稿）",
+            "# 中书省需求文档 [v1]",
             str(decision.effects[0].payload.get("content") or ""),
         )
 
@@ -184,17 +193,17 @@ class PlanReviewGateTests(unittest.TestCase):
         self.assertEqual(decision.transition.action, "FREEZE_APPROVED")
         types = [effect.effect_type for effect in decision.effects]
         self.assertIn("node_dispatch", types)
-        self.assertIn("plan_review_doc", types)
+        self.assertEqual(types[0], "plan_review_doc")
 
-    def test_fast_track_skips_the_gate(self) -> None:
+    def test_fast_track_keeps_human_review(self) -> None:
         registry = StateRegistry.default()
         decision = registry.get("ZHONGSHU_FREEZE_CHECK").handle(
             _context(gate=True, fast_track=True), _freeze_event()
         )
 
-        self.assertEqual(decision.transition.action, "FREEZE_APPROVED")
+        self.assertEqual(decision.transition.action, "PLAN_REVIEW")
 
-    def test_rejection_routes_to_the_planner_with_a_finding(self) -> None:
+    def test_rejection_dispatches_full_human_revision(self) -> None:
         registry = StateRegistry.default()
         gate = _context(state="HUMAN_GATE")
         decision = registry.get("HUMAN_GATE").handle(
@@ -203,15 +212,16 @@ class PlanReviewGateTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.transition.action, "PLAN_REVIEW_REJECTED")
-        findings = decision.update.review.findings
-        self.assertEqual(len(findings), 1)
-        self.assertIn("目标一节要拆细", findings[0].claim)
-        self.assertTrue(findings[0].active)
+        feedback = decision.update.review.plan_review["pending_feedback"]
+        self.assertEqual(feedback[0]["answer"], "拒绝：目标一节要拆细")
+        self.assertEqual(decision.effects[0].payload["dispatch_context"]["zhongshu_dispatch_mode"], "human_plan_revision")
+        self.assertTrue(all(row.stage == "REVIEWING" for row in decision.update.review.zhongshu_groups))
 
     def test_reject_markers(self) -> None:
         self.assertTrue(_is_plan_review_rejection("拒绝：改一下"))
         self.assertTrue(_is_plan_review_rejection("REJECT"))
-        self.assertFalse(_is_plan_review_rejection("批准"))
+        self.assertTrue(_is_plan_review_rejection("批准"))
+        self.assertFalse(_is_plan_review_rejection("通过"))
         self.assertFalse(_is_plan_review_rejection(""))
 
 
@@ -225,6 +235,134 @@ class PlanReviewTransitionTests(unittest.TestCase):
         self.assertEqual(
             registry.target_for("HUMAN_GATE", "PLAN_REVIEW_REJECTED"), "ZHONGSHU_SOLVER"
         )
+
+
+class _ReviewPort:
+    def __init__(self, delivered=True):
+        self.requests = []
+        self.delivered = delivered
+        self.replies = []
+
+    def send(self, request):
+        self.requests.append(request)
+        return NotificationReceipt(request.notification_key, self.delivered)
+
+    def poll_reply(self, gate):
+        return self.replies
+
+
+class CompletePlanDeliveryTests(unittest.TestCase):
+    def test_latest_readonly_null_setting_pauses_and_delivers_before_menxia(self):
+        adapter, port = FakeMulticaAdapter(), _ReviewPort()
+        with tempfile.TemporaryDirectory() as directory:
+            app = OrchestratorApp(_context(gate=None), root=directory,
+                                  multica=adapter, notification_port=port)
+            app.engine.dispatch(_freeze_event())
+            app.effects.execute_pending(TASK)
+            context = app.repository.load(TASK).context
+            self.assertEqual(context.progression.state, "HUMAN_GATE")
+            self.assertEqual(context.human_gate.reason_code, "PLAN_REVIEW")
+            self.assertEqual(adapter.dispatched, [])
+            persisted = (app.root / "zhongshu-requirements.md").read_text(encoding="utf-8")
+            self.assertIn(_doc("group-000001"), persisted)
+            offers = [request for request in port.requests if request.document_markdown]
+            self.assertEqual(len(offers), 1)
+            self.assertIn("分组需求正文", offers[0].document_markdown)
+            self.assertIn("不实施任何代码改动。", offers[0].document_markdown)
+            self.assertNotIn("分组需求正文", offers[0].body)
+            self.assertFalse(app.resume())
+            self.assertTrue(app.resume("通过"))
+            event = app.inbox.next(TASK)
+            app.engine.dispatch(event)
+            self.assertEqual(app.repository.load(TASK).context.progression.state, "MENXIA_GROUP_SOLVER")
+
+    def test_one_notice_preserves_long_unicode_document_in_metadata(self):
+        source = _context()
+        doc = _doc("group-000001") + "\n原文🙂" * 5000 + "\n完整文档末尾标记"
+        review = replace(source.review, zhongshu_groups=(replace(source.review.zhongshu_groups[0], doc_markdown=doc),))
+        source = replace(source, review=review)
+        decision = StateRegistry.default().get("ZHONGSHU_FREEZE_CHECK").handle(source, _freeze_event())
+        context = replace(source, progression=replace(source.progression, state="HUMAN_GATE", sequence=4),
+                          human_gate=decision.update.human_gate)
+        parts = build_notification_parts("HUMAN_GATE", "HUMAN_GATE", _freeze_event(), context)
+        self.assertEqual(len(parts), 1)
+        self.assertTrue(all(len(body.encode("utf-8")) <= 8000 for body in parts))
+        self.assertTrue(all(context.human_gate.decision_id in body for body in parts))
+        self.assertNotIn(doc, parts[0])
+        self.assertNotIn("分段", parts[0])
+        port = _ReviewPort()
+        keys = DirectNotificationEmitter(port).emit(source, _freeze_event(), context)
+        offers = [request for request in port.requests if request.document_markdown]
+        self.assertEqual(len(offers), 1)
+        self.assertIn(doc, offers[0].document_markdown)
+        self.assertIn("完整文档末尾标记", offers[0].document_markdown)
+        self.assertEqual(len(keys), len(set(keys)))
+        audited = replace(context, audit=replace(context.audit, sent_notification_keys=keys))
+        self.assertEqual(DirectNotificationEmitter(port).emit(source, _freeze_event(), audited), ())
+
+    def test_failed_delivery_is_not_recorded_as_sent(self):
+        source = _context()
+        decision = StateRegistry.default().get("ZHONGSHU_FREEZE_CHECK").handle(source, _freeze_event())
+        context = replace(source, progression=replace(source.progression, state="HUMAN_GATE", sequence=4),
+                          human_gate=decision.update.human_gate)
+        self.assertEqual(DirectNotificationEmitter(_ReviewPort(False)).emit(source, _freeze_event(), context), ())
+
+    def test_poll_preserves_feedback_before_later_pass(self):
+        source = _context()
+        decision = StateRegistry.default().get("ZHONGSHU_FREEZE_CHECK").handle(source, _freeze_event())
+        context = replace(source, progression=replace(source.progression, state="HUMAN_GATE", sequence=4),
+                          human_gate=HumanGateState(
+                              decision_id=decision.update.human_gate.decision_id,
+                              reason_code="PLAN_REVIEW", resume_state="MENXIA_GROUP_SOLVER"))
+        port = _ReviewPort()
+        port.replies = [HumanReply(context.human_gate.decision_id, "通过", "u"),
+                        HumanReply(context.human_gate.decision_id, "拒绝：旧批注", "u")]
+        with tempfile.TemporaryDirectory() as directory:
+            app = OrchestratorApp(context, root=directory, multica=FakeMulticaAdapter(), notification_port=port)
+            app._poll_human_gate_reply(TASK)
+            event = app.inbox.next(TASK)
+            self.assertEqual(event.name, "PLAN_REVIEW_REJECTED")
+            self.assertEqual(event.payload["answer"], "拒绝：旧批注")
+
+    def test_only_explicit_approval_signs_off(self):
+        for answer in ("通过", " 通过\n"):
+            self.assertTrue(_is_plan_review_approval(answer))
+        for answer in ("", "批准", "同意", "通过。", "APPROVED", "稍等", "继续", "是否可以批准？", "不同意"):
+            self.assertFalse(_is_plan_review_approval(answer))
+
+    def test_reply_to_older_document_part_across_pages_is_recognized(self):
+        decision = "task-1:plan-review:4"
+        pages = [
+            {"code": 0, "data": {"items": [
+                {"message_id": "reply", "parent_id": "part1", "body": {"content": "批准"}},
+                {"message_id": "part2", "sender": {"sender_type": "app"},
+                 "body": {"content": decision + "\n分段：2/2"}},
+            ], "has_more": True, "page_token": "older"}},
+            {"code": 0, "data": {"items": [
+                {"message_id": "part1", "sender": {"sender_type": "app"},
+                 "body": {"content": decision + "\n分段：1/2"}},
+            ], "has_more": False}},
+        ]
+        adapter = FeishuHttpAdapter()
+        adapter.chat_id = "chat-1"
+        with _allow_adapter_poll(), patch.object(adapter, "_token", return_value="fake"), \
+                patch.object(adapter, "_request", side_effect=pages) as http:
+            replies = adapter.poll_reply(HumanGate(decision, TASK, "MENXIA_GROUP_SOLVER", "", message_id="part2"))
+        self.assertEqual(http.call_count, 2)
+        self.assertEqual([reply.answer for reply in replies], ["批准"])
+
+    def test_feishu_transport_preserves_approval_looking_punctuation(self):
+        adapter = FeishuHttpAdapter()
+        adapter.chat_id = "chat-1"
+        page = {"code": 0, "data": {"items": [
+            {"message_id": "a", "parent_id": "root", "body": {"content": "通过，"}},
+            {"message_id": "b", "parent_id": "root", "body": {"content": "通过："}},
+            {"message_id": "c", "parent_id": "root", "body": {"content": "gate-1：通过。"}},
+        ]}}
+        with _allow_adapter_poll(), patch.object(adapter, "_token", return_value="fake"), patch.object(adapter, "_request", return_value=page):
+            replies = adapter.poll_reply(HumanGate("gate-1", TASK, "MENXIA_GROUP_SOLVER", "", "root"))
+        self.assertEqual([reply.answer for reply in replies], ["通过，", "通过：", "通过。"])
+        self.assertTrue(all(not _is_plan_review_approval(reply.answer) for reply in replies))
 
 
 if __name__ == "__main__":

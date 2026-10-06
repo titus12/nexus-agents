@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -255,6 +256,8 @@ def validate_schema(value: Any, schema: Mapping[str, Any], path: str, errors: li
     if enum is not None and not _enum_members_match(enum, value):
         errors.append(f"{path}: invalid enum")
     if isinstance(value, str):
+        if "pattern" in schema and re.search(str(schema["pattern"]), value) is None:
+            errors.append(f"{path}: must match pattern {schema['pattern']}")
         if "minLength" in schema and len(value) < int(schema["minLength"]):
             errors.append(f"{path}: shorter than minLength")
         if "maxLength" in schema and len(value) > int(schema["maxLength"]):

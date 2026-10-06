@@ -190,12 +190,14 @@ class MulticaTransportAdapter:
             status = "RUNNING"
         else:
             status = "UNKNOWN"
+        failure_reader = getattr(self._adapter, "get_run_failure", None)
+        remote_error = (failure_reader(external) if status == "FAILED" and callable(failure_reader) else "")
         return RemoteRunStatus(
             request_id=request.request_id,
             operation_id=request.operation_id,
             status=status,
             error_code="REMOTE_RUN_FAILED" if status == "FAILED" else None,
-            error_message="remote run reported failure" if status == "FAILED" else None,
+            error_message=(remote_error or "remote run reported failure") if status == "FAILED" else None,
         )
 
     def cancel_runs(self, request: PollRequest) -> list[str]:

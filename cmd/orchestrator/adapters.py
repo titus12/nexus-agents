@@ -336,12 +336,20 @@ def _evidence_demand_rejection(request: AgentRequest, payload: object) -> str:
     if not isinstance(demand, dict):
         return ""
     body = payload if isinstance(payload, dict) else {}
+    from .domain.policies.evidence_repair import evidence_scope_rejection
+    scope_error = evidence_scope_rejection(body, demand)
+    if scope_error:
+        return scope_error
     raw_targets = demand.get("evidence_targets")
     demands = demand.get("active_findings")
     if not isinstance(raw_targets, list) and not isinstance(demands, list):
         return ""
     try:
-        text = json.dumps(payload, ensure_ascii=False).casefold()
+        coverage = payload
+        if demand.get("strict_item_scope"):
+            coverage = [{"source": row.get("source"), "quote": row.get("quote")}
+                        for row in body.get("evidence_updates") or [] if isinstance(row, dict)]
+        text = json.dumps(coverage, ensure_ascii=False).casefold()
     except (TypeError, ValueError):
         return ""
     # A JSON-encoded backslash is the two-character escape `\\`, so a
@@ -403,18 +411,47 @@ def _evidence_demand_rejection(request: AgentRequest, payload: object) -> str:
 
 
 def _apply_quote_gate(request: AgentRequest, payload: object) -> object:
-    """Mark file-citing Analyst entries without a verbatim quote as unverified.
+    """Reject invalid targeted supplements; demote initial exploratory quotes.
 
-    Only ZHONGSHU replies are gated.  A bad quote demotes its own entry
-    instead of bouncing the reply: a rejection re-dispatched a whole worker
-    (up to the analyst timeout) over one mis-transcribed line.
+    Targeted requests use the existing bounded per-worker contract repair.
+    Other Zhongshu evidence retains the exploratory unverified policy.
     """
 
     if str(getattr(request, "phase", "") or "") != "ZHONGSHU" or not isinstance(payload, dict):
         return payload
+    if (request.role == "review-analyst"
+            and payload.get("action") == "REQUIREMENT_CONTRACT_READY"):
+        from .zhongshu_parallel import validate_zhongshu_requirement_contract
+        rejection = validate_zhongshu_requirement_contract(
+            payload, original_request=request.context.get("original_request"),
+        )
+        if rejection:
+            raise AgentResultFileError(rejection)
+    targeted_repair = (request.role == "review-analyst"
+                       and (request.context.get("evidence_demand") or {}).get("repair_quotes_locally"))
+    if targeted_repair:
+        from .domain.policies.evidence_repair import normalize_evidence_reuse
+        normalized = normalize_evidence_reuse(payload, request.context.get("evidence_demand") or {})
+        if normalized is not payload:
+            logger.info("AGENT_EVIDENCE_CITATION_NORMALIZED task_id=%s request_id=%s", request.task_id, request.request_id)
+            payload = normalized
+        from .quote_gate import repair_verified_quote_spans
+        repaired = repair_verified_quote_spans(payload)
+        if repaired is not payload:
+            logger.info("AGENT_QUOTE_FORMAT_REPAIRED task_id=%s request_id=%s", request.task_id, request.request_id)
+            payload = repaired
+        for key in ("evidence_updates", "finding_responses"):
+            for row in payload.get(key) or []:
+                if isinstance(row, dict) and any(
+                    str(row.get(field) or "").startswith("[UNVERIFIED-QUOTE]")
+                    for field in ("conclusion", "answer")
+                ):
+                    raise AgentResultFileError("targeted supplement contains UNVERIFIED-QUOTE; repair the original quote or report an explicit runtime UNKNOWN")
     issues = find_quote_issues(payload)
     if not issues:
         return payload
+    if targeted_repair:
+        raise AgentResultFileError(format_rejection(issues))
     logger.warning(
         "AGENT_REPLY_QUOTE_DEMOTED task_id=%s request_id=%s phase=%s role=%s reason=%s",
         request.task_id,
@@ -531,6 +568,7 @@ class MulticaCliAdapter:
             self.inline_result_max_bytes,
         )
         self.last_issue_id = ""
+        self._run_failures: dict[str, str] = {}
         self.cli_timeout_seconds = float(os.environ.get("MULTICA_CLI_TIMEOUT_SEC", "30"))
         self.cli_read_timeout_seconds = float(
             os.environ.get("MULTICA_CLI_READ_TIMEOUT_SEC", "60")
@@ -1457,9 +1495,15 @@ class MulticaCliAdapter:
             if rejections is not None:
                 rejections.append(rejection)
             return None
+        try:
+            gated = _apply_quote_gate(request, file_result.payload)
+        except AgentResultFileError as error:
+            if rejections is not None:
+                rejections.append(str(error))
+            return None
         return ExternalMessage(
             request.agent_id,
-            _apply_quote_gate(request, file_result.payload),
+            gated,
             f"file:{request.request_id}",
             "",
         )
@@ -1760,8 +1804,8 @@ class MulticaCliAdapter:
                                     "structured_output_schema_hash": str(
                                         (request.structured_output or {}).get("schema_hash") or ""
                                     ),
-                                    "raw_reply": body[:500],
-                                    "raw_reply_truncated": len(body) > 500,
+                                    "raw_reply": body[:16000],
+                                    "raw_reply_truncated": len(body) > 16000,
                                     "raw_reply_path": raw_reply_path,
                                     "raw_reply_chars": body_meta["chars"],
                                     "raw_reply_bytes": body_meta["bytes"],
@@ -1893,8 +1937,8 @@ class MulticaCliAdapter:
                                     "phase": request.phase,
                                     "response_source": "comment",
                                     "contract_rejection": str(error),
-                                    "raw_reply": body[:500],
-                                    "raw_reply_truncated": len(body) > 500,
+                                    "raw_reply": body[:16000],
+                                    "raw_reply_truncated": len(body) > 16000,
                                     "raw_reply_path": self._save_raw_reply(
                                         request, comment_id, body
                                     ),
@@ -2371,6 +2415,10 @@ class MulticaCliAdapter:
         )
         if status in {"failed", "error"}:
             run = matches[0]
+            self._run_failures[request.request_id] = "; ".join(
+                str(run.get(key) or "") for key in ("error", "failure_reason")
+                if run.get(key)
+            ) or "remote run reported failure"
             logger.warning(
                 "AGENT_REMOTE_RUN_FAILED_DETAIL task_id=%s request_id=%s "
                 "issue_id=%s run_id=%s kind=%s duration_ms=%s "
@@ -2385,6 +2433,9 @@ class MulticaCliAdapter:
                 str(run.get("failure_reason") or ""),
             )
         return status
+
+    def get_run_failure(self, request: AgentRequest) -> str:
+        return self._run_failures.get(request.request_id, "")
 
     def cancel_stale_runs(self, request: AgentRequest) -> list[str]:
         """Best-effort cancel non-terminal remote runs correlated to a request.
@@ -3084,44 +3135,86 @@ class FeishuHttpAdapter:
             raise RuntimeError("FEISHU_EXTERNAL_DISABLED_FOR_TESTS")
         if not self.chat_id:
             return []
-        value = self._request(
-            "GET",
-            self.base_url + "/open-apis/im/v1/messages?" + urllib.parse.urlencode({
-                "container_id_type": "chat",
-                "container_id": self.chat_id,
-                "sort_type": "ByCreateTimeDesc",
-                "page_size": 50,
-            }),
-            token=self._token("gate"),
-        )
-        items = value.get("data", {}).get("items", [])
-        gate_message_id = str(gate.message_id or "")
-        if not gate_message_id and gate.decision_id:
-            # The gate message body carries its decision id; use the newest
-            # match as the thread root so replies are recognized even when
-            # the orchestrator restarted and lost the original message id.
+        items: list[dict] = []
+        seen_messages: set[str] = set()
+        seen_tokens: set[str] = set()
+        page_token = ""
+        token = self._token("gate")
+        # Replies can be buried by agent traffic. Scan pages back to the gate,
+        # retaining newer replies before recovering a missing gate message id.
+        for _ in range(100):
+            query = {"container_id_type": "chat", "container_id": self.chat_id,
+                     "sort_type": "ByCreateTimeDesc", "page_size": 50}
+            if page_token:
+                query["page_token"] = page_token
+            value = self._request(
+                "GET", self.base_url + "/open-apis/im/v1/messages?"
+                + urllib.parse.urlencode(query), token=token,
+            )
+            if value.get("code") not in (None, 0, "0"):
+                raise RuntimeError(f"FEISHU_GATE_POLL_API_ERROR:{value.get('code')}")
+            data = value.get("data", {})
+            reached_gate = False
+            for item in data.get("items", []):
+                message_id = str(item.get("message_id") or item.get("id") or "")
+                if message_id and message_id in seen_messages:
+                    continue
+                seen_messages.add(message_id)
+                items.append(item)
+                sender_type = str((item.get("sender") or {}).get("sender_type") or "")
+                body = _feishu_message_text(item)
+                is_gate_part = bool(gate.decision_id and gate.decision_id in body)
+                # Read through the first part to recover all document roots.
+                first_or_unsplit = "分段：" not in body or "分段：1/" in body
+                if first_or_unsplit and (
+                    (gate.message_id and message_id == gate.message_id)
+                    or (is_gate_part and sender_type in {"app", "bot"})
+                ):
+                    reached_gate = True
+            next_token = str(data.get("page_token") or "")
+            if reached_gate or not data.get("has_more"):
+                break
+            if not next_token or next_token in seen_tokens:
+                raise RuntimeError("FEISHU_GATE_POLL_CURSOR_STALLED")
+            seen_tokens.add(next_token)
+            page_token = next_token
+        else:
+            logger.warning("FEISHU_GATE_POLL_PAGE_LIMIT decision_id=%s", gate.decision_id)
+        gate_message_ids = {str(gate.message_id)} if gate.message_id else set()
+        if gate.decision_id:
+            # Every document part is a valid thread root after a restart.
             for item in items:
-                if gate.decision_id in _feishu_message_text(item):
-                    gate_message_id = str(
+                body = _feishu_message_text(item)
+                sender_type = str((item.get("sender") or {}).get("sender_type") or "")
+                if (gate.decision_id in body
+                        and (sender_type in {"app", "bot"}
+                             or (not sender_type and not body.strip().startswith(gate.decision_id)))):
+                    gate_message_ids.add(str(
                         item.get("message_id") or item.get("id") or ""
-                    )
-                    break
+                    ))
+        gate_message_ids.discard("")
         replies: list[HumanReply] = []
         for item in items:
             message_id = str(item.get("message_id") or item.get("id") or "")
-            if gate_message_id and message_id == gate_message_id:
+            if message_id in gate_message_ids:
+                continue
+            if str((item.get("sender") or {}).get("sender_type") or "") in {"app", "bot"}:
                 continue
             body = _feishu_message_text(item)
             parent_id = str(item.get("parent_id") or "")
             root_id = str(item.get("root_id") or "")
             is_direct_reply = bool(
-                gate_message_id
-                and gate_message_id in {parent_id, root_id}
+                gate_message_ids.intersection({parent_id, root_id})
             )
-            contains_decision_id = gate.decision_id in body
+            contains_decision_id = bool(gate.decision_id and gate.decision_id in body)
             if not is_direct_reply and not contains_decision_id:
                 continue
-            answer = body.replace(gate.decision_id, "").strip(" ：:，,\n\r\t")
+            answer = body
+            if contains_decision_id:
+                # Remove routing decoration only before the answer. Trailing
+                # punctuation is user content: "通过，" is revision feedback.
+                answer = answer.replace(gate.decision_id, "", 1).lstrip(" ：:，,\n\r\t")
+            answer = answer.strip()
             answer = re.sub(r"^(?:@\S+\s+)+", "", answer).strip()
             if not answer:
                 continue
@@ -3135,12 +3228,12 @@ class FeishuHttpAdapter:
                     or ""
                 )
             sender_id = sender_id or str(item.get("sender_id") or "")
-            replies.append(HumanReply(gate.decision_id, answer, sender_id))
+            replies.append(HumanReply(gate.decision_id, answer, sender_id, message_id))
         logger.info(
             "FEISHU_GATE_POLL_RESULT decision_id=%s gate_message_id=%s messages_total=%s replies=%s",
             gate.decision_id,
-            gate_message_id,
-            len(value.get("data", {}).get("items", [])),
+            ",".join(sorted(gate_message_ids)),
+            len(items),
             len(replies),
         )
         return replies

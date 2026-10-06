@@ -7,20 +7,24 @@ workflow snapshot.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
+import copy
 import json
 import logging
 import os
 import time
 from typing import Callable
+from ..contracts.analyst_gate import analyst_questions
 
 from ..domain.decisions import EffectRequest
 from ..domain.errors import (
     CONTRACT_REJECTED_EVENT,
     FailureRecord,
+    DomainError,
     LeaseLostError,
     OUTPUT_OVERFLOW_FEEDBACK,
     TransportError,
@@ -41,8 +45,10 @@ from ..domain.policies.menxia_group import (
 )
 from ..domain.menxia_doc import (
     MenxiaGroupDoc,
+    LedgerEntry,
     menxia_approval_blockers,
     verify_group_reply,
+    solver_reply_repairable,
 )
 from ..transport import RawTransportReply, ReplyBinding, ReplyNormalizer
 from .effects import EffectOutcome
@@ -335,6 +341,7 @@ class AgentWorkerRunner:
                 worker_id=worker_id,
                 revision_id=str(payload.get("revision_id") or request.idempotency_key),
                 external_target_key=external_target_key,
+                role=dispatch.role,
             )
             receipt = self._admission.acquire(key, deadline)
             if receipt is None:
@@ -393,17 +400,25 @@ class AgentWorkerRunner:
                     # discarding it and re-running the whole dispatch.
                     salvaged = self._salvage_replies(poll, deadline)
                     if salvaged:
-                        logger.warning(
-                            "REMOTE_RUN_FAILED_REPLY_SALVAGED task_id=%s "
-                            "request_id=%s replies=%s remote_error=%r",
-                            request.task_id,
-                            poll.request_id,
-                            len(salvaged),
-                            status.error_message or "",
-                        )
-                        return self._completed_outcome(
-                            request, dispatch, receipt, poll, deadline_at, salvaged
-                        )
+                        # Runtime error comments are also correlated replies.
+                        # Salvage only a result that actually normalizes; retain
+                        # the remote cause when its error comment is unusable.
+                        try:
+                            outcome = self._completed_outcome(
+                                request, dispatch, receipt, poll, deadline_at, salvaged
+                            )
+                        except DomainError as error:
+                            logger.warning(
+                                "REMOTE_RUN_FAILED_SALVAGE_REJECTED request_id=%s error=%s remote_error=%r",
+                                poll.request_id, error, status.error_message or "",
+                            )
+                        else:
+                            if outcome.event_name not in {UNSTRUCTURED_REPLY_EVENT, CONTRACT_REJECTED_EVENT}:
+                                logger.warning(
+                                    "REMOTE_RUN_FAILED_REPLY_SALVAGED task_id=%s request_id=%s replies=%s remote_error=%r",
+                                    request.task_id, poll.request_id, len(salvaged), status.error_message or "",
+                                )
+                                return outcome
                     failure = self._remote_failure(request, status, receipt)
                     logger.warning(
                         "REMOTE_RUN_FAILED task_id=%s request_id=%s "
@@ -1088,6 +1103,7 @@ class AgentNodeJoiner:
         previous_review: object | None = None,
         salvaged_worker_payloads: tuple[dict[str, object], ...] = (),
         evidence_requester: str = "",
+        evidence_requires_solver_revision: bool = False,
         binding_contexts: Mapping[str, Mapping[str, object]] | None = None,
         menxia_stage_census: Mapping[str, object] | None = None,
     ) -> None:
@@ -1112,6 +1128,7 @@ class AgentNodeJoiner:
             if isinstance(row, Mapping) and str(row.get("worker_id") or "")
         )
         self._evidence_requester = str(evidence_requester or "")
+        self._evidence_requires_solver_revision = evidence_requires_solver_revision
         self._binding_contexts: dict[str, dict[str, object]] = {
             str(worker_id): dict(ctx)
             for worker_id, ctx in (binding_contexts or {}).items()
@@ -1142,6 +1159,32 @@ class AgentNodeJoiner:
             for result in results
             if result.status != "SUCCEEDED" or _is_unstructured_reply(result)
         ]
+        analyst_rejections: dict[str, str] = {}
+        if (self._analyst_salvage_enabled() and self._canonical_requirements
+                and not any(result.status == "SUCCEEDED"
+                            and isinstance(result.result_payload, Mapping)
+                            and result.result_payload.get("action") in {"BLOCKED", "HUMAN_GATE"}
+                            for result in results)):
+            from ..zhongshu_parallel import merge_analyst_evidence
+            for result in results:
+                if result in failed or not isinstance(result.result_payload, Mapping):
+                    continue
+                if result.result_payload.get("action") != "EVIDENCE_PACKET_READY":
+                    continue
+                try:
+                    from ..domain.policies.evidence_repair import evidence_scope_rejection
+                    demand = (self._binding_contexts.get(result.worker_id) or {}).get("evidence_demand") or {}
+                    rejection = evidence_scope_rejection(result.result_payload, demand)
+                    if rejection:
+                        raise ValueError(rejection)
+                    merge_analyst_evidence(
+                        self._task_id, self._revision_id,
+                        [{**dict(result.result_payload), "worker_id": result.worker_id}],
+                        list(self._canonical_requirements) or None,
+                    )
+                except ValueError as error:
+                    failed.append(result)
+                    analyst_rejections[result.worker_id] = str(error)
         # Harvest the verdicts of the workers that did finish exactly once, so
         # every failure exit can hand them to the FSM ledger and the retry only
         # has to re-dispatch the tasks that are still missing.
@@ -1157,6 +1200,12 @@ class AgentNodeJoiner:
             worker_rejections = tuple(
                 _worker_rejection_entry(result) for result in failed
             )
+            if analyst_rejections:
+                worker_rejections = tuple(
+                    (entry[0], "NODE_FANIN_REJECTED: " + analyst_rejections[entry[0]])
+                    if entry[0] in analyst_rejections else entry
+                    for entry in worker_rejections
+                )
             failure = next((result.failure for result in failed if result.failure), None)
             if failure is not None:
                 failure = replace(failure, worker_rejections=worker_rejections)
@@ -1205,6 +1254,21 @@ class AgentNodeJoiner:
                         worker_rejections=worker_rejections,
                     )
             aggregate: dict[str, object] = {"action": "FAIL"}
+            if analyst_rejections:
+                worker_id = next(iter(analyst_rejections))
+                failure = replace(failure, worker_id=worker_id,
+                                  error_code="NODE_FANIN_REJECTED",
+                                  message=analyst_rejections[worker_id],
+                                  worker_rejections=worker_rejections)
+            if self._dispatch_mode == "group_review":
+                valid = tuple(result for result in results if result not in failed)
+                if valid:
+                    partial = self._join_group_review(valid, [
+                        {**dict(result.result_payload), "worker_id": result.worker_id}
+                        for result in valid if isinstance(result.result_payload, Mapping)
+                    ])
+                    aggregate["group_reviews"] = partial.aggregate.get("group_reviews", [])
+                    aggregate["findings"] = partial.aggregate.get("findings", [])
             if partial_reviews:
                 # The FSM folds these into the review ledger even on the
                 # FAIL -> RETRY path (see _select_review_jobs).  When the
@@ -1346,6 +1410,7 @@ class AgentNodeJoiner:
                     worker_payloads,
                     self._canonical_requirements or None,
                     evidence_requester=self._evidence_requester,
+                    evidence_requires_solver_revision=self._evidence_requires_solver_revision,
                 )
                 if analyst_salvage:
                     # The carried payloads were consumed by this fan-in;
@@ -1501,10 +1566,10 @@ class AgentNodeJoiner:
         """Fan-in for the group-pipeline wave (shared document model).
 
         Each group is one worker, so the mechanical document checks run here
-        before anything folds: a reply that fails ``verify_group_reply`` is
-        demoted to a ``BLOCKED`` row carrying the violations, never folded
-        into the document chain.  Infrastructure failures return ``None`` so
-        the standard retry path takes over.
+        before anything folds. Repairable Solver shape defects return to the
+        same group under a bounded reply budget; protected-document violations
+        stay BLOCKED. Rejected drafts never fold into the accepted document.
+        Infrastructure failures return None for the standard retry path.
         """
 
         infra_failed = [
@@ -1532,6 +1597,8 @@ class AgentNodeJoiner:
         }[self._state]
         group_rows: list[dict[str, object]] = []
         result_actions: dict[str, str] = {}
+        human_questions: list[str] = []
+        human_reasons: list[str] = []
         for result in succeeded:
             payload = result.result_payload
             assert isinstance(payload, Mapping)
@@ -1556,14 +1623,52 @@ class AgentNodeJoiner:
                 result_actions[group_id] = "BLOCKED"
                 continue
             previous_markdown = str(context.get("doc_markdown") or "")
+            gate_error = ""
+            if action == "HUMAN_GATE":
+                questions = analyst_questions(payload)
+                reason = str(payload.get("summary") or "").strip()
+                if not reason:
+                    reason = "; ".join(str(entry.get("reason") or "").strip()
+                                       for entry in payload.get("questions_for_user") or ()
+                                       if isinstance(entry, Mapping) and entry.get("reason"))
+                if questions and reason:
+                    # A real question may precede the first complete draft.
+                    # Park without accepting worker-authored document changes.
+                    group_rows.append({"group_id": group_id, "action": "HUMAN_GATE"})
+                    result_actions[group_id] = "HUMAN_GATE"
+                    human_questions.extend(f"{group_id}: {question}" for question in questions)
+                    human_reasons.append(f"{group_id}: {reason}")
+                    continue
+                gate_error = "human_gate_requires_concrete_question_and_reason"
             previous = (
                 MenxiaGroupDoc.parse(previous_markdown)
                 if previous_markdown.strip() else None
             )
-            violations = verify_group_reply(
+            violations = ((gate_error,) if gate_error else verify_group_reply(
                 previous, role=role, reply=payload,
-            )
+            ))
+            if role != "solver" and payload.get("reviewed_hash") not in (
+                None, "", _sha256_hex(previous_markdown)
+            ):
+                violations += (f"{role} reviewed_hash does not match the dispatched document",)
             if violations:
+                if role == "solver" and action != "BLOCKED" and solver_reply_repairable(violations):
+                    count = int(context.get("reply_retry_count") or 0)
+                    maximum = int(context.get("max_reply_retries", 3))
+                    repair = count < maximum
+                    next_action = "REPAIR_SOLVER_REPLY" if repair else "BLOCKED"
+                    reason = ("MENXIA_GROUP_REPLY_REPAIR: " if repair else
+                              "MENXIA_GROUP_REPLY_RETRIES_EXHAUSTED: ") + "; ".join(violations)
+                    group_rows.append({
+                        "group_id": group_id, "action": next_action,
+                        "reply_rejection": reason,
+                        "rejected_doc_markdown": str(payload.get("doc_markdown") or "")[:200000],
+                        "blocked_reason": "" if repair else reason,
+                    })
+                    result_actions[group_id] = next_action
+                    logger.warning("MENXIA_GROUP_REPLY_REJECTED group_id=%s retry=%s/%s reason=%s",
+                                   group_id, count, maximum, reason)
+                    continue
                 group_rows.append({
                     "group_id": group_id,
                     "action": "BLOCKED",
@@ -1574,6 +1679,17 @@ class AgentNodeJoiner:
                 continue
             doc_markdown = str(payload.get("doc_markdown"))
             doc = MenxiaGroupDoc.parse(doc_markdown)
+            if role != "solver":
+                for suggestion_id in payload.get("confirmed_rejection_ids") or ():
+                    doc = doc.confirm_rejection(str(suggestion_id), accept=True)
+                    doc = replace(doc, ledger=doc.ledger + (LedgerEntry(
+                        doc.version, f"{role} 确认不采纳 {suggestion_id}", (str(suggestion_id),)
+                    ),))
+                for suggestion_id in payload.get("reaffirmed_rejection_ids") or ():
+                    doc = doc.confirm_rejection(str(suggestion_id), accept=False)
+                doc = doc.prune_closed()
+            if role == "solver" and action == "READY_FOR_CRITIC":
+                action = "READY_FOR_ANALYST"
             approval_blockers: tuple[str, ...] = ()
             if role == "critic" and action == "APPROVE_GROUP":
                 # The approval map must close against the group requirement
@@ -1583,6 +1699,7 @@ class AgentNodeJoiner:
                 # markdown skip the map closure.
                 approval_blockers = menxia_approval_blockers(
                     doc.body_markdown,
+                    group_id=str(context.get("group_id") or ""),
                     requirement_markdown=str(
                         context.get("requirement_markdown") or ""
                     ),
@@ -1602,6 +1719,13 @@ class AgentNodeJoiner:
                 # blockers.  Fold the demand back to the solver instead of
                 # advancing to the gate.
                 action = "REQUEST_SOLVER_REVISION"
+            if role == "critic" and action == "APPROVE_GROUP" and not doc.approved_by("analyst"):
+                action = "REQUEST_EVIDENCE"
+            if role != "solver":
+                approved = (action in {"EVIDENCE_SUFFICIENT", "READY_FOR_CRITIC", "APPROVE_GROUP"}
+                            and not any(s.author == role for s in (*doc.open_blocking(), *doc.pending_rejections())))
+                doc = doc.sign_doc(author=role, approved=approved)
+                doc_markdown = doc.render()
             row: dict[str, object] = {
                 "group_id": group_id,
                 "action": action,
@@ -1609,11 +1733,14 @@ class AgentNodeJoiner:
                 "doc_hash": _sha256_hex(doc_markdown),
                 "doc_markdown": doc_markdown,
                 "open_count": doc.open_count(),
+                "open_suggestion_ids": sorted(s.suggestion_id for s in
+                                               (*doc.open_blocking(), *doc.pending_rejections())),
             }
             fingerprint = str(payload.get("fingerprint") or "")
             if fingerprint:
                 row["fingerprint"] = fingerprint
             if role == "solver":
+                row["clear_reply_repair"] = True
                 # Doc mutations the fold needs, claimed by the worker and
                 # already mechanically verified against the section rules.
                 absorbed_ids = payload.get("absorbed_ids")
@@ -1651,7 +1778,8 @@ class AgentNodeJoiner:
             census[group_id] = next_stage
         aggregate: dict[str, object] = {
             "action": menxia_group_wave_action(
-                self._state, result_actions=result_actions, census=census
+                self._state, result_actions=result_actions,
+                census=dict(Counter(census.values())),
             ),
             "menxia_group_results": group_rows,
             "worker_results": [
@@ -1663,6 +1791,9 @@ class AgentNodeJoiner:
                 )
             ],
         }
+        if human_questions:
+            aggregate["questions_for_user"] = human_questions
+            aggregate["summary"] = "\n".join(human_reasons)
         return NodeResult(
             self._node_run_id, "SUCCEEDED", results, aggregate=aggregate
         )
@@ -1905,6 +2036,7 @@ class AgentNodeJoiner:
             GROUP_MODE_ACTIONS,
             group_finding_scope,
             normalize_group_action,
+            group_action_with_followups,
         )
 
         member_ids_by_group = {
@@ -1916,21 +2048,43 @@ class AgentNodeJoiner:
         group_reviews: list[dict[str, object]] = []
         findings: list[dict[str, object]] = []
         rejected: list[str] = []
+        worker_rejections: list[tuple[str, str]] = []
+        def reject(worker_id, reasons):
+            rejected.extend(reasons)
+            worker_rejections.append((worker_id, "; ".join(reasons)))
         group_by_worker = {
             worker_id: str(context.get("group_id") or "")
             for worker_id, context in self._binding_contexts.items()
         }
         for payload in worker_payloads:
+            worker_id = str(payload.get("worker_id") or "")
             group_id = (
                 str(payload.get("group_id") or "").strip()
                 or group_by_worker.get(str(payload.get("worker_id") or ""), "")
             )
             raw_action = str(payload.get("action") or "")
+            binding = self._binding_contexts.get(str(payload.get("worker_id") or "")) or {}
+            if binding.get("revision_id") and binding.get("plan_hash"):
+                from ..zhongshu_review import review_identity_error
+                # REVIEW_GROUP explicitly forbids model-echoed business IDs.
+                # Transport already correlates the envelope to this dispatch;
+                # stamp missing business coordinates from its trusted binding.
+                # Supplied coordinates still undergo mismatch checks below.
+                identity = dict(payload)
+                if not any(identity.get(key) for key in ("revision_id", "plan_revision_id")):
+                    identity["revision_id"] = str(binding["revision_id"])
+                if not any(identity.get(key) for key in ("plan_hash", "reviewed_plan_hash")):
+                    identity["reviewed_plan_hash"] = str(binding["plan_hash"])
+                identity_error = review_identity_error(
+                    identity, str(binding["revision_id"]), str(binding["plan_hash"])
+                )
+                if identity_error or group_id != str(binding.get("group_id") or ""):
+                    reject(worker_id, [identity_error or "GROUP_REVIEW_GROUP_MISMATCH"])
+                    continue
+                payload = identity
             action = normalize_group_action(raw_action)
             if not group_id or action not in GROUP_MODE_ACTIONS:
-                rejected.append(
-                    f"GROUP_REVIEW_RESULT_INVALID:{group_id or '?'}:{raw_action}"
-                )
+                reject(worker_id, [f"GROUP_REVIEW_RESULT_INVALID:{group_id or '?'}:{raw_action}"])
                 continue
             scoped: list[dict[str, object]] = []
             unscoped: list[str] = []
@@ -1938,6 +2092,9 @@ class AgentNodeJoiner:
                 if not isinstance(raw, Mapping):
                     continue
                 entry = dict(raw)
+                if entry.get("group_id") and entry["group_id"] != group_id:
+                    unscoped.append(f"GROUP_FINDING_GROUP_MISMATCH:{entry.get('finding_id')}")
+                    continue
                 item_id, error = group_finding_scope(
                     entry, member_ids_by_group.get(group_id, ())
                 )
@@ -1948,13 +2105,34 @@ class AgentNodeJoiner:
                 entry.setdefault("group_id", group_id)
                 scoped.append(entry)
             if unscoped:
-                rejected.extend(unscoped)
+                reject(worker_id, unscoped)
                 continue
             responses = [
                 dict(entry)
                 for entry in payload.get("finding_responses") or ()
                 if isinstance(entry, Mapping)
             ]
+            prior = [
+                dict(entry)
+                for context in self._binding_contexts.values()
+                if str(context.get("group_id") or "") == group_id
+                for entry in context.get("active_findings") or ()
+                if isinstance(entry, Mapping)
+            ]
+            from ..domain.policies.critic_dispositions import group_disposition_error
+            known = {str(entry.get("finding_id")): entry for entry in prior}
+            for entry in binding.get("known_findings") or ():
+                if isinstance(entry, Mapping):
+                    known.setdefault(str(entry.get("finding_id")), dict(entry))
+            disposition_error = group_disposition_error(list(known.values()), scoped, responses, action)
+            if disposition_error:
+                reject(worker_id, [disposition_error])
+                continue
+            # Closed prior blockers no longer veto a P2/P3-only follow-up approval.
+            closing = {str(row.get("finding_id")) for row in responses
+                       if str(row.get("response") or "").upper() in {"RESOLVED", "ACCEPT", "DEFERRED", "ACCEPTED_RISK", "WONT_FIX", "WONT_VERIFY"}}
+            prior = [row for row in prior if str(row.get("finding_id")) not in closing]
+            action = group_action_with_followups(action, scoped, prior)
             group_reviews.append(
                 {
                     "group_id": group_id,
@@ -1962,6 +2140,8 @@ class AgentNodeJoiner:
                     "member_ids": member_ids_by_group.get(group_id, []),
                     "findings": scoped,
                     "finding_responses": responses,
+                    "required_change": copy.deepcopy(payload.get("required_change") or []),
+                    "missing_evidence": copy.deepcopy(payload.get("missing_evidence") or []),
                     "reviewed_plan_hash": str(payload.get("reviewed_plan_hash") or ""),
                 }
             )
@@ -1994,6 +2174,7 @@ class AgentNodeJoiner:
                     error_code="NODE_GROUP_REVIEW_RESULT_INVALID",
                     retryable=True,
                     message="; ".join(rejected[:6]),
+                    worker_rejections=tuple(worker_rejections),
                     cause_type="FanInValidation",
                 ),
             )

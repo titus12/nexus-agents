@@ -69,6 +69,7 @@ class AdmissionKey:
     worker_id: str
     revision_id: str
     external_target_key: str = ""
+    role: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,10 @@ class NotificationRequest:
     task_id: str
     notification_key: str
     body: str
+    document_markdown: str = ""
+    document_version: int = 0
+    document_hash: str = ""
+    decision_id: str = ""
 
 
 @dataclass(frozen=True)

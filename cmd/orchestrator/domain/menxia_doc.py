@@ -77,6 +77,34 @@ BODY_PART_TITLES = (
     "风险与兼容",
 )
 
+
+def body_template() -> str:
+    """One source for the exact headings shown to workers and validated."""
+    return "\n\n".join(f"### {title}\n" for title in BODY_PART_TITLES)
+
+
+def is_initial_body(body: str) -> bool:
+    """Legacy empty skeletons and the canonical heading-only skeleton."""
+    return not body.strip() or body.strip() == body_template().strip()
+
+
+def body_protocol_prompt() -> str:
+    return ("Keep these exact ### body headings in order, with substantive content under each: "
+            + "; ".join(BODY_PART_TITLES)
+            + ". Put per-item subsections at #### depth inside these sections, not instead of them. "
+            "For review-only requests describe review steps and deliverables; do not invent code implementation work. "
+            "First fill keeps v1 (legacy first-fill v2 is accepted); later revisions advance exactly one version. "
+            "Complete Solver drafts go to READY_FOR_ANALYST; never skip the evidence reviewer.")
+
+
+def solver_reply_repairable(violations: tuple[str, ...]) -> bool:
+    """Only shape corrections; protected-document violations stay blocked."""
+    prefixes = ("body_missing_part:", "body_empty_part:", "body_part_order",
+                "human_gate_requires_concrete_question_and_reason",
+                "solver must fill the empty document body",
+                "body sections changed without a touched_scope entry:")
+    return bool(violations) and all(error.startswith(prefixes) for error in violations)
+
 # Markers that mean a decision is still open; none may survive into an
 # approved plan body.
 UNDECIDED_MARKERS = ("待定", "待决策", "TODO")
@@ -485,7 +513,7 @@ def render_initial(
         version=1,
         title=f"{group_id} 门下省方案",
         baseline_markdown=baseline_markdown.strip(),
-        body_markdown=body_markdown.strip(),
+        body_markdown=body_markdown.strip() or body_template(),
         suggestions=(),
         ledger=(),
         signoffs=(),
@@ -627,6 +655,8 @@ def body_part_violations(body_markdown: str) -> tuple[str, ...]:
             errors.append(f"body_missing_part:{title}")
         else:
             positions.append(headings.index(title))
+            if not _body_part_slices(body_markdown).get(title, "").strip():
+                errors.append(f"body_empty_part:{title}")
     if (
         len(positions) == len(BODY_PART_TITLES)
         and positions != sorted(positions)
@@ -684,6 +714,7 @@ def menxia_approval_blockers(
     body_markdown: str,
     *,
     requirement_markdown: str = "",
+    group_id: str = "",
 ) -> tuple[str, ...]:
     """Approval-gate checks for a critic APPROVE_GROUP (requirements §9).
 
@@ -696,6 +727,12 @@ def menxia_approval_blockers(
     """
 
     errors: list[str] = []
+    if "<!-- requirement-group:" in requirement_markdown:
+        from .plan_review import group_chapter
+        try:
+            requirement_markdown = group_chapter(requirement_markdown, group_id)
+        except ValueError as error:
+            return (str(error),)
     for marker in UNDECIDED_MARKERS:
         if marker in body_markdown:
             errors.append(f"undecided_marker:{marker}")
@@ -810,12 +847,22 @@ def _verify_solver_reply(
     # three groups parked as MENXIA_GROUP_DOC_BREACH on their first solver
     # wave).  Revision rounds (below) keep the strict rules.
     initial_fill = (
-        not previous.body_markdown.strip()
+        is_initial_body(previous.body_markdown)
         and not previous.suggestions
         and not previous.ledger
     )
+    if current.baseline_markdown != previous.baseline_markdown:
+        errors.append("solver changed frozen baseline")
+    if current.group_id != previous.group_id or current.title != previous.title:
+        errors.append("solver changed document identity")
+    if current.extra_sections != previous.extra_sections:
+        errors.append("solver changed protected extra sections")
+    if any(signoff not in previous.signoffs for signoff in current.signoffs):
+        errors.append("solver forged reviewer signoff")
     if initial_fill:
-        if not current.body_markdown.strip():
+        if current.suggestions != previous.suggestions or current.ledger != previous.ledger or current.signoffs != previous.signoffs:
+            errors.append("solver changed protected first-fill sections")
+        if is_initial_body(current.body_markdown):
             errors.append("solver must fill the empty document body")
         if current.version not in (previous.version, previous.version + 1):
             errors.append(
@@ -902,6 +949,10 @@ def _verify_reviewer_reply(
     reply: Mapping[str, object],
 ) -> tuple[str, ...]:
     errors: list[str] = []
+    if current.title != previous.title or current.group_id != previous.group_id:
+        errors.append(f"{role} changed document identity")
+    if reply.get("reviewed_version") not in (None, "", previous.version):
+        errors.append(f"{role} reviewed_version does not match the dispatched document")
     if current.version != previous.version:
         errors.append(
             f"reviewer must keep the version at {previous.version}, "
@@ -948,6 +999,16 @@ def _verify_reviewer_reply(
             "added_suggestion_ids does not match the appended suggestions: "
             f"claimed {claimed_ids}, found {added_ids}"
         )
+    confirmations = reply.get("confirmed_rejection_ids") or ()
+    reaffirmed = reply.get("reaffirmed_rejection_ids") or ()
+    if not isinstance(confirmations, (list, tuple)) or not isinstance(reaffirmed, (list, tuple)):
+        errors.append("rejection confirmation IDs must be arrays")
+    else:
+        pending = {s.suggestion_id for s in previous.suggestions
+                   if s.author == role and s.status == SUGGESTION_REJECTED_PENDING}
+        claims = [str(value) for value in (*confirmations, *reaffirmed)]
+        if len(set(claims)) != len(claims) or any(value not in pending for value in claims):
+            errors.append("rejection confirmation must name unique pending suggestions owned by the reviewer")
     return tuple(errors)
 
 
@@ -1013,12 +1074,13 @@ def _parse_signoffs(markdown: str) -> list[Signoff]:
         match = SIGNOFF_PATTERN.match(line.strip())
         if not match:
             continue
-        rest = match.group("rest")
+        rest = match.group("rest").strip(" ,，")
+        status = re.match(r"^(通过|approved|已审|reviewed)(?:\s*[,，]?\s*)", rest, re.IGNORECASE)
         signoffs.append(Signoff(
             author=match.group("author"),
             version=int(match.group("version")),
-            approved=any(marker in rest.lower() for marker in _PASS_MARKERS),
-            note=rest.strip(" ,，"),
+            approved=status is not None and status.group(1).lower() in _PASS_MARKERS,
+            note=rest[status.end():] if status is not None else rest,
         ))
     return signoffs
 

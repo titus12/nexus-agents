@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from .contracts import all_contracts, contract_for_state
+from .contracts.analyst_gate import analyst_gate_error
 from .contracts.common import (
     STRUCTURED_OUTPUT_PROTOCOL,
     PhaseContract,
@@ -410,4 +411,8 @@ def validate_role_result_shape(
     validate_schema(payload, active_schema, "", errors)
     if errors:
         return "STRUCTURED_ROLE_CONTRACT_INVALID:" + ";".join(errors[:20])
+    if contract.state == "ZHONGSHU_ANALYST":
+        error = analyst_gate_error(payload)
+        if error:
+            return "STRUCTURED_ROLE_CONTRACT_INVALID:" + error
     return ""

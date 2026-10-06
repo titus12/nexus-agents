@@ -485,6 +485,9 @@ class _EvidenceDetourMultica(_ConvergingMultica):
     def _evidence_packet_reply(self, request) -> None:
         self.evidence_waves += 1
         citation = Path(self.evidence_site).as_posix()
+        scope = request.context['evidence_demand']['active_findings'][0]
+        quote = {'path': citation, 'line_start': 1, 'line_end': 1,
+                 'text': Path(self.evidence_site).read_text(encoding='utf-8').splitlines()[0]}
         self._reply(
             request,
             {
@@ -496,15 +499,18 @@ class _EvidenceDetourMultica(_ConvergingMultica):
                 "note": f"verified at {citation}:1",
                 "finding_responses": [
                     {
-                        "finding_id": "finding-evidence-db",
+                        "finding_id": scope['finding_id'],
                         "answer": f"ENGINE is defined at {citation}:1",
                         "evidence_ids": ["evidence-db-1"],
+                        "quote": quote,
                         "suggested_disposition": "CLOSE",
                     }
                 ],
                 "evidence_updates": [
                     {
                         "evidence_id": "evidence-db-1",
+                        "item_id": scope['item_id'],
+                        "quote": quote,
                         "requirement_id": "req-000001",
                         "decision_relevance": "risk",
                         "source": citation,

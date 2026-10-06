@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 from .common import array, make_contract, object_schema, string
+from ..group_identity import GROUP_ID_DESCRIPTION, GROUP_ID_SCHEMA_PATTERN
+
+_GROUP_ID = {**string(), "pattern": GROUP_ID_SCHEMA_PATTERN,
+             "description": GROUP_ID_DESCRIPTION}
 
 
 _ACTIONS = ("READY_FOR_CRITIC", "REQUEST_ANALYST_EVIDENCE", "NEEDS_MORE_EVIDENCE", "HUMAN_GATE", "BLOCKED")
@@ -27,12 +31,13 @@ _REQUIREMENT = object_schema(
         "scope": string(enum=("in", "out", "conditional")),
         "kind": string(enum=("task", "constraint")),
         "acceptance_signal": string(),
+        "source_quote": string(),
     },
     required=("requirement_id", "statement", "source", "priority", "scope", "kind", "acceptance_signal"),
 )
 _GROUP = object_schema(
     {
-        "group_id": string(),
+        "group_id": _GROUP_ID,
         "title": string(),
         "objective": string(),
         "item_ids": array(string()),
@@ -66,7 +71,7 @@ _EVIDENCE_REQUEST = object_schema(
     required=("item_id", "requirement_id", "question", "reason"),
 )
 _GROUP_DOC = object_schema(
-    {"group_id": string(), "markdown": string()},
+    {"group_id": _GROUP_ID, "markdown": string()},
     required=("group_id", "markdown"),
 )
 
@@ -92,6 +97,8 @@ CONTRACT = make_contract(
         "`requirement_contract` in dispatch_context is the same authoritative requirement array; when echoing requirement text into group_docs, answers, or documents, transcribe it verbatim from that array and cite the anchor `requirement_contract[<requirement_id>]`.",
         "Analyst candidate_items and candidate_groups are empty in the current evidence-only handoff; Solver creates the formal task graph from evidence.",
         "Dependencies are one-way execution prerequisites only. The complete plan.items dependency graph must be a directed acyclic graph: direct and transitive cycles are invalid, and related-but-not-blocking work must not be encoded as depends_on.",
+        "Project item dependencies onto owning groups (ignore within-group edges): the group graph must also be acyclic. Never place an upstream prerequisite and downstream summary in the same group when this makes groups depend on each other. Split those groups while preserving real item dependencies.",
+        GROUP_ID_DESCRIPTION,
         "plan.items is the only complete task-object index. Every group must use item_ids to reference plan.items; never emit groups[*].items or duplicate task objects.",
         "Do not emit implementation-level design fields forbidden by the solver protocol.",
         "Every finding resolution must identify its owner and next action, and must carry a non-empty evidence array; an empty evidence list is a contract violation.",

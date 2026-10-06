@@ -309,8 +309,8 @@ class ZhongshuCriticGroupGateTests(unittest.TestCase):
         )
 
     def test_stuck_finding_fuse_retained(self) -> None:
-        # The stuck fuse fires before the group pipeline parks anything: one
-        # finding the Solver keeps re-raising escalates on its own.
+        # A scoped stuck finding parks its own group; independent peers keep
+        # their review opportunities before the named human decision opens.
         context = _context(
             findings=(
                 _finding(
@@ -324,12 +324,14 @@ class ZhongshuCriticGroupGateTests(unittest.TestCase):
         )
         decision = self.state.handle(context, _event("REQUEST_SOLVER_REVISION"))
 
-        self.assertEqual(decision.transition.action, "HUMAN_GATE")
-        self.assertEqual(
-            decision.transition.reason_code, "ZHONGSHU_STUCK_FINDING"
-        )
+        self.assertEqual(decision.transition.action, "CONTINUE_GROUP_REVIEW")
         rows = self._rows_by_id(decision.update.review)
         self.assertEqual(rows["group-000001"].revision_round, 1)
+        self.assertEqual(rows["group-000001"].stage, "STALLED")
+        self.assertEqual(rows["group-000001"].blocked_reason, "ZHONGSHU_STUCK_FINDING")
+        dispatch = next(effect for effect in decision.effects if effect.effect_type == "node_dispatch")
+        self.assertEqual({binding["group_id"] for binding in dispatch.payload["bindings"]},
+                         {"group-000002", "group-000003"})
 
     def test_followup_freeze_still_bounded(self) -> None:
         findings = (

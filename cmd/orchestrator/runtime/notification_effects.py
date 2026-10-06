@@ -35,19 +35,45 @@ class NullNotificationPort:
 class FeishuNotificationPort:
     """Adapt the existing Feishu gate adapter to the runtime port."""
 
-    def __init__(self, adapter: FeishuHttpAdapter | None = None) -> None:
+    def __init__(self, adapter: FeishuHttpAdapter | None = None, *, task_root=None, publisher=None) -> None:
         self._adapter = adapter or FeishuHttpAdapter()
+        self._publisher = publisher
+        if self._publisher is None and task_root is not None:
+            from ..feishu_review_document import FeishuReviewDocumentPublisher
+            self._publisher = FeishuReviewDocumentPublisher(task_root, chat_id=self._adapter.chat_id)
 
     def send(self, request: NotificationRequest) -> NotificationReceipt:
+        body = request.body
+        if request.document_markdown:
+            if self._publisher is None:
+                raise RuntimeError("PLAN_REVIEW_DOCUMENT_PUBLISHER_MISSING")
+            document = self._publisher.publish(request.task_id, request.document_version,
+                                               request.document_markdown, request.document_hash)
+            if document.get("message_id") and document.get("decision_id") == request.decision_id:
+                return NotificationReceipt(request.notification_key, delivered=True)
+            body += "\n\n完整方案：" + document["url"]
         receipt = self._adapter.send_gate(
             HumanGate(
                 decision_id=request.notification_key,
                 task_id=request.task_id,
                 resume_state="",
-                prompt=request.body,
+                prompt=body,
             )
         )
+        if request.document_markdown and receipt.delivered:
+            self._publisher.record_delivery(request.document_version, request.document_hash,
+                                            receipt.message_id, request.notification_key, request.decision_id)
         return NotificationReceipt(request.notification_key, delivered=receipt.delivered)
+
+    def ensure_plan_review_delivery(self, context) -> bool:
+        from ..notifications import plan_review_notification_request
+        return self.send(plan_review_notification_request(context)).delivered
+
+    def verify_plan_review_document(self, context) -> None:
+        if self._publisher is None:
+            raise RuntimeError("PLAN_REVIEW_DOCUMENT_PUBLISHER_MISSING")
+        self._publisher.verify(int(context.review.plan_review["version"]),
+                               context.human_gate.document_hash)
 
     def poll_reply(self, gate: HumanGate) -> list:
         return self._adapter.poll_reply(gate)

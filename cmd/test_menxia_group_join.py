@@ -109,7 +109,7 @@ class TestGroupSolverJoin(unittest.TestCase):
         self.assertTrue(row["doc_hash"])
         self.assertEqual(row["open_count"], 0)
 
-    def test_breach_is_demoted_to_blocked(self) -> None:
+    def test_undeclared_body_change_returns_to_solver_repair(self) -> None:
         joiner = _solver_joiner(_doc_v1())
         payload = {
             "action": "READY_FOR_ANALYST",
@@ -120,12 +120,12 @@ class TestGroupSolverJoin(unittest.TestCase):
         self.assertEqual(node.status, "SUCCEEDED")
         aggregate = node.aggregate
         row = aggregate["menxia_group_results"][0]
-        self.assertEqual(row["action"], "BLOCKED")
-        self.assertIn("MENXIA_GROUP_DOC_BREACH", row["blocked_reason"])
+        self.assertEqual(row["action"], "REPAIR_SOLVER_REPLY")
+        self.assertIn("touched_scope", row["reply_rejection"])
         # Mirrors the item pipeline: the joiner routes by active stages;
         # the drain-out tail (only parked rows) is intercepted by the
         # state-level wave decision, not by the aggregate action.
-        self.assertEqual(aggregate["action"], "READY_FOR_ANALYST")
+        self.assertEqual(aggregate["action"], "RETRY")
 
     def test_first_round_needs_no_previous_document(self) -> None:
         joiner = _solver_joiner(None)
@@ -235,11 +235,12 @@ class TestGroupCriticJoin(unittest.TestCase):
         self.assertEqual(row["doc_version"], 1)
 
     def test_critic_approval_with_clean_document_passes(self) -> None:
-        joiner = self._critic_joiner(_doc_v1())
+        reviewed = MenxiaGroupDoc.parse(_doc_v1()).sign_doc(author="analyst", approved=True).render()
+        joiner = self._critic_joiner(reviewed)
         payload = {
             "action": "APPROVE_GROUP",
             "group_id": "group-000001",
-            "doc_markdown": _doc_v1(),
+            "doc_markdown": reviewed,
             "added_suggestion_ids": [],
         }
         node = joiner.join((_result(payload),))
@@ -269,6 +270,7 @@ class TestGroupCriticJoin(unittest.TestCase):
     def test_critic_approval_without_requirement_doc_passes(self) -> None:
         # Legacy bindings carry no requirement_markdown: the map closure is
         # skipped and the approval folds as before.
+        reviewed = MenxiaGroupDoc.parse(_doc_v1()).sign_doc(author="analyst", approved=True).render()
         joiner = AgentNodeJoiner(
             "node-1",
             task_id="task-1",
@@ -276,14 +278,14 @@ class TestGroupCriticJoin(unittest.TestCase):
             dispatch_mode="menxia_group_pipeline",
             binding_contexts={"worker-1": {
                 "group_id": "group-000001",
-                "doc_markdown": _doc_v1(),
+                "doc_markdown": reviewed,
             }},
             menxia_stage_census={"group-000001": "REVIEWING"},
         )
         payload = {
             "action": "APPROVE_GROUP",
             "group_id": "group-000001",
-            "doc_markdown": _doc_v1(),
+            "doc_markdown": reviewed,
             "added_suggestion_ids": [],
         }
         node = joiner.join((_result(payload),))

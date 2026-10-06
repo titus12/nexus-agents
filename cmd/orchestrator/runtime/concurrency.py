@@ -105,6 +105,17 @@ class RuntimeConcurrencyAdmission:
             if snapshot.phase_inflight.get(key.phase, 0) >= phase_limit:
                 self._log_rejection(key, "phase_limit", snapshot.phase_inflight.get(key.phase, 0), phase_limit, log_rejection)
                 return None
+            # phase is ZHONGSHU/MENXIA in real dispatches, not a role name.
+            # Enforce role capacity across both phases independently.
+            if key.role:
+                role_inflight = sum(
+                    self._role_name(lease.key.role) == self._role_name(key.role)
+                    for lease in snapshot.active_leases
+                )
+                role_limit = self._phase_limit(key.role)
+                if role_inflight >= role_limit:
+                    self._log_rejection(key, "role_limit", role_inflight, role_limit, log_rejection)
+                    return None
             now = self._now()
             lease = LeaseReceipt(
                 lease_id=f"lease-{uuid.uuid4().hex}",
@@ -198,6 +209,10 @@ class RuntimeConcurrencyAdmission:
         if "CRITIC" in normalized:
             return self.limits.critic_max
         return self.limits.per_task_max
+
+    @staticmethod
+    def _role_name(role: str) -> str:
+        return role.upper().removeprefix("REVIEW-")
 
     def _expire_locked(self, now: datetime) -> list[LeaseReceipt]:
         expired: list[LeaseReceipt] = []

@@ -1,541 +1,93 @@
-# Solver 门下省阶段 Skill 设计
+# Solver 门下省 Skill
 
-> Skill 名称：`menxia-solver`  
-> 适用 Agent：`review-solver`  
-> 适用阶段：`MENXIA`  
-> 审查粒度：当前组内的单个方案条目
-> 机器协议：`cmd/orchestrator/contracts/menxia_item_solver.py`
+负责当前组完整正文和修订，不批准需求，不代替证据审计。
 
-> Solver 负责细化和提出 ReviewOverlay amendment，但不能批准条目或
-> 直接修改 FrozenPlan。
+## 组级协议（2026-10-06）
 
-## 运行边界
+先读本次 prompt.txt、context.json、active-skill.md 和注入的 Python result contract。
+state、mode、字段和 action 枚举以本次契约为准；历史指南不能覆盖当前派发协议。
 
-本 skill 只描述当前条目的方案细化方法。机器字段、类型、枚举和结果结构由
-Orchestrator 注入的 Menxia Solver Python 契约决定，不从本文件推导另一套协议。
+默认链路：用户“通过”批准中书省需求 → 就绪组 Solver → Analyst → Critic → 组级 Gate → 后续组/完成。
+同组成员共用一份版本化门下省文档，组间由编排器按依赖调度，不逐条生成独立方案。
+不得自行改 group_id、item_ids、冻结范围或工作流状态。
+仅在 MENXIA_ITEM_* 状态使用旧条目方法和当前条目契约，组级任务不返回 ItemReviewPacket。
+MENXIA_GROUP_GATE 使用独立汇总契约，不能与 MENXIA_GROUP_CRITIC 混用。
 
-本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针（唯一例外：当结果超大、平台以 "too large to post safely" 占位符顶替了原文时，把完整结果写入 prompt bundle manifest 所列的结果文件、评论只留一句摘要——这只是超限兜底，正常体量的结果仍走 inline 交付），不要以裸 Markdown、代码围栏或 diff/patch 代替结构化 JSON 结果；`changes`、`tests` 等字段内部包含 diff/代码文本是本 Skill 的明确要求，不属于违规。
+### 范围和文档
 
-交付纪律：本轮只提交一份结果并结束。禁止使用 todo/计划清单（todo_write）：本轮是单结果交付，直接产出结构化 JSON 并结束，不要建立或维护任务清单。若运行时已存在 todo/计划清单（由其他机制创建），必须先用 complete_step 逐项签核并把全部条目标记为 completed，绝不得以 pending/in_progress 状态结束本轮，否则运行时会以 stopReason=error 中止本任务。本轮只允许产生一条结果评论，其正文必须是该 JSON 对象本身；禁止额外发布任何报告、进度或说明性质的过程评论。
+冻结的 requirement_markdown 是本组需求依据；同时对照完整人工批准的需求文档，
+保留 source_quote，覆盖本组全部成员和验收信号，区分用户原话、推断和证据。
+审查/分析需求交付审查结论、证据和验证方法，不扩张为立即实施或强制上线测量。
+明确要求实现设计时才细化代码、接口、验证和回滚。
 
-## 1. Skill 定位
+保留派发骨架的 ## 0 冻结基线、## 1 正文、## 2 建议、## 3 吸收记录、## 4 签收。
+## 1 必须依次有六个固定标题，每节填实质内容：
 
-该 Skill 负责把中书省的原始方案条目细化为可行、可落地、可验证的
-实现条目。
-
-```text
-读取冻结条目
-→ 读取 Analyst 证据审计
-→ 重新确认影响落地的关键事实
-→ 检查现有架构和复用能力
-→ 补充接口、模块、数据流、控制流和生命周期
-→ 补充错误处理、兼容性、验证和回滚
-→ 输出 ItemFeasibilityProposal
+```markdown
+### 目标与设计决策
+### 现状与目标行为
+### 统一约束
+### 任务分解
+### 验收映射
+### 风险与兼容
 ```
 
-Solver 的核心问题是：
-
-> 这个条目在当前真实项目中应该如何落地，才能边界清晰、风险可控、可被验证？
-
-## 2. 输入
-
-```json
-{
-  "phase": "MENXIA",
-  "plan_id": "string",
-  "plan_version": 1,
-  "group_id": "string",
-  "item": {},
-  "frozen_plan": {},
-  "analyst_evidence_audit": {},
-  "project_context": {},
-  "prior_revisions": [],
-  "loaded_rules": [],
-  "loaded_skills": []
-}
-```
-
-## 3. Solver 职责
-
-Solver 必须：
-
-- 判断当前条目是否可实施；
-- 说明条目需要修改或复用哪些模块；
-- 明确接口和数据契约；
-- 明确数据流、控制流和生命周期；
-- 补充异常、超时、重试和降级；
-- 检查版本和平台兼容；
-- 检查是否重复造轮子；
-- 细化任务边界和实施步骤；
-- 处理 Analyst 提出的证据缺口；
-- 给出条目级验证计划；
-- 给出回滚或禁用策略；
-- 回应 Critic 对当前条目的每一条意见；
-- 明确剩余风险和需要用户决策的内容。
-
-Solver 不得：
-
-- 静默改变冻结方案的总体目标；
-- 直接修改冻结原文；
-- 把无法证实的假设写成实现前提；
-- 跳过证据审计；
-- 直接宣布条目通过；
-- 替 Critic 给出质量门结论；
-- 在没有依据时选定用户拥有的架构取舍；
-- 直接修改代码；
-- 声称代码已经落地或测试已经通过。
-
-## 4. 条目可行性流程
-
-```text
-ITEM_CONTEXT_CHECK
-  → FEASIBILITY_CHECK
-  → ARCHITECTURE_DETAIL
-  → IMPLEMENTATION_DETAIL
-  → COMPATIBILITY_DETAIL
-  → VERIFICATION_DETAIL
-  → ROLLBACK_DETAIL
-  → ITEM_PROPOSAL
-```
-
-如果 Critic 返回问题，则进入：
-
-```text
-CRITIC_FINDING
-  → RESPONSE_BY_FINDING
-  → ITEM_PROPOSAL_REVISION
-```
-
-## 5. 条目合理性判断
-
-Solver 首先判断原始条目应该如何处理：保留并细化、修改、拆分、合并、
-移除、转人工或阻塞。上述是语义处置，不是机器 action；具体 action 和
-结果字段只使用注入的 `cmd/orchestrator/contracts/menxia_item_solver.py`。
-
-这个判断不是最终质量结论，而是 Solver 对条目落地形态的建议。
-
-## 6. 条目实现细化
-
-每个条目至少要补充：
-
-```text
-目标
-涉及模块
-模块职责
-接口
-数据结构
-数据流
-控制流
-状态变化
-生命周期
-异常处理
-超时和重试
-并发模型
-兼容性
-迁移影响
-验证方式
-回滚方式
-```
-
-### 6.1 实现设计格式
-
-```json
-{
-  "implementation": {
-    "objective": "string",
-    "affected_modules": [],
-    "new_components": [],
-    "reused_components": [],
-    "interfaces": [],
-    "data_contracts": [],
-    "data_flow": [],
-    "control_flow": [],
-    "state_transitions": [],
-    "lifecycle": [],
-    "error_handling": [],
-    "timeout_retry": [],
-    "concurrency": [],
-    "configuration": [],
-    "migration": []
-  }
-}
-```
-
-### 6.2 代码级实施规格（验收线）
-
-方案细化的验收线只有一条：
-
-```text
-实施者拿到 changes 后，不需要做任何设计决策，只做机械录入。
-```
-
-`changes` 中的每个条目必须是代码级规格：
-
-- 修改既有代码：给出 before/after（原代码片段与替换代码片段，能精确锚定
-  到被改位置即可，格式与语言无关）；
-- 新增逻辑：给出完整实现代码，不允许只有行为描述；
-- 新增测试：给出断言级用例（Arrange/Act/Assert 或等价结构），测试代码属于
-  `changes` 的一部分，不得只写"补充 XX 测试"；
-- 纯样板（如 import 行、注册行）可以折叠省略，但任何含设计决策的代码不得
-  省略。
-
-写不出某段实现，说明存在未解决的设计决策：要么补证后再写，要么
-`HUMAN_GATE`。不允许用"由实施者决定"把决策推给下游。
-
-测试记录放在 `changes` 中（kind 为 test 的条目）；顶层 `tests` 字段只列
-测试名称与覆盖点摘要，并引用对应 change_id，两处不得互相矛盾。
-
-### 6.3 修订吸收义务
-
-revision_round > 0 时，`responses_to_critic` 必须覆盖上一轮每一条
-Finding，逐条给出 finding_id 和 position：
-
-```text
-accepted：对应变更必须出现在 changes 中，缺一即假吸收；
-rejected：必须给出能被 Critic 独立复核的反驳论证；
-其余 position：必须逐条说明后续动作，不允许整段沉默或用总体说明代替。
-```
-
-## 7. 可行性检查
-
-Solver 必须检查：
-
-```text
-方案是否符合现有架构
-是否需要新增模块
-已有模块是否可以复用
-接口是否真实存在或可增加
-依赖是否满足
-改动范围是否受控
-失败路径是否可处理
-是否可以验证
-是否存在不可逆影响
-```
-
-输出：
-
-```json
-{
-  "feasibility": {
-    "assessment": "semantic feasibility assessment; machine action comes from the injected contract",
-    "architecture_fit": "pass|risk|unknown",
-    "dependency_fit": "pass|risk|unknown",
-    "scope_fit": "within_scope|expanded|unknown",
-    "implementation_risks": [],
-    "blocking_questions": []
-  }
-}
-```
-
-## 8. 复用和重复造轮子
-
-如果已有能力存在，Solver 必须比较：
-
-```text
-能力是否相同
-输入输出是否兼容
-生命周期是否兼容
-性能是否满足
-扩展成本
-维护成本
-改造成本
-```
-
-输出：
-
-```json
-{
-  "reuse_decision": {
-    "existing_component": "string|null",
-    "decision": "reuse|extend|wrap|replace|new",
-    "reason": "string",
-    "evidence_ids": [],
-    "tradeoffs": []
-  }
-}
-```
-
-不能因为“新增模块看起来更干净”就忽略项目已有能力。
-
-## 9. 项目类型专项细化
-
-### 9.1 Go
-
-条目细化至少考虑：
-
-```text
-package 边界
-接口必要性
-context 取消
-错误传播
-goroutine 和 channel
-锁和竞态
-事务一致性
-分配和热点路径
-go.mod 影响
-向上兼容
-单元、集成、benchmark 和 race 验证
-```
-
-### 9.2 .NET
-
-条目细化至少考虑：
-
-```text
-Target Framework
-公共 API
-NuGet 和 assembly
-DI 注册
-CancellationToken
-IHostedService / BackgroundService
-IDisposable / IAsyncDisposable
-timeout 和 retry
-nullable
-配置兼容
-GC 和对象生命周期
-向上兼容
-```
-
-### 9.3 Unity
-
-条目细化至少考虑：
-
-```text
-Runtime / Editor 边界
-主线程
-对象生命周期
-Prefab、Scene、Asset 和 .meta
-序列化引用
-Unity 版本
-Android/iOS 真机
-ARM 架构
-Graphics API
-Mono、IL2CPP、Burst
-Package 影响
-帧耗时
-内存和 GC
-资源加载与释放
-```
-
-## 10. 验证计划
-
-Solver 必须将条目细化到可验证程度。
-
-```json
-{
-  "verification": {
-    "observable_behavior": [],
-    "unit_tests": [],
-    "integration_tests": [],
-    "regression_tests": [],
-    "benchmark_or_profile": [],
-    "device_matrix": [],
-    "manual_acceptance": [],
-    "logs_and_metrics": [],
-    "failure_cases": []
-  }
-}
-```
-
-必须区分：
-
-```text
-验证设计
-验证命令
-实际执行
-实际通过
-```
-
-当前阶段只允许输出验证设计和验证计划，不得声称已经执行。
-
-### 10.1 测量配方（五要素）
-
-中书省需求文档的验收信号只钉"什么必须可观测"（场景断言 + 数值二选一），"怎么测"由本阶段负责。凡验收信号含对比性数值结论（百分比、提升/降低/缩短等）而未给实测来源的，实施计划的验证段必须给出五要素测量配方：
-
-```text
-1. 测量对象（含 file:line 或日志字段）
-2. 具体命令/步骤
-3. 指标与单位
-4. 基线来源
-5. 预期观测量
-```
-
-五要素缺一项，验证计划不得进入执行；执行完成后按配方口径回填实测数字，替换需求信号里的「待实测」。
-
-## 11. 回滚和降级
-
-每个有风险的条目必须说明：
-
-```text
-如何禁用
-如何回退
-如何保留旧路径
-如何处理部分成功
-如何恢复数据
-如何恢复配置
-如何观测回滚是否生效
-```
-
-输出：
-
-```json
-{
-  "rollback": {
-    "strategy": "feature_flag|fallback_path|revert_change|migration_rollback|manual",
-    "steps": [],
-    "trigger_conditions": [],
-    "data_safety": [],
-    "verification": []
-  }
-}
-```
-
-## 12. 条目级可行性输出
-
-输出应覆盖目标、证据基础、可行性、实现细化、复用、兼容性、验证、回滚、
-剩余风险和 Critic 意见响应。机器 envelope、字段、类型和 action 不在本节
-重复定义，统一使用注入的 `cmd/orchestrator/contracts/menxia_item_solver.py`。
-
-`amendment` 只描述对 `ReviewOverlay` 的建议。Solver 不得直接覆盖
-FrozenPlan。涉及跨组依赖、公共契约、主要架构方向或组边界的修改，
-必须返回中书省并生成新的 FrozenPlan 版本。
-
-## 13. Critic 意见响应
-
-Critic 对条目提出问题后，Solver 必须逐条回应：
-
-```json
-{
-  "responses_to_critic": [
-    {
-      "finding_id": "finding-000001",
-      "position": "accepted|rejected|partially_accepted|needs_more_evidence|needs_user",
-      "reason": "string",
-      "proposal_change": "string",
-      "evidence_ids": [],
-      "verification_change": [],
-      "remaining_risk": "string"
-    }
-  ]
-}
-```
-
-不得用一段总体说明替代逐条响应。
-
-## 14. 典型细化示例
-
-### 原始条目
-
-```text
-增加核心资源预加载。
-```
-
-### Solver 细化后
-
-```text
-在现有 AddressablesLoader 之上增加预加载调度接口：
-
-1. 增加 IPreloadScheduler；
-2. 资源分为 Critical、SceneWarmup、Deferred；
-3. Critical 在进入主流程前加载；
-4. SceneWarmup 在场景切换前异步加载；
-5. Deferred 进入场景后按需加载；
-6. 每类资源拥有独立 Handle 生命周期；
-7. Critical 失败时阻止进入主流程；
-8. SceneWarmup 失败时降级为按需加载；
-9. Deferred 失败时支持重试；
-10. 不修改现有资源发布流程；
-11. 提供内存峰值和首帧耗时验证方案；
-12. 通过配置开关支持关闭预加载并恢复旧路径。
-```
-
-这才是可以交给质量门继续检查的落地条目。
-
-### 代码级变更记录（changes 条目示例）
-
-```json
-{
-  "change_id": "chg-000001",
-  "file": "Assets/Scripts/Loading/AddressablesLoader.cs",
-  "kind": "edit",
-  "before": "public Task LoadAsync(string key) { return LoadAsync(key, default); }",
-  "after": "public Task LoadAsync(string key) { return LoadAsync(key, _preloadScheduler.TokenFor(key)); }",
-  "anchor": "AddressablesLoader.LoadAsync(string)",
-  "why": "Critical 资源必须在进入主流程前挂到预加载调度器上 (finding-000003, accepted)"
-}
-```
-
-```json
-{
-  "change_id": "chg-000002",
-  "file": "Assets/Tests/PreloadSchedulerTests.cs",
-  "kind": "test",
-  "code": "Assert.Throws<InvalidOperationException>(() => _scheduler.Preload(critical));",
-  "why": "证伪'Critical 失败不阻止主流程'：若预加载失败未阻断主流程，该断言不成立"
-}
-```
-
-对照第 14 节开头的原始条目："增加核心资源预加载"这种粒度不满足验收线；
-上面的记录粒度才满足。
-
-## 15. Prompt Contract
-
-```text
-ROLE:
-You are Solver refining one frozen solution item in the Menxia phase.
-
-MISSION:
-Turn the current item into a feasible, bounded, implementation-ready, and
-verifiable item using Analyst's evidence audit and the frozen plan.
-
-REQUIRED ORDER:
-1. Read the frozen item and Analyst evidence audit.
-2. Decide whether the item should be kept, revised, split, merged, removed,
-   or sent to HUMAN_GATE.
-3. Revalidate facts that affect implementation direction.
-4. Detail modules, interfaces, data flow, lifecycle, errors, compatibility,
-   verification, and rollback.
-5. Compare reuse and new-implementation choices.
-6. Produce code-level changes: before/after for edits, complete code for new
-   logic, assertion-level tests. The implementer must make zero design
-   decisions from your changes alone.
-7. Respond to every Critic finding by finding ID; each accepted finding maps
-   to a concrete change.
-8. Return ItemFeasibilityProposal.
-
-DO NOT:
-- silently change the overall plan objective;
-- modify the frozen source artifact;
-- claim implementation or tests were completed;
-- declare the item approved;
-- choose user-owned trade-offs without HUMAN_GATE;
-- invent missing facts;
-- defer design decisions to the implementer with "TBD" or behavior-only
-  placeholders.
-```
-
-## 16. 验证要求
-
-实现该 Skill 时至少验证：
-
-1. Solver 能消费 Analyst 的条目证据审计；
-2. Solver 能判断条目保留、修改、拆分、合并或删除；
-3. Solver 能补充具体模块、接口和数据流；
-4. Solver 能补充错误处理、重试、降级和回滚；
-5. Solver 能检查复用和重复造轮子；
-6. Solver 能检查 Go/.NET/Unity 专项兼容性；
-7. Solver 能输出可验证的条目；
-8. Solver 能逐条回应 Critic Finding；
-9. accepted Finding 与 changes 一一对应，不存在假吸收；
-10. changes 达到代码级：实施者仅凭 changes 无需再做设计决策；
-11. Solver 不会直接宣布条目通过；
-12. Solver 不会声称已经修改代码或执行测试；
-13. Solver 能在缺少关键证据时返回 `NEEDS_MORE_EVIDENCE`；
-14. 输出可以被 Critic 的 ItemReviewPacket 校验器读取。
-
-## 23. Runtime Contract Authority
-
-This Skill contains only item-feasibility semantics. The Orchestrator injects
-`cmd/orchestrator/contracts/menxia_item_solver.py`, validates the full result
-before transition, and supplies bounded field paths for repair. Do not derive
-a machine envelope or action set from this document.
+标题来自编排器 BODY_PART_TITLES，以派发 body_part_titles 和完整骨架为准。
+ITEM 子节用 #### 放在固定节内，不能取代六节。
+验收映射逐项写“ - 原验收信号 -> 验证方法/步骤”，不增加原需求没有的验收门槛。
+没有风险时写适用边界和判断依据，不能留空标题。
+
+首次填充保持派发 v1，后续 Solver 正文修订升一个版本。以 expected_doc_version 为准。
+拒绝草稿没有进入权威版本链，格式修复不基于拒绝草稿另升版本。
+Analyst/Critic 保持版本，只在建议区追加本角色建议，其他分区及已有建议保持原样。
+reviewed_version、reviewed_hash 对应派发版本和 doc_hash，不使用追加意见后的新 hash。
+签收由编排器写入，worker 不伪造签名，不修改冻结基线或另一角色意见。
+
+建议严格使用本次契约格式：
+`[S-NNN][analyst或critic][vN base][P0-P3][open] 可执行建议`。
+编号不冲突；added_suggestion_ids 精确列出新增编号；旧建议不能静默消失。
+P0/P1 与待确认不采纳阻止收敛；P2/P3 仅按契约允许的有目标、有理由的延后规则处置。
+当前版本两位 reviewer 签收且阻断闭合，编排器才批准本组。
+
+### 修复、人工决策与输出
+
+缺小节、空小节、顺序错误或缺 touched_scope，由编排器返回组内有界 Solver 格式修复。
+使用 reply_rejection 和 rejected_doc_markdown 修复；doc_markdown 仍是最后接受的权威版本。
+修复计数由编排器管理，与内容修订轮数分开，不重做无关调查。
+身份、基线、受保护分区破坏或格式修复预算耗尽仍阻断，不能声称已通过。
+HUMAN_GATE 仅用于确需用户选择的问题，必须给具体 questions_for_user、原因与可选方案。
+空问题、完成汇报、格式错误均不应请求人工；证据缺口走补证，正文缺陷走 Solver 修订。
+具体 action 只使用当前注入枚举，不造新字段。
+
+复用已有文件、日志和证据，优先检查本组变化与未解决问题；契约满足即提交。
+不重复全库审计，不使用 todo_write，不输出过程评论。返回一个完整 inline JSON；
+仅在平台明确报 “too large to post safely” 时使用派发允许的 result-file fallback：
+将完整 JSON 写到本次派发指定的结果文件，不能写另一个 run 的路径，也不能截断正文。
+
+### 人工需求审查
+
+只有编排器能消费用户去除首尾空白后的精确“通过”，释放中书省需求到门下省。
+其他非空回复交 Solver 修订，再送人工审，该人工修订不需要 Critic 校验。
+用户和门下省使用同一 canonical requirements document 的版本与 hash，不另写摘要替代。
+门下省共享审查正文是细化产物，不能反向替换人工批准的需求。
+
+## Solver 方法
+
+1. 读取本组成员、依赖、冻结需求及已有证据，确定交付是审查报告还是实现设计。
+2. 首次填六节骨架；后续只修订最后接受的文档。目标节解释决策依据，现状节区分事实与目标，
+   约束节列接口/资源/权限/兼容边界，任务节覆盖每个成员，验收节逐信号闭合，风险节列失效和降级。
+3. 审查任务给出可复查证据路径、引用和结论，未知保持未知。
+   实现设计任务给出真实文件/符号、before/after 或完整实现规格、调用方、错误路径及断言级验证，
+   使实施者不再猜设计决策。仅注入契约要求 changes/tests 时使用这些字段。
+4. 逐编号回应 Analyst/Critic：吸收须有对应正文变化和吸收记录、absorbed_ids；
+   不采纳保留建议和可复核理由、rejected_ids，等待原作者确认，不能自行关闭 P0/P1。
+   touched_scope 按契约写确切变更小节标题及需要的字段，不能以“整个正文”替代。
+5. 完整正文提交 READY_FOR_ANALYST（兼容 FEASIBLE 以注入契约为准）。
+   不用 READY_FOR_CRITIC 绕过 Analyst；旧动作由编排器归一到证据审计。
+   缺证据时明确所缺事实，按契约走补证路径，不直接找用户批准。
+
+代码主张须来自真实读取的路径/符号/行号；已有能力同名不代表行为等价，说明复用边界。
+测量建议有入口、数据/负载、指标、步骤和判断信号；区分实测、估计与“待实测”，不编数字。
+用户没有定量目标时使用可观察的定性验收。
+仅涉及该任务时检查 Go context/取消/锁/goroutine 生命周期、.NET async/线程/分配、
+Unity 主线程/资源/序列化/帧内分配，不将所有专项变成固定工作量。

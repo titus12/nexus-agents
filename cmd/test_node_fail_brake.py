@@ -125,9 +125,9 @@ class NodeFailStreakTests(unittest.TestCase):
             decision.update.recovery.last_failure.error_code, "AGENT_TIMEOUT"
         )
 
-    def test_streak_ignores_the_error_code(self) -> None:
-        # Wave 6 failed the fold (reply class), wave 8 timed out
-        # (infrastructure class): still one state failing deterministically.
+    def test_legacy_streak_without_failure_record_is_preserved(self) -> None:
+        # Old snapshots have no failure classification; keep their conservative
+        # count instead of guessing which independent budget paid for it.
         context = _context(
             node_fail_streak=1, node_fail_state="ZHONGSHU_SOLVER"
         )

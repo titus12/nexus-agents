@@ -3,8 +3,9 @@
 The group pipeline mirrors the Menxia group pipeline (``menxia_group.py``)
 but one row covers the Zhongshu convergence of a whole review group: the
 group converges on one shared versioned requirements document, the revision
-budget is group-wide, and the fold tracks the same stall rule (open blocker
-count not shrinking for consecutive revision rounds).
+budget is group-wide, and the fold tracks unresolved revision findings.
+Closing an old finding counts as progress even when a new issue keeps the
+total count unchanged; unchanged identities still trigger the stall budget.
 
 The functions here are pure: they take the immutable review projection and
 return new group rows, never touching the FSM or dispatch layers.
@@ -14,11 +15,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
+import hashlib
+import json
 
 from ..context import ReviewState, ReviewTaskRecord, ZhongshuGroupState
 from .zhongshu import _ACTIVE_STATUSES, _BLOCKING_SEVERITIES, approved_item_ids
 
-# Consecutive revision rounds without a shrinking open-blocker count before
+# Consecutive revision rounds without progress on open revision findings before
 # the group parks as STALLED (mirrors MENXIA_GROUP_STALL_LIMIT).
 ZHONGSHU_GROUP_STALL_LIMIT = 2
 
@@ -111,7 +114,7 @@ def apply_zhongshu_round(
     whether they are in scope or not.  In-scope, non-terminal groups bump
     their group-wide ``revision_round``; the stall rule mirrors
     ``menxia_group.py``: the first revision round only seeds the baseline,
-    afterwards an open-blocker count that fails to shrink accumulates
+    afterwards unchanged open finding identities/counts accumulate
     ``stalled_rounds``, and reaching the limit or ``max_rounds`` parks the
     group as ``STALLED``.  Out-of-scope groups never consume budget and
     never have their stall counters cleared.
@@ -127,15 +130,25 @@ def apply_zhongshu_round(
     }
     scope.discard("")
     for group_id, row in rows.items():
+        if row.stage in _ZHONGSHU_GROUP_PARKED_STAGES:
+            continue
         if zhongshu_group_converged(review, group_id):
             if row.stage != "FROZEN":
                 rows[group_id] = replace(row, stage="CONVERGED")
             continue
         if group_id not in scope or row.stage in _ZHONGSHU_GROUP_TERMINAL_STAGES:
             continue
-        open_count = len(group_open_blockers(review, group_id))
+        # Measure the findings actually driving revisions, including P2 in
+        # legacy replies. Equal counts with a resolved old finding are progress.
+        members = set(group_item_ids(review, group_id))
+        open_ids = tuple(sorted(
+            finding.finding_id for finding in review.findings
+            if finding.item_id in members and finding.active
+        ))
+        open_count = len(open_ids)
         revision_round = row.revision_round + 1
-        if row.revision_round > 0 and open_count >= row.last_open_count:
+        resolved_old = bool(set(row.last_open_finding_ids) - set(open_ids))
+        if row.revision_round > 0 and open_count >= row.last_open_count and not resolved_old:
             stalled_rounds = row.stalled_rounds + 1
         else:
             stalled_rounds = 0
@@ -152,9 +165,56 @@ def apply_zhongshu_round(
             revision_round=revision_round,
             last_open_count=open_count,
             stalled_rounds=stalled_rounds,
+            last_open_finding_ids=open_ids,
         )
     ordered_ids = [row.group_id for row in review.seed_zhongshu_groups()]
     return tuple(rows[group_id] for group_id in ordered_ids if group_id in rows)
+
+
+def apply_zhongshu_evidence_round(
+    review: ReviewState, group_ids: Iterable[str], *, max_rounds: int,
+) -> tuple[ZhongshuGroupState, ...]:
+    """Bound evidence retries separately from Solver revision opportunities.
+
+    New IDs or paraphrased answers are not new evidence: progress requires a
+    new scoped source/quote pair. A total completed-round cap bounds even a
+    stream of novel quotations that never resolves the demanded finding.
+    """
+    scope = set(group_ids)
+    packet = review.evidence_packet or {}
+    evidence = packet.get("evidence_updates") or ()
+    rows = []
+    for row in review.seed_zhongshu_groups():
+        if row.group_id not in scope or row.stage != "REVIEWING":
+            rows.append(row)
+            continue
+        members = set(group_item_ids(review, row.group_id))
+        requirements = {key for item in review.task_items if item.item_id in members
+                        for key in item.source_requirement_ids}
+        keys = set()
+        for record in evidence:
+            if not isinstance(record, Mapping) or record.get("observed_variants"):
+                continue
+            if (record.get("item_id") not in members
+                    and not (not record.get("item_id") and record.get("requirement_id") in requirements)):
+                continue
+            quote = record.get("quote")
+            source = str(record.get("source") or "")
+            if (not isinstance(quote, Mapping) or not quote.get("text") or not source
+                    or "UNVERIFIED" in str(record.get("conclusion") or "")
+                    or "UNVERIFIED" in source):
+                continue
+            keys.add(hashlib.sha256(json.dumps(
+                [source, quote.get("text")], ensure_ascii=False).encode("utf-8")).hexdigest())
+        rounds = row.evidence_round + (row.last_evidence_keys is not None)
+        progress = row.last_evidence_keys is None or bool(keys - set(row.last_evidence_keys))
+        stalled = 0 if progress else row.evidence_stalled_rounds + 1
+        parked = stalled >= ZHONGSHU_GROUP_STALL_LIMIT or 0 < max_rounds <= rounds
+        rows.append(replace(row, evidence_round=rounds, evidence_stalled_rounds=stalled,
+                            last_evidence_keys=tuple(sorted(keys)),
+                            stage="STALLED" if parked else row.stage,
+                            blocked_reason="ZHONGSHU_EVIDENCE_STALLED" if parked else row.blocked_reason))
+    return tuple(rows)
 
 
 def freeze_ready_groups(review: ReviewState) -> tuple[ZhongshuGroupState, ...]:

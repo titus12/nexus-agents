@@ -106,6 +106,7 @@ class NodeEffectRunner:
                 else ()
             ),
             evidence_requester=str(payload.get("evidence_requester") or ""),
+            evidence_requires_solver_revision=bool(payload.get("evidence_requires_solver_revision")),
         )
         executor = (
             self._executor_factory(node, context)

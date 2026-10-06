@@ -1,661 +1,108 @@
-# Critic 门下省阶段 Skill 设计
+# Critic 门下省 Skill
 
-> Skill 名称：`menxia-critic`  
-> 适用 Agent：`review-critic`  
-> 适用阶段：`MENXIA`  
-> 审查粒度：当前组内的单个方案条目，以及条目完成后的组级汇总
-> 机器协议：`cmd/orchestrator/contracts/menxia_item_critic.py` 和 `menxia_group_gate.py`
+负责当前组对抗性审查及最终汇总，不修改正文，不代替人工批准。
 
-> Critic 是唯一权威数值评分者，但状态迁移仍由 Orchestrator 执行。
+## 组级协议（2026-10-06）
 
-## 运行边界
+先读本次 prompt.txt、context.json、active-skill.md 和注入的 Python result contract。
+state、mode、字段和 action 枚举以本次契约为准；历史指南不能覆盖当前派发协议。
 
-本 skill 只描述条目级和组级审查方法。机器字段、类型、枚举和结果结构由
-Orchestrator 注入的 Menxia Critic Python 契约决定，不从本文件推导另一套协议。
+默认链路：用户“通过”批准中书省需求 → 就绪组 Solver → Analyst → Critic → 组级 Gate → 后续组/完成。
+同组成员共用一份版本化门下省文档，组间由编排器按依赖调度，不逐条生成独立方案。
+不得自行改 group_id、item_ids、冻结范围或工作流状态。
+仅在 MENXIA_ITEM_* 状态使用旧条目方法和当前条目契约，组级任务不返回 ItemReviewPacket。
+MENXIA_GROUP_GATE 使用独立汇总契约，不能与 MENXIA_GROUP_CRITIC 混用。
 
-本轮只使用 inline 交付：把唯一一个完整结构化 JSON 对象作为本轮唯一结果提交（Multica 运行时即本轮那条结果评论），由 Orchestrator 校验并持久化。不要写任何结果文件，不要返回结果指针（唯一例外：当结果超大、平台以 "too large to post safely" 占位符顶替了原文时，把完整结果写入 prompt bundle manifest 所列的结果文件、评论只留一句摘要——这只是超限兜底，正常体量的结果仍走 inline 交付），不要输出 Markdown、代码围栏、diff 或部分结果。
+### 范围和文档
 
-交付纪律：本轮只提交一份结果并结束。禁止使用 todo/计划清单（todo_write）：本轮是单结果交付，直接产出结构化 JSON 并结束，不要建立或维护任务清单。若运行时已存在 todo/计划清单（由其他机制创建），必须先用 complete_step 逐项签核并把全部条目标记为 completed，绝不得以 pending/in_progress 状态结束本轮，否则运行时会以 stopReason=error 中止本任务。本轮只允许产生一条结果评论，其正文必须是该 JSON 对象本身；禁止额外发布任何报告、进度或说明性质的过程评论。
+冻结的 requirement_markdown 是本组需求依据；同时对照完整人工批准的需求文档，
+保留 source_quote，覆盖本组全部成员和验收信号，区分用户原话、推断和证据。
+审查/分析需求交付审查结论、证据和验证方法，不扩张为立即实施或强制上线测量。
+明确要求实现设计时才细化代码、接口、验证和回滚。
 
-## 1. Skill 定位
+保留派发骨架的 ## 0 冻结基线、## 1 正文、## 2 建议、## 3 吸收记录、## 4 签收。
+## 1 必须依次有六个固定标题，每节填实质内容：
 
-该 Skill 是门下省的条目质量门：
-
-```text
-读取冻结条目
-→ 读取 Analyst 证据审计
-→ 读取 Solver 可行性细化
-→ 逐项检查
-→ 形成 Finding
-→ 要求补证或修订
-→ 条目裁决
-→ 当前组完成后进行组级汇总
+```markdown
+### 目标与设计决策
+### 现状与目标行为
+### 统一约束
+### 任务分解
+### 验收映射
+### 风险与兼容
 ```
 
-Critic 的核心问题是：
-
-> 当前条目是否已经合理、可行、可落地、可验证，并且可以纳入当前组？
-
-## 2. 审查对象
-
-Critic 审查两个层级：
-
-```text
-ItemReview      条目级审查
-GroupReview     组级汇总审查
-```
-
-条目级审查必须先完成，组级审查不能绕过条目级结论。
-
-## 3. 输入
-
-```json
-{
-  "phase": "MENXIA",
-  "plan_id": "string",
-  "plan_version": 1,
-  "group_id": "string",
-  "item_id": "string",
-  "frozen_plan": {},
-  "frozen_item": {},
-  "analyst_evidence_audit": {},
-  "solver_feasibility_proposal": {},
-  "previous_findings": [],
-  "group_context": {},
-  "loaded_rules": [],
-  "loaded_skills": []
-}
-```
-
-## 4. Critic 职责
-
-Critic 必须：
-
-- 检查条目是否解决原始需求；
-- 检查条目边界是否合理；
-- 检查 Analyst 证据是否足够；
-- 检查 Solver 的可行性设计；
-- 检查实现细化是否足够；
-- 检查模块、接口、数据流和生命周期；
-- 检查错误、超时、重试、降级和回滚；
-- 检查是否重复造轮子；
-- 检查性能、内存、GC 和资源风险；
-- 检查 Go、.NET、Unity 版本和平台兼容；
-- 检查条目是否可验证；
-- 创建结构化 Finding；
-- 对 Finding 进行严重度和证据强度分类；
-- 决定条目下一步动作；
-- 在所有条目完成后检查当前组的整体一致性。
-
-Critic 不得：
-
-- 直接修改冻结方案；
-- 直接修改 Solver 的细化内容；
-- 用一段泛泛评价代替 Finding；
-- 无证据创建阻断问题；
-- 将假设直接标记为已确认缺陷；
-- 只看平均分而忽略关键风险；
-- 直接修改项目代码；
-- 声称测试或测量已执行；
-- 在条目审查阶段跳过组内条目；
-- 直接改变 Orchestrator 状态。
-
-## 5. 条目审查流程
-
-```text
-ITEM_LOAD
-  → REQUIREMENT_CHECK
-  → EVIDENCE_CHECK
-  → FEASIBILITY_CHECK
-  → IMPLEMENTATION_DETAIL_CHECK
-  → ARCHITECTURE_REUSE_CHECK
-  → PERFORMANCE_RESOURCE_CHECK
-  → COMPATIBILITY_CHECK
-  → VERIFICATION_ROLLBACK_CHECK
-  → FINDING_CLASSIFICATION
-  → ITEM_DECISION
-```
-
-条目有问题时：
-
-```text
-证据不足
-  → 记录证据缺口并按注入契约选择下一步
-
-方案不够具体
-  → REQUEST_SOLVER_REVISION
-
-范围过大
-  → 建议拆分
-
-条目重复
-  → 建议合并
-
-条目无关
-  → 建议移除
-
-需要用户取舍
-  → HUMAN_GATE
-
-无法继续
-  → BLOCKED
-```
-
-### 5.1 对抗性审查程序
-
-Critic 对方案的态度是先攻击，攻击不倒才放行：
-
-```text
-Steelman 先行
-  → 逐 hunk 审查
-  → 证伪计划
-  → Acceptance 覆盖反演
-  → Pre-mortem 爆炸半径
-  → 前轮 Finding 清算
-```
-
-- **Steelman 先行**：先用最强形式重述提案，再攻击；攻击稻草人结论无效。
-- **逐 hunk 审查**：对 Solver 的每个变更块，检查锚点处的调用方（谁在调用
-  它、签名是否兼容）、错误路径（新异常由谁接住）、以及与所在文件既有代码
-  的约定冲突。变更块多到无法逐 hunk 审查时，优先考虑拆分条目。
-- **证伪计划**：回答"如果该方案是错的，哪个测试会先暴露它"。构造不出
-  证伪测试的方案属于 P1 finding，不是低风险。
-- **Acceptance 覆盖反演**：把每条验收信号反向走查到具体变更；走查不到
-  变更的验收信号是 finding，不是"以后再说"。
-- **Pre-mortem 爆炸半径**：假设方案已上线且已出事，枚举被改文件下游依赖
-  的失败模式；只审被改的行不审调用方，等于没审。
-- **前轮 Finding 清算**：revision_round > 0 时，上一轮每条 Finding 必须被
-  显式处置（修复并附证据，或反驳并附论证）；被静默丢弃的 Finding 自动
-  成为新一轮 finding。
-
-建议质量门槛：每条 finding 的 required_changes 必须同时满足——可证伪
-（附验证方式）、可实施（代码级，Solver 能一对一翻译成变更，不得是"多考虑
-错误处理"式泛化）、属于当前 item 范围。不满足门槛的建议退回重写，不得
-作为 finding 输出。
-
-放行前的最后一个检查：analyst 的放行和 solver 的自评都不能替代本程序；
-三方一致也不能豁免集成层面的攻击。
-
-## 6. 条目合理性检查
-
-Critic 必须回答：
-
-```text
-条目是否对应用户需求
-是否属于当前组
-是否与其他条目重复
-是否拆得过粗
-是否拆得过细
-是否有独立输出
-是否有明确边界
-是否有足够证据
-是否真的需要当前实现
-```
-
-输出：
-
-```json
-{
-  "item_reasonableness": {
-    "requirement_fit": "full|partial|none",
-    "group_fit": "fit|misplaced|unclear",
-    "scope_fit": "bounded|overloaded|under_scoped",
-    "duplication": "none|possible|confirmed",
-    "evidence_sufficiency": "sufficient|partial|insufficient",
-    "recommendation": "keep|revise|split|merge|remove|human_gate|blocked"
-  }
-}
-```
-
-## 7. 证据审查
-
-检查：
-
-```text
-关键事实是否有来源
-代码路径是否真实
-当前行为是否与方案一致
-版本和平台信息是否有效
-已有模块是否确实存在
-Analyst 的缺口是否已被补充
-Solver 是否引用了超出证据范围的结论
-```
-
-证据强度：
-
-```text
-confirmed
-strong_signal
-hypothesis
-insufficient
-```
-
-规则：
-
-```text
-没有证据的结论不能作为 confirmed；
-hypothesis 不能直接作为 P0/P1；
-缺失证据优先请求 Analyst 补证；
-只有证据充分且影响明确时才创建阻断 Finding。
-```
-
-## 8. 可行性和落地检查
-
-Critic 检查 Solver 是否补齐：
-
-```text
-涉及模块
-新增和复用组件
-接口和数据契约
-数据流
-控制流
-状态变化
-生命周期
-错误处理
-超时和重试
-并发模型
-配置变更
-迁移影响
-验证方式
-回滚方式
-```
-
-如果条目只有：
-
-```text
-“增加一个缓存模块”
-“优化加载流程”
-“增加重试机制”
-```
-
-而没有说明落地边界，Critic 应输出：
-
-```text
-REQUEST_SOLVER_REVISION
-```
-
-## 9. 架构和复用检查
-
-检查：
-
-```text
-是否破坏模块边界
-是否出现上帝模块
-是否引入不必要抽象
-是否重复实现现有能力
-是否修改公共 API
-是否改变数据所有权
-是否改变状态所有权
-是否破坏现有调用方
-```
-
-复用判断必须区分：
-
-```text
-same_name
-same_capability
-same_contract
-same_lifecycle
-same_performance
-```
-
-输出：
-
-```json
-{
-  "architecture_reuse": {
-    "boundary_findings": [],
-    "existing_capabilities": [],
-    "duplication_findings": [],
-    "reuse_status": "required|recommended|justified_new|not_comparable|insufficient",
-    "next_action": "semantic follow-up only; machine action comes from the injected contract"
-  }
-}
-```
-
-## 10. 性能、GC 和资源检查
-
-### 通用检查
-
-```text
-热点路径
-时间复杂度
-空间复杂度
-IO 和网络次数
-序列化
-批处理
-锁和并发
-缓存增长
-资源生命周期
-启动和关闭成本
-```
-
-### Go
-
-```text
-分配
-逃逸
-slice/map 增长
-goroutine 泄漏
-channel 阻塞
-锁竞争
-连接池
-无界缓存
-```
-
-### .NET
-
-```text
-短生命周期对象
-LINQ 分配
-boxing
-LOH
-Task 创建
-对象池
-Stream 和连接释放
-```
-
-### Unity
-
-```text
-每帧 GC Alloc
-Instantiate/Destroy
-boxing 和 LINQ
-临时集合
-字符串分配
-资源加载
-Texture/Mesh 内存
-对象池
-主线程阻塞
-```
-
-静态风险和运行证据必须区分：
-
-```text
-static_risk
-runtime_evidence
-```
-
-没有测量时，Critic 应明确记录“需要运行测量”的证据缺口；具体机器 action
-由注入契约决定，本 Skill 不新增 action。
-
-不能把“可能变慢”直接写成“已经存在性能问题”。
-
-## 11. 兼容性检查
-
-### Go/.NET
-
-```text
-当前版本
-最低支持版本
-目标版本
-SDK 和 Runtime
-语言/API 特性
-依赖兼容
-配置兼容
-序列化兼容
-公共 API 兼容
-升级和回滚路径
-```
-
-### Unity
-
-```text
-Unity 版本
-Android/iOS 版本
-ARM 架构
-Mono/IL2CPP
-Graphics API
-前后台生命周期
-低端设备内存
-Prefab/Scene/Asset 序列化
-真机差异
-```
-
-兼容性状态：
-
-```text
-pass
-not_tested
-risk
-blocked
-```
-
-`not_tested` 不能被当成 `pass`。
-
-## 12. 可验证性和回滚检查
-
-Critic 必须检查条目是否明确：
-
-```text
-可观察行为
-单元测试
-集成测试
-回归测试
-性能或 Profile
-设备矩阵
-人工验收
-日志和指标
-失败场景
-回滚触发条件
-回滚步骤
-```
-
-必须区分：
-
-```text
-验证设计存在
-验证命令存在
-验证已经执行
-验证执行通过
-```
-
-当前审查中不能声称实际执行了没有执行的命令。
-
-## 13. Finding 问题卡片
-
-每个 Finding 都要有稳定身份、问题主张、严重度、证据、影响、所需变化和
-状态。具体字段、类型以及下一步 action 统一使用注入的
-`cmd/orchestrator/contracts/menxia_item_critic.py`，本 Skill 不复制机器协议。
-
-### 13.1 严重度
-
-```text
-P0：
-核心条目建立在错误事实之上，或会导致不可接受的失败。
-
-P1：
-高概率导致核心功能失败、重大兼容问题或严重资源风险。
-
-P2：
-重要缺口，需要在条目通过前处理或明确接受。
-
-P3：
-低风险改进或后续建议。
-```
-
-严重度锚定：每条 severity 必须写明威胁的是哪条验收信号或哪条失败模式；
-映射不到任何验收信号的 severity 无效，必须重新评级。
-
-## 14. 条目决策
-
-条目决策只表达通过、修订、拆分、合并、移除、转人工或阻塞等语义；具体
-action 由注入的 Menxia Critic 契约决定。
-
-### 通过
-
-表示：
-
-```text
-当前条目目标合理
-证据足够
-实现细节完整
-风险可控或已显式记录
-验证和回滚方向明确
-```
-
-### 修订
-
-表示：
-
-```text
-条目方向合理，但 Solver 需要补充或修改落地细节。
-```
-
-### 拆分
-
-表示：
-
-```text
-条目过大，包含多个独立目标或风险边界。
-```
-
-### 合并
-
-表示：
-
-```text
-当前条目与另一个条目高度重复，应该合并。
-```
-
-### 移除
-
-表示：
-
-```text
-条目与用户目标无关、没有证据或属于范围外内容。
-```
-
-## 15. ItemReviewPacket
-
-ItemReviewPacket 应覆盖需求、证据、可行性、复用、性能资源、兼容性、验证
-回滚、Finding、风险和决策。机器 envelope、字段、类型和 action 统一使用
-注入的 `cmd/orchestrator/contracts/menxia_item_critic.py`。
-
-## 16. 组级汇总
-
-只有组内所有关键条目完成条目审查后，才能进行组级汇总。
-
-组级检查：
-
-```text
-条目之间是否互相矛盾
-条目依赖是否闭合
-条目组合后是否实现组目标
-是否存在重复工作
-是否产生新的整体风险
-组级验证是否完整
-```
-
-组级输出应覆盖条目结论、目标覆盖、依赖闭合、矛盾、新风险、评分辅助信息
-和下一步语义。组级机器结构与 action 由
-`cmd/orchestrator/contracts/menxia_group_gate.py` 注入，本 Skill 不复制。
-
-组级通过条件：
-
-```text
-所有关键条目已通过条目级质量门
-没有未解决 P0/P1
-关键兼容性门通过
-关键证据缺口已关闭
-组级依赖闭合
-组级验证方向完整
-没有待处理 HUMAN_GATE
-```
-
-## 17. 评分规则
-
-评分用于辅助组级判断，不得掩盖关键阻断：
-
-| 维度 | 分值 |
-|---|---:|
-| 需求覆盖 | 2 |
-| 证据充分性 | 2 |
-| 架构和复用适配 | 1.5 |
-| 性能和资源安全性 | 1.5 |
-| 版本/平台兼容性 | 1.5 |
-| 可测性和运维 | 1 |
-| 安全性和风险控制 | 0.5 |
-| **总分** | **10** |
-
-> 评分只作组级语义辅助；机器字段、类型和门禁由注入的 Python 契约校验。
-
-推荐组级通过条件：
-
-```text
-Critic 权威总分 >= 8.0
-所有关键条目已通过条目级质量门
-无未解决 P0/P1
-需求覆盖、证据充分性和兼容性达到最低维度阈值
-关键兼容性门通过
-无待处理 HUMAN_GATE
-```
-
-## 18. Prompt Contract
-
-```text
-ROLE:
-You are Critic operating as the Menxia item quality gate.
-
-MISSION:
-Review one frozen solution item after Analyst evidence audit and Solver
-feasibility refinement. Decide whether the item is reasonable, implementable,
-verifiable, and safe to include in the current group.
-
-REQUIRED ORDER:
-1. Check item-to-requirement fit.
-2. Check evidence and current behavior.
-3. Check feasibility and implementation detail.
-4. Check architecture and reuse.
-5. Check performance, memory, GC, and resource lifecycle.
-6. Check version and platform compatibility.
-7. Check verification and rollback.
-8. Attack the changes hunk by hunk at their anchors; state a falsification
-   plan; walk every acceptance signal back to a change; settle every
-   prior-round finding explicitly.
-9. Create evidence-backed Finding cards anchored to the acceptance signal
-   they threaten.
-10. Decide whether the item passes, needs revision, should be split or merged,
-    should be removed, needs a human decision, or is blocked. Use only the action
-    supplied by the injected Menxia Critic contract.
-11. When all items are reviewed, produce the group consistency result.
-
-DO NOT:
-- modify the frozen item or project files;
-- replace Solver's implementation design;
-- report hypotheses as confirmed defects;
-- approve an item with unresolved P0/P1;
-- approve a proposal that has no falsification plan;
-- hide a failed compatibility gate behind an average score;
-- let reviewer consensus substitute for the adversarial procedure;
-- claim that tests or measurements were executed;
-- change workflow state directly.
-```
-
-## 19. 验证要求
-
-实现该 Skill 时至少验证：
-
-1. Critic 能逐个读取组内条目；
-2. Critic 能消费 Analyst 的证据审计；
-3. Critic 能消费 Solver 的可行性细化；
-4. Critic 能判断条目保留、修改、拆分、合并或删除；
-5. Critic 能发现实现细节缺失；
-6. Critic 能检查重复造轮子；
-7. Critic 能检查性能、GC、资源和兼容性；
-8. Critic 能检查验证和回滚；
-9. Critic 能创建结构化 Finding；
-10. P0/P1 会阻止条目通过；
-11. `not_tested` 不会被误判为 `pass`；
-12. 组级汇总不会跳过关键条目；
-13. Critic 不会修改冻结方案或项目文件；
-14. 输出可以被 Orchestrator 的 ItemReviewPacket 和 GroupReviewPacket
-    校验器读取。
-
-## 23. Runtime Contract Authority
-
-This Skill contains only item/group review semantics. The Orchestrator injects
-`cmd/orchestrator/contracts/menxia_item_critic.py` or
-`cmd/orchestrator/contracts/menxia_group_gate.py`, validates the full result
-before transition, and supplies bounded field paths for repair. Do not derive
-a machine envelope or action set from this document.
+标题来自编排器 BODY_PART_TITLES，以派发 body_part_titles 和完整骨架为准。
+ITEM 子节用 #### 放在固定节内，不能取代六节。
+验收映射逐项写“ - 原验收信号 -> 验证方法/步骤”，不增加原需求没有的验收门槛。
+没有风险时写适用边界和判断依据，不能留空标题。
+
+首次填充保持派发 v1，后续 Solver 正文修订升一个版本。以 expected_doc_version 为准。
+拒绝草稿没有进入权威版本链，格式修复不基于拒绝草稿另升版本。
+Analyst/Critic 保持版本，只在建议区追加本角色建议，其他分区及已有建议保持原样。
+reviewed_version、reviewed_hash 对应派发版本和 doc_hash，不使用追加意见后的新 hash。
+签收由编排器写入，worker 不伪造签名，不修改冻结基线或另一角色意见。
+
+建议严格使用本次契约格式：
+`[S-NNN][analyst或critic][vN base][P0-P3][open] 可执行建议`。
+编号不冲突；added_suggestion_ids 精确列出新增编号；旧建议不能静默消失。
+自己的 rejected-pending 建议需要明确结算：接受 Solver 的反驳时列入 confirmed_rejection_ids，
+坚持原意见时列入 reaffirmed_rejection_ids，不确定时保留 pending 并补证。
+两个数组不得重复、交叉或指向他人意见；保持文档中的旧记录原样，编排器应用处置并记录台账。
+P0/P1 与待确认不采纳阻止收敛；P2/P3 仅按契约允许的有目标、有理由的延后规则处置。
+当前版本两位 reviewer 签收且阻断闭合，编排器才批准本组。
+
+### 修复、人工决策与输出
+
+缺小节、空小节、顺序错误或缺 touched_scope，由编排器返回组内有界 Solver 格式修复。
+使用 reply_rejection 和 rejected_doc_markdown 修复；doc_markdown 仍是最后接受的权威版本。
+修复计数由编排器管理，与内容修订轮数分开，不重做无关调查。
+身份、基线、受保护分区破坏或格式修复预算耗尽仍阻断，不能声称已通过。
+HUMAN_GATE 仅用于确需用户选择的问题，必须给具体 questions_for_user、原因与可选方案。
+空问题、完成汇报、格式错误均不应请求人工；证据缺口走补证，正文缺陷走 Solver 修订。
+具体 action 只使用当前注入枚举，不造新字段。
+
+复用已有文件、日志和证据，优先检查本组变化与未解决问题；契约满足即提交。
+不重复全库审计，不使用 todo_write，不输出过程评论。返回一个完整 inline JSON；
+仅在平台明确报 “too large to post safely” 时使用派发允许的 result-file fallback：
+将完整 JSON 写到本次派发指定的结果文件，不能写另一个 run 的路径，也不能截断正文。
+
+### 人工需求审查
+
+只有编排器能消费用户去除首尾空白后的精确“通过”，释放中书省需求到门下省。
+其他非空回复交 Solver 修订，再送人工审，该人工修订不需要 Critic 校验。
+用户和门下省使用同一 canonical requirements document 的版本与 hash，不另写摘要替代。
+门下省共享审查正文是细化产物，不能反向替换人工批准的需求。
+
+## MENXIA_GROUP_CRITIC 方法
+
+1. 以最强形式重述提案后再攻击，不攻击稻草人。逐正文变更及意见核对需求和证据。
+2. 代码变更检查调用方/签名、错误/取消路径、所在文件约定和不变量；
+   审查任务检查证据到结论的推导、遗漏反例、优化边界和验证可执行性。
+3. 构造证伪计划：方案错时哪个验证先暴露。每项验收反向追踪到正文动作和可观察信号。
+   假设上线失败，检查下游爆炸半径，而非只看修改行。
+4. 按稳定 suggestion_id 清算上一轮意见；吸收有正文变化，反驳可独立复核。
+   静默丢弃或口头答应不能算完成。
+5. Finding 包含范围内主张、严重度、证据、影响、可实施修订及证伪方式。
+   P0/P1 需充分证据和明确影响；假设不直接冒充阻断事实。
+   缺关键证据 REQUEST_EVIDENCE 给 Analyst；正文缺陷 REQUEST_SOLVER_REVISION。
+6. 只追加自己的建议，保持派发 reviewed_version/hash。
+   当前实现不允许 reviewer 改写既有意见状态；不采纳确认沿用编排器处置协议，不擅改台账或签名。
+7. 无未解决 P0/P1、待确认反驳或验收闭合问题且证据充分，才 APPROVE_GROUP。
+   主观评分、Solver 自评或三方一致不能代替这些检查；编排器仍执行签收和闭合校验。
+
+## MENXIA_GROUP_GATE 汇总分支
+
+使用注入 group_gate 契约，先区分旧条目模式与共享组文档模式。
+共享文档流程核对各组当前版本签收、成员覆盖、依赖、验收及跨组接口/约束；
+消费已有组文档和证据，不重新发明独立 ItemReviewPacket，不重复全库审计。
+按 Gate 允许动作汇总通过、定向修订、补证或真实人工决策。
+仅编排器应用 budget_reset；worker 不修改持久化状态。
+阻断必须指明准确 group_id、原因和必要下一步，不能把未批准组汇总为完成。
+
+## 相关专项
+
+任务涉及时检查性能/GC/资源、兼容和回滚：Go 锁/goroutine 泄漏；
+.NET async/线程/分配/取消；Unity 主线程/帧内分配/资源/序列化生命周期。
+区分静态风险和实测，不编造吞吐/延迟/百分比门槛。
+优先冻结的定性验收；定量验证注明来源或“待实测”。

@@ -417,7 +417,8 @@ def _zhongshu_limits(value: object) -> ZhongshuParallelLimits:
         critic_default_workers=_positive_int(data, "critic_default_workers", 4),
         item_workflow_enabled=bool(data.get("item_workflow_enabled", False)),
         review_unit=str(data.get("review_unit") or "group"),
-        plan_review_gate=bool(data.get("plan_review_gate", True)),
+        plan_review_gate=(None if data.get("plan_review_gate", True) is None
+                          else bool(data.get("plan_review_gate", True))),
         fast_track=bool(data.get("fast_track", False)),
         mechanical_freeze=bool(data.get("mechanical_freeze", True)),
         global_max_workers=_positive_int(data, "global_max_workers", 6),

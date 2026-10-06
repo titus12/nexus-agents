@@ -144,15 +144,16 @@ class _FanoutNodeExecutor:
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off"})
 
-# Plan-review gate answers: an explicit rejection marker sends the plan back to
-# the planner; any other reply signs the plan off to Menxia ("reply anything to
-# continue" stays the approval semantics of every other gate).
-_PLAN_REVIEW_REJECT_MARKERS = ("拒绝", "不同意", "退回", "修改", "reject", "refuse")
+# Plan review has one approval word; all other nonempty answers are feedback.
+# Other gates retain their existing reply-to-continue semantics.
 
 
 def _is_plan_review_rejection(answer: str) -> bool:
-    text = str(answer or "").strip().casefold()
-    return any(marker in text for marker in _PLAN_REVIEW_REJECT_MARKERS)
+    return bool(str(answer or "").strip()) and not _is_plan_review_approval(answer)
+
+
+def _is_plan_review_approval(answer: str) -> bool:
+    return str(answer or "").strip() == "通过"
 
 
 def _env_flag(name: str) -> bool | None:
@@ -195,6 +196,10 @@ def _with_parallel_flag_overrides(context: WorkflowContext) -> WorkflowContext:
         zhongshu = replace(zhongshu, fast_track=fast_track_flag)
     if plan_review_flag is not None:
         zhongshu = replace(zhongshu, plan_review_gate=plan_review_flag)
+    # Production cannot opt out of the user's approval rule. Machine-only
+    # fixtures remain available through the notification-isolated test runner.
+    if _env_flag("NEXUS_TEST_NO_EXTERNAL_NOTIFICATIONS") is not True:
+        zhongshu = replace(zhongshu, plan_review_gate=True)
     if mechanical_freeze_flag is not None:
         zhongshu = replace(zhongshu, mechanical_freeze=mechanical_freeze_flag)
     menxia = replace(context.parallel.menxia, enabled=menxia_flag)
@@ -288,7 +293,7 @@ class OrchestratorApp:
         )
         self._last_gate_poll = 0.0
         self.notification_port = notification_port or (
-            FeishuNotificationPort()
+            FeishuNotificationPort(task_root=self.root)
             if feishu_notifications_enabled()
             else NullNotificationPort()
         )
@@ -479,6 +484,7 @@ class OrchestratorApp:
                 previous_review=node_context.previous_review,
                 salvaged_worker_payloads=node_context.salvaged_worker_payloads,
                 evidence_requester=node_context.evidence_requester,
+                evidence_requires_solver_revision=node_context.evidence_requires_solver_revision,
                 menxia_stage_census=node_context.menxia_stage_census,
                 binding_contexts={
                     binding.worker_id: dict(binding.dispatch_context)
@@ -750,10 +756,10 @@ class OrchestratorApp:
         return True
 
     def _poll_human_gate_reply(self, task_id: str) -> None:
-        """Consume one operator reply from the gate chat and resume on it.
+        """Consume approval or revision feedback matched to review messages.
 
-        The gate message promises "reply anything to continue"; the poller
-        makes that promise true.  Replies are matched by the Feishu adapter
+        Plan review requires exact approval; other gates retain their existing
+        resume semantics. Replies are matched by the Feishu adapter
         (threaded reply to the gate message, or a message quoting the gate's
         decision id), so unrelated chat traffic never triggers a resume.
         """
@@ -769,6 +775,14 @@ class OrchestratorApp:
         gate = snapshot.context.human_gate
         if gate is None or not str(gate.decision_id or "").strip():
             return
+        ensure_delivery = getattr(self.notification_port, "ensure_plan_review_delivery", None)
+        if gate.reason_code == "PLAN_REVIEW" and callable(ensure_delivery):
+            try:
+                if not ensure_delivery(snapshot.context):
+                    return
+            except Exception:
+                logger.exception("PLAN_REVIEW_DOCUMENT_DELIVERY_FAILED task_id=%s", task_id)
+                return
         request = HumanGate(
             decision_id=gate.decision_id,
             task_id=task_id,
@@ -785,22 +799,65 @@ class OrchestratorApp:
                 gate.decision_id,
             )
             return
-        if not replies:
+        if not replies and gate.reason_code != "PLAN_REVIEW":
             return
-        answer = " | ".join(
+        answers = [
             str(getattr(reply, "answer", "") or "").strip()
             for reply in replies
             if str(getattr(reply, "answer", "") or "").strip()
-        )
+        ]
+        if gate.reason_code == "PLAN_REVIEW":
+            seen = {entry.get("external_id") for entry in
+                    (snapshot.context.review.plan_review.get("feedback_history", [])
+                     if snapshot.context.review else []) if entry.get("external_id")}
+            # The adapter returns newest first; retain all fresh feedback in
+            # chronological order. A pass cannot approve unprocessed changes.
+            messages = [{"answer": str(reply.answer),
+                         "external_id": getattr(reply, "external_id", ""),
+                         "author_id": getattr(reply, "author_id", ""),
+                         "decision_id": gate.decision_id}
+                        for reply in reversed(replies)
+                        if reply.decision_id == gate.decision_id
+                        and str(reply.answer or "").strip()
+                        and (not getattr(reply, "external_id", "")
+                             or reply.external_id not in seen)]
+            # A synchronous LLM run cannot poll the chat while it is revising.
+            # Recover comments added to earlier review threads afterwards;
+            # their pass replies never authorize the newer document.
+            anchors = (snapshot.context.review.plan_review.get("feedback_gates", [])
+                       if snapshot.context.review else [])
+            for anchor in anchors:
+                if anchor["decision_id"] == gate.decision_id:
+                    continue
+                try:
+                    delayed = poller(HumanGate(decision_id=anchor["decision_id"], task_id=task_id,
+                                              resume_state="MENXIA_GROUP_SOLVER", prompt="",
+                                              message_id=anchor.get("message_id") or ""))
+                except Exception:
+                    logger.exception("PLAN_REVIEW_LATE_FEEDBACK_POLL_FAILED task_id=%s", task_id)
+                    return  # Hold approval until older feedback can be checked.
+                for reply in reversed(delayed or []):
+                    identity = getattr(reply, "external_id", "")
+                    if (reply.decision_id == anchor["decision_id"] and identity and identity not in seen
+                            and _is_plan_review_rejection(reply.answer)):
+                        messages.append({**anchor, "answer": str(reply.answer), "external_id": identity,
+                                         "author_id": getattr(reply, "author_id", "")})
+            feedback = [entry for entry in messages if _is_plan_review_rejection(entry["answer"])]
+            answer = "\n\n".join(entry["answer"] for entry in feedback) if feedback else ("通过" if messages else "")
+            resumed = self.resume(answer, feedback_messages=feedback)
+        else:
+            answer = " | ".join(answers)
+            resumed = self.resume(answer)
+        if not resumed:
+            return
         logger.info(
             "HUMAN_GATE_REPLY_CONSUMED task_id=%s decision_id=%s replies=%s",
             task_id,
             gate.decision_id,
             len(replies),
         )
-        self.resume(answer)
 
-    def resume(self, answer: str = "") -> bool:
+    def resume(self, answer: str = "", *, feedback_messages: list[dict] | None = None) -> bool:
         """Apply one operator/human resume decision to a recoverable state."""
 
         snapshot = self.repository.load(self.context.identity.task_id)
@@ -816,15 +873,32 @@ class OrchestratorApp:
         if (
             gate is not None
             and str(getattr(gate, "reason_code", "") or "") == "PLAN_REVIEW"
-            and _is_plan_review_rejection(answer)
         ):
-            event_name = "PLAN_REVIEW_REJECTED"
+            if not str(answer or "").strip():
+                return False
+            if _is_plan_review_rejection(answer):
+                event_name = "PLAN_REVIEW_REJECTED"
+            else:
+                from .domain.plan_review import matches_current
+                if not snapshot.context.review or not matches_current(snapshot.context.review, gate.document_hash):
+                    logger.warning("PLAN_REVIEW_STALE_APPROVAL task_id=%s", snapshot.task_id)
+                    return False
+                verify_document = getattr(self.notification_port, "verify_plan_review_document", None)
+                if callable(verify_document):
+                    try:
+                        verify_document(snapshot.context)
+                    except Exception:
+                        logger.exception("PLAN_REVIEW_DOCUMENT_APPROVAL_HELD task_id=%s", snapshot.task_id)
+                        return False
+        payload = {"answer": answer} if answer else {}
+        if feedback_messages:
+            payload["feedback_messages"] = feedback_messages
         self.inbox.publish(
             DomainEvent(
                 name=event_name,
                 task_id=snapshot.task_id,
                 sequence=snapshot.context.progression.sequence,
-                payload={"answer": answer} if answer else {},
+                payload=payload,
                 occurred_at=_now(),
                 event_id=f"resume:{snapshot.task_id}:{snapshot.context.progression.sequence}",
             )

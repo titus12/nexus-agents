@@ -45,10 +45,10 @@ class PlanArtifactRunner:
         return self._write_plan_artifact(request)
 
     def _write_review_doc(self, request: EffectRequest) -> EffectOutcome:
-        """Persist the human-facing plan-review document at a stable path.
+        """Persist the shared requirements document and immutable history.
 
         The document is the Zhongshu hand-off artifact for the human gate, so
-        it lands at ``<task_root>/zhongshu-plan-review.md`` -- stable and easy
+        it lands at ``<task_root>/zhongshu-requirements.md`` -- stable and easy
         to open -- instead of the hash-prefixed provenance artifact names.
         """
 
@@ -60,7 +60,7 @@ class PlanArtifactRunner:
             # Fallback: derive the task root from the provenance artifact
             # layout (runs/<task_id>/artifacts/...).
             receipt = self._write_artifact(
-                request.task_id, "plan-review/zhongshu-plan-review.md", content.encode("utf-8")
+                request.task_id, "plan-review/zhongshu-requirements.md", content.encode("utf-8")
             )
             if receipt is not None:
                 root = Path(receipt.artifact_id).parent.parent
@@ -72,8 +72,17 @@ class PlanArtifactRunner:
             return EffectOutcome(status="SUCCEEDED")
         try:
             root.mkdir(parents=True, exist_ok=True)
-            path = root / "zhongshu-plan-review.md"
-            path.write_text(content, encoding="utf-8")
+            path = root / "zhongshu-requirements.md"
+            version = int(request.payload.get("version") or 0)
+            if version:
+                history = root / "requirements"
+                history.mkdir(parents=True, exist_ok=True)
+                immutable = history / f"zhongshu-requirements-v{version:03d}.md"
+                data = content.encode("utf-8")
+                if immutable.exists() and immutable.read_bytes() != data:
+                    raise ValueError("PLAN_REVIEW_VERSION_COLLISION")
+                immutable.write_bytes(data)
+            path.write_bytes(content.encode("utf-8"))
         except Exception:
             # A provenance write must never wedge the review workflow.
             logger.exception("ZHONGSHU_PLAN_DOC_WRITE_FAILED task_id=%s", request.task_id)

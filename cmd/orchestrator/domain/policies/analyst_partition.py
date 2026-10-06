@@ -14,6 +14,19 @@ from collections.abc import Iterable
 from ..context import ReviewState
 
 
+def needs_analyst_evidence(finding: object) -> bool:
+    """Keep mixed findings; document-only repairs belong to Solver."""
+    if not getattr(finding, "active", False):
+        return False
+    if getattr(finding, "evidence_targets", ()):
+        return True
+    if getattr(finding, "owner_role", "") in {"SOLVER", "review-solver"}:
+        return False
+    return str(getattr(finding, "category", "")).lower() not in {
+        "acceptance", "acceptance_gap", "document_gap", "plan_gap",
+    }
+
+
 def partition_active_findings(
     review: ReviewState | None, worker_count: int
 ) -> dict[int, tuple[object, ...]]:
@@ -26,7 +39,7 @@ def partition_active_findings(
     if review is None or worker_count <= 1:
         return {}
     active = sorted(
-        (finding for finding in review.findings if finding.active),
+        (finding for finding in review.findings if needs_analyst_evidence(finding)),
         key=lambda finding: str(finding.finding_id),
     )
     if not active:

@@ -210,6 +210,13 @@ def analyst_evidence_task(
         lines.append(
             f"- {finding.finding_id} [{severity}, item {item_id}] {demand[:220]}"
         )
+        requirement_ids = next((
+            list(item.source_requirement_ids) for item in review.task_items
+            if item.item_id == item_id
+        ), [])
+        if requirement_ids:
+            lines.append(f"  Required evidence scope: item_id={item_id}; requirement_id must be one of {requirement_ids}. "
+                         "finding_responses.evidence_ids must reference these scoped updates in this reply.")
         targets = [
             {"path": str(target.get("path") or ""), "symbol": str(target.get("symbol") or "")}
             for target in (getattr(finding, "evidence_targets", ()) or ())
@@ -256,13 +263,19 @@ def critic_evidence_task(context: WorkflowContext) -> str:
         )
     )
     raw_updates = packet.get("evidence_updates")
+    active_ids = {str(finding.finding_id) for finding in active}
+    answered_evidence_ids = {str(eid) for response in packet.get("finding_responses") or []
+        if isinstance(response, Mapping) and response.get("finding_id") in active_ids
+        for eid in response.get("evidence_ids") or []}
     prioritized: list[tuple[int, dict[str, object]]] = []
     for value in raw_updates if isinstance(raw_updates, list) else ():
         record = project_evidence_record(value)
         if not record:
             continue
         evidence_id = str(record.get("evidence_id") or "")
-        if evidence_id and evidence_id in demanded_blob:
+        if evidence_id in answered_evidence_ids:
+            tier = -1
+        elif evidence_id and evidence_id in demanded_blob:
             tier = 0
         elif record.get("item_id"):
             tier = 1

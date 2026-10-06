@@ -19,6 +19,7 @@ _REQUIREMENT = object_schema(
         "scope": string(enum=("in", "out", "conditional")),
         "kind": string(enum=("task", "constraint")),
         "acceptance_signal": string(),
+        "source_quote": string(),
     },
     required=("requirement_id", "statement", "source", "priority", "scope", "kind", "acceptance_signal"),
 )
@@ -67,13 +68,17 @@ _QUOTE = {
     "description": (
         "One contiguous span of the cited lines, transcribed verbatim: at "
         "most 30 lines / 4096 chars, no ellipsis, no skipped lines. Evidence "
-        "about separate spots needs separate entries; an oversized or "
-        "non-verbatim quote marks its entry [UNVERIFIED-QUOTE]."
+        "about separate spots needs separate entries. Invalid targeted "
+        "supplements are rejected for bounded repair; only initial exploratory "
+        "evidence may be demoted to [UNVERIFIED-QUOTE]."
     ),
 }
 _EVIDENCE_UPDATE = object_schema(
     {
         "evidence_id": string(), "requirement_id": string(),
+        "item_id": string(), "finding_id": string(),
+        "source_evidence_id": string(),
+        "quote_group_id": string(), "quote_part_index": {"type": "integer"}, "quote_part_count": {"type": "integer"},
         "decision_relevance": string(
             enum=("boundary", "coverage", "dependency", "acceptance", "risk"),
             aliases=_DECISION_RELEVANCE_ALIASES,
@@ -137,7 +142,27 @@ CONTRACT = make_contract(
     actions=_ACTIONS,
     fields=FIELDS,
     prompt_rules=(
+        "Requirement extraction uses only the original request. Do not invent a minimum number of directions, "
+        "steps or recommendations, performance target or coverage guarantee. A quantified acceptance must be "
+        "supported by its source_quote. Scope review conclusions to the inspected evidence; record engineering "
+        "assumptions and optional improvements separately from user requirements. 'Assess whether there is "
+        "optimization room' does not mean 'find at least three optimizations' or 'prove no omissions'.",
+        "In REQUIREMENT_CONTRACT_ONLY, completed extraction returns REQUIREMENT_CONTRACT_READY, not HUMAN_GATE. "
+        "In EVIDENCE_COLLECTION_READ_ONLY, completed evidence returns EVIDENCE_PACKET_READY. "
+        "HUMAN_GATE requires a concrete nonempty questions_for_user question and a reason in summary or question.reason. "
+        "Unknown facts alone do not request a human decision; record them in unknowns and continue the applicable handoff.",
         "Collect evidence only; do not create or group implementation tasks.",
+        "Before reinvestigating, inspect evidence_demand.available_evidence. To reuse a source fact, "
+        "create a distinct evidence_id with demanded item_id/requirement_id and source_evidence_id of the original; "
+        "copy source and quote exactly, and explain its relevance to this task. "
+        "Equivalent workspace file path aliases may be canonicalized by transport, but quote text, line coordinates "
+        "and source symbol/line suffixes cannot change. New investigation sources require a separate update without "
+        "source_evidence_id; never append a new source claim to reused provenance. "
+        "Shared facts do not approve another task's acceptance.",
+        "For targeted evidence_demand, each evidence update must use the demanded item_id and one of its source_requirement_ids. "
+        "Each finding_response references evidence_ids from this reply in that scope. Repair invalid quotes locally; "
+        "do not return paraphrases, oversized spans or UNVERIFIED claims as completed supplements. "
+        "If runtime data is unavailable, record unknowns and NEEDS_RUNTIME_DATA explicitly.",
         "task_proposals, candidate_items, and candidate_groups must always be empty; Solver is the only task-graph producer.",
         "Every evidence update must include decision_relevance, exactly one of: "
         "boundary, coverage, dependency, acceptance, risk.",
@@ -162,11 +187,13 @@ CONTRACT = make_contract(
         "quote must be one contiguous span copied character-for-character: no "
         "ellipsis, no skipped or paraphrased lines, at most 30 lines and 4096 "
         "characters; when the evidence points at several separate spots, emit "
-        "one entry per spot, each with its own small quote. The transport gate "
-        "marks an entry [UNVERIFIED-QUOTE] and strips its CLOSE suggestion when "
-        "it cites a file without a quote (QUOTE_REQUIRED), quotes text absent "
-        "from the cited file (QUOTE_MISMATCH), or exceeds that limit "
-        "(QUOTE_OVERSIZE); such entries count as unverified evidence.",
+        "one entry per spot, each with its own small quote. For targeted supplements, "
+        "the transport may split a fully verified continuous oversized span into "
+        "at most four linked parts without removing text; missing or mismatched "
+        "quotes and spans that cannot be split safely are rejected to the same "
+        "worker within its existing repair budget. Only initial exploratory evidence "
+        "is marked [UNVERIFIED-QUOTE] with CLOSE stripped for QUOTE_REQUIRED, "
+        "QUOTE_MISMATCH or QUOTE_OVERSIZE.",
         "Evidence conclusions must state what the code or document contains, "
         "with file:line sources. Engineering recommendations ('X should be "
         "added') are not evidence and will be rejected as unsupported claims.",

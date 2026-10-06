@@ -49,6 +49,7 @@ APPROVAL_ACTIONS = frozenset(
 EVIDENCE_RECORD_FIELDS = (
     "evidence_id", "requirement_id", "item_id", "decision_relevance",
     "conclusion", "source", "confidence",
+    "source_evidence_id", "quote_group_id", "quote_part_index", "quote_part_count",
 )
 EVIDENCE_TEXT_LIMITS = {"conclusion": 400, "source": 200}
 MAX_EVIDENCE_RECORDS = 8
@@ -71,6 +72,16 @@ def project_evidence_record(value: object) -> dict[str, object]:
             )
         else:
             record[key] = raw
+    variants = value.get("observed_variants")
+    if isinstance(variants, list) and variants:
+        # Do not hide conflicting supplement observations behind the older
+        # canonical row. The full history remains in the persisted packet.
+        record["observed_variant_count"] = len(variants)
+        record["observed_variants"] = [
+            {key: (" ".join(str(row[key]).split())[:400])
+             for key in ("conclusion", "source", "confidence") if row.get(key) is not None}
+            for row in variants[-3:] if isinstance(row, Mapping)
+        ]
     return record
 
 

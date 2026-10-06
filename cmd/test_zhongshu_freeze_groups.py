@@ -209,11 +209,12 @@ class FreezeGroupsTests(unittest.TestCase):
         # Early hand-over: group-000001 enters Menxia now while group-000002
         # keeps converging in Zhongshu.
         self.assertEqual(decision.transition.action, "FREEZE_APPROVED")
-        self.assertEqual(decision.effects[0].effect_type, "node_dispatch")
+        self.assertEqual(decision.effects[0].effect_type, "plan_review_doc")
+        dispatch = next(effect for effect in decision.effects if effect.effect_type == "node_dispatch")
         self.assertEqual(
             [
                 binding["group_id"]
-                for binding in decision.effects[0].payload["bindings"]
+                for binding in dispatch.payload["bindings"]
             ],
             ["group-000001"],
         )
@@ -236,7 +237,8 @@ class FreezeGroupsTests(unittest.TestCase):
         # the remaining groups for observability.
         self.assertEqual(decision.transition.action, "FREEZE_APPROVED")
         self.assertTrue(decision.effects)
-        payload = decision.effects[0].payload
+        self.assertEqual(decision.effects[0].effect_type, "plan_review_doc")
+        payload = next(effect.payload for effect in decision.effects if effect.effect_type == "node_dispatch")
         self.assertEqual(payload.get("state"), "MENXIA_GROUP_SOLVER")
         self.assertEqual(
             tuple(payload.get("zhongshu_remaining_groups") or ()),
@@ -332,7 +334,9 @@ class FreezeGroupsTests(unittest.TestCase):
         self.assertEqual(decision.transition.action, "FREEZE_APPROVED")
         rows = self._rows(decision.update.review)
         self.assertEqual(rows["group-000002"].stage, "FROZEN")
-        payload = decision.effects[0].payload
+        self.assertEqual(decision.effects[0].effect_type, "plan_review_doc")
+        payload = next(effect.payload for effect in decision.effects
+                       if effect.effect_type in {"node_dispatch", "agent_dispatch"})
         self.assertEqual(
             payload.get("state") or payload.get("target_state"),
             "MENXIA_GROUP_SOLVER",

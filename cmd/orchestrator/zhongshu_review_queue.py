@@ -13,9 +13,11 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import re
 from typing import Any, Iterable, Mapping
 
 from .acceptance_standards import acceptance_signal_gate
+from .group_identity import GROUP_ID_SCHEMA_PATTERN
 
 
 PENDING = "PENDING"
@@ -505,6 +507,8 @@ def structural_gate(plan: Mapping[str, Any]) -> list[str]:
         if not isinstance(group, Mapping):
             continue
         group_id = str(group.get("group_id") or "")
+        if not re.fullmatch(GROUP_ID_SCHEMA_PATTERN, group_id):
+            issues.append(f"GROUP_ID_INVALID:{group_id!r}")
         for item_id in group.get("item_ids") or []:
             item_id = str(item_id)
             if item_id in group_of:
@@ -561,6 +565,30 @@ def structural_gate(plan: Mapping[str, Any]) -> list[str]:
 
     for cycle in _dependency_cycles(by_item):
         issues.append("DEPENDENCY_CYCLE:" + ",".join(cycle))
+    # A valid item DAG can become cyclic when an upstream prerequisite and a
+    # downstream summary share a group. Freeze waits on whole groups, so check
+    # the same projection here rather than deadlocking after Critic approval.
+    owners = {r["item_id"]: r["group_id"] or group_of.get(r["item_id"], "")
+              for r in records}
+    group_edges: dict[str, set[str]] = {}
+    for record in records:
+        owner = owners[record["item_id"]]
+        if not owner:
+            continue
+        if not re.fullmatch(GROUP_ID_SCHEMA_PATTERN, owner):
+            issue = f"GROUP_ID_INVALID:{owner!r}"
+            if issue not in issues:
+                issues.append(issue)
+        dependencies = group_edges.setdefault(owner, set())
+        for dependency in record["dependencies"]:
+            upstream = owners.get(dependency, "")
+            if upstream and upstream != owner:
+                dependencies.add(upstream)
+    groups = {gid: {"dependencies": sorted(deps)}
+              for gid, deps in sorted(group_edges.items())}
+    for cycle in _dependency_cycles(groups):
+        issues.append("GROUP_DEPENDENCY_CYCLE:" + ",".join(cycle)
+                      + ":split upstream prerequisite and downstream summary into separate groups")
     issues.extend(acceptance_signal_gate(plan))
     return issues
 

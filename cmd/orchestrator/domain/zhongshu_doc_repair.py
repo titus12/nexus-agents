@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from collections.abc import Collection
 from dataclasses import dataclass
+from ..group_identity import GROUP_ID_TOKEN
 
 from .zhongshu_doc import (
     DOC_TITLE_PATTERN,
@@ -22,11 +23,14 @@ from .zhongshu_doc import (
     SECTION_ACCEPTANCE,
     SECTION_PATTERN,
     SECTION_TITLES,
+    normalize_doc_title,
     strip_md_emphasis,
 )
 
 _H1_PATTERN = re.compile(r"^#(?!#)")
-_GROUP_TOKEN = re.compile(r"group-\d+")
+_DECLARED_GROUP = re.compile(
+    rf"^#\s*(?P<group_id>{GROUP_ID_TOKEN})\s+需求文档"
+)
 _DECLARED_VERSION = re.compile(r"\[\s*v(\d+)\s*\]")
 
 
@@ -66,7 +70,8 @@ def _canonical_title(
     if start is None or _H1_PATTERN.match(lines[start].lstrip()) is None:
         return lines
     title = lines[start].strip()
-    if set(_GROUP_TOKEN.findall(title)) - {group_id}:
+    declared_group = _DECLARED_GROUP.match(normalize_doc_title(title))
+    if declared_group and declared_group.group("group_id") != group_id:
         # A title naming another group is a real defect, not a formatting slip.
         return lines
     # A version the model declared is kept: a wrong one is a real defect

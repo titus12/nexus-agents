@@ -44,6 +44,8 @@ _BLOCKING_STRUCTURAL_ISSUES = (
     "ITEM_WITHOUT_GROUP",
     "DEPENDENCY_UNKNOWN_ITEM",
     "DEPENDENCY_CYCLE",
+    "GROUP_DEPENDENCY_CYCLE",
+    "GROUP_ID_INVALID",
     # A measurement claim with neither a verification recipe nor an UNKNOWN
     # marker is what five-round evidence fights are made of; reject it at
     # plan-materialization time (recipe/demote is a one-line edit for the
@@ -55,7 +57,9 @@ _BLOCKING_STRUCTURAL_ISSUES = (
 # (``SOLVER_PLAN_STRUCTURE_INVALID:<issue>;<issue>``).  The literal lives in
 # ``domain.errors`` so the retryability predicate and the reply-failure
 # taxonomy agree on it.
-_GATE_STRUCTURAL_ENTRY_PREFIX = "ACCEPTANCE_SIGNAL_UNVERIFIABLE"
+_GATE_STRUCTURAL_ENTRY_PREFIXES = (
+    "ACCEPTANCE_SIGNAL_UNVERIFIABLE", "GROUP_DEPENDENCY_CYCLE:", "GROUP_ID_INVALID:",
+)
 
 # Reply-shape errors the Solver can trivially reformulate on a fresh attempt.
 # These are mechanical protocol slips (e.g. sending both a plan and changes),
@@ -110,13 +114,13 @@ def is_retryable_solver_reply_error(error: str) -> bool:
     # An acceptance-signal gate rejection is a one-line edit for the Solver
     # (add the verification recipe or demote the claim), so the first gate
     # rejection must bounce back on the reply budget instead of blocking the
-    # task for a human.  A structural error that mixes in a non-gate entry
-    # (dependency cycle, uncovered blocker) stays fatal: the feedback loop
-    # would not know which half the Solver can actually fix.
+    # task for a human. A projected group cycle can likewise be fixed by
+    # splitting groups, without inventing or dropping item dependencies.
+    # Other structural errors retain their existing fatal classification.
     if text.startswith(SOLVER_STRUCTURE_REPLY_PREFIX + ":"):
         entries = text.split(":", 1)[1].split(";")
         return bool(entries) and all(
-            entry.strip().startswith(_GATE_STRUCTURAL_ENTRY_PREFIX)
+            entry.strip().startswith(_GATE_STRUCTURAL_ENTRY_PREFIXES)
             for entry in entries
         )
     return any(text.startswith(prefix) for prefix in _RETRYABLE_SOLVER_REPLY_PREFIXES)
@@ -492,7 +496,7 @@ def carry_forward_group_docs(
             # the exact rows named instead of guessing at the closure rule.
             return {}, "SOLVER_GROUP_DOC_INVALID:" + ";".join(
                 violation.render(with_expected=True) for violation in violations[:10]
-            )
+            ) + f";group_id={group_id}"
         document = ZhongshuRequirementDoc.parse(markdown)
         folded[group_id] = {
             "markdown": markdown,

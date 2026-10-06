@@ -23,10 +23,11 @@ from collections.abc import Mapping
 import copy
 import re
 from dataclasses import dataclass
+from ..group_identity import GROUP_ID_TOKEN
 
 DOC_TITLE_PATTERN = re.compile(
-    r"^#\s*[*_`]*\s*(?P<group_id>group-\d+)\s*[*_`]*\s+需求文档\s*"
-    r"\[\s*v(?P<version>\d+)\s*\]\s*[*_`]*\s*$"
+    rf"^#\s*(?P<group_id>{GROUP_ID_TOKEN})\s+需求文档\s*"
+    r"\[\s*v(?P<version>\d+)\s*\]\s*$"
 )
 SECTION_PATTERN = re.compile(r"^##\s*(?P<index>\d+)\.\s*(?P<name>.+?)\s*$")
 ITEM_SUBSECTION_PATTERN = re.compile(r"^###\s+(?P<item_id>[^\s#]+).*$")
@@ -66,6 +67,18 @@ def strip_md_emphasis(text: str) -> str:
             continue
         break
     return stripped
+
+
+def normalize_doc_title(title: str) -> str:
+    """Peel symmetric decorations without consuming an ID's trailing '_'."""
+
+    if not title.startswith("#") or title.startswith("##"):
+        return title
+    body = strip_md_emphasis(title[1:].strip())
+    parts = body.split(None, 1)
+    if len(parts) != 2:
+        return title
+    return f"# {strip_md_emphasis(parts[0])} {parts[1]}"
 
 SECTION_TITLES = (
     "背景",
@@ -136,10 +149,12 @@ class ZhongshuRequirementDoc:
                 "requirement document must be non-empty markdown"
             )
         lines = markdown.splitlines()
-        title_match = DOC_TITLE_PATTERN.match(lines[0]) if lines else None
+        title_match = DOC_TITLE_PATTERN.match(normalize_doc_title(lines[0])) if lines else None
         if title_match is None:
             raise ZhongshuDocError(
-                "first line must be '# <group_id> 需求文档 [v<N>]'"
+                "first line must be '# <group_id> 需求文档 [v<N>]' "
+                "(group_id: ASCII letter/digit first, then letters, digits, _, ., -); "
+                f"actual={lines[0][:200]!r}"
             )
         version = int(title_match.group("version"))
         if version < 1:
@@ -392,7 +407,9 @@ def doc_violation_details(
     except ZhongshuDocError as error:
         return (
             DocViolation(
-                "doc_unparseable", f"doc_unparseable:{error}", actual=str(error)
+                "doc_unparseable", f"doc_unparseable:{error}",
+                expected=f"# {group_id or '<group_id>'} 需求文档 [v{(previous_version or 0) + 1}]",
+                actual=str(error),
             ),
         )
     details: list[DocViolation] = []

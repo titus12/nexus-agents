@@ -487,7 +487,8 @@ class MenxiaWaveDispatchTests(unittest.TestCase):
             context, make_event({"aggregate": {"action": "APPROVE_FREEZE"}})
         )
         self.assertEqual(decision.transition.action, "APPROVE_FREEZE")
-        effect = decision.effects[0]
+        self.assertEqual(decision.effects[0].effect_type, "plan_review_doc")
+        effect = next(effect for effect in decision.effects if effect.effect_type == "node_dispatch")
         self.assertEqual(effect.payload["state"], "MENXIA_GROUP_SOLVER")
         self.assertEqual(effect.payload["dispatch_mode"], "menxia_group_pipeline")
 
@@ -876,8 +877,8 @@ class ZhongshuMenxiaPingPongTests(unittest.TestCase):
         self.assertEqual(
             stages, {"group-001": "FROZEN", "group-002": "REVIEWING"}
         )
-        effect = decision.effects[0]
-        self.assertEqual(effect.effect_type, "node_dispatch")
+        self.assertEqual(decision.effects[0].effect_type, "plan_review_doc")
+        effect = next(effect for effect in decision.effects if effect.effect_type == "node_dispatch")
         self.assertEqual(effect.payload["dispatch_mode"], "menxia_group_pipeline")
         self.assertEqual(
             [binding["group_id"] for binding in effect.payload["bindings"]],

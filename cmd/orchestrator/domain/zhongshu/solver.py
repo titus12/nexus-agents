@@ -202,7 +202,7 @@ def batch_group_scope(review: object, batch: SolverBatch) -> list[str]:
     scope.difference_update(
         row.group_id
         for row in _seeded_group_rows(review)
-        if row.stage == "FROZEN"
+        if row.stage in {"FROZEN", "STALLED", "BLOCKED"}
     )
     return sorted(scope)
 
@@ -400,7 +400,8 @@ def process_solver_reply(
 ) -> SolverReplyOutcome:
     """Validate and materialize one Solver reply through its stage's logic."""
 
-    stage = resolve_reply_stage(payload, review)
+    human_revision = bool(review and review.plan_review.get("pending_feedback"))
+    stage = SolverStage.FORMALIZE if human_revision else resolve_reply_stage(payload, review)
     active_ids = [
         str(getattr(finding, "finding_id", "") or "")
         for finding in getattr(review, "findings", ()) or ()
@@ -408,6 +409,11 @@ def process_solver_reply(
     ]
     # Canonicalize abbreviated finding ids once, before any policy reads them.
     normalized = normalize_solver_finding_ids(dict(payload), active_ids)
+    if human_revision:
+        if not isinstance(normalized.get("plan"), Mapping):
+            return SolverReplyOutcome(stage, normalized, None, "SOLVER_GROUP_DOC_MISSING:human_revision_full_plan")
+        normalized["mode"] = "TASK_GRAPH_FORMALIZATION_READ_ONLY"
+        normalized["changes"] = []
     if stage is SolverStage.REVISE:
         logic = ReviseSolverLogic(SolverBatch.for_findings(
             getattr(review, "findings", ()) or (),
@@ -423,6 +429,9 @@ def process_solver_reply(
     group_doc_rows: tuple[ZhongshuGroupState, ...] = ()
     if not error and materialized is not None:
         rows = _rows_with_group_docs(review, logic.folded_group_docs)
+        if human_revision:
+            group_ids = {str(group.get("group_id") or "") for group in materialized.get("groups", [])}
+            rows = tuple(row for row in rows if row.group_id in group_ids)
         # §8 is the single author of acceptance_signals: the projection
         # overwrites whatever the solver wrote in the plan field.
         materialized, projection_error = project_acceptance_signals(
@@ -574,7 +583,32 @@ def build_solver_dispatch(
         "group_id": next_item.group_id if next_item else None,
         "item_id": next_item.item_id if next_item else None,
     }
-    if stage is SolverStage.REVISE:
+    if review and review.plan_review.get("pending_feedback"):
+        payload["prompt_ref"] = (
+            "Human requirements revision. Revise the prior document and task graph from the full feedback in context.json. "
+            "Return the complete updated plan and group_docs using TASK_GRAPH_FORMALIZATION_READ_ONLY; "
+            "do not return only a finding patch. You may add/reorganize tasks and groups. "
+            "Preserve unrelated requirements; advance changed group document versions by one. "
+            "Use summary to explain each feedback item and the changes. The orchestrator returns your "
+            "validated document directly to the human; no Critic or Analyst round follows. "
+            "Return READY_FOR_CRITIC only as the injected transport action; it is routed to human review "
+            "for this mode. Never approve or dispatch Menxia yourself."
+        )
+        payload["dispatch_context"] = {
+            "solver_stage": "formalize", "zhongshu_dispatch_mode": "human_plan_revision",
+            "expected_reply_mode": "TASK_GRAPH_FORMALIZATION_READ_ONLY", "has_current_plan": has_plan,
+            "current_formal_plan": dict(review.plan) if has_plan else None,
+            "current_requirements_document": str(review.plan_review.get("markdown") or ""),
+            "human_review_feedback": list(review.plan_review["pending_feedback"]),
+            "group_docs_authoritative": {row.group_id: row.doc_markdown for row in review.zhongshu_groups},
+            "requirement_contract": [dict(entry) for entry in review.requirements],
+            "envelope": build_envelope(
+                ingredients=[{"key": "human_review_feedback", "source": "context.json", "lifetime": "persisted"},
+                             {"key": "current_requirements_document", "source": "context.json", "lifetime": "persisted"}],
+                tools={"editable": "plan.full", "contract": "nexus.zhongshu.solver.v1"},
+                product={"type": "solver_result", "contract": "nexus.zhongshu.solver.v1"}),
+        }
+    elif stage is SolverStage.REVISE:
         batch = SolverBatch.for_findings(active, ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND)
         selected_ids = set(batch.selected_finding_ids)
         scope_items = batch_item_scope(review, batch)

@@ -93,11 +93,20 @@ class RuntimeNoticePollTests(unittest.TestCase):
             self.assertEqual(len(messages), 1)
             payload = messages[0].payload
             self.assertEqual(payload["action"], "__UNSTRUCTURED_REPLY__")
-            self.assertEqual(len(payload["raw_reply"]), 500)
-            self.assertTrue(payload["raw_reply_truncated"])
+            self.assertEqual(payload["raw_reply"], body)
+            self.assertFalse(payload["raw_reply_truncated"])
             saved = Path(payload["raw_reply_path"])
             self.assertTrue(saved.is_file())
             self.assertEqual(saved.read_text(encoding="utf-8"), body)
+
+    def test_large_rejected_draft_is_bounded_but_full_file_remains_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = MulticaCliAdapter(Path(temporary) / "transport")
+            body = '{"action": "READY_FOR_SOLVER", "summary": "' + "长" * 17000 + '" "x": 1}'
+            payload = self._poll(adapter, body)[0].payload
+            self.assertEqual(payload["raw_reply"], body[:16000])
+            self.assertTrue(payload["raw_reply_truncated"])
+            self.assertEqual(Path(payload["raw_reply_path"]).read_text(encoding="utf-8"), body)
 
 
 if __name__ == "__main__":

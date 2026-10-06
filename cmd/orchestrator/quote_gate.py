@@ -140,7 +140,7 @@ def find_quote_issues(payload: object) -> list[QuoteIssue]:
 
 
 def _check_entry(
-    key: str, index: int, entry: dict, reader: _FileReader
+    key: str, index: int, entry: dict, reader: _FileReader, *, ignore_size: bool = False
 ) -> QuoteIssue | None:
     prose = str(entry.get("conclusion") or entry.get("answer") or "")
     if prose.startswith(UNVERIFIED_MARK):
@@ -164,7 +164,7 @@ def _check_entry(
             )
         return None
     line_count = quote_text.count("\n") + 1
-    if len(quote_text) > QUOTE_MAX_CHARS or line_count > QUOTE_MAX_LINES:
+    if not ignore_size and (len(quote_text) > QUOTE_MAX_CHARS or line_count > QUOTE_MAX_LINES):
         # Report the actual size: "exceeds the cap" alone left the worker
         # guessing how much to cut and it re-submitted the same oversized
         # span on the retry (task-20260929-dad75d).
@@ -198,14 +198,85 @@ def _check_entry(
     )
 
 
+def repair_verified_quote_spans(payload: object) -> object:
+    """Split only verified continuous source spans, keeping every cited line.
+
+    This is formatting repair, never a semantic rewrite or transcription fix.
+    Up to four parts per entry; unverified/oversized single lines stay rejected.
+    All response references expand to the complete set of parts.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get('evidence_updates'), list):
+        return payload
+    reader = _FileReader()
+    rows = []
+    links = {}
+    used_ids = {str(row.get('evidence_id')) for row in payload['evidence_updates'] if isinstance(row, dict)}
+    for index, entry in enumerate(payload['evidence_updates']):
+        if not isinstance(entry, dict):
+            rows.append(entry)
+            continue
+        quote = entry.get('quote')
+        text = str(quote.get('text') or '') if isinstance(quote, dict) else ''
+        eid = str(entry.get('evidence_id') or '')
+        if (not eid or str(entry.get('conclusion') or '').startswith(UNVERIFIED_MARK)
+                or not text or (text.count('\n') + 1 <= QUOTE_MAX_LINES and len(text) <= QUOTE_MAX_CHARS)):
+            rows.append(entry)
+            continue
+        path = str(quote.get('path') or '')
+        if not path:
+            match = _FILE_TOKEN_RE.search(str(entry.get('source') or ''))
+            path = match.group(0) if match else ''
+        if (not path or reader.load(path) is None
+                or _check_entry('evidence_updates', index, entry, reader, ignore_size=True) is not None):
+            rows.append(entry)
+            continue
+        chunks = []
+        chunk = []
+        unsafe = False
+        for line in text.split('\n'):
+            if len(line) > QUOTE_MAX_CHARS:
+                unsafe = True
+                break
+            if chunk and (len(chunk) >= QUOTE_MAX_LINES or len('\n'.join([*chunk, line])) > QUOTE_MAX_CHARS):
+                chunks.append('\n'.join(chunk))
+                chunk = []
+            chunk.append(line)
+        if chunk:
+            chunks.append('\n'.join(chunk))
+        ids = [eid] + [f'{eid}:quote-part-{part:02d}' for part in range(2, len(chunks) + 1)]
+        if unsafe or len(chunks) > 4 or any(value in used_ids for value in ids[1:]):
+            rows.append(entry)
+            continue
+        links[eid] = ids
+        used_ids.update(ids)
+        offset = 0
+        for part, (part_id, content) in enumerate(zip(ids, chunks), 1):
+            row = copy.deepcopy(entry)
+            row.update(evidence_id=part_id, quote_group_id=eid, quote_part_index=part, quote_part_count=len(chunks))
+            row['quote']['text'] = content
+            if isinstance(quote.get('line_start'), int):
+                row['quote']['line_start'] = quote['line_start'] + offset
+                row['quote']['line_end'] = row['quote']['line_start'] + content.count('\n')
+            rows.append(row)
+            offset += content.count('\n') + 1
+    if not links:
+        return payload
+    result = copy.deepcopy(payload)
+    result['evidence_updates'] = rows
+    for row in result.get('finding_responses') or []:
+        if isinstance(row, dict) and isinstance(row.get('evidence_ids'), list):
+            row['evidence_ids'] = list(dict.fromkeys(part for eid in row['evidence_ids'] for part in links.get(eid, [eid])))
+    return result
+
+
 def format_rejection(issues: list[QuoteIssue]) -> str:
     """The retry feedback for a reply bounced on ``issues`` ('' when none)."""
 
     if not issues:
         return ""
-    shown = "; ".join(item.message for item in issues[:3])
-    if len(issues) > 3:
-        shown += f"; (+{len(issues) - 3} more quote problems)"
+    shown = "; ".join(item.message for item in issues[:8])
+    if len(issues) > 8:
+        shown += "; remaining defects: " + ", ".join(f"{item.label}:{item.kind}" for item in issues[8:])
     return (
         "verbatim quote gate: " + shown
         + ". Every file-citing evidence_update or finding_response needs a "

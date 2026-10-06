@@ -22,7 +22,9 @@ def _context() -> WorkflowContext:
         progression=ProgressState("REQUEST_INTAKE", 0, "2026-09-10T00:00:00Z"),
         request=RequestState(raw_request="run a review", project_type="go", task_type="review"),
         parallel=ParallelState(
-            zhongshu=ZhongshuParallelLimits(enabled=True, fast_track=True),
+            # This test exercises machine fast track through DONE; human
+            # sign-off is explicitly disabled only in this offline fixture.
+            zhongshu=ZhongshuParallelLimits(enabled=True, fast_track=True, plan_review_gate=False),
             menxia=MenxiaParallelLimits(
                 enabled=True,
                 max_concurrent_groups=2,

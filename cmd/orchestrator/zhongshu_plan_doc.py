@@ -18,7 +18,7 @@ from .domain.context import WorkflowContext
 from .domain.decisions import EffectRequest
 from .domain.zhongshu_doc import ZhongshuRequirementDoc
 
-__all__ = ["render_plan_review_doc", "plan_review_doc_effect"]
+__all__ = ["render_plan_review_doc", "render_plan_review_packet", "plan_review_doc_effect"]
 
 
 def _group_rows(context: WorkflowContext) -> list[object]:
@@ -213,7 +213,7 @@ def _handoff() -> list[str]:
         "交门下省时带：本方案全文、analyst 证据包、各组需求文档约束条款（原样带入，实施不得越界）。",
         "",
         "---",
-        "*预审批注区：同意 / 需修改（回复「拒绝：<批注>」退回规划修订）→ 批准后移交门下省*",
+        "*审阅规则：仅回复「通过」移交门下省；其他非空回复交 LLM 修订后再次送审。*",
     ]
 
 
@@ -243,10 +243,43 @@ def render_plan_review_doc(context: WorkflowContext) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def render_plan_review_packet(context: WorkflowContext, *, fresh: bool = False) -> str:
+    """The single canonical human/Menxia document; never reword group bodies."""
+    review = context.review
+    snapshot = review.plan_review if review else {}
+    if not fresh and snapshot.get("markdown"):
+        return str(snapshot["markdown"])
+    version = int(snapshot.get("version") or 0) + 1
+    from .zhongshu_parallel import canonical_plan_hash
+    plan_hash = canonical_plan_hash(review.plan or {}) if review else ""
+    parts = [
+        f"# 中书省需求文档 [v{version}]\n\n",
+        f"任务：{context.identity.task_id}\n\n",
+        f"原始请求：{context.request.raw_request}\n\n",
+        f"任务图哈希：{plan_hash}\n\n",
+        "审阅规则：仅回复「通过」交门下省；其他非空回复交 LLM 修订，再送审。\n\n",
+        "## 任务、分组与依赖\n\n",
+        "\n".join(_task_table(context)) + "\n\n",
+    ]
+    if snapshot.get("revision_summary"):
+        parts.append("## 本轮修订说明\n\n" + str(snapshot["revision_summary"]) + "\n\n")
+    parts.append("## 分组需求正文\n")
+    for row in _group_rows(context):
+        parts.append(
+            f"\n### {row.group_id}（版本 {row.doc_version}）\n"
+            f"文档哈希：{getattr(row, 'doc_hash', '')}\n\n"
+            f"<!-- requirement-group:{row.group_id}:begin -->\n"
+        )
+        parts.append(row.doc_markdown)
+        parts.append(f"\n<!-- requirement-group:{row.group_id}:end -->\n")
+    return "".join(parts)
+
+
 def plan_review_doc_effect(
     task_id: str,
     sequence: int,
     content: str,
+    *, version: int = 0,
 ) -> EffectRequest:
     """Sink effect: persist the plan-review document for the human gate."""
 
@@ -255,5 +288,5 @@ def plan_review_doc_effect(
         effect_type="plan_review_doc",
         task_id=task_id,
         idempotency_key=f"{task_id}:plan-review-doc:{sequence + 1}",
-        payload={"content": content, "sequence": sequence},
+        payload={"content": content, "sequence": sequence, "version": version},
     )

@@ -18,11 +18,12 @@ anti-fake-measurement rule.
 """
 
 from collections.abc import Mapping
+import re
 
 ZHONGSHU_ACCEPTANCE_CHECKLIST = (
     "[Acceptance standard] 每条验收信号（acceptance_signal）必须是一个可打勾的场景断言，逐条对照：",
     "1. 可打勾：一条信号一个断言（给定-当-则或简单谓词），审阅时能直接判定过/不过；不写过程描述，不把多条断言合并成一段。",
-    "2. 数值结论二选一：对比性数值结论（百分比、提升/降低/缩短/加速等）要么给实测数字并注明来源，要么明确写「待实测」；估算不得冒充实测。既无实测来源又未标注的信号会被机械闸门以 ACCEPTANCE_SIGNAL_UNVERIFIABLE 拒绝。具体怎么测（测量对象、命令、指标、基线）由门下省实施计划负责，不在需求文档展开。",
+    "2. 数值结论二选一：对比性数值结论（百分比、提升/降低/缩短/加速等）要么给实测数字并注明来源，要么明确写「待实测」；估算不得冒充实测。定性评估可行性/是否有优化空间并给出依据，不等于承诺性能已改善，无需伪造实测。既无实测来源又未标注的收益承诺会被机械闸门以 ACCEPTANCE_SIGNAL_UNVERIFIABLE 拒绝。具体怎么测（测量对象、命令、指标、基线）由门下省实施计划负责，不在需求文档展开。",
     "3. 口径与出处：计量范围/单位等易混口径写入 §4 口径定义表并在信号中引用，不写长段解释；断言引用的证据（文件:行、日志字段、测试名）须真实存在且支撑该断言；每条信号归属的 item 须能追溯到 requirement。",
 )
 
@@ -38,6 +39,30 @@ _MEASUREMENT_CLAIM_MARKERS = (
 # verification recipe / measured source.  The gate is a coarse pre-filter
 # against fake measurements, not a recipe format check.
 _RECIPE_ESCAPE_MARKERS = ("UNKNOWN", "ＵＮＫＮＯＷＮ", "待实测", "未实测", "验证方法", "实测")
+
+# Exempt only comparison words scoped to a qualitative review question. Strip
+# that span, then inspect the rest: another clause can still assert an outcome.
+_QUALITATIVE_REVIEW = re.compile(
+    r"(?:评估|评审报告对|报告分析|分析|审查|核查|评审|评估报告对)"
+    r"[^，。；;!?！？\n]*?(?:可行性|是否[^，。；;!?！？\n]*?(?:优化空间|可优化|可提高|可降低))"
+)
+_NUMERIC_OUTCOME = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:[%％倍]|[xX](?![A-Za-z])|分钟|秒|ms\b)|"
+    r"[一二三四五六七八九十百]+倍", re.IGNORECASE,
+)
+_OUTCOME_ASSERTION = re.compile(r"确认|保证|确保|承诺|实现|达到|已经|已提高|已降低|已提升")
+
+
+def _claims_measured_outcome(text: str) -> bool:
+    if not any(marker in text.lower() for marker in _MEASUREMENT_CLAIM_MARKERS):
+        return False
+    if _NUMERIC_OUTCOME.search(text):
+        return True
+    remaining = _QUALITATIVE_REVIEW.sub(
+        lambda match: match.group(0) if _OUTCOME_ASSERTION.search(match.group(0)) else "",
+        text,
+    )
+    return any(marker in remaining.lower() for marker in _MEASUREMENT_CLAIM_MARKERS)
 
 
 def acceptance_signal_gate(plan: object) -> list[str]:
@@ -62,7 +87,7 @@ def acceptance_signal_gate(plan: object) -> list[str]:
             continue
         for index, signal in enumerate(signals):
             text = str(signal or "")
-            if not any(marker in text for marker in _MEASUREMENT_CLAIM_MARKERS):
+            if not _claims_measured_outcome(text):
                 continue
             if any(marker in text for marker in _RECIPE_ESCAPE_MARKERS):
                 continue
@@ -103,6 +128,8 @@ def acceptance_standard_hint() -> str:
         "consistent with evidence, and closed "
         "source_requirement_ids lineage.  A signal claiming a measured outcome "
         "that cannot be measured this round must carry 待实测/UNKNOWN; do NOT "
+        "treat a qualitative feasibility/optimization-space review as a claim "
+        "of achieved performance improvement. Do NOT "
         "require a five-element verification recipe -- recipes "
         "belong to the execution phase, not the task-list review.  Close an "
         "unverifiable claim with decision=WONT_VERIFY instead of keeping it "

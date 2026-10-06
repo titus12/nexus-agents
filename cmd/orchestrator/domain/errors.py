@@ -101,6 +101,7 @@ REPLY_FAILURE_CODES = frozenset(
     {
         "AGENT_REPLY_UNSTRUCTURED",
         "AGENT_REPLY_CONTRACT_REJECTED",
+        "ANALYST_HUMAN_GATE_INVALID",
         # The platform discarded an oversized output before the orchestrator
         # could read it ("too large to post safely" placeholder).  Same remedy
         # class -- re-ask on the reply budget -- but the correction is to move

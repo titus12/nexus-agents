@@ -73,7 +73,7 @@ class TestParseRenderRoundtrip(unittest.TestCase):
         self.assertEqual(doc.version, 1)
         self.assertEqual(doc.title, "group-000001 门下省方案")
         self.assertEqual(doc.baseline_markdown, "需求基线内容")
-        self.assertEqual(doc.body_markdown, "")
+        self.assertTrue(all("### " + title in doc.body_markdown for title in BODY_PART_TITLES))
         self.assertEqual(doc.suggestions, ())
         self.assertEqual(doc.ledger, ())
         self.assertEqual(doc.signoffs, ())

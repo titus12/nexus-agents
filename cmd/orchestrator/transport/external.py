@@ -77,6 +77,7 @@ class HumanReply:
     decision_id: str
     answer: str
     author_id: str = ""
+    external_id: str = ""
 
 
 __all__ = [
