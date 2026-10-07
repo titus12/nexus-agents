@@ -17,8 +17,50 @@ import xml.etree.ElementTree as ET
 from .adapters import feishu_notifications_enabled
 
 
+TRANSIENT_DOCUMENT_CLI_MARKERS = (
+    'token_expired', 'Access token expired', 'broker token failed',
+    'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'socket hang up',
+)
+
+
 class ReviewDocumentError(RuntimeError):
-    pass
+    def __init__(self,message,*,source_ref='',prerequisite_fingerprint=''):
+        super().__init__(message)
+        self.source_ref,self.prerequisite_fingerprint=source_ref,prerequisite_fingerprint
+        self.transient=any(marker in message for marker in TRANSIENT_DOCUMENT_CLI_MARKERS)
+
+
+def semantic_blocks(content: str) -> tuple:
+    """Conservative readback: retain structure, table cells and executable text."""
+    content = re.sub(r'^\s*<title(?:\s[^>]*)?>.*?</title>\s*', '', content, count=1, flags=re.S)
+    if content.lstrip().startswith('<'):
+        raise ReviewDocumentError('REQUIREMENTS_READBACK_FORMAT_UNSUPPORTED')
+    blocks, code, language = [], None, ''
+    for line in content.replace('\r\n','\n').splitlines():
+        fence = re.fullmatch(r'\s*```(.*)',line)
+        if fence:
+            if code is None:
+                code, language = [], fence.group(1).strip()
+            else:
+                blocks.append(('code',language,'\n'.join(code)))
+                code = None
+            continue
+        if code is not None:
+            code.append(line)
+            continue
+        if not line.strip() or re.fullmatch(r'\s*\|?[ :|-]+\|[ :|-]*',line):
+            continue
+        heading = re.match(r'^(#{1,6})\s+(.*)',line)
+        if heading:
+            blocks.append(('heading',len(heading.group(1)),_plain_inline(heading.group(2)).strip()))
+        elif line.strip().startswith('|') and line.strip().endswith('|'):
+            blocks.append(('table',tuple(_plain_inline(c.strip()) for c in line.strip()[1:-1].split('|'))))
+        else:
+            # Preserve list markers, numbers, negation, operators, inline code and line order.
+            blocks.append(('line',_plain_inline(line).strip()))
+    if code is not None:
+        raise ReviewDocumentError('REQUIREMENTS_READBACK_UNCLOSED_CODE')
+    return tuple(blocks)
 
 
 def digest(text: str) -> str:
@@ -97,10 +139,11 @@ def _document(result: dict) -> dict:
 
 
 class FeishuReviewDocumentPublisher:
-    def __init__(self, task_root: str | Path, *, cli=None, chat_id: str = ""):
+    def __init__(self, task_root: str | Path, *, cli=None, chat_id: str = "", strict_readback=False):
         self.root = Path(task_root).resolve() / "requirements" / "feishu"
         self.cli = cli or self._run
         self.chat_id = chat_id
+        self.strict_readback = strict_readback
 
     def _run(self, arguments: list[str]) -> dict:
         if not feishu_notifications_enabled():
@@ -197,10 +240,12 @@ class FeishuReviewDocumentPublisher:
             record = self._recover(record, version)
         if record.get("status") != "VERIFIED":
             found = self._fetch(record["document_id"], version)
-            expected = _visible_text(f"# {record['title']}\n\n" + markdown)
-            actual = _visible_text(found["content"])
+            compare = semantic_blocks if self.strict_readback else _visible_text
+            expected = compare(f"# {record['title']}\n\n" + markdown)
+            actual = compare(found["content"])
             if actual != expected:
-                raise ReviewDocumentError("PLAN_REVIEW_DOCUMENT_READBACK_MISMATCH")
+                raise ReviewDocumentError("PLAN_REVIEW_DOCUMENT_READBACK_MISMATCH",
+                    source_ref=f"cloud:{version}:{record['document_id']}",prerequisite_fingerprint=digest(found['content']))
             record.update(status="VERIFIED", cloud_content_hash=digest(found["content"]))
             _save(path, record)
         return record
@@ -211,7 +256,8 @@ class FeishuReviewDocumentPublisher:
             raise ReviewDocumentError("PLAN_REVIEW_DOCUMENT_NOT_PUBLISHED")
         found = self._fetch(record["document_id"], version)
         if digest(found["content"]) != record.get("cloud_content_hash"):
-            raise ReviewDocumentError("PLAN_REVIEW_DOCUMENT_CHANGED: submit changes as review feedback")
+            raise ReviewDocumentError("PLAN_REVIEW_DOCUMENT_CHANGED: submit changes as review feedback",
+                source_ref=f"cloud:{version}:{record['document_id']}",prerequisite_fingerprint=digest(found['content']))
 
     def record_delivery(self, version: int, document_hash: str, message_id: str,
                         notification_key: str, decision_id: str) -> None:
