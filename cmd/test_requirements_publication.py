@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from orchestrator.domain.decisions import EffectRequest
-from orchestrator.domain.requirements.model import ApprovalRecord, FactRecord, text_digest
+from orchestrator.domain.requirements.model import ApprovalRecord, BudgetLedger, EffectCharge, FactRecord, RequirementsRecovery, text_digest
 from orchestrator.domain.requirements.document import render_markdown
 from orchestrator.domain.requirements.review import merge_review
 from orchestrator.runtime.requirements_effects import materialize, RequirementsEffects
@@ -126,6 +126,43 @@ class PublicationTests(unittest.TestCase):
         config=ReviewDocumentError('FEISHU_DOCUMENT_CLI_FAILED exit=1: missing scope docx:document')
         self.assertFalse(config.transient)
         self.assertFalse(ReviewDocumentError('PLAN_REVIEW_DOCUMENT_CHANGED').transient)
+
+    def test_publication_retry_budget_allows_four_transient_retries(self):
+        from orchestrator.domain.requirements.budget import BudgetExceeded, charge_publication
+        ledger=BudgetLedger()
+        for _ in range(4):
+            ledger=charge_publication(ledger,'task:REQ_REVIEW_PUBLISH:publication')
+        self.assertEqual([c.count for c in ledger.publication_retries],[4])
+        with self.assertRaisesRegex(BudgetExceeded,'PUBLICATION_RETRY_BUDGET_EXHAUSTED'):
+            charge_publication(ledger,'task:REQ_REVIEW_PUBLISH:publication')
+
+    def test_external_retry_dwell_scales_with_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            effects=RequirementsEffects(directory,object())
+            base=replace(reviewed(),budget=BudgetLedger())
+            recovery=RequirementsRecovery('REQ_REVIEW_PUBLISH','REQ_REVIEW_PUBLISH','task:publication',
+                                          repair_fingerprint='external')
+            for count,expected in [(1,45),(2,90),(3,120),(5,120)]:
+                state=replace(base,recovery=recovery,
+                    budget=BudgetLedger(publication_retries=(EffectCharge('task:publication',count),)))
+                self.assertEqual(effects.external_retry_dwell(state),expected)
+            state=replace(base,recovery=replace(recovery,repair_fingerprint='format'),
+                budget=BudgetLedger(publication_retries=(EffectCharge('task:publication',2),)))
+            self.assertEqual(effects.external_retry_dwell(state),0)
+            state=replace(base,recovery=None)
+            self.assertEqual(effects.external_retry_dwell(state),0)
+
+    def test_external_retry_effect_backs_off_before_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            slept=[]
+            state=replace(reviewed(),
+                recovery=RequirementsRecovery('REQ_REVIEW_PUBLISH','REQ_REVIEW_PUBLISH','task:publication',
+                                              repair_fingerprint='external'),
+                budget=BudgetLedger(publication_retries=(EffectCharge('task:publication',1),)))
+            request=EffectRequest('check','requirements_retry','task','retry-1',payload={'state':state.to_dict()})
+            outcome=RequirementsEffects(directory,object(),sleep=slept.append).run_once(request)
+            self.assertEqual(outcome.event_name,'RETRY_READY')
+            self.assertEqual(slept,[45])
 
 
 if __name__ == '__main__':
