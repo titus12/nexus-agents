@@ -2,13 +2,46 @@
 
 import logging
 import os
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from orchestrator import logging_setup
 from orchestrator.logging_setup import HourlyFileHandler, configure_logging
+
+
+class _StalledStream:
+    def __init__(self) -> None:
+        self._fd = os.open(os.devnull, os.O_WRONLY)
+        self._gate = threading.Event()
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def write(self, _msg: str) -> int:
+        self._gate.wait()
+        return len(_msg)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        os.close(self._fd)
+
+
+class _BrokenStream:
+    def fileno(self) -> int:
+        raise OSError("no handle")
+
+    def write(self, _msg: str) -> int:
+        raise OSError("no handle")
+
+    def flush(self) -> None:
+        pass
 
 
 class HourlyLoggingTests(unittest.TestCase):
@@ -57,6 +90,46 @@ class HourlyLoggingTests(unittest.TestCase):
                 if getattr(handler, "_review_orchestrator_handler", False)
             ]
             self.assertEqual(len(marked), 2)
+
+    def test_console_write_does_not_block_caller_when_stream_stalls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stalled = _StalledStream()
+            self.addCleanup(stalled.close)
+            configure_logging(directory, console_stream=stalled)
+            logger = logging.getLogger("review_orchestrator_fsm")
+            done = threading.Event()
+
+            def emit_line() -> None:
+                logger.info("stall-regression-test")
+                done.set()
+
+            worker = threading.Thread(target=emit_line, daemon=True)
+            worker.start()
+            self.assertTrue(done.wait(5.0), "console logging blocked the caller thread")
+            files = list(Path(directory).glob("orchestrator-*.log"))
+            self.assertTrue(
+                any("stall-regression-test" in p.read_text(encoding="utf-8") for p in files)
+            )
+
+    def test_console_write_returns_even_when_stream_never_consumes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stalled = _StalledStream()
+            self.addCleanup(stalled.close)
+            configure_logging(directory, console_stream=stalled)
+            logger = logging.getLogger("review_orchestrator_fsm")
+            for index in range(512):
+                logger.info("overflow-%d", index)
+            self.assertTrue(True, "repeated logging on a stalled stream returned")
+
+    def test_unusable_console_stream_falls_back_to_devnull(self) -> None:
+        self.assertFalse(logging_setup.usable_console_stream(_BrokenStream()))
+        self.assertTrue(logging_setup.usable_console_stream(sys.stderr))
+        resolved, owns = logging_setup.resolve_console_stream(_BrokenStream())
+        try:
+            self.assertTrue(owns)
+            self.assertNotIsInstance(resolved, _BrokenStream)
+        finally:
+            resolved.close()
 
 
 if __name__ == "__main__":

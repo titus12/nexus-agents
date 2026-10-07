@@ -1,7 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
+import queue
+import sys
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -72,9 +74,91 @@ def default_log_directory() -> Path:
     return Path(__file__).resolve().parents[2] / "multica"
 
 
+class NonBlockingConsoleHandler(logging.Handler):
+    """Emit formatted records to a console stream without blocking the caller.
+
+    A console stream can stall indefinitely (dead console handle, full pipe
+    whose relay reader stopped). Blocking on it inside emit() freezes the
+    workflow loop, so records are formatted on the caller thread and handed
+    to a daemon writer over a bounded queue. Overflow drops the record
+    because the hourly file handler stays the source of truth.
+    """
+
+    def __init__(self, stream: TextIO, owns_stream: bool = False, max_pending: int = 256) -> None:
+        super().__init__()
+        self._stream = stream
+        self._owns_stream = owns_stream
+        self._pending: queue.Queue[str | None] = queue.Queue(maxsize=max_pending)
+        self._writer = threading.Thread(
+            target=self._drain, name="orchestrator-console-writer", daemon=True
+        )
+        self._writer.start()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            rendered = self.format(record) + "\n"
+        except Exception:
+            self.handleError(record)
+            return
+        try:
+            self._pending.put_nowait(rendered)
+        except queue.Full:
+            pass
+
+    def _drain(self) -> None:
+        while True:
+            rendered = self._pending.get()
+            if rendered is None:
+                return
+            try:
+                self._stream.write(rendered)
+                self._stream.flush()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        for _ in range(3):
+            try:
+                self._pending.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self._pending.get_nowait()
+                except queue.Empty:
+                    pass
+        super().close()
+        if self._owns_stream:
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+
+
+def usable_console_stream(stream: TextIO | None) -> bool:
+    if stream is None or getattr(stream, "closed", False):
+        return False
+    try:
+        fileno = stream.fileno()
+        if not isinstance(fileno, int) or fileno < 0:
+            return False
+        os.fstat(fileno)
+    except (AttributeError, OSError, ValueError):
+        return False
+    return True
+
+
+def resolve_console_stream(stream: TextIO | None = None) -> tuple[TextIO, bool]:
+    """Return the console stream to write to and whether we own (opened) it."""
+    candidate = sys.stderr if stream is None else stream
+    if usable_console_stream(candidate):
+        return candidate, False
+    return open(os.devnull, "w", encoding="utf-8"), True
+
+
 def configure_logging(
     log_directory: str | Path | None = None,
     retention_hours: int = DEFAULT_RETENTION_HOURS,
+    console_stream: TextIO | None = None,
 ) -> Path:
     """Configure console + hourly file logging once and return the directory."""
     directory = Path(log_directory) if log_directory else default_log_directory()
@@ -92,7 +176,8 @@ def configure_logging(
             logger.removeHandler(handler)
             handler.close()
 
-    console = logging.StreamHandler()
+    resolved_stream, owns_stream = resolve_console_stream(console_stream)
+    console = NonBlockingConsoleHandler(resolved_stream, owns_stream=owns_stream)
     console.setLevel(logging.INFO)
     console.setFormatter(formatter)
     setattr(console, _HANDLER_MARKER, True)
