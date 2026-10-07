@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock
 from orchestrator.domain.decisions import EffectRequest
 from orchestrator.domain.requirements.model import ApprovalRecord, BudgetLedger, EffectCharge, FactRecord, RequirementsRecovery, text_digest
 from orchestrator.domain.requirements.document import render_markdown
@@ -79,45 +80,33 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RequirementsState.from_dict(dto)
 
-    def test_cloud_change_blocks_with_verifiable_source_basis(self):
-        from unittest.mock import Mock,patch
+    def test_review_publish_is_local_document_without_cloud_calls(self):
+        from unittest.mock import Mock
         from orchestrator.requirements_gateway import GatewayStore
         from orchestrator.requirements_port import FeishuRequirementsPort
-        from orchestrator.feishu_review_document import ReviewDocumentError
         with tempfile.TemporaryDirectory() as directory:
             publisher=Mock()
-            fingerprint=text_digest('edited cloud text')
-            publisher.verify.side_effect=ReviewDocumentError('PLAN_REVIEW_DOCUMENT_CHANGED',
-                source_ref='cloud:2:doc',prerequisite_fingerprint=fingerprint)
             port=FeishuRequirementsPort(directory,GatewayStore(Path(directory)/'gateway.sqlite'),
                 actor_ids=('owner',),chat_id='isolated',http=Mock(),publisher=publisher)
-            request=EffectRequest('check','requirements_approval_verify','task','check',payload={'state':reviewed().to_dict()})
-            with patch.object(port,'preflight'):
-                outcome=RequirementsEffects(directory,port).run_once(request)
-            self.assertEqual(outcome.event_name,'FAIL')
-            self.assertEqual(outcome.event_payload['error_code'],'PREREQUISITE_MISSING')
-            self.assertEqual(outcome.event_payload['prerequisite_fingerprint'],fingerprint)
-            self.assertEqual(outcome.event_payload['recovery_source_ref'],'cloud:2:doc')
+            receipt=port.publish_review('task',reviewed(),'send-key')
+            publisher.assert_not_called()
+            self.assertTrue(receipt['gate_id'])
+            self.assertTrue(receipt['cloud_revision_ref'].startswith('local:'))
+            self.assertNotIn('url',receipt)
 
-    def test_transient_document_cli_failure_is_retryable_not_blocked(self):
-        from unittest.mock import Mock,patch
+    def test_local_review_document_tamper_fails_verification(self):
         from orchestrator.requirements_gateway import GatewayStore
-        from orchestrator.requirements_port import FeishuRequirementsPort
-        from orchestrator.feishu_review_document import ReviewDocumentError
+        from orchestrator.requirements_port import FeishuRequirementsPort,RequirementsPrerequisiteError
         with tempfile.TemporaryDirectory() as directory:
-            publisher=Mock()
-            publisher.publish.side_effect=ReviewDocumentError(
-                'FEISHU_DOCUMENT_CLI_FAILED exit=1: lark-cli-wrapper: broker token failed: '
-                '{"error":{"type":"token_expired","message":"Access token expired and no refresh token is available"}}')
             port=FeishuRequirementsPort(directory,GatewayStore(Path(directory)/'gateway.sqlite'),
-                actor_ids=('owner',),chat_id='isolated',http=Mock(),publisher=publisher)
-            request=EffectRequest('check','requirements_review_document','task','check',
-                payload={'state':reviewed().to_dict()})
-            with patch.object(port,'preflight'):
-                outcome=RequirementsEffects(directory,port).run_once(request)
-            self.assertEqual(outcome.event_name,'FAIL')
-            self.assertEqual(outcome.event_payload['error_code'],'COMMUNICATION_TRANSIENT')
-            self.assertTrue(outcome.event_payload['retryable'])
+                actor_ids=('owner',),chat_id='isolated',http=Mock(),publisher=Mock())
+            state=reviewed()
+            receipt=port.publish_review('task',state,'send-key')
+            changed=replace(state,review_document_ref=str(Path(directory)/'review.md'),
+                review_gate_id=receipt['gate_id'])
+            (Path(directory)/'review.md').write_text('tampered',encoding='utf-8')
+            with self.assertRaisesRegex(RequirementsPrerequisiteError,'LOCAL_REVIEW_DOCUMENT_CHANGED'):
+                port.verify_approval('task',changed)
 
     def test_document_cli_transient_markers_are_classified(self):
         from orchestrator.feishu_review_document import ReviewDocumentError

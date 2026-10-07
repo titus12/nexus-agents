@@ -5,10 +5,9 @@ import os
 import logging
 from pathlib import Path
 from .domain.errors import DomainError
-from .domain.requirements.document import render_markdown
 from .domain.requirements.review import review_input_digest
 from .feishu_review_document import FeishuReviewDocumentPublisher,ReviewDocumentError
-from .requirements_cards import clarification_card, review_card, progress_card, question_recommendation
+from .requirements_cards import clarification_card, progress_card, question_recommendation
 
 logger = logging.getLogger('review_orchestrator_fsm')
 
@@ -250,18 +249,6 @@ class FeishuRequirementsPort(LocalRequirementsPort):
         return len({a.question_id for a in state.answers if a.question_id in round_.question_ids
                     and a.question_revision == revisions[a.question_id]})
 
-    def publish_review(self, task_id, state, key):
-        self.preflight()
-        draft = state.draft
-        receipt = self._document_call(self.publisher.publish,task_id,draft.version,render_markdown(draft),draft.document_digest)
-        stamp = review_input_digest(draft,state.consensus)
-        gate_id = task_id+':review:'+stamp
-        token = self.store.register(gate_id,task_id,{'kind':'review','document_digest':draft.document_digest,
-            'review_input_digest':stamp,'actor_ids':list(self.actor_ids),'owner_policy':self.owner_policy,'chat_id':self.chat_id,
-            'pages':{'review':{'send_key':key,'questions':{}}}})
-        self._send(gate_id,'review',key,review_card(gate_id,token,receipt['url'],draft.version,draft.document_digest))
-        return {'gate_id':gate_id,'cloud_revision_ref':receipt['cloud_content_hash'],'url':receipt['url']}
-
     def refresh_clarification(self, task_id, state, *, upgrade=False):
         from .adapters import feishu_notifications_enabled
         if not feishu_notifications_enabled():
@@ -288,14 +275,6 @@ class FeishuRequirementsPort(LocalRequirementsPort):
                 {'content':json.dumps(card,ensure_ascii=False)},token=self.http._token('gate'))
             if result.get('code',0):
                 raise RequirementsPrerequisiteError('CARD_UPDATE_REJECTED')
-
-    def verify_approval(self, task_id, state):
-        self.preflight()
-        self._document_call(self.publisher.verify,state.draft.version,state.draft.document_digest)
-        if not self.store.close_for_approval(state.review_gate_id,state.pending_approval.event_id):
-            raise RequirementsPrerequisiteError('APPROVAL_QUEUE_NOT_DRAINED')
-        receipt = self.publisher.receipt(state.draft.version)
-        return {'cloud_revision_ref':receipt['cloud_content_hash']}
 
     def verify_message(self, message_id, gate):
         # Used solely for a callback that arrived before the send receipt was saved.
