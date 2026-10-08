@@ -87,7 +87,8 @@ def result_errors(payload, dispatch):
                     errors.append(f'analysis.claims[{index}].quote: EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE; '
                                   f'set quote to a verbatim contiguous excerpt of {cited} '
                                   '(copy the source text exactly, keep path separators and case; '
-                                  'statement may paraphrase but quote may not).' + excerpt)
+                                  'statement may paraphrase but quote may not; when unsure, copying '
+                                  'the entire source text as the quote is acceptable).' + excerpt)
     consensus = dispatch.get('consensus', {})
     previous_assumptions = {row.get('assumption_id'):row for row in consensus.get('assumptions',[])
                             if isinstance(row,dict) and isinstance(row.get('assumption_id'),str)}
