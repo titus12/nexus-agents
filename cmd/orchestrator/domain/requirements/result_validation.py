@@ -60,8 +60,9 @@ def result_errors(payload, dispatch):
             if any(not isinstance(ref,str) or ref not in sources for ref in refs):
                 errors.append(f'analysis.claims[{index}].source_ids: CLAIM_SOURCE_UNKNOWN')
             if row.get('origin','explicit') in ('explicit','choice'):
-                quote = row.get('quote') or row.get('statement')
-                if isinstance(quote,str) and quote.strip().casefold() in ('none','null'):
+                raw_quote = row.get('quote')
+                if 'quote' in row and (raw_quote is None or
+                        (isinstance(raw_quote,str) and raw_quote.strip().casefold() in ('none','null'))):
                     human_refs = [ref for ref in refs if isinstance(ref,str) and ref in sources
                         and sources[ref].get('kind') in ('request','answer','feedback')]
                     cited = human_refs[0] if human_refs else 'the cited human source'
@@ -69,9 +70,11 @@ def result_errors(payload, dispatch):
                     if human_refs:
                         excerpt = ' Copy from it: ' + sources[human_refs[0]].get('text','')[:300]
                     errors.append(f'analysis.claims[{index}].quote: QUOTE_IS_NULL_LITERAL; '
-                                  f'the string "None" is not a quote. Replace it with the verbatim text '
-                                  f'of {cited} - no placeholder, no null, copy the exact characters.' + excerpt)
+                                  f'the quote is null or the string "None" - that is not a quote. '
+                                  f'Replace it with the verbatim text of {cited}: copy the exact '
+                                  'characters, no placeholder, no null.' + excerpt)
                     continue
+                quote = raw_quote or row.get('statement')
                 if isinstance(quote,str) and not any(isinstance(ref,str) and ref in sources
                     and sources[ref].get('kind') in ('request','answer','feedback')
                     and claim_quote_matches(quote,sources[ref].get('text','')) for ref in refs):

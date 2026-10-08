@@ -136,13 +136,20 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn('Full source text: 建议保留原句逐字引用',feedback)
 
     def test_null_literal_quote_gets_dedicated_repair_feedback(self):
-        payload={'analysis':{'claims':[{'requirement_id':'req-1','topic_key':'t','statement':'paraphrased goal',
-            'kind':'goal','origin':'choice','source_ids':['src-000002'],'quote':'None'}]}}
+        for null_value in (None, 'None', 'null'):
+            payload={'analysis':{'claims':[{'requirement_id':'req-000001','topic_key':'t','statement':'paraphrased goal',
+                'kind':'goal','origin':'choice','source_ids':['src-000002'],'quote':null_value}]}}
+            dispatch={'sources':[{'source_id':'src-000002','kind':'answer','text':'建议逐字引用来源原文'}]}
+            feedback='\n'.join(result_errors(payload,dispatch))
+            self.assertIn('QUOTE_IS_NULL_LITERAL',feedback,null_value)
+            self.assertNotIn('EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE',feedback)
+            self.assertIn('Copy from it: 建议逐字引用来源原文',feedback)
+
+    def test_absent_quote_keeps_statement_fallback(self):
+        payload={'analysis':{'claims':[{'requirement_id':'req-000001','topic_key':'t',
+            'statement':'建议逐字引用来源原文','kind':'goal','origin':'choice','source_ids':['src-000002']}]}}
         dispatch={'sources':[{'source_id':'src-000002','kind':'answer','text':'建议逐字引用来源原文'}]}
-        feedback='\n'.join(result_errors(payload,dispatch))
-        self.assertIn('QUOTE_IS_NULL_LITERAL',feedback)
-        self.assertNotIn('EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE',feedback)
-        self.assertIn('Copy from it: 建议逐字引用来源原文',feedback)
+        self.assertEqual(result_errors(payload,dispatch),[])
 
     def test_separator_and_case_variants_still_count_as_verbatim(self):
         source='RTC-SDK 项目，Packages\\com.sdk\\Runtime中的网络层tlv做性能优化，GC优化'
