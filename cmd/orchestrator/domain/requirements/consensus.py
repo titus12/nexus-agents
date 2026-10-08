@@ -74,7 +74,12 @@ def apply_analysis(state, payload, *, aliases=None, preserve_pending=False):
                           if sources[sid].kind in ('request', 'answer', 'feedback')
                           and quote in sources[sid].text), None)
             if not human:
-                raise ValueError('%s: EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE: quote must be an exact contiguous excerpt of the cited human source' % label)
+                human_ids = [sid for sid in claim.source_ids
+                             if sid in sources and sources[sid].kind in ('request', 'answer', 'feedback')]
+                cited = human_ids[0] if human_ids else 'the cited human source'
+                raise ValueError('%s: EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE: quote must be an exact contiguous '
+                                 'excerpt of %s (copy the source text verbatim; statement may paraphrase but quote may not)' % (
+                                     label, cited))
             old_choices = tuple(d for d in active_decisions(replace(state, decisions=tuple(decisions)))
                                 if d.topic_key == claim.topic_key)
             if any(d.conclusion != quote and human.source_id == d.source_id for d in old_choices):
