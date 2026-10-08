@@ -72,14 +72,22 @@ def latest_snapshot(journal_records: list[dict]) -> dict:
 
 
 CARD_RECOMMENDATION_FALLBACK = '建议先采集相关基线数据，再确定可量化的目标与验收标准。'
+REJECT_OBJECTION = '（验收剧本：拒绝推荐项）本条不接受推荐，请按所选约束重新评估对应方案。'
 
 
-def recommendation_answer(question: dict) -> dict | None:
+def recommendation_answer(question: dict, scenario: str = 'recommend') -> dict | None:
     options = question.get('options') or []
     blocking = bool(question.get('blocking'))
     base = {'question_id': question['question_id'],
             'question_revision': question.get('revision', 1)}
     recommendation = question.get('recommendation') or ''
+    if scenario == 'reject':
+        if len(options) >= 2:
+            return {**base, 'option_ids': [options[-1]['option_id']],
+                    'free_text': REJECT_OBJECTION, 'disposition': 'answered'}
+        if blocking or not options:
+            return {**base, 'option_ids': [], 'free_text': '', 'disposition': 'defer'}
+        return {**base, 'option_ids': [], 'free_text': '', 'disposition': 'defer'}
     if recommendation:
         return {**base, 'option_ids': [], 'free_text': recommendation, 'disposition': 'answered'}
     if options:
@@ -89,7 +97,7 @@ def recommendation_answer(question: dict) -> dict | None:
     return {**base, 'option_ids': [], 'free_text': CARD_RECOMMENDATION_FALLBACK, 'disposition': 'answered'}
 
 
-def submit_answers(task_id: str, snapshot: dict) -> tuple[bool, str]:
+def submit_answers(task_id: str, snapshot: dict, scenario: str = 'recommend') -> tuple[bool, str]:
     requirements = snapshot['context']['requirements']
     answered = {(a['question_id'], a['question_revision']) for a in requirements.get('answers', [])}
     rounds = requirements.get('rounds', [])
@@ -103,7 +111,7 @@ def submit_answers(task_id: str, snapshot: dict) -> tuple[bool, str]:
         revision = revisions.get(question_id, 1)
         if (question_id, revision) in answered:
             continue
-        answer = recommendation_answer(by_id.get(question_id, {}))
+        answer = recommendation_answer(by_id.get(question_id, {}), scenario)
         if answer is None:
             return False, 'UNSUPPORTED_BLOCKING_QUESTION:' + question_id
         rows.append(answer)
@@ -294,11 +302,12 @@ def last_poll_age(task_id: str) -> float | None:
 
 
 def patrol(task_id: str, pid: int, silence_timeout: int, wait_cap: int,
-           round_deadline: float) -> tuple[str, str, list[str]]:
+           round_deadline: float, scenario: str = 'recommend') -> tuple[str, str, list[str]]:
     answered_rounds: set[str] = set()
     approved_digests: set[str] = set()
     visited: list[str] = []
     entered_wait_at: float | None = None
+    last_heartbeat = time.time()
     while time.time() < round_deadline:
         records = journal(task_id)
         current = states(records)
@@ -320,8 +329,8 @@ def patrol(task_id: str, pid: int, silence_timeout: int, wait_cap: int,
             round_id = open_round['round_id'] if open_round else ''
             if round_id and round_id not in answered_rounds:
                 answered_rounds.add(round_id)
-                ok, detail = submit_answers(task_id, snapshot)
-                log('auto-answer %s %s' % (round_id, detail[:160] if ok else detail))
+                ok, detail = submit_answers(task_id, snapshot, scenario)
+                log('auto-answer[%s] %s %s' % (scenario, round_id, detail[:160] if ok else detail))
                 if not ok and detail.startswith(('UNSUPPORTED', 'ANSWER_SUBMIT_FAILED')):
                     return 'failure', 'clarify gate: ' + detail, visited
             if entered_wait_at and time.time() - entered_wait_at > wait_cap:
@@ -342,13 +351,25 @@ def patrol(task_id: str, pid: int, silence_timeout: int, wait_cap: int,
             return 'failure', 'REQ_BLOCKED: ' + str(reason)[:300], visited
         last = records[-1] if records else None
         if last and last.get('record_type') == 'effect_running':
-            if time.time() - _recorded_at(last) > silence_timeout:
+            journal_age = time.time() - _recorded_at(last)
+            if time.time() - last_heartbeat > 300:
+                poll_age = last_poll_age(task_id)
+                log('patrol state=%s journal_age=%ds poll_age=%s' % (
+                    state, int(journal_age),
+                    'none' if poll_age is None else '%ds' % poll_age))
+                last_heartbeat = time.time()
+            if journal_age > silence_timeout:
                 poll_age = last_poll_age(task_id)
                 if poll_age is None or poll_age > silence_timeout:
-                    return 'failure', ('stall: effect_running with no journal progress and no '
-                                       'dispatch polls for %ds (poll_age=%s)' % (
-                                           silence_timeout, 'none' if poll_age is None else '%ds' % poll_age)), visited
-        time.sleep(15)
+                    return 'failure', ('stall: effect_running journal_age=%ds poll_age=%s '
+                                       'exceeds silence_timeout=%ds' % (
+                                           int(journal_age),
+                                           'none' if poll_age is None else '%ds' % poll_age,
+                                           silence_timeout)), visited
+        elif time.time() - last_heartbeat > 300:
+            log('patrol state=%s (journal idle, last record: %s)' % (
+                state, last.get('record_type') if last else 'none'))
+            last_heartbeat = time.time()
         time.sleep(15)
     return 'failure', 'round timeout', visited
 
@@ -361,6 +382,45 @@ def _recorded_at(record: dict) -> float:
         return time.time()
 
 
+def log_config_fingerprint() -> None:
+    """Log the live platform agent/skill config vs repo canon before each round.
+
+    Multica-side skill or prompt drift (missing sections, conflicting text)
+    has caused real instability, so every round starts with a drift check:
+    any non-empty drift list is logged as a warning for post-mortems.
+    """
+    try:
+        import sync_multica_review_agents as sync
+    except Exception as error:
+        log('config fingerprint unavailable: %r' % (error,))
+        return
+    for role in ('analyst', 'solver', 'critic'):
+        try:
+            agent_id, skill_id, _menxia_id = sync.TARGETS[role]
+            agent = sync.cli('agent', 'get', agent_id)
+            skill = sync.cli('skill', 'get', skill_id, '--with-content')
+            drift = sync.differences(role, agent, skill)
+            sha = sync.digest(skill.get('content'))
+            log('config %s status=%s skill_sha=%s drift=%s' % (
+                role, agent.get('status'), sha[:12], drift or 'OK'))
+        except Exception as error:
+            log('config %s check failed: %r' % (role, error))
+
+
+def last_dispatch_role(task_id: str) -> str:
+    bundles = RUNS / 'transport' / 'prompt-bundles' / task_id
+    candidates = sorted(bundles.glob('*/context.json'), key=lambda p: p.stat().st_mtime) if bundles.exists() else []
+    for path in reversed(candidates):
+        try:
+            context = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        role = context.get('role')
+        if role:
+            return str(role)
+    return 'unknown'
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request-file', type=Path, default=REQUEST_DEFAULT)
@@ -369,6 +429,8 @@ def main() -> int:
     parser.add_argument('--silence-timeout', type=int, default=600)
     parser.add_argument('--wait-cap', type=int, default=1200)
     parser.add_argument('--skip-cleanup', action='store_true')
+    parser.add_argument('--scenario', choices=('recommend', 'reject'), default='recommend',
+                        help='reject: answer clarify rounds against the recommendation (negative path)')
     arguments = parser.parse_args()
 
     request_text = arguments.request_file.read_text(encoding='utf-8-sig').strip()
@@ -381,6 +443,8 @@ def main() -> int:
             cleanup_issues(cookie)
     ensure_gateway()
     ensure_broker_token()
+    log('scenario=%s' % arguments.scenario)
+    log_config_fingerprint()
 
     pid, handle = launch(request_text)
     log('launched pid=%d' % pid)
@@ -389,12 +453,14 @@ def main() -> int:
     if not task_id:
         stop_process(pid)
         record_round({'task_id': 'unknown', 'outcome': 'failure', 'duration_sec': int(time.time() - started_at),
-                      'note': 'task id not found in logs within 120s', 'started_at': started_at})
+                      'note': 'task id not found in logs within 120s', 'started_at': started_at,
+                      'scenario': arguments.scenario})
         return 1
     log('task_id=%s' % task_id)
     try:
         outcome, note, visited = patrol(task_id, pid, arguments.silence_timeout,
-                                        arguments.wait_cap, started_at + arguments.round_timeout)
+                                        arguments.wait_cap, started_at + arguments.round_timeout,
+                                        arguments.scenario)
     except Exception as error:
         outcome, note, visited = 'failure', 'driver bug: %r' % (error,), []
     finally:
@@ -404,6 +470,7 @@ def main() -> int:
     if outcome == 'success':
         final_state = 'REQ_HANDOFF'
     else:
+        log('failure dispatch role=%s' % last_dispatch_role(task_id))
         records = journal(task_id)
         current = states(records)
         final_state = current[-1] if current else 'UNKNOWN'
@@ -418,7 +485,8 @@ def main() -> int:
                     break
     record_round({'task_id': task_id, 'outcome': outcome, 'duration_sec': duration,
                   'note': note, 'states': visited, 'started_at': started_at,
-                  'finished_at': time.time(), 'final_state': final_state})
+                  'finished_at': time.time(), 'final_state': final_state,
+                  'scenario': arguments.scenario})
     log('round %s: %s (%s)' % (task_id, outcome, note[:160]))
     return 0 if outcome == 'success' else 1
 
