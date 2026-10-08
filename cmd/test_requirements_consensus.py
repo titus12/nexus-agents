@@ -40,6 +40,26 @@ class ConsensusTests(unittest.TestCase):
             apply_analysis(state, payload)
         self.assertIn('req-000002', str(caught.exception))
 
+    def test_partial_quote_of_existing_conclusion_reuses_the_decision(self):
+        state = make_state()
+        source_text = state.sources[0].text
+        full_quote = source_text + '\n（补充说明）接受默认约束'
+        state = add_feedback(state, full_quote, 'feedback-multi')
+        payload = {'claims': [
+            {'local_key': 'claim_full', 'topic_key': 'gc', 'kind': 'goal', 'origin': 'explicit',
+             'statement': full_quote, 'source_ids': ['src-000002'], 'quote': full_quote},
+            {'local_key': 'claim_part', 'topic_key': 'gc', 'kind': 'goal', 'origin': 'explicit',
+             'statement': '重述同一结论的目标', 'source_ids': ['src-000002'], 'quote': source_text},
+        ]}
+        state = apply_analysis(state, payload)
+        gc_decisions = [d for d in state.decisions if d.topic_key == 'gc']
+        self.assertEqual(len(gc_decisions), 1)
+        self.assertEqual(gc_decisions[0].conclusion, full_quote)
+        bound = {c.local_id if hasattr(c, 'local_id') else c.requirement_id: c
+                 for c in state.consensus.claims}
+        part = [c for c in state.consensus.claims if c.statement == '重述同一结论的目标'][0]
+        self.assertEqual(part.decision_ids, (gc_decisions[0].decision_id,))
+
     def test_statement_change_error_names_claim_and_existing_statement(self):
         with self.assertRaisesRegex(ValueError, r"claims\[req-000001\]: USER_DECISION_PROTECTED: "
                                                 r"statement changed.*keep existing statement: "

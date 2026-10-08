@@ -68,7 +68,7 @@ def apply_analysis(state, payload, *, aliases=None, preserve_pending=False):
             if not any(sid in state.consensus.pending_source_ids for sid in claim.source_ids):
                 raise ValueError('%s: USER_DECISION_PROTECTED: statement changed without a new human source; keep existing statement: %r' % (
                     label, previous.statement))
-            if not quote or quote not in claim.statement:
+            if not quote or not claim_quote_matches(quote, claim.statement):
                 raise ValueError('%s: CHANGED_CHOICE_REQUIRES_EXPLICIT_SOURCE' % label)
         if claim.origin in ('explicit', 'choice'):
             quote = quote or claim.statement
@@ -87,13 +87,20 @@ def apply_analysis(state, payload, *, aliases=None, preserve_pending=False):
                                  'statement may paraphrase but quote may not).%s' % (label, cited, excerpt))
             old_choices = tuple(d for d in active_decisions(replace(state, decisions=tuple(decisions)))
                                 if d.topic_key == claim.topic_key)
-            if any(d.conclusion != quote and human.source_id == d.source_id for d in old_choices):
-                conflicting = next(d for d in old_choices
-                                   if d.conclusion != quote and human.source_id == d.source_id)
+
+            def same_conclusion(conclusion: str, candidate: str) -> bool:
+                a, b = normalized_quote(conclusion), normalized_quote(candidate)
+                return bool(a) and bool(b) and (a in b or b in a)
+
+            conflicting = next((d for d in old_choices
+                                if human.source_id == d.source_id
+                                and not same_conclusion(d.conclusion, quote)), None)
+            if conflicting:
                 raise ValueError('%s: USER_DECISION_PROTECTED: topic %r already concluded %r from the same human source (claims %s); one quote per topic per source - reuse that quote or use a different topic' % (
                     label, claim.topic_key, conflicting.conclusion,
                     ','.join(conflicting.requirement_ids) or conflicting.decision_id))
-            existing = next((d for d in old_choices if d.source_id == human.source_id and d.conclusion == quote), None)
+            existing = next((d for d in old_choices
+                             if d.source_id == human.source_id and same_conclusion(d.conclusion, quote)), None)
             if existing is None:
                 existing = DecisionRecord(next_id(decisions, 'decision_id', 'decision'), claim.topic_key,
                                           quote, human.source_id, tuple(d.decision_id for d in old_choices), (identity,))
