@@ -266,6 +266,9 @@ def wait_for_task_id(pid: int, timeout: int = 120) -> str | None:
     return None
 
 
+LOG_STAMP = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))')
+
+
 def last_poll_age(task_id: str) -> float | None:
     marker = 'AGENT_REMOTE_RUN_STATUS'
     needle = 'task_id=' + task_id
@@ -278,8 +281,11 @@ def last_poll_age(task_id: str) -> float | None:
             continue
         for line in text.splitlines():
             if marker in line and needle in line:
+                stamp_match = LOG_STAMP.match(line)
+                if not stamp_match:
+                    continue
                 try:
-                    stamp = datetime.fromisoformat(line[:29])
+                    stamp = datetime.fromisoformat(stamp_match.group(1).replace('Z', '+00:00'))
                 except ValueError:
                     continue
                 age = time.time() - stamp.timestamp()
