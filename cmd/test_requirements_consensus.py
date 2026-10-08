@@ -60,6 +60,24 @@ class ConsensusTests(unittest.TestCase):
         part = [c for c in state.consensus.claims if c.statement == '重述同一结论的目标'][0]
         self.assertEqual(part.decision_ids, (gc_decisions[0].decision_id,))
 
+    def test_topic_remap_orphaning_a_decision_is_rejected(self):
+        state = make_state()
+        state = add_feedback(state, 'GC 门禁：每帧分配低于 128 字节', 'feedback-gc')
+        state = apply_analysis(state, {'claims': [{'requirement_id': 'req-000002', 'topic_key': 'gc-gate',
+            'statement': 'GC 门禁以每帧分配为验收口径', 'source_ids': ['src-000002'], 'quote': 'GC 门禁：每帧分配低于 128 字节'}]})
+        with self.assertRaisesRegex(ValueError, r"claims\[req-000002\]: REQUIREMENT_REMAP_ORPHANS_DECISION.*decision-"):
+            apply_analysis(state, {'claims': [{'requirement_id': 'req-000002', 'topic_key': 'engine-version',
+                'statement': '引擎版本约束', 'source_ids': ['src-000002'], 'quote': 'GC 门禁：每帧分配低于 128 字节'}]})
+
+    def test_topic_remap_without_decisions_is_allowed(self):
+        state = make_state()
+        state = apply_analysis(state, {'claims': [{'requirement_id': 'req-000002', 'topic_key': 'old-topic',
+            'statement': '无决定的主题', 'source_ids': ['src-000001'], 'origin': 'derived'}]})
+        state = apply_analysis(state, {'claims': [{'requirement_id': 'req-000002', 'topic_key': 'new-topic',
+            'statement': '换个主题重新归纳', 'source_ids': ['src-000001'], 'origin': 'derived'}]})
+        moved = next(c for c in state.consensus.claims if c.requirement_id == 'req-000002')
+        self.assertEqual(moved.topic_key, 'new-topic')
+
     def test_statement_change_error_names_claim_and_existing_statement(self):
         with self.assertRaisesRegex(ValueError, r"claims\[req-000001\]: USER_DECISION_PROTECTED: "
                                                 r"statement changed.*keep existing statement: "

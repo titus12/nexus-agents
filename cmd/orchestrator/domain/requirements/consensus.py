@@ -57,6 +57,16 @@ def apply_analysis(state, payload, *, aliases=None, preserve_pending=False):
             raise ValueError('%s: CLAIM_SOURCE_UNKNOWN: %s' % (
                 label, sorted(set(claim.source_ids) - sources.keys())))
         previous = claims.get(identity)
+        if previous and previous.topic_key != claim.topic_key and previous.decision_ids:
+            still_bound = any(rid != identity and other.decision_ids
+                              and set(other.decision_ids) & set(previous.decision_ids)
+                              for rid, other in claims.items())
+            if not still_bound:
+                raise ValueError(
+                    '%s: REQUIREMENT_REMAP_ORPHANS_DECISION: %s previously carried decisions %s '
+                    'for topic %r; keep that topic on this requirement_id, or supersede those '
+                    'decisions with a new human decision' % (
+                        label, identity, ','.join(previous.decision_ids), previous.topic_key))
         if previous and previous.origin in ('explicit','choice') and claim.origin not in ('explicit','choice'):
             raise ValueError('%s: USER_DECISION_PROTECTED: existing %s claim cannot be downgraded to %s' % (
                 label, previous.origin, claim.origin))
