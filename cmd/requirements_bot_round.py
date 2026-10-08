@@ -83,12 +83,10 @@ def recommendation_answer(question: dict, scenario: str = 'recommend') -> dict |
             'question_revision': question.get('revision', 1)}
     recommendation = question.get('recommendation') or ''
     if scenario == 'reject':
-        if len(options) >= 2:
+        if options:
             return {**base, 'option_ids': [options[-1]['option_id']],
                     'free_text': REJECT_OBJECTION, 'disposition': 'answered'}
-        if blocking or not options:
-            return {**base, 'option_ids': [], 'free_text': '', 'disposition': 'defer'}
-        return {**base, 'option_ids': [], 'free_text': '', 'disposition': 'defer'}
+        return {**base, 'option_ids': [], 'free_text': REJECT_OBJECTION, 'disposition': 'answered'}
     if recommendation:
         return {**base, 'option_ids': [], 'free_text': recommendation, 'disposition': 'answered'}
     if options:
