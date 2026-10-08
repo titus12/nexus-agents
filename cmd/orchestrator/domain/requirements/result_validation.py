@@ -61,6 +61,17 @@ def result_errors(payload, dispatch):
                 errors.append(f'analysis.claims[{index}].source_ids: CLAIM_SOURCE_UNKNOWN')
             if row.get('origin','explicit') in ('explicit','choice'):
                 quote = row.get('quote') or row.get('statement')
+                if isinstance(quote,str) and quote.strip().casefold() in ('none','null'):
+                    human_refs = [ref for ref in refs if isinstance(ref,str) and ref in sources
+                        and sources[ref].get('kind') in ('request','answer','feedback')]
+                    cited = human_refs[0] if human_refs else 'the cited human source'
+                    excerpt = ''
+                    if human_refs:
+                        excerpt = ' Copy from it: ' + sources[human_refs[0]].get('text','')[:300]
+                    errors.append(f'analysis.claims[{index}].quote: QUOTE_IS_NULL_LITERAL; '
+                                  f'the string "None" is not a quote. Replace it with the verbatim text '
+                                  f'of {cited} - no placeholder, no null, copy the exact characters.' + excerpt)
+                    continue
                 if isinstance(quote,str) and not any(isinstance(ref,str) and ref in sources
                     and sources[ref].get('kind') in ('request','answer','feedback')
                     and claim_quote_matches(quote,sources[ref].get('text','')) for ref in refs):
