@@ -51,7 +51,7 @@ def desired(role):
     if role == "solver":
         files["references/option-comparison-guide.md"] = RUNTIME / "skill-assets/option-comparison-guide.md"
     return (RUNTIME / f"agent-instructions/{role}.md",
-            RUNTIME / f"zhongshu-{role}-skill.md", files)
+            RUNTIME / f"requirements-{role}-skill.md", files)
 
 
 def differences(role, agent, skill):
