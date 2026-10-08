@@ -30,13 +30,6 @@ from .domain.errors import (
     UNSTRUCTURED_REPLY_EVENT,
     is_runtime_failure_notice,
 )
-from .structured_output import (
-    role_mode_for,
-    state_actions,
-    stable_role_fields,
-)
-from .domain.zhongshu import resolve_solver_stage, solver_contract_fragments
-from .zhongshu_solver_contract import ZHONGSHU_SOLVER_REQUIRED_ITEM_FIELDS
 
 logger = logging.getLogger("review_orchestrator_fsm")
 
@@ -252,6 +245,19 @@ def _parse_json_candidate(
         trailing = candidate[end:].strip()
         if trailing == "}":
             return value, "repaired", "EXTRA_CLOSING_BRACE", end
+        # The model can close the root object one brace early and continue
+        # with more fields: {"...":"..."},"questions":[...]}  Accept only
+        # when the merged document parses as one complete JSON object, so
+        # nothing the model wrote is dropped and malformed tails still
+        # fall through to the invalid path.
+        if trailing.startswith(",") and candidate[:end].rstrip().endswith("}"):
+            merged = candidate[:end].rstrip()[:-1].rstrip().rstrip(",")
+            joined = merged + "," + trailing[1:]
+            for extra_braces in range(4):
+                try:
+                    return json.loads(joined + "}" * extra_braces), "repaired", "PREMATURE_OBJECT_CLOSE", end
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
 
     stripped = _strip_trailing_commas(candidate)
     if stripped is not None:
@@ -410,57 +416,8 @@ def _evidence_demand_rejection(request: AgentRequest, payload: object) -> str:
     )
 
 
-def _apply_quote_gate(request: AgentRequest, payload: object) -> object:
-    """Reject invalid targeted supplements; demote initial exploratory quotes.
-
-    Targeted requests use the existing bounded per-worker contract repair.
-    Other Zhongshu evidence retains the exploratory unverified policy.
-    """
-
-    if str(getattr(request, "phase", "") or "") != "ZHONGSHU" or not isinstance(payload, dict):
-        return payload
-    if (request.role == "review-analyst"
-            and payload.get("action") == "REQUIREMENT_CONTRACT_READY"):
-        from .zhongshu_parallel import validate_zhongshu_requirement_contract
-        rejection = validate_zhongshu_requirement_contract(
-            payload, original_request=request.context.get("original_request"),
-        )
-        if rejection:
-            raise AgentResultFileError(rejection)
-    targeted_repair = (request.role == "review-analyst"
-                       and (request.context.get("evidence_demand") or {}).get("repair_quotes_locally"))
-    if targeted_repair:
-        from .domain.policies.evidence_repair import normalize_evidence_reuse
-        normalized = normalize_evidence_reuse(payload, request.context.get("evidence_demand") or {})
-        if normalized is not payload:
-            logger.info("AGENT_EVIDENCE_CITATION_NORMALIZED task_id=%s request_id=%s", request.task_id, request.request_id)
-            payload = normalized
-        from .quote_gate import repair_verified_quote_spans
-        repaired = repair_verified_quote_spans(payload)
-        if repaired is not payload:
-            logger.info("AGENT_QUOTE_FORMAT_REPAIRED task_id=%s request_id=%s", request.task_id, request.request_id)
-            payload = repaired
-        for key in ("evidence_updates", "finding_responses"):
-            for row in payload.get(key) or []:
-                if isinstance(row, dict) and any(
-                    str(row.get(field) or "").startswith("[UNVERIFIED-QUOTE]")
-                    for field in ("conclusion", "answer")
-                ):
-                    raise AgentResultFileError("targeted supplement contains UNVERIFIED-QUOTE; repair the original quote or report an explicit runtime UNKNOWN")
-    issues = find_quote_issues(payload)
-    if not issues:
-        return payload
-    if targeted_repair:
-        raise AgentResultFileError(format_rejection(issues))
-    logger.warning(
-        "AGENT_REPLY_QUOTE_DEMOTED task_id=%s request_id=%s phase=%s role=%s reason=%s",
-        request.task_id,
-        request.request_id,
-        request.phase,
-        request.role,
-        format_rejection(issues),
-    )
-    return demote_unverified(payload, issues)
+def _apply_quote_gate(request, payload):
+    return payload
 
 
 class MulticaAdapter(Protocol):
@@ -1131,7 +1088,7 @@ class MulticaCliAdapter:
             request.target_state
             or str(request.context.get("target_state") or "")
         )
-        if target_state in {"ZHONGSHU_FREEZE_CHECK", "MENXIA_GROUP_GATE"}:
+        if target_state in {"MENXIA_GROUP_GATE"}:
             # Freeze / gate dispatches are the phase boundaries where the hop
             # metering gets summarized (2026-09-28 efficiency plan T3.1).
             emit_prompt_bundle_report(
@@ -1438,6 +1395,7 @@ class MulticaCliAdapter:
         try:
             file_result = read_agent_result_file(
                 {"result_path": str(result_path)},
+                workflow=str(request.context.get('workflow') or 'requirements-v1'),
                 task_id=request.task_id,
                 request_id=request.request_id,
                 phase=request.phase,
@@ -1553,6 +1511,7 @@ class MulticaCliAdapter:
         )
         file_result = write_agent_result_file(
             inline_payload,
+            workflow=str(request.context.get('workflow') or 'requirements-v1'),
             target_path=result_path,
             task_id=request.task_id,
             request_id=request.request_id,
@@ -2018,6 +1977,7 @@ class MulticaCliAdapter:
                             "role": request.role,
                             "phase": request.phase,
                             "response_source": "result_file",
+                            "raw_reply_path": str(self.prompt_bundle_builder.result_path(request.task_id, request.request_id)),
                             "contract_rejection": file_rejections[-1],
                             "structured_output_schema_hash": str(
                                 (request.structured_output or {}).get("schema_hash") or ""
@@ -2027,6 +1987,13 @@ class MulticaCliAdapter:
                         "",
                     )
                 )
+        # Multica can publish a short comment while preserving the complete
+        # agent response only in the completed execution's result.output.
+        # Recover it before classifying the comment as a failed delivery.
+        if not result:
+            recovered_run = self._recover_run_output(request, rejected_candidates)
+            if recovered_run is not None:
+                result = [recovered_run]
         recovery_ids: set[str] = set()
 
         if (
@@ -2146,7 +2113,7 @@ class MulticaCliAdapter:
                     request.dispatch_external_message_id,
                 )
 
-        if not result and len(unstructured_candidates) == 1:
+        if not result and not rejected_candidates and len(unstructured_candidates) == 1:
             candidate = unstructured_candidates[0]
             result = [candidate]
             logger.warning(
@@ -2214,6 +2181,56 @@ class MulticaCliAdapter:
             sorted(recovery_ids),
         )
         return result
+
+    def _recover_run_output(
+        self, request: AgentRequest, rejections: list[ExternalMessage]
+    ) -> ExternalMessage | None:
+        """Recover a completed response with explicit request and agent binding.
+
+        Run matching alone is insufficient: coalesced and assignment runs can
+        belong to several requests. Never backfill task/request IDs here.
+        The same contract/materialization path used by inline comments still
+        validates the response before it can advance the workflow.
+        """
+        for run in self._matching_runs(request):
+            if (self._normalize_run_status(run.get('status')) != 'completed'
+                or str(run.get('agent_id') or '') != request.agent_id):
+                continue
+            execution_result = run.get('result')
+            body = execution_result.get('output') if isinstance(execution_result, dict) else None
+            if not isinstance(body, str) or not body.strip():
+                continue
+            payload = _extract_json(body)
+            if payload is None:
+                # Some providers wrap the final object in one JSON fence with
+                # an explanatory prefix. Extract only an unambiguous single
+                # fence; never select among competing objects or infer fields.
+                fences = re.findall(r'```(?:json)?\s*\n?(.*?)```', body, re.DOTALL | re.IGNORECASE)
+                if len(fences) == 1:
+                    payload = _extract_json(fences[0])
+            if (not isinstance(payload, dict) or not payload.get('action')
+                or payload.get('task_id') != request.task_id
+                or payload.get('request_id') != request.request_id):
+                continue
+            external_id = 'run:' + str(run.get('id') or request.request_id)
+            try:
+                validated = self._persist_inline_result(request, payload)
+            except AgentResultFileError as error:
+                rejections.append(ExternalMessage(request.agent_id, {
+                    'action': CONTRACT_REJECTED_EVENT,
+                    'task_id': request.task_id, 'request_id': request.request_id,
+                    'phase': request.phase, 'role': request.role,
+                    'response_source': 'run_output', 'contract_rejection': str(error),
+                    'raw_reply': body[:16000], 'raw_reply_truncated': len(body) > 16000,
+                    'raw_reply_path': self._save_raw_reply(request, external_id, body),
+                }, external_id, body))
+                logger.warning('AGENT_RUN_OUTPUT_REJECTED task_id=%s request_id=%s run_id=%s reason=%s',
+                               request.task_id, request.request_id, run.get('id'), error)
+                continue
+            logger.info('AGENT_RUN_OUTPUT_RECOVERED task_id=%s request_id=%s run_id=%s',
+                        request.task_id, request.request_id, run.get('id'))
+            return ExternalMessage(request.agent_id, validated, external_id, body)
+        return None
 
     def _find_correlated_delivery_ids(self, request: AgentRequest) -> set[str]:
         matches = self._matching_runs(request)
@@ -2591,418 +2608,12 @@ class MulticaCliAdapter:
         return value if isinstance(value, dict) else {}
 
 
-def _response_contract_for(request: AgentRequest) -> dict:
-    optional = [
-        "notification",
-        "evidence_packet",
-        "findings",
-        "candidate_groups",
-        "groups",
-        "items",
-        "questions_for_user",
-    ]
-    allowed_actions: list[str] = []
-    required_by_action: dict[str, list[str]] = {}
-    instruction = (
-        "Return one structured JSON response. Put the full analysis in the "
-        "business fields; do not send a separate unbound Markdown reply."
-    )
-    if request.phase == "ZHONGSHU" and request.role == "review-analyst":
-        dispatch_mode = str(request.context.get("zhongshu_dispatch_mode") or "evidence_collection")
-        if request.context.get("contract_mode") or dispatch_mode == "requirement_contract":
-            optional.extend(["requirements", "unknowns", "next_actions"])
-            allowed_actions = ["REQUIREMENT_CONTRACT_READY", "HUMAN_GATE", "BLOCKED"]
-            instruction = (
-                "You are the Zhongshu requirement-contract Analyst. Return only "
-                "the atomic requirement contract requested in the prompt. Do not "
-                "emit task proposals or implementation details."
-            )
-            required_by_action = {
-                "REQUIREMENT_CONTRACT_READY": ["action", "requirements"],
-            }
-        else:
-            optional.extend([
-                "lens", "requirements", "evidence_updates", "confirmed_facts",
-                "constraints", "conflicts", "unknowns", "unknown_requirement_ids",
-                "risks", "scope", "questions_for_solver", "questions_for_user",
-            ])
-            allowed_actions = ["EVIDENCE_PACKET_READY", "HUMAN_GATE", "BLOCKED"]
-            instruction = (
-                "You are the Zhongshu evidence-only Analyst. Return requirements "
-                "and traceable evidence only. Do not emit task proposals, candidate "
-                "items, candidate groups, or implementation details."
-            )
-    elif request.phase == "ZHONGSHU" and request.role == "review-solver":
-        if str(request.context.get("zhongshu_dispatch_mode") or "") == "item_revise":
-            optional.extend([
-                "item", "finding_resolutions", "evidence_ids", "unknowns", "risks",
-            ])
-            allowed_actions = ["READY_FOR_CRITIC", "BLOCKED"]
-            required_by_action = {
-                "READY_FOR_CRITIC": ["action", "item", "finding_resolutions"],
-            }
-            instruction = (
-                "You are the item-scoped Zhongshu Solver. Revise exactly the "
-                "assigned item so every listed finding is addressed; keep "
-                "item_id and group_id unchanged and return the patched item "
-                "object plus one finding_resolution per finding. Do not touch "
-                "other items or return a full plan."
-            )
-            return {
-                "contract_id": "nexus.zhongshu.item_solver.v1",
-                "allowed_actions": allowed_actions,
-                "required_by_action": required_by_action,
-                "optional_fields": optional,
-                "instruction": instruction,
-            }
-        if str(request.context.get("zhongshu_dispatch_mode") or "") == "group_revise":
-            optional.extend([
-                "items", "group_docs", "finding_resolutions",
-                "evidence_ids", "unknowns", "risks",
-            ])
-            allowed_actions = ["READY_FOR_CRITIC", "BLOCKED"]
-            required_by_action = {
-                "READY_FOR_CRITIC": [
-                    "action", "group_id", "items", "group_docs",
-                    "finding_resolutions",
-                ],
-            }
-            instruction = (
-                "You are the group-scoped Zhongshu Solver. Revise only the "
-                "editable member tasks named in the capsule and this group's "
-                "requirement document: section 8 of the document must close "
-                "verbatim over the member acceptance signals. Every other "
-                "member and every other group is frozen - echo them "
-                "byte-identically or omit them. Reply with action "
-                "READY_FOR_CRITIC, the group_id, the patched member items in "
-                "items (or a full plan whose other entries are byte-identical "
-                "echoes), this group's next document version in group_docs, and "
-                "one finding_resolution per batch finding. Do not design "
-                "implementation."
-            )
-            return {
-                "contract_id": "nexus.zhongshu.solver.v1",
-                "allowed_actions": allowed_actions,
-                "required_by_action": required_by_action,
-                "optional_fields": optional,
-                "instruction": instruction,
-            }
-        optional.extend([
-            "plan",
-            "changes",
-            "dependencies",
-            "scope",
-            "unknowns",
-            "risks",
-            "finding_resolutions",
-            "finding_batch",
-            "next_actions",
-        ])
-        allowed_actions = [
-            "READY_FOR_CRITIC",
-            "REQUEST_ANALYST_EVIDENCE",
-            "NEEDS_MORE_EVIDENCE",
-            "HUMAN_GATE",
-            "BLOCKED",
-        ]
-        instruction = (
-            "You are the Zhongshu task-graph Solver. Preserve Analyst requirements "
-            "and produce one auditable formal task graph. Do not emit implementation "
-            "design, options, comparison, or recommendation fields; do not modify "
-            "files; on the initial run return the complete plan, while a revision "
-            "with current_formal_plan returns bounded changes (changes=[] is valid) "
-            "and finding_resolutions so the orchestrator can materialize the full "
-            "plan. A revision must return finding_resolutions only for a bounded "
-            "selected batch plus finding_batch.selected_finding_ids and "
-            "finding_batch.remaining_finding_ids covering all active findings. "
-            "The orchestrator carries the declared remainder to the next round. "
-            "For compact full-plan output, groups MUST use item_ids that refer "
-            "to complete plan.items; do not emit groups[*].items or duplicate "
-            "task objects. Always "
-            "finish with exactly one structured JSON response. Preserve every "
-            "Analyst candidate item_id in plan.items and plan.groups; do not silently "
-            "drop a candidate task during normalization."
-        )
-    elif request.phase == "ZHONGSHU" and request.role == "review-critic":
-        optional.extend([
-            "context_summary",
-            "requirement_coverage",
-            "evidence_alignment",
-            "architecture_review",
-            "reuse_review",
-            "grouping_review",
-            "dependency_review",
-            "risk_signals",
-            "findings",
-            "next_actions",
-            "remaining_blockers",
-            "questions_for_solver",
-            "questions_for_analyst",
-            "questions_for_user",
-        ])
-        dispatch_mode = str(request.context.get("zhongshu_dispatch_mode") or "")
-        if dispatch_mode == "group_review":
-            from .contracts.zhongshu_critic import GROUP_MODE_ACTIONS
-
-            optional.extend([
-                "group_id",
-                "review_checks",
-                "evidence_ids",
-                "unknowns",
-            ])
-            allowed_actions = sorted(GROUP_MODE_ACTIONS)
-            instruction = (
-                "You are the Zhongshu group Critic. Review the whole assigned "
-                "group capsule (requirement document + every member task) and "
-                "return exactly one group action. Every finding must carry the "
-                "owning member item_id. Do not echo revision ids or business "
-                "hashes (plan/task/dependency); copy the envelope's "
-                "structured_output_schema_hash verbatim from the injected "
-                "contract. Do not review other groups, and do not design "
-                "implementation."
-            )
-            required_by_action = {
-                action: [
-                    "action", "group_id",
-                    "review_checks", "findings", "evidence_ids", "unknowns",
-                ]
-                for action in allowed_actions
-            }
-        elif dispatch_mode == "task_review":
-            optional.extend([
-                "group_id",
-                "item_id",
-                "review_checks",
-                "evidence_ids",
-                "unknowns",
-            ])
-            allowed_actions = [
-                "TASK_APPROVED",
-                "TASK_CHANGES_REQUIRED",
-                "REQUEST_ANALYST_EVIDENCE",
-                "HUMAN_GATE",
-                "BLOCKED",
-            ]
-            instruction = (
-                "You are the Zhongshu task Critic. Review only the assigned "
-                "group_id/item_id capsule. Do not echo revision ids or business "
-                "hashes (plan/task/dependency; the orchestrator stamps them); "
-                "copy the envelope's structured_output_schema_hash verbatim "
-                "from the injected contract. Return "
-                "all review_checks and task-scoped evidence-backed findings. Do not "
-                "review or create findings for any other task, and do not design implementation."
-            )
-            required_by_action = {
-                action: [
-                    "action", "group_id", "item_id",
-                    "review_checks", "findings", "evidence_ids", "unknowns",
-                ]
-                for action in allowed_actions
-            }
-        else:
-            allowed_actions = [
-                "APPROVE_FREEZE",
-                "REQUEST_ANALYST_EVIDENCE",
-                "REQUEST_SOLVER_REVISION",
-                "REQUEST_REGROUP",
-                "HUMAN_GATE",
-                "BLOCKED",
-            ]
-            instruction = (
-                "You are the Zhongshu plan Critic. Return one structured JSON "
-                "object with the allowed action, the exact reviewed_plan_hash, and "
-                "evidence-backed findings; include explicit resolutions of prior findings you reviewed. "
-                "Omission does not close history. Independent workers may reach identical conclusions. Do not "
-                "modify files or output final approval beyond the action."
-            )
-            required_by_action = {
-                action: ["action", "reviewed_plan_hash", "findings"]
-                for action in (
-                    "APPROVE_FREEZE",
-                    "REQUEST_ANALYST_EVIDENCE",
-                    "REQUEST_SOLVER_REVISION",
-                    "REQUEST_REGROUP",
-                )
-            }
-    elif request.phase == "MENXIA" and request.role == "review-analyst":
-        optional.extend([
-            "assessment",
-            "requirement_trace",
-            "confirmed_facts",
-            "evidence",
-            "current_behavior",
-            "existing_capabilities",
-            "dependencies_verified",
-            "missing_evidence",
-            "conflicts",
-            "unknowns",
-            "questions_for_solver",
-            "questions_for_user",
-        ])
-        allowed_actions = [
-            "EVIDENCE_SUFFICIENT",
-            "NEEDS_MORE_EVIDENCE",
-            "REQUEST_SOLVER_REVISION",
-            "HUMAN_GATE",
-            "BLOCKED",
-        ]
-        instruction = (
-            "You are the Menxia item evidence Analyst. Return one structured "
-            "JSON object with the allowed action and ItemEvidenceAudit fields. "
-            "Re-derive the item from the original requirement before reading the "
-            "proposal, verdict each atomic claim with evidence, and keep every "
-            "suggestion code-level actionable."
-        )
-    elif request.phase == "MENXIA" and request.role == "review-critic":
-        optional.extend([
-            "item_reasonableness",
-            "requirement_review",
-            "evidence_review",
-            "feasibility_review",
-            "architecture_reuse_review",
-            "performance_resource_review",
-            "compatibility_review",
-            "testability_rollback_review",
-            "findings",
-            "required_changes",
-            "verification_plan",
-            "rollback_plan",
-            "remaining_risks",
-            "questions_for_user",
-        ])
-        allowed_actions = [
-            "APPROVE_ITEM",
-            "REVISE_ITEM",
-            "SPLIT_ITEM",
-            "MERGE_ITEM",
-            "REMOVE_ITEM",
-            "REQUEST_SOLVER_REVISION",
-            "APPROVE_GROUP",
-            "APPROVE_FREEZE",
-            "REQUEST_GROUP_REVISION",
-            "REVISE_GROUP",
-            "HUMAN_GATE",
-            "BLOCKED",
-        ]
-        instruction = (
-            "You are the Menxia item Critic. Return one structured JSON "
-            "object with action, evidence-backed findings, and review fields. "
-            "Attack changes hunk by hunk, state a falsification plan, walk every "
-            "acceptance signal back to a change, and settle every prior-round "
-            "finding explicitly."
-        )
-    elif request.phase == "MENXIA" and request.role == "review-solver":
-        optional.extend([
-            "implementation_proposal",
-            "files",
-            "changes",
-            "tests",
-            "rollback",
-            "next_actions",
-        ])
-        allowed_actions = ["FEASIBLE", "READY_FOR_ANALYST", "READY_FOR_CRITIC", "HUMAN_GATE", "BLOCKED"]
-        instruction = (
-            "You are the Menxia item Solver. Return one structured JSON "
-            "implementation proposal whose changes are code-level: before/after "
-            "for edits, complete code for new logic, assertion-level tests. The "
-            "implementer must make zero design decisions from changes alone, and "
-            "every Critic finding must be answered by finding ID in "
-            "responses_to_critic."
-        )
-    if request.phase == "ZHONGSHU":
-        from .zhongshu_review import ANALYST_ACTIONS, CRITIC_ACTIONS, TASK_CRITIC_ACTIONS
-        if request.role == "review-analyst":
-            mode = "requirement_contract" if request.context.get("contract_mode") else str(request.context.get("zhongshu_dispatch_mode") or "evidence_collection")
-            if mode == "task_discovery":
-                mode = "evidence_collection"
-            if mode in ANALYST_ACTIONS:
-                allowed_actions = sorted(ANALYST_ACTIONS[mode])
-        elif request.role == "review-critic":
-            if str(request.context.get("zhongshu_dispatch_mode") or "") == "task_review":
-                allowed_actions = sorted(TASK_CRITIC_ACTIONS)
-                required_by_action = {
-                    action: [
-                        "action", "group_id", "item_id",
-                        "review_checks", "findings", "evidence_ids", "unknowns",
-                    ]
-                    for action in allowed_actions
-                }
-            else:
-                allowed_actions = sorted(
-                    action for action in CRITIC_ACTIONS
-                    if action not in {
-                        "TASK_APPROVED", "TASK_CHANGES_REQUIRED",
-                        # Discard is a task-scoped recommendation: the legacy
-                        # whole-plan FSM path has no folding for it.
-                        "REQUEST_TASK_DISCARD",
-                    }
-                )
-                required_by_action = {
-                    action: ["action", "reviewed_plan_hash"] + (
-                        [] if action in {"HUMAN_GATE", "BLOCKED"} else ["findings"]
-                    )
-                    for action in allowed_actions
-                }
-    contract = {
-        "format": "json",
-        "required": ["action"],
-        "optional": list(dict.fromkeys(optional)),
-        "allowed_actions": allowed_actions,
-        "do_not_echo": ["task_id", "request_id", "role", "phase"],
-        "instruction": instruction,
-    }
-    if required_by_action:
-        contract["required_by_action"] = required_by_action
-    if request.phase == "ZHONGSHU" and request.role == "review-solver":
-        contract["formal_item_required_fields"] = list(ZHONGSHU_SOLVER_REQUIRED_ITEM_FIELDS)
-        contract["formal_item_rule"] = (
-            "For READY_FOR_CRITIC, every object in plan.items must include all "
-            "formal_item_required_fields. Groups must contain item_ids that reference "
-            "plan.items; do not emit groups[*].items or duplicate task objects. Empty "
-            "unknowns and risks must be emitted as [] and parallelizable must be a boolean."
-        )
-        contract.update(
-            solver_contract_fragments(resolve_solver_stage(request.context))
-        )
-    stable_fields = stable_role_fields(request.phase, request.role)
-    if stable_fields and isinstance(request.structured_output, dict):
-        target_state = str(
-            request.target_state or request.context.get("target_state") or ""
-        )
-        valid_state_actions = state_actions(target_state)
-        if valid_state_actions:
-            allowed_actions = [
-                action for action in allowed_actions
-                if action in valid_state_actions
-            ]
-        transport_fields = [
-            "task_id", "request_id", "phase", "state", "role", "mode",
-            "structured_output_protocol", "structured_output_schema_hash",
-        ]
-        role_mode = str(
-            request.context.get("structured_output_role_mode")
-            or request.structured_output.get("role_mode")
-            or role_mode_for(request.phase, request.role, request.context)
-        )
-        contract["required"] = ["action", *transport_fields, *stable_fields]
-        contract["optional"] = []
-        contract["required_by_action"] = {
-            action: ["action", *transport_fields, *stable_fields]
-            for action in allowed_actions
-        }
-        contract["stable_role_protocol"] = {
-            "phase": request.phase,
-            "role": request.role,
-            "state": target_state,
-            "mode": role_mode,
-            "transport_fields": transport_fields,
-            "fields": stable_fields,
-            "rule": (
-                "Always emit the same fields for this role. Put [] or null in fields "
-                "that are not used by the current mode; do not change the root shape."
-            ),
-        }
-    return contract
+def _response_contract_for(request):
+    from .contracts import contract_for_state
+    selected = contract_for_state(request.target_state)
+    return {'required':list(selected.required_fields), 'optional':[],
+            'allowed_actions':list(selected.actions), 'instruction':'\n'.join(selected.prompt_rules),
+            'required_by_action':{a:list(selected.required_fields) for a in selected.actions}}
 
 
 def _external_notifications_disabled_for_tests() -> bool:

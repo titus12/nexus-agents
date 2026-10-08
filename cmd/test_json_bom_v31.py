@@ -17,6 +17,23 @@ class JsonBomTests(unittest.TestCase):
         value = _extract_json('{"action":"READY_FOR_CRITIC"}}')
         self.assertEqual(value, {"action": "READY_FOR_CRITIC"})
 
+    def test_premature_object_close_with_comma_tail_is_merged(self):
+        raw = '{"action":"ANALYSIS_READY","gaps":["a","b"]},"questions":[{"id":"Q-1"}]'
+        value = _extract_json(raw)
+        self.assertEqual(value, {"action": "ANALYSIS_READY",
+                                 "gaps": ["a", "b"],
+                                 "questions": [{"id": "Q-1"}]})
+
+    def test_premature_close_with_final_brace_is_merged(self):
+        raw = '{"action":"ANALYSIS_READY","gaps":["a"]},"questions":[{"id":"Q-1"}]}'
+        value = _extract_json(raw)
+        self.assertEqual(value, {"action": "ANALYSIS_READY",
+                                 "gaps": ["a"],
+                                 "questions": [{"id": "Q-1"}]})
+
+    def test_premature_close_with_unparseable_tail_is_rejected(self):
+        self.assertIsNone(_extract_json('{"action":"A"},"questions":[{"id":'))
+
     def test_concatenated_json_documents_are_rejected(self):
         value = _extract_json('{"action":"A"}{"action":"B"}')
         self.assertIsNone(value)
