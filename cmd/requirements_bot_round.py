@@ -44,13 +44,14 @@ def run_cli(arguments: list[str], timeout: int = 120) -> tuple[int, str]:
     return result.returncode, output
 
 
-def cleanup_issues(cookie: str) -> None:
+def cleanup_issues(cookie: str) -> int:
     result = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
                              '-File', str(CLEANUP), '-Cookie', cookie],
                             input=b'y\n', capture_output=True, timeout=300)
     output = ((result.stdout or b'') + (result.stderr or b'')).decode('utf-8', 'replace')
     tail = output.strip().splitlines()
     log('cleanup exit=%s %s' % (result.returncode, tail[-1] if tail else ''))
+    return result.returncode
 
 
 def journal(task_id: str) -> list[dict]:
@@ -256,6 +257,36 @@ def stop_process(pid: int) -> None:
         os.kill(pid, signal.SIGTERM)
 
 
+def launch_with_retries(request_text: str, attempts: int = 3) -> tuple[int, object] | None:
+    """Launch the orchestrator, retrying around platform blips.
+
+    A failed cleanup or a transient multica error surfaces here as a
+    missing task id; log the launch-log tail, re-run cleanup (stale
+    issues block creation via the duplicate guard) and try again.
+    """
+    for attempt in range(1, attempts + 1):
+        pid, handle = launch(request_text)
+        log('launched pid=%d (attempt %d/%d)' % (pid, attempt, attempts))
+        task_id = wait_for_task_id(pid)
+        if task_id:
+            return pid, handle, task_id
+        stop_process(pid)
+        handle.close()
+        tail = ''
+        try:
+            logs = sorted(REPORTS.glob('launch-*.log'), key=lambda p: p.stat().st_mtime)
+            if logs:
+                tail = logs[-1].read_text(encoding='utf-8', errors='replace')[-400:]
+        except OSError:
+            pass
+        log('launch attempt %d produced no task id; log tail: %s' % (attempt, tail.replace('\n', ' | ')[-380:]))
+        if attempt < attempts:
+            cleanup_issues(COOKIE_DEFAULT.read_text(encoding='utf-8-sig').strip()
+                           if COOKIE_DEFAULT.exists() else '')
+            time.sleep(60)
+    return None
+
+
 def wait_for_task_id(pid: int, timeout: int = 120) -> str | None:
     deadline = time.time() + timeout
     pattern = re.compile(r'task-\d{8}-[0-9a-f]{6}')
@@ -440,22 +471,25 @@ def main() -> int:
         if not cookie:
             log('no cookie file, skip cleanup')
         else:
-            cleanup_issues(cookie)
+            for attempt in range(1, 4):
+                if cleanup_issues(cookie) == 0:
+                    break
+                log('cleanup attempt %d failed; retrying in 30s' % attempt)
+                time.sleep(30)
     ensure_gateway()
     ensure_broker_token()
     log('scenario=%s' % arguments.scenario)
     log_config_fingerprint()
 
-    pid, handle = launch(request_text)
-    log('launched pid=%d' % pid)
     started_at = time.time()
-    task_id = wait_for_task_id(pid)
-    if not task_id:
-        stop_process(pid)
-        record_round({'task_id': 'unknown', 'outcome': 'failure', 'duration_sec': int(time.time() - started_at),
-                      'note': 'task id not found in logs within 120s', 'started_at': started_at,
-                      'scenario': arguments.scenario})
+    launched = launch_with_retries(request_text)
+    if launched is None:
+        record_round({'task_id': 'unknown', 'outcome': 'failure',
+                      'duration_sec': int(time.time() - started_at),
+                      'note': 'no task id after 3 launch attempts (see launch log tails)',
+                      'started_at': started_at, 'scenario': arguments.scenario})
         return 1
+    pid, handle, task_id = launched
     log('task_id=%s' % task_id)
     try:
         outcome, note, visited = patrol(task_id, pid, arguments.silence_timeout,
