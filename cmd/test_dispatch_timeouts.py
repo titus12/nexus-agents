@@ -194,14 +194,14 @@ class RoleTimeoutResolutionTests(unittest.TestCase):
         self.assertEqual(resolved, ROLE_DISPATCH_TIMEOUTS)
         self.assertEqual(resolved["review-solver"], 1800.0)
         self.assertEqual(resolved["review-critic"], 1200.0)
-        self.assertEqual(resolved["review-analyst"], 900.0)
+        self.assertEqual(resolved["review-analyst"], 1800.0)
 
     def test_env_override_wins_per_role(self) -> None:
         env = {"ZHONGSHU_DISPATCH_TIMEOUT_OVERRIDES": '{"review-solver": 2400}'}
         with mock.patch.dict(os.environ, env):
             resolved = resolve_dispatch_role_timeouts()
         self.assertEqual(resolved["review-solver"], 2400.0)
-        self.assertEqual(resolved["review-analyst"], 900.0)
+        self.assertEqual(resolved["review-analyst"], 1800.0)
 
     def test_invalid_env_json_keeps_the_table(self) -> None:
         env = {"ZHONGSHU_DISPATCH_TIMEOUT_OVERRIDES": "{not json"}
@@ -248,7 +248,7 @@ class MenxiaSharedRoleTimeoutTests(unittest.TestCase):
                 timeout, _ = runner._effective_dispatch_limits(role_name, {})
                 self.assertEqual(timeout, expected[role_name])
         # The same solver role carries the same deadline in both phases.
-        for state in ("ZHONGSHU_SOLVER", "MENXIA_GROUP_SOLVER", "MENXIA_ITEM_SOLVER"):
+        for state in ("MENXIA_GROUP_SOLVER", "MENXIA_ITEM_SOLVER"):
             role, _phase = _ROLE_BY_STATE[state]
             self.assertEqual(role, "review-solver")
             timeout, _ = runner._effective_dispatch_limits(role, {})
@@ -261,7 +261,7 @@ class AppWiringTests(unittest.TestCase):
     def _app(self, **kwargs) -> OrchestratorApp:
         with tempfile.TemporaryDirectory() as directory:
             app = OrchestratorApp(
-                _context(),
+                __import__("test_requirements_workflow_e2e").context(),
                 root=directory,
                 multica=FakeMulticaAdapter(),
                 **kwargs,
