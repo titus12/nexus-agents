@@ -88,7 +88,15 @@ def recommendation_answer(question: dict, scenario: str = 'recommend') -> dict |
                     'free_text': REJECT_OBJECTION, 'disposition': 'answered'}
         return {**base, 'option_ids': [], 'free_text': REJECT_OBJECTION, 'disposition': 'answered'}
     if recommendation:
-        return {**base, 'option_ids': [], 'free_text': recommendation, 'disposition': 'answered'}
+        # The proxy user's answer must read as an explicit confirmation, not
+        # as another recommendation: a "建议..." answer that downstream
+        # consensus promotes into an approved decision is exactly the
+        # recommendation-is-not-human-decision finding the critic files.
+        if recommendation.startswith('建议'):
+            confirmed = '用户确认：' + recommendation[len('建议'):]
+        else:
+            confirmed = '用户确认：' + recommendation
+        return {**base, 'option_ids': [], 'free_text': confirmed, 'disposition': 'answered'}
     if options:
         return {**base, 'option_ids': [options[0]['option_id']], 'free_text': '', 'disposition': 'answered'}
     if not blocking:
