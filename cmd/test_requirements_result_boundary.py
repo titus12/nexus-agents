@@ -133,6 +133,15 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn('EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE',feedback)
         self.assertIn('src-000002',feedback)
         self.assertIn('verbatim',feedback)
+        self.assertIn('Full source text: 建议保留原句逐字引用',feedback)
+
+    def test_separator_and_case_variants_still_count_as_verbatim(self):
+        source='RTC-SDK 项目，Packages\\com.sdk\\Runtime中的网络层tlv做性能优化，GC优化'
+        payload={'analysis':{'claims':[{'requirement_id':'req-1','topic_key':'t',
+            'statement':'Packages/com.sdk/Runtime中的网络层TLV做性能优化，GC优化',
+            'kind':'behavior','origin':'explicit','source_ids':['src-000001']}]}}
+        dispatch={'sources':[{'source_id':'src-000001','kind':'request','text':source}]}
+        self.assertEqual(result_errors(payload,dispatch),[])
 
     def test_numeric_bounds_and_multiple_reference_errors_are_reported(self):
         from orchestrator.contracts.common import validate_schema

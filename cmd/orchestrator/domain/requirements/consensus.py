@@ -1,7 +1,9 @@
 """Human authority and evolving interpretations, with append-only provenance."""
 from dataclasses import replace
 from .model import (SourceRecord, RequirementClaim, DecisionRecord, FactRecord,
-                    AssumptionRecord, ConsensusRevision, decode, next_id)
+                    AssumptionRecord, ConsensusRevision, decode, next_id,
+                    normalized_quote)
+from .result_validation import claim_quote_matches
 
 
 def active_decisions(state):
@@ -72,14 +74,17 @@ def apply_analysis(state, payload, *, aliases=None, preserve_pending=False):
             quote = quote or claim.statement
             human = next((sources[sid] for sid in claim.source_ids
                           if sources[sid].kind in ('request', 'answer', 'feedback')
-                          and quote in sources[sid].text), None)
+                          and claim_quote_matches(quote, sources[sid].text)), None)
             if not human:
                 human_ids = [sid for sid in claim.source_ids
                              if sid in sources and sources[sid].kind in ('request', 'answer', 'feedback')]
                 cited = human_ids[0] if human_ids else 'the cited human source'
+                excerpt = ''
+                if human_ids:
+                    excerpt = ' Full source text: ' + sources[human_ids[0]].text[:300]
                 raise ValueError('%s: EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE: quote must be an exact contiguous '
-                                 'excerpt of %s (copy the source text verbatim; statement may paraphrase but quote may not)' % (
-                                     label, cited))
+                                 'excerpt of %s (copy the source text verbatim, keep path separators and case; '
+                                 'statement may paraphrase but quote may not).%s' % (label, cited, excerpt))
             old_choices = tuple(d for d in active_decisions(replace(state, decisions=tuple(decisions)))
                                 if d.topic_key == claim.topic_key)
             if any(d.conclusion != quote and human.source_id == d.source_id for d in old_choices):

@@ -1,5 +1,15 @@
 """Collect independent result errors before an atomic domain commit; no I/O."""
-from .model import (RequirementClaim, FactRecord, AssumptionRecord, Question, decode)
+from .model import (RequirementClaim, FactRecord, AssumptionRecord, Question, decode,
+        normalized_quote)
+
+
+def claim_quote_matches(quote: str, source_text: str) -> bool:
+    if not isinstance(quote, str) or not quote:
+        return False
+    if quote in source_text:
+        return True
+    probe, haystack = normalized_quote(quote), normalized_quote(source_text)
+    return bool(probe) and probe in haystack
 
 
 def result_errors(payload, dispatch):
@@ -53,13 +63,17 @@ def result_errors(payload, dispatch):
                 quote = row.get('quote') or row.get('statement')
                 if isinstance(quote,str) and not any(isinstance(ref,str) and ref in sources
                     and sources[ref].get('kind') in ('request','answer','feedback')
-                    and quote in sources[ref].get('text','') for ref in refs):
+                    and claim_quote_matches(quote,sources[ref].get('text','')) for ref in refs):
                     human_refs = [ref for ref in refs if isinstance(ref,str) and ref in sources
                         and sources[ref].get('kind') in ('request','answer','feedback')]
                     cited = human_refs[0] if human_refs else 'a cited human source'
+                    excerpt = ''
+                    if human_refs:
+                        excerpt = ' Full source text: ' + sources[human_refs[0]].get('text','')[:300]
                     errors.append(f'analysis.claims[{index}].quote: EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE; '
                                   f'set quote to a verbatim contiguous excerpt of {cited} '
-                                  '(copy the source text exactly; statement may paraphrase but quote may not)')
+                                  '(copy the source text exactly, keep path separators and case; '
+                                  'statement may paraphrase but quote may not).' + excerpt)
     consensus = dispatch.get('consensus', {})
     previous_assumptions = {row.get('assumption_id'):row for row in consensus.get('assumptions',[])
                             if isinstance(row,dict) and isinstance(row.get('assumption_id'),str)}
