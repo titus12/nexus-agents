@@ -68,24 +68,26 @@ class RequirementsAgentRunner:
 
         The key covers everything the analysis can depend on: the validated
         domain state (whose skeleton embeds the raw request text), the locked
-        analyst skill version and the result contract schema.  Task identity,
-        sequence numbers and dispatch bookkeeping are deliberately excluded so
-        identical analysis inputs across rounds hit the same entry.
+        analyst skill version and the result contract schema.  ``active_dispatch``
+        and ``budget`` are dropped before hashing: they only carry per-task
+        bookkeeping (logical_dispatch_id, request_id, charges) that must not
+        split identical analysis inputs across rounds.
         """
         if not self.cache_enabled or request.payload.get('target_state') != 'REQ_ANALYZE':
             return None
         state = request.payload.get('validation_state')
         if not isinstance(state, dict) or not state:
             return None
+        key_state = {k: v for k, v in state.items() if k not in ('active_dispatch', 'budget')}
         try:
             contract = contract_for_state('REQ_ANALYZE', workflow='requirements-v1')
             schema_hash = hashlib.sha256(_canonical_json(contract.schema).encode('utf-8')).hexdigest()
         except Exception:
             schema_hash = ''
-        material = {'v': 1,
+        material = {'v': 2,
                     'skill_sha': str(_skill_lock('REQ_ANALYZE').get('sha256', '') or ''),
                     'schema_hash': schema_hash,
-                    'validation_state': state}
+                    'validation_state': key_state}
         return self.cache_dir / (hashlib.sha256(_canonical_json(material).encode('utf-8')).hexdigest() + '.json')
 
     def _analyze_cache_fresh(self, payload) -> bool:

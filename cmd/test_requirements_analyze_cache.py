@@ -112,6 +112,26 @@ class AnalyzeCacheTests(unittest.TestCase):
         runner.run_once(make_request(self.root, other))
         self.assertEqual(inner.calls, 1)
 
+    def test_task_bookkeeping_does_not_split_the_key(self):
+        from dataclasses import replace as dc_replace
+        from orchestrator.domain.requirements.model import BudgetLedger, RequirementsDispatch
+        runner, inner = self.runner(make_payload(self.root))
+        first = dc_replace(self.state,
+                           active_dispatch=RequirementsDispatch(
+                               'task-a:e1:1:REQ_ANALYZE', 'task-a:e1:1:REQ_ANALYZE:attempt-1',
+                               'REQ_ANALYZE', 'd' * 64, 'e' * 64),
+                           budget=BudgetLedger(calls=1, total_calls=1))
+        runner.run_once(make_request(self.root, first))
+        inner.calls = 0
+        second = dc_replace(self.state,
+                            active_dispatch=RequirementsDispatch(
+                                'task-b:e1:1:REQ_ANALYZE', 'task-b:e1:1:REQ_ANALYZE:attempt-1',
+                                'REQ_ANALYZE', 'd' * 64, 'e' * 64),
+                            budget=BudgetLedger(calls=1, total_calls=1))
+        outcome = runner.run_once(make_request(self.root, second))
+        self.assertEqual(inner.calls, 0)
+        self.assertEqual(outcome.event_name, 'ANALYSIS_READY')
+
     def test_invalid_cached_result_is_evicted_not_looped(self):
         runner, inner = self.runner(make_payload(self.root))
         runner.run_once(make_request(self.root, self.state))
