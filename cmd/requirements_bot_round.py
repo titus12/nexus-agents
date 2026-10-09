@@ -129,6 +129,19 @@ def recommendation_answer(question: dict, scenario: str = 'recommend') -> dict |
     return {**base, 'option_ids': [], 'free_text': CARD_RECOMMENDATION_FALLBACK, 'disposition': 'answered'}
 
 
+def effective_scenario(scenario: str, reject_rounds_used: int, reject_cap: int = 2) -> str:
+    """A real user opposes a couple of times, then converges.
+
+    Endless objection in the reject scenario only burns the round budget on
+    clarify ping-pong (four rounds once consumed a 90-minute deadline), so
+    after ``reject_cap`` rounds the proxy user switches to confirming the
+    recommended options while keeping the earlier objections on record.
+    """
+    if scenario == 'reject' and reject_rounds_used >= reject_cap:
+        return 'recommend'
+    return scenario
+
+
 def submit_answers(task_id: str, snapshot: dict, scenario: str = 'recommend') -> tuple[bool, str]:
     requirements = snapshot['context']['requirements']
     answered = {(a['question_id'], a['question_revision']) for a in requirements.get('answers', [])}
@@ -366,6 +379,7 @@ def patrol(task_id: str, pid: int, silence_timeout: int, wait_cap: int,
            round_deadline: float, scenario: str = 'recommend') -> tuple[str, str, list[str]]:
     answered_rounds: set[str] = set()
     approved_digests: set[str] = set()
+    reject_rounds_used = 0
     visited: list[str] = []
     entered_wait_at: float | None = None
     last_heartbeat = time.time()
@@ -395,8 +409,11 @@ def patrol(task_id: str, pid: int, silence_timeout: int, wait_cap: int,
             round_id = open_round['round_id'] if open_round else ''
             if round_id and round_id not in answered_rounds:
                 answered_rounds.add(round_id)
-                ok, detail = submit_answers(task_id, snapshot, scenario)
-                log('auto-answer[%s] %s %s' % (scenario, round_id, detail[:160] if ok else detail))
+                round_scenario = effective_scenario(scenario, reject_rounds_used)
+                if round_scenario == 'reject':
+                    reject_rounds_used += 1
+                ok, detail = submit_answers(task_id, snapshot, round_scenario)
+                log('auto-answer[%s] %s %s' % (round_scenario, round_id, detail[:160] if ok else detail))
                 if not ok and detail.startswith(('UNSUPPORTED', 'ANSWER_SUBMIT_FAILED')):
                     return 'failure', 'clarify gate: ' + detail, visited
             if entered_wait_at and time.time() - entered_wait_at > wait_cap:
@@ -491,7 +508,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request-file', type=Path, default=REQUEST_DEFAULT)
     parser.add_argument('--cookie-file', type=Path, default=COOKIE_DEFAULT)
-    parser.add_argument('--round-timeout', type=int, default=5400)
+    parser.add_argument('--round-timeout', type=int, default=7200)
     parser.add_argument('--silence-timeout', type=int, default=600)
     parser.add_argument('--wait-cap', type=int, default=1200)
     parser.add_argument('--skip-cleanup', action='store_true')
