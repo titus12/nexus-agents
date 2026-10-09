@@ -354,6 +354,11 @@ def patrol(task_id: str, pid: int, silence_timeout: int, wait_cap: int,
             log('state -> %s' % state)
             entered_wait_at = time.time() if state in STUCK_STATES else None
         snapshot = latest_snapshot(records)
+        # REQ_HANDOFF can flash by between polls (publish -> handoff -> menxia
+        # intake inside one patrol interval), so judge success from the
+        # journal history, not just the latest state.
+        if 'REQ_HANDOFF' in current:
+            return 'success', 'REQ_HANDOFF reached', visited
         if state == 'REQ_HANDOFF':
             return 'success', 'REQ_HANDOFF reached', visited
         if state in ('REQ_CANCELLED', 'REQ_ENGINE_ERROR', 'FAILED'):
