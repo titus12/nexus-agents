@@ -44,14 +44,39 @@ def run_cli(arguments: list[str], timeout: int = 120) -> tuple[int, str]:
     return result.returncode, output
 
 
-def cleanup_issues(cookie: str) -> int:
-    result = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                             '-File', str(CLEANUP), '-Cookie', cookie],
-                            input=b'y\n', capture_output=True, timeout=300)
-    output = ((result.stdout or b'') + (result.stderr or b'')).decode('utf-8', 'replace')
-    tail = output.strip().splitlines()
-    log('cleanup exit=%s %s' % (result.returncode, tail[-1] if tail else ''))
-    return result.returncode
+def cleanup_issues(cookie: str = '') -> int:
+    """Cancel stale review issues so the duplicate guard does not block launch.
+
+    The old browser-cookie HTTP cleanup (cleanup-my-issues.ps1) died with the
+    web session; the multica CLI keeps its own credentials, so stale issues are
+    cancelled through the CLI instead.  ``cookie`` is kept for call-site
+    compatibility and ignored.
+    """
+    result = subprocess.run(['multica', 'issue', 'list', '--limit', '50',
+                             '--output', 'json'], capture_output=True, timeout=180)
+    output = (result.stdout or b'').decode('utf-8', 'replace').lstrip('﻿')
+    if result.returncode != 0:
+        log('cleanup list failed rc=%d %s' % (result.returncode, (result.stderr or b'').decode('utf-8', 'replace')[-200:]))
+        return 1
+    try:
+        data = json.loads(output)
+    except ValueError:
+        log('cleanup list unparsable: %s' % output[-200:])
+        return 1
+    rows = data.get('issues') or data.get('items') or (data if isinstance(data, list) else [])
+    active = ('todo', 'in_progress', 'in_review', 'blocked', 'backlog', 'reopened')
+    stale = [row for row in rows if isinstance(row, dict)
+             and str(row.get('title') or '').startswith('Review: RTC-SDK')
+             and row.get('status') in active]
+    failures = 0
+    for row in stale:
+        cancel = subprocess.run(['multica', 'issue', 'status', str(row['id']), 'cancelled'],
+                                capture_output=True, timeout=120)
+        log('cleanup %s (%s) -> %s' % (row.get('identifier') or str(row['id'])[:8],
+                                       row.get('status'), 'ok' if cancel.returncode == 0 else 'fail'))
+        failures += 0 if cancel.returncode == 0 else 1
+    log('cleanup cancelled %d/%d stale review issues' % (len(stale) - failures, len(stale)))
+    return 1 if failures else 0
 
 
 def journal(task_id: str) -> list[dict]:
@@ -287,8 +312,7 @@ def launch_with_retries(request_text: str, attempts: int = 3) -> tuple[int, obje
             pass
         log('launch attempt %d produced no task id; log tail: %s' % (attempt, tail.replace('\n', ' | ')[-380:]))
         if attempt < attempts:
-            cleanup_issues(COOKIE_DEFAULT.read_text(encoding='utf-8-sig').strip()
-                           if COOKIE_DEFAULT.exists() else '')
+            cleanup_issues()
             time.sleep(60)
     return None
 
@@ -476,17 +500,12 @@ def main() -> int:
     arguments = parser.parse_args()
 
     request_text = arguments.request_file.read_text(encoding='utf-8-sig').strip()
-    cookie = arguments.cookie_file.read_text(encoding='utf-8-sig').strip() \
-        if arguments.cookie_file.exists() else ''
     if not arguments.skip_cleanup:
-        if not cookie:
-            log('no cookie file, skip cleanup')
-        else:
-            for attempt in range(1, 4):
-                if cleanup_issues(cookie) == 0:
-                    break
-                log('cleanup attempt %d failed; retrying in 30s' % attempt)
-                time.sleep(30)
+        for attempt in range(1, 4):
+            if cleanup_issues() == 0:
+                break
+            log('cleanup attempt %d failed; retrying in 30s' % attempt)
+            time.sleep(30)
     ensure_gateway()
     ensure_broker_token()
     log('scenario=%s' % arguments.scenario)
