@@ -2872,6 +2872,56 @@ def _feishu_message_text(item: dict) -> str:
     return ""
 
 
+def _extract_prose_prefixed_json(body: str) -> object | None:
+    """Recover one JSON object that the model prefixed with delivery prose.
+
+    The reply-shape feedback demands a pure JSON object, yet retries under
+    pressure often open with a short note ("Two prior deliveries were
+    discarded...") before the object itself.  Accept only a brace-free prose
+    prefix followed by one balanced object that ends the reply, so neither
+    concatenated documents nor trailing content can be silently dropped.
+    """
+    text = str(body).lstrip("\ufeff\u200b").strip()
+    start = text.find("{")
+    if start <= 0:
+        return None
+    prefix = text[:start]
+    if "{" in prefix or "}" in prefix or "```" in prefix:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                if text[index + 1:].strip():
+                    return None
+                candidate = text[start:index + 1]
+                value, status, _, _ = _parse_json_candidate(candidate)
+                if status in {"valid", "repaired"}:
+                    logger.warning(
+                        "AGENT_REPLY_JSON_REPAIRED repair=PROSE_PREFIX sha256=%s",
+                        _fingerprint_text(body)["sha256"],
+                    )
+                    return value
+                return None
+    return None
+
+
 def _extract_json(body: str) -> object:
     # Agent comments may start with a UTF-8 BOM, especially when produced by
     # Windows/PowerShell tooling. Strip it before JSON decoding.
@@ -2892,6 +2942,9 @@ def _extract_json(body: str) -> object:
     repaired = _repair_diff_prefixed_json(body)
     if repaired is not None:
         return repaired
+    recovered = _extract_prose_prefixed_json(body)
+    if recovered is not None:
+        return recovered
     return None
 
 

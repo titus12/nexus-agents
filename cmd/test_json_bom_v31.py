@@ -106,6 +106,21 @@ class EscapeRepairTests(unittest.TestCase):
     def test_structural_damage_is_still_rejected(self):
         self.assertIsNone(_extract_json('{"a":"x\n" "b": 1}'))
 
+    def test_prose_prefix_before_one_object_is_recovered(self):
+        body = ('Two prior deliveries were discarded by the platform\'s output-size guard, '
+                'so this attempt delivers a minimal delta as exactly one pure JSON object.\n\n'
+                '{"action":"ANALYSIS_READY","analysis":{"facts":[]}}')
+
+        value = _extract_json(body)
+
+        self.assertEqual(value, {"action": "ANALYSIS_READY", "analysis": {"facts": []}})
+
+    def test_prose_prefix_with_braces_is_rejected(self):
+        self.assertIsNone(_extract_json('note {see below}\n{"action":"A"}'))
+
+    def test_prose_prefix_with_trailing_content_is_rejected(self):
+        self.assertIsNone(_extract_json('note\n{"action":"A"} trailing text'))
+
 
 class ParseDiagnosticTests(unittest.TestCase):
     def test_fenced_body_is_diagnosed_after_unfencing(self):
