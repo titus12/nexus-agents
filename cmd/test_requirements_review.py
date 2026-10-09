@@ -20,18 +20,26 @@ class ReviewTests(unittest.TestCase):
         closed = merge_review(again, review_payload(closures=[{'issue_id': state.issues[0].issue_id, 'status': 'resolved', 'evidence': 'S_behavior明确失败通知'}]))
         self.assertTrue(closed.review_stamp.passed)
 
-    def test_issue_rename_does_not_create_identity_or_change_acceptance(self):
+    def test_issue_rename_does_not_fork_ledger_and_acceptance_stays_stable(self):
         state = merge_review(self.state, review_payload([self.issue]))
         issue = dict(self.issue, issue_id='finding-999999', claim='换种说法')
         self.assertEqual(len(merge_review(state, review_payload([issue])).issues), 1)
         issue['acceptance'] = '额外增加性能测试'
-        with self.assertRaisesRegex(ValueError, 'ACCEPTANCE_CHANGED'):
-            try:
-                merge_review(state, review_payload([issue]))
-            except ValueError as error:
-                self.assertIn('写明失败后的可观察行为', str(error))
-                self.assertIn('verbatim', str(error))
-                raise
+        merged = merge_review(state, review_payload([issue]))
+        self.assertEqual(len(merged.issues), 1)
+        self.assertEqual(merged.issues[0].acceptance, '写明失败后的可观察行为')
+        self.assertEqual(merged.issues[0].status, 'open')
+
+    def test_new_demand_requires_close_then_reopen(self):
+        state = merge_review(self.state, review_payload([self.issue]))
+        closed = merge_review(state, review_payload(closures=[
+            {'issue_id': state.issues[0].issue_id, 'status': 'resolved', 'evidence': 'S_behavior明确失败通知'}]))
+        new_demand = dict(self.issue, claim='换种说法', acceptance='额外增加性能测试')
+        merged = merge_review(closed, review_payload([new_demand]))
+        self.assertEqual(len(merged.issues), 2)
+        by_id = {issue.issue_id: issue for issue in merged.issues}
+        self.assertEqual(by_id[state.issues[0].issue_id].status, 'resolved')
+        self.assertEqual(by_id[merged.issues[-1].issue_id].acceptance, '额外增加性能测试')
 
     def test_first_review_needs_all_axes(self):
         with self.assertRaisesRegex(ValueError, 'COVERAGE_INCOMPLETE'):

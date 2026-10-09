@@ -65,14 +65,20 @@ def merge_review(state, payload):
         if not issue.section_ids and not issue.requirement_ids and not issue.basis_source_ids:
             raise ValueError('FINDING_BASIS_REQUIRED')
         old = next((i for i in issues if i.issue_id == issue.issue_id or issue_identity(i) == issue_identity(issue)), None)
-        if old:
-            if issue.acceptance != old.acceptance:
-                raise ValueError(
-                    'FINDING_ACCEPTANCE_CHANGED: finding %s already requires %r; '
-                    'restate that acceptance text verbatim (changing it requires closing '
-                    'the finding and opening a new one).' % (old.issue_id, old.acceptance))
+        if old and old.status != 'resolved':
+            # The recorded acceptance is the contract the solver is already
+            # working against, so the ledger itself keeps it stable: a re-file
+            # with drifted wording must neither fork the ledger nor reject the
+            # whole payload (asking the critic to restate the text verbatim
+            # cannot be relied on and once caused an endless
+            # FINDING_ACCEPTANCE_CHANGED repair loop).  A genuinely new demand
+            # is expressed by closing this finding and opening a new one.
+            issues[issues.index(old)] = replace(old, status='open', basis_source_ids=tuple(sorted(set(old.basis_source_ids + issue.basis_source_ids))))
+        elif old and issue.acceptance == old.acceptance:
             issues[issues.index(old)] = replace(old, status='open', basis_source_ids=tuple(sorted(set(old.basis_source_ids + issue.basis_source_ids))))
         else:
+            # Re-raising a resolved finding: same acceptance reopens it, a
+            # changed acceptance is a new demand and gets a fresh ledger row.
             issues.append(replace(issue, status='open'))
     for closure in payload.get('closures', ()):
         old = next((i for i in issues if i.issue_id == closure['issue_id']), None)
