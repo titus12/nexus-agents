@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from ..contracts import contract_for_state
 from ..domain.requirements.result_validation import result_errors
+from ..domain.requirements.quote_align import align_quote
 from ..domain.requirements.model import RequirementsState
 from ..domain.requirements.consensus import apply_analysis
 from ..domain.requirements.questions import merge_questions
@@ -17,6 +18,7 @@ from ..domain.errors import CONTRACT_REJECTED_EVENT, UNSTRUCTURED_REPLY_EVENT
 from .effects import EffectOutcome
 from .compat_effects import _skill_lock
 from .requirements_fact_sources import source_path
+from .requirements_quotes import normalize_claim_quotes
 
 # Fields that bind one agent reply to the dispatch that produced it.  A cached
 # reply replayed for a different task must not carry another task's values.
@@ -28,6 +30,51 @@ _RUNTIME_KEYS = {'result_artifact_id','operation_id','external_message_id','idem
 
 def _canonical_json(value) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+
+
+def verify_facts(facts, project_root='', task_id=''):
+    """Verify quoted file evidence in place; returns ``(kept facts, errors)``.
+
+    Each verified observed fact is mutated in place: the quote is healed to the
+    exact raw file slice, ``source_fingerprint`` is filled, and ``source`` is
+    made absolute (keeping any ``:12``-style line suffix).  Non-observed facts
+    are kept unverified.  The scout fan-out reuses this function to drop facts
+    whose quotes do not match their source files.
+    """
+    verified, errors = [], []
+    for index, fact in enumerate(facts):
+        if not isinstance(fact,dict) or not isinstance(fact.get('source',''),str) or not isinstance(fact.get('quote',''),str):
+            continue
+        if fact.get('status','observed') != 'observed':
+            verified.append(fact)
+            continue
+        try:
+            path = source_path(fact['source'],project_root)
+            content = path.read_bytes()
+            text = content.decode('utf-8-sig')
+            # File-reading tools commonly expose CRLF as LF. Line-ending
+            # and whitespace-only drift is healed by alignment below; the
+            # stored quote is always the exact raw file slice.
+            if not fact['quote'] or fact['quote'].replace('\r\n','\n') not in text.replace('\r\n','\n'):
+                aligned = align_quote(text, fact['quote'])
+                if not aligned:
+                    raise ValueError('FACT_QUOTE_NOT_IN_SOURCE')
+                # The replacement is the real file slice, so a forged quote
+                # still fails while sloppy (NFKC/whitespace) ones are healed.
+                fact['quote'] = text[aligned[0]:aligned[1]]
+                record('QUOTE_ALIGNED',task_id=task_id,mode='normalized')
+            else:
+                record('QUOTE_ALIGNED',task_id=task_id,mode='exact')
+            fingerprint = hashlib.sha256(content).hexdigest()
+            fact['source_fingerprint'] = fingerprint
+            suffix = re.search(r':\d+(?:-\d+)?$',fact['source'])
+            fact['source'] = str(path) + (suffix.group() if suffix else '')
+        except (OSError,UnicodeError,KeyError,ValueError) as error:
+            errors.append({'index':index,'fact_id':fact.get('fact_id') or fact.get('local_key',''),
+                                    'source':fact.get('source',''),'reason':str(error)})
+        else:
+            verified.append(fact)
+    return verified, errors
 
 
 class RequirementsAgentRunner:
@@ -84,9 +131,10 @@ class RequirementsAgentRunner:
             schema_hash = hashlib.sha256(_canonical_json(contract.schema).encode('utf-8')).hexdigest()
         except Exception:
             schema_hash = ''
-        material = {'v': 2,
+        material = {'v': 3,
                     'skill_sha': str(_skill_lock('REQ_ANALYZE').get('sha256', '') or ''),
                     'schema_hash': schema_hash,
+                    'scout': getattr(self.inner, 'cache_salt', lambda: '')(),
                     'validation_state': key_state}
         return self.cache_dir / (hashlib.sha256(_canonical_json(material).encode('utf-8')).hexdigest() + '.json')
 
@@ -181,38 +229,22 @@ class RequirementsAgentRunner:
         if candidate is None:
             return outcome
         payload = copy.deepcopy(dict(candidate or {}))
+        raw_sources = (request.payload.get('validation_state') or {}).get('sources', [])
+        span_errors = normalize_claim_quotes(payload, raw_sources)
         runtime_keys = {'result_artifact_id','operation_id','external_message_id','idempotency_key',
             'result_source','result_path','result_sha256','result_utf8_bytes','result_has_bom','result_transport_backfilled_fields',
             'supplemental_reports'}
         errors = contract.validate({k:v for k,v in payload.items() if k not in runtime_keys})
         dispatch = request.payload.get('dispatch_context',{})
         semantic_errors = result_errors(payload,dispatch)
+        semantic_errors.extend(span_errors)
         analysis = payload.get('analysis',{})
         facts = analysis.get('facts',[]) if target == 'REQ_ANALYZE' and isinstance(analysis,dict) else payload.get('fact_updates',[])
         if not isinstance(facts,list):
             facts = []
         evidence_errors = []
         project_root = request.payload.get('dispatch_context',{}).get('project_root','')
-        for index, fact in enumerate(facts):
-            if not isinstance(fact,dict) or not isinstance(fact.get('source',''),str) or not isinstance(fact.get('quote',''),str):
-                continue
-            if fact.get('status','observed') != 'observed':
-                continue
-            try:
-                path = source_path(fact['source'],project_root)
-                content = path.read_bytes()
-                text = content.decode('utf-8-sig')
-                # File-reading tools commonly expose CRLF as LF. Only line-ending
-                # equivalence is allowed; indentation, text and contiguity stay exact.
-                if not fact['quote'] or fact['quote'].replace('\r\n','\n') not in text.replace('\r\n','\n'):
-                    raise ValueError('FACT_QUOTE_NOT_IN_SOURCE')
-                fingerprint = hashlib.sha256(content).hexdigest()
-                fact['source_fingerprint'] = fingerprint
-                suffix = re.search(r':\d+(?:-\d+)?$',fact['source'])
-                fact['source'] = str(path) + (suffix.group() if suffix else '')
-            except (OSError,UnicodeError,KeyError,ValueError) as error:
-                evidence_errors.append({'index':index,'fact_id':fact.get('fact_id') or fact.get('local_key',''),
-                                        'source':fact.get('source',''),'reason':str(error)})
+        _, evidence_errors = verify_facts(facts, project_root, getattr(request,'task_id',''))
         if not errors and not semantic_errors and not evidence_errors and target == 'REQ_ANALYZE' and request.payload.get('validation_state'):
             try:
                 aliases = {}
@@ -236,8 +268,8 @@ class RequirementsAgentRunner:
                    semantic_error_count=len(semantic_errors),evidence_error_count=len(evidence_errors),reason=code)
             return replace(outcome,event_name='FAIL',event_payload={**payload,
                 'error_code':code,'reason':'Repair ALL reported paths in this same response:\n'+'\n'.join(feedback)+
-                    '\nUse exact contiguous quotes; '
-                    'omit source_fingerprint. If a source cannot be read, mark that fact unavailable. '
+                    '\nThe runtime backfills span_ids quotes and aligns file quotes, so focus on the reported paths. '
+                    'If a source cannot be read, mark that fact unavailable. '
                     'New question revision must be omitted or 1; all local_key aliases must be unique. '
                     'For MODEL_CANNOT_ACCEPT_ASSUMPTION set the indexed disposition to proposed; changing an ID does not fix it. '
                     'Return existing human-accepted assumptions unchanged or omit them. '

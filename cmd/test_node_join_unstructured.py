@@ -35,7 +35,7 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
             _result("worker-02", "EVIDENCE_PACKET_READY"),
             _result("worker-03", "EVIDENCE_PACKET_READY"),
         )
-        node = self._joiner("ZHONGSHU_ANALYST").join(results)
+        node = self._joiner("MENXIA_GROUP_ANALYST").join(results)
         self.assertEqual(node.status, "FAILED")
         self.assertIsNotNone(node.failure)
         assert node.failure is not None
@@ -57,7 +57,7 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
             ),
             _result("worker-02", "EVIDENCE_PACKET_READY"),
         )
-        node = self._joiner("ZHONGSHU_ANALYST").join(results)
+        node = self._joiner("MENXIA_GROUP_ANALYST").join(results)
 
         self.assertEqual(node.status, "FAILED")
         assert node.failure is not None
@@ -82,7 +82,7 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
             ),
             _result("worker-03", "EVIDENCE_PACKET_READY"),
         )
-        node = self._joiner("ZHONGSHU_ANALYST").join(results)
+        node = self._joiner("MENXIA_GROUP_ANALYST").join(results)
 
         self.assertEqual(node.status, "FAILED")
         assert node.failure is not None
@@ -98,7 +98,7 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
             stage="agent_result",
             owner_component="agent_dispatch",
             task_id="task-1",
-            state="ZHONGSHU_ANALYST",
+            state="MENXIA_GROUP_ANALYST",
             sequence=1,
             node_run_id=None,
             worker_id="worker-01",
@@ -112,7 +112,7 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
             WorkerResult("worker-01", "FAILED", None, failure=failure, result_payload=None),
             _result("worker-02", "EVIDENCE_PACKET_READY"),
         )
-        node = self._joiner("ZHONGSHU_ANALYST").join(results)
+        node = self._joiner("MENXIA_GROUP_ANALYST").join(results)
 
         self.assertEqual(node.status, "FAILED")
         assert node.failure is not None
@@ -131,7 +131,7 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
             _result("worker-02", "EVIDENCE_PACKET_READY"),
             _result("worker-03", "EVIDENCE_PACKET_READY"),
         )
-        node = self._joiner("ZHONGSHU_ANALYST").join(results)
+        node = self._joiner("MENXIA_GROUP_ANALYST").join(results)
 
         self.assertEqual(node.status, "SUCCEEDED")
         assert node.aggregate is not None
@@ -142,7 +142,7 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
             _result("worker-01", "EVIDENCE_PACKET_READY"),
             _result("worker-02", "HUMAN_GATE"),
         )
-        node = self._joiner("ZHONGSHU_ANALYST").join(results)
+        node = self._joiner("MENXIA_GROUP_ANALYST").join(results)
 
         self.assertEqual(node.status, "SUCCEEDED")
         assert node.aggregate is not None
@@ -157,7 +157,7 @@ class UnstructuredReplyFanInTest(unittest.TestCase):
             ),
             _result("worker-02", "EVIDENCE_PACKET_READY"),
         )
-        node = self._joiner("ZHONGSHU_ANALYST").join(results)
+        node = self._joiner("MENXIA_GROUP_ANALYST").join(results)
 
         self.assertEqual(node.status, "FAILED")
         assert node.failure is not None

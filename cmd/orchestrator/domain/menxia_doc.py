@@ -715,6 +715,7 @@ def menxia_approval_blockers(
     *,
     requirement_markdown: str = "",
     group_id: str = "",
+    approved_acceptance_markdown: str | None = None,
 ) -> tuple[str, ...]:
     """Approval-gate checks for a critic APPROVE_GROUP (requirements §9).
 
@@ -728,7 +729,7 @@ def menxia_approval_blockers(
 
     errors: list[str] = []
     if "<!-- requirement-group:" in requirement_markdown:
-        from .plan_review import group_chapter
+        from .document_utils import group_chapter
         try:
             requirement_markdown = group_chapter(requirement_markdown, group_id)
         except ValueError as error:
@@ -757,6 +758,9 @@ def menxia_approval_blockers(
         if requirement_markdown.strip()
         else None
     )
+    if approved_acceptance_markdown is not None:
+        from .zhongshu_doc import _normalize
+        allowed = {_normalize(line.strip()) for line in approved_acceptance_markdown.splitlines() if line.strip()}
     for line in map_lines:
         match = _MAP_ROW_PATTERN.match(line)
         if match is None:

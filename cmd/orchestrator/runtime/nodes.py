@@ -74,6 +74,7 @@ class NodeContext:
     issue_id: str = ""
     plan_hash: str = ""
     dispatch_mode: str = ""
+    workflow: str = 'requirements-v1'
     review_queue: object | None = None
     canonical_requirements: tuple[dict[str, object], ...] = ()
     # A2/P3 item-revise nodes: the dispatch-time plan the joiner merges

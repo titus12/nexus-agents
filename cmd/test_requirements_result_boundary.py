@@ -69,8 +69,13 @@ class BoundaryTests(unittest.TestCase):
             self.assertIn('LOCAL_KEY_COLLISION',feedback)
             for index in range(5):
                 self.assertIn(f'questions[{index}].revision: must be >= 1',feedback)
-            self.assertEqual(len(outcome.event_payload['evidence_errors']),5)
+            self.assertEqual(len(outcome.event_payload['evidence_errors']),1)
             self.assertIn('FACT_QUOTE_NOT_IN_SOURCE',feedback)
+            # Whitespace-damaged real excerpts are healed by T7 alignment; the
+            # stored quote must be the exact raw file slice afterwards.
+            healed=outcome.event_payload['analysis']['facts'][0]['quote']
+            self.assertIn(healed.replace('\r\n','\n'),
+                          Path(payload['analysis']['facts'][0]['source']).read_text(encoding='utf-8'))
             self.assertEqual(payload,original)
 
     def test_real_fixture_repaired_together_passes_boundary(self):
@@ -94,7 +99,7 @@ class BoundaryTests(unittest.TestCase):
                 outcome=run_reply(payload,dispatch,rejected=True,root=directory,raw_path=raw_path)
                 self.assertEqual(outcome.event_name,'FAIL')
                 self.assertIn('LOCAL_KEY_COLLISION',outcome.event_payload['reason'])
-                self.assertEqual(len(outcome.event_payload['evidence_errors']),5)
+                self.assertEqual(len(outcome.event_payload['evidence_errors']),1)
 
     def test_rejected_json_cannot_be_accepted_or_cross_task_inspected(self):
         payload=contract_for_state('REQ_ANALYZE').example_payload()

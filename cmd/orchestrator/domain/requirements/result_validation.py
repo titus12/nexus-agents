@@ -44,6 +44,7 @@ def result_errors(payload, dispatch):
             row = {k:v for k,v in raw.items() if k != 'local_key'}
             if cls is RequirementClaim:
                 row.pop('quote', None)  # Transport provenance, not a claim field.
+                row.pop('span_ids', None)  # Payload-only citation hint; not a claim field.
             row[id_field] = identity or f'validation-{index}'
             try:
                 decode(cls,row)
@@ -51,6 +52,14 @@ def result_errors(payload, dispatch):
                 errors.append(f'{path}: {error}')
 
     sources = {s.get('source_id'):s for s in dispatch.get('sources',[]) if isinstance(s,dict)}
+
+    def source_text(entry):
+        # Span presentation (T7): '[src-000001#1] text' lines replace the raw
+        # text; quote matching only needs whitespace-insensitive containment.
+        if 'spans' in entry and isinstance(entry['spans'], list):
+            return '\n'.join(str(line).split('] ', 1)[-1] for line in entry['spans'] if isinstance(line, str))
+        return entry.get('text', '')
+
     claims = analysis.get('claims',[])
     if isinstance(claims,list):
         for index,row in enumerate(claims):
@@ -68,7 +77,7 @@ def result_errors(payload, dispatch):
                     cited = human_refs[0] if human_refs else 'the cited human source'
                     excerpt = ''
                     if human_refs:
-                        excerpt = ' Copy from it: ' + sources[human_refs[0]].get('text','')[:300]
+                        excerpt = ' Copy from it: ' + source_text(sources[human_refs[0]])[:300]
                     errors.append(f'analysis.claims[{index}].quote: QUOTE_IS_NULL_LITERAL; '
                                   f'the quote is null or the string "None" - that is not a quote. '
                                   f'Replace it with the verbatim text of {cited}: copy the exact '
@@ -77,13 +86,13 @@ def result_errors(payload, dispatch):
                 quote = raw_quote or row.get('statement')
                 if isinstance(quote,str) and not any(isinstance(ref,str) and ref in sources
                     and sources[ref].get('kind') in ('request','answer','feedback')
-                    and claim_quote_matches(quote,sources[ref].get('text','')) for ref in refs):
+                    and claim_quote_matches(quote,source_text(sources[ref])) for ref in refs):
                     human_refs = [ref for ref in refs if isinstance(ref,str) and ref in sources
                         and sources[ref].get('kind') in ('request','answer','feedback')]
                     cited = human_refs[0] if human_refs else 'a cited human source'
                     excerpt = ''
                     if human_refs:
-                        excerpt = ' Full source text: ' + sources[human_refs[0]].get('text','')[:300]
+                        excerpt = ' Full source text: ' + source_text(sources[human_refs[0]])[:300]
                     errors.append(f'analysis.claims[{index}].quote: EXPLICIT_CLAIM_REQUIRES_HUMAN_QUOTE; '
                                   f'set quote to a verbatim contiguous excerpt of {cited} '
                                   '(copy the source text exactly, keep path separators and case; '

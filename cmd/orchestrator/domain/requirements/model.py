@@ -14,15 +14,15 @@ from typing import get_args, get_origin, get_type_hints
 # Shared by domain validation and the model-facing result contracts.
 RECORD_ENUMS = {
     'RequirementClaim': {
-        'kind': ('goal', 'behavior', 'constraint', 'non_goal'),
+        'kind': ('goal', 'behavior', 'constraint', 'non_goal', 'boundary'),
         'origin': ('explicit', 'choice', 'derived', 'proposal'),
         'status': ('active', 'proposed', 'superseded', 'rejected'),
     },
     'FactRecord': {'status': ('observed', 'unavailable')},
     'AssumptionRecord': {'disposition': ('proposed', 'accepted', 'deferred', 'rejected')},
     'Question': {'answer_kind': ('single', 'multi', 'text')},
-    'DraftSection': {'kind': ('background', 'goals', 'scope', 'constraints', 'behavior',
-                              'rules', 'acceptance', 'non_goals', 'topic')},
+    'DraftSection': {'kind': ('background', 'goals', 'problem', 'scope', 'constraints', 'behavior',
+                              'rules', 'acceptance', 'non_goals', 'risks', 'topic')},
     'ReviewIssue': {
         'owner': ('solver', 'analyst', 'user', 'engine', 'menxia'),
         'severity': ('blocking', 'advisory'),
@@ -256,7 +256,7 @@ class AnswerRecord:
     event_id: str
 
 
-CORE_SECTIONS = ('background', 'goals', 'scope', 'constraints', 'behavior', 'rules', 'acceptance', 'non_goals')
+CORE_SECTIONS = ('background', 'goals', 'constraints', 'behavior', 'scope', 'acceptance', 'non_goals')
 
 
 @dataclass(frozen=True)
@@ -370,7 +370,7 @@ class EffectCharge:
 
 @dataclass(frozen=True)
 class BudgetLedger:
-    policy_version: str = 'requirements-policy-v1'
+    policy_version: str = 'requirements-policy-v2'
     work_epoch: int = 1
     epoch_input_digest: str = ''
     calls: int = 0
@@ -387,7 +387,7 @@ class BudgetLedger:
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise ValueError(f'invalid budget {name}')
-        if self.work_epoch < 1 or self.policy_version != 'requirements-policy-v1':
+        if self.work_epoch < 1 or self.policy_version not in ('requirements-policy-v1', 'requirements-policy-v2'):
             raise ValueError('unsupported requirements budget policy')
 
 

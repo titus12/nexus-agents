@@ -1,36 +1,14 @@
 """Deterministic prompt projections with no transport or file I/O."""
-
 from __future__ import annotations
-
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 from types import MappingProxyType
-
 from ..context import WorkflowContext
 from ..errors import is_reply_failure
-from ...acceptance_standards import (
-    acceptance_standard_applies_to,
-    acceptance_standard_block,
-)
+from ...acceptance_standards import acceptance_standard_applies_to, acceptance_standard_block
 from ...contracts import contract_for_state
-from ...zhongshu_solver_contract import ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
-from .zhongshu import MAX_EVIDENCE_RECORDS, project_evidence_record, select_solver_batch
-
-
-# Replies are hand-written 10-30KB documents full of quoted code, Chinese prose
-# and Windows paths; the recurring parse failures were unescaped quotes,
-# backslashes and raw line breaks inside string values.
-JSON_STRING_RULES = (
-    "\n[JSON string rules] Inside every string value: escape each double quote "
-    'as \\" (or quote prose with 「」 instead); write each backslash as \\\\ '
-    "(a Windows path is D:\\\\workspace\\\\src); write line breaks and tabs as "
-    "\\n and \\t, never as raw characters. If you can run code, build the result "
-    "as a Python dict, write it with json.dump(ensure_ascii=False) to a UTF-8 "
-    "file, confirm json.load reads that file back, and only then submit exactly "
-    "that validated text."
-)
-
+JSON_STRING_RULES = '\n[JSON string rules] Inside every string value: escape each double quote as \\" (or quote prose with 「」 instead); write each backslash as \\\\ (a Windows path is D:\\\\workspace\\\\src); write line breaks and tabs as \\n and \\t, never as raw characters. If you can run code, build the result as a Python dict, write it with json.dump(ensure_ascii=False) to a UTF-8 file, confirm json.load reads that file back, and only then submit exactly that validated text.'
 
 @dataclass(frozen=True)
 class PromptSpec:
@@ -41,10 +19,9 @@ class PromptSpec:
     references: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "references", MappingProxyType(dict(self.references)))
+        object.__setattr__(self, 'references', MappingProxyType(dict(self.references)))
 
-
-def retry_feedback(context: WorkflowContext, state: str, worker_id: str = "") -> str:
+def retry_feedback(context: WorkflowContext, state: str, worker_id: str='') -> str:
     """Restate the validator's rejection so a re-ask is not a blind re-sample.
 
     A reply budget only helps if the agent learns what was wrong: without this
@@ -57,279 +34,32 @@ def retry_feedback(context: WorkflowContext, state: str, worker_id: str = "") ->
     nothing: a sibling's error is noise that makes the re-ask fix the wrong
     defect (task-20260929-dad75d wave 4).
     """
-
-    failure = getattr(context, "recovery", None)
-    failure = getattr(failure, "last_failure", None)
+    failure = getattr(context, 'recovery', None)
+    failure = getattr(failure, 'last_failure', None)
     if failure is None:
-        return ""
+        return ''
     if worker_id:
-        rejections = tuple(getattr(failure, "worker_rejections", ()) or ())
-        own = [
-            str(text)
-            for entry_worker, text in rejections
-            if str(entry_worker) == str(worker_id)
-            and is_reply_failure(str(text).split(":", 1)[0])
-        ]
-        if own and str(getattr(failure, "state", "") or "") != str(state):
-            return ""
+        rejections = tuple(getattr(failure, 'worker_rejections', ()) or ())
+        own = [str(text) for entry_worker, text in rejections if str(entry_worker) == str(worker_id) and is_reply_failure(str(text).split(':', 1)[0])]
+        if own and str(getattr(failure, 'state', '') or '') != str(state):
+            return ''
         if own:
-            reason = " ".join(own[0].split())
+            reason = ' '.join(own[0].split())
             if not reason:
-                return ""
-            return (
-                "\n[Retry feedback] The orchestrator rejected your previous reply: "
-                f"{reason[:600]}\n"
-                "Correct exactly that defect and return one complete structured result again.\n"
-            )
+                return ''
+            return f'\n[Retry feedback] The orchestrator rejected your previous reply: {reason[:600]}\nCorrect exactly that defect and return one complete structured result again.\n'
         if rejections:
-            # A sibling failed this wave, or this worker failed for a reason
-            # that is not a bad reply (timeout, transport): nothing to correct.
-            return ""
-    if not is_reply_failure(getattr(failure, "error_code", "")):
-        return ""
-    if str(getattr(failure, "state", "") or "") != str(state):
-        return ""
-    reason = " ".join(str(getattr(failure, "message", "") or "").split())
+            return ''
+    if not is_reply_failure(getattr(failure, 'error_code', '')):
+        return ''
+    if str(getattr(failure, 'state', '') or '') != str(state):
+        return ''
+    reason = ' '.join(str(getattr(failure, 'message', '') or '').split())
     if not reason:
-        return ""
-    return (
-        "\n[Retry feedback] The orchestrator rejected your previous reply: "
-        f"{reason[:600]}\n"
-        "Correct exactly that defect and return one complete structured result again.\n"
-    )
+        return ''
+    return f'\n[Retry feedback] The orchestrator rejected your previous reply: {reason[:600]}\nCorrect exactly that defect and return one complete structured result again.\n'
 
-
-def solver_revision_task(context: WorkflowContext) -> str:
-    """Render this round's Solver revision task as explicit instructions.
-
-    The review findings used to live only in the 58 KB ``context.json`` (the
-    prompt merely said "finding count: 20"), and the agent had to invent the
-    batch partition itself.  Every mechanical slip -- a blocker deferred, the
-    same id in both lists, an omitted id -- discarded the whole reply.  The
-    orchestrator already knows what should be worked on, so it states the batch
-    and the exact ``finding_batch`` to return.
-    """
-
-    review = context.review
-    if review is None or not isinstance(review.plan, Mapping):
-        return ""
-    active = tuple(finding for finding in review.findings if finding.active)
-    if not active:
-        return ""
-    selected, remaining = select_solver_batch(
-        active, ZHONGSHU_SOLVER_MAX_FINDINGS_PER_ROUND
-    )
-    if not selected:
-        return ""
-    by_id = {finding.finding_id: finding for finding in active}
-    lines = [
-        "",
-        "[Revision task] Resolve only this round's batch of "
-        f"{len(selected)} of {len(active)} open findings. For each listed finding "
-        "return one finding_resolution (response, changed_fields, evidence, "
-        "owner_role, next_action) and adjust the plan only as far as that "
-        "finding requires. Set mode to "
-        "TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME: answering this revision "
-        "with the formalization mode is a protocol violation:",
-    ]
-    for finding_id in selected:
-        finding = by_id.get(finding_id)
-        severity = str(getattr(finding, "severity", "") or "?").strip().upper()
-        item_id = str(getattr(finding, "item_id", "") or "-").strip()
-        demand = getattr(finding, "required_action", None) or getattr(
-            finding, "claim", ""
-        )
-        demand = " ".join(str(demand or "").split())
-        lines.append(f"- {finding_id} [{severity}, item {item_id}] {demand[:220]}")
-    lines.append(
-        "Copy this finding_batch into your result unchanged; do not re-plan the "
-        "partition and do not add or drop ids:"
-    )
-    lines.append(
-        json.dumps(
-            {
-                "selected_finding_ids": list(selected),
-                "remaining_finding_ids": list(remaining),
-            },
-            ensure_ascii=False,
-        )
-    )
-    lines.append(
-        "The orchestrator carries the remaining findings into the next round."
-    )
-    return "\n".join(lines) + "\n"
-
-
-def analyst_evidence_task(
-    context: WorkflowContext, findings: tuple[object, ...] | None = None
-) -> str:
-    """Render the Critic's active findings as the Analyst's directed brief.
-
-    The Analyst used to see only ``Current review finding count: N`` -- the
-    demand stayed in the 58 KB context.json while the Critic kept rejecting
-    the undirected evidence dump for not addressing it.  The Solver already
-    receives its batch verbatim (``solver_revision_task``); the Analyst gets
-    the same treatment, plus each finding's structured ``evidence_targets``
-    so the fulfillment gate and the answer share one demand definition.
-    """
-
-    review = context.review
-    if review is None:
-        return ""
-    open_findings = tuple(finding for finding in review.findings if finding.active)
-    if not open_findings:
-        return ""
-    # A fan-out worker answers only its slice; the other slices belong to the
-    # other Analyst workers of the same wave.
-    active = open_findings if findings is None else findings
-    scope = (
-        f"{len(open_findings)} open finding(s)"
-        if findings is None
-        else f"{len(open_findings)} open finding(s); your slice is "
-        f"{len(active)} of them and the other Analyst workers cover the rest"
-    )
-    lines = [
-        "",
-        f"[Evidence task] The Critic holds {scope}. Answer each one listed below "
-        "in finding_responses "
-        "(finding_id, answer, evidence_ids, suggested_disposition) with "
-        "file:line evidence; keep evidence_updates scoped to these demands. "
-        "Every quote is one contiguous span of the cited lines, at most 30 "
-        "lines and 4096 characters (usually far less): quote only the lines "
-        "that support the claim, and split evidence about separate spots into "
-        "separate evidence_updates entries:",
-    ]
-    for finding in active:
-        severity = str(getattr(finding, "severity", "") or "?").strip().upper()
-        item_id = str(getattr(finding, "item_id", "") or "-").strip()
-        demand = (
-            getattr(finding, "required_action", None)
-            or getattr(finding, "claim", "")
-        )
-        demand = " ".join(str(demand or "").split())
-        lines.append(
-            f"- {finding.finding_id} [{severity}, item {item_id}] {demand[:220]}"
-        )
-        requirement_ids = next((
-            list(item.source_requirement_ids) for item in review.task_items
-            if item.item_id == item_id
-        ), [])
-        if requirement_ids:
-            lines.append(f"  Required evidence scope: item_id={item_id}; requirement_id must be one of {requirement_ids}. "
-                         "finding_responses.evidence_ids must reference these scoped updates in this reply.")
-        targets = [
-            {"path": str(target.get("path") or ""), "symbol": str(target.get("symbol") or "")}
-            for target in (getattr(finding, "evidence_targets", ()) or ())
-            if isinstance(target, Mapping) and str(target.get("path") or "").strip()
-        ]
-        if targets:
-            lines.append(
-                "  evidence_targets: "
-                + json.dumps(targets, ensure_ascii=False, sort_keys=True)
-            )
-    return "\n".join(lines) + "\n"
-
-
-def critic_evidence_task(context: WorkflowContext) -> str:
-    """Render the Analyst evidence packet for a plan-level Critic dispatch.
-
-    The group/task review bindings already carry per-item evidence slices
-    (``states._item_evidence_context``); the single-dispatch Critic prompt had
-    no evidence section at all, so after Fix 3 routes the Analyst packet
-    straight back the Critic could not see it and re-demanded evidence the run
-    already held.  Same slicing rules as the bindings, projected against the
-    whole plan instead of one item: demand-first selection, shared record
-    projection, and the same 8-record cap so the section stays bounded.
-    """
-
-    review = context.review
-    if review is None:
-        return ""
-    packet = getattr(review, "evidence_packet", None)
-    if not isinstance(packet, Mapping):
-        return ""
-    active = tuple(
-        finding
-        for finding in getattr(review, "findings", ())
-        if bool(getattr(finding, "active", True))
-    )
-    demanded_blob = " ".join(
-        " ".join(part.split())
-        for finding in active
-        for part in (
-            str(getattr(finding, "claim", "") or ""),
-            str(getattr(finding, "required_action", "") or ""),
-            *(str(eid) for eid in getattr(finding, "supporting_evidence", ()) or ()),
-        )
-    )
-    raw_updates = packet.get("evidence_updates")
-    active_ids = {str(finding.finding_id) for finding in active}
-    answered_evidence_ids = {str(eid) for response in packet.get("finding_responses") or []
-        if isinstance(response, Mapping) and response.get("finding_id") in active_ids
-        for eid in response.get("evidence_ids") or []}
-    prioritized: list[tuple[int, dict[str, object]]] = []
-    for value in raw_updates if isinstance(raw_updates, list) else ():
-        record = project_evidence_record(value)
-        if not record:
-            continue
-        evidence_id = str(record.get("evidence_id") or "")
-        if evidence_id in answered_evidence_ids:
-            tier = -1
-        elif evidence_id and evidence_id in demanded_blob:
-            tier = 0
-        elif record.get("item_id"):
-            tier = 1
-        else:
-            tier = 2
-        prioritized.append((tier, record))
-    prioritized.sort(key=lambda pair: pair[0])
-    records = [record for _, record in prioritized[:MAX_EVIDENCE_RECORDS]]
-    active_ids = {str(getattr(finding, "finding_id", "") or "") for finding in active}
-    responses: list[tuple[str, str]] = []
-    raw_responses = packet.get("finding_responses")
-    if isinstance(raw_responses, list):
-        for value in raw_responses:
-            if not isinstance(value, Mapping) or len(responses) >= MAX_EVIDENCE_RECORDS:
-                continue
-            finding_id = str(value.get("finding_id") or "")
-            if not finding_id or finding_id not in active_ids:
-                continue
-            answer = " ".join(str(value.get("answer") or "").split())[:400]
-            if not answer:
-                continue
-            responses.append((finding_id, answer))
-    if not records and not responses:
-        return ""
-    lines = [
-        "",
-        "[Evidence packet] The Analyst already delivered this investigation; "
-        "judge against it instead of re-requesting evidence it already answers:",
-    ]
-    for record in records:
-        scope = str(
-            record.get("item_id") or record.get("requirement_id") or "plan"
-        )
-        source = str(record.get("source") or "")
-        lines.append(
-            f"- {record.get('evidence_id') or '?'} "
-            f"[{record.get('decision_relevance') or 'evidence'}, {scope}] "
-            f"{record.get('conclusion') or ''}"
-            + (f" (source: {source})" if source else "")
-        )
-    if responses:
-        lines.append("Answers to the open findings:")
-        for finding_id, answer in responses:
-            lines.append(f"- {finding_id}: {answer}")
-    return "\n".join(lines) + "\n"
-
-
-def build_prompt(
-    context: WorkflowContext,
-    *,
-    target_state: str | None = None,
-    worker_id: str = "",
-    evidence_findings: tuple[object, ...] | None = None,
-) -> PromptSpec:
+def build_prompt(context: WorkflowContext, *, target_state: str | None=None, worker_id: str='', evidence_findings: tuple[object, ...] | None=None) -> PromptSpec:
     """Project immutable context into a bounded role prompt.
 
     ``target_state`` is the state the dispatched agent must act as.  Dispatching
@@ -337,80 +67,18 @@ def build_prompt(
     orchestrator is transitioning *from* (which previously told the Solver it
     was in ``ZHONGSHU_CRITIC`` and the Analyst it was in ``REQUEST_INTAKE``).
     """
-
     state = target_state or context.progression.state
-    phase = "ZHONGSHU" if state.startswith("ZHONGSHU") else "MENXIA"
-    role = {
-        "ANALYST": "review-analyst",
-        "SOLVER": "review-solver",
-        "CRITIC": "review-critic",
-        "FREEZE_CHECK": "review-critic",
-        "ITEM_SOLVER": "review-solver",
-        "ITEM_ANALYST": "review-analyst",
-        "ITEM_CRITIC": "review-critic",
-        "GROUP_GATE": "review-critic",
-    }.get(state.removeprefix("ZHONGSHU_").removeprefix("MENXIA_"), "")
+    phase = 'MENXIA'
+    role = 'review-critic' if state.endswith(('CRITIC', 'GATE')) else 'review-analyst' if state.endswith('ANALYST') else 'review-solver'
     findings = len(context.review.findings) if context.review else 0
-    revision_task = (
-        solver_revision_task(context) if state == "ZHONGSHU_SOLVER" else ""
-    )
-    evidence_task = (
-        analyst_evidence_task(context, evidence_findings)
-        if state == "ZHONGSHU_ANALYST"
-        else ""
-    )
-    critic_evidence = (
-        critic_evidence_task(context) if state == "ZHONGSHU_CRITIC" else ""
-    )
-    # The contract's prompt_rules carry hard deliverable demands (e.g. the
-    # nine-section group document in ``group_docs``).  They used to live only
-    # on the contract object and never reached the dispatched prompt, so a
-    # worker could not know a field was mandatory (task-20260924-beb814).
+    revision_task = ''
+    evidence_task = ''
+    critic_evidence = ''
     try:
         contract_rules = contract_for_state(state).prompt_rules
     except KeyError:
         contract_rules = ()
-    rules_block = (
-        "\n[Contract rules]\n"
-        + "\n".join(f"- {rule}" for rule in contract_rules)
-        if contract_rules
-        else ""
-    )
-    # The acceptance-quality standard rides with every producing dispatch, so
-    # acceptance signals are written observably the first time instead of
-    # being negotiated inside the Critic revision loop.
-    acceptance_block = (
-        "\n" + acceptance_standard_block()
-        if acceptance_standard_applies_to(state)
-        else ""
-    )
-    content = (
-        f"Task {context.identity.task_id}\n"
-        f"State: {state}\n"
-        f"Request:\n{context.request.raw_request}\n"
-        f"Current review finding count: {findings}\n"
-        "Return exactly one complete structured result for the bound state. "
-        "The result must be strictly valid JSON: no trailing commas, no "
-        "comments, no markdown fences, no text outside the JSON document."
-        f"{JSON_STRING_RULES}"
-        f"{revision_task}"
-        f"{evidence_task}"
-        f"{critic_evidence}"
-        f"{rules_block}"
-        f"{acceptance_block}"
-        f"{retry_feedback(context, state, worker_id)}"
-    )
-    return PromptSpec(
-        state=state,
-        phase=phase,
-        role=role,
-        content=content,
-        references={
-            "request_payload": context.request.payload_ref or "",
-            "last_result": context.delivery.last_result_ref or "",
-            "revision_id": context.review.revision_id if context.review else "",
-        },
-    )
-
-
-__all__ = ["PromptSpec", "build_prompt", "critic_evidence_task"]
+    rules_block = '\n[Contract rules]\n' + '\n'.join((f'- {rule}' for rule in contract_rules)) if contract_rules else ''
+    acceptance_block = '\n' + acceptance_standard_block() if acceptance_standard_applies_to(state) else ''
+    content = f'Task {context.identity.task_id}\nState: {state}\nRequest:\n{context.request.raw_request}\nCurrent review finding count: {findings}\nReturn exactly one complete structured result for the bound state. The result must be strictly valid JSON: no trailing commas, no comments, no markdown fences, no text outside the JSON document.{JSON_STRING_RULES}{revision_task}{evidence_task}{critic_evidence}{rules_block}{acceptance_block}{retry_feedback(context, state, worker_id)}'
+    return PromptSpec(state=state, phase=phase, role=role, content=content, references={'request_payload': context.request.payload_ref or '', 'last_result': context.delivery.last_result_ref or '', 'revision_id': context.review.revision_id if context.review else ''})

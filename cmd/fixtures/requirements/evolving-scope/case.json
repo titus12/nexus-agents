@@ -1,0 +1,10 @@
+{
+  "case_id": "evolving-scope",
+  "input": "同一 projectId 和 uid 的并发 Login 只建立一次连接；失败后自动重试一次。每个调用方最多完成一次。",
+  "known_facts": [],
+  "answers": [],
+  "feedback_after_first_review": "撤销此前失败后自动重试一次的要求。失败后只通知所有等待调用方，不自动重试；是否再登录由业务层决定。其他 singleflight 范围保持。",
+  "required_semantics": ["原决定历史可追溯", "新决定明确 supersedes 旧自动重试决定", "当前正文不含自动重试承诺", "旧批准不能批准新版本", "验收验证失败后无额外自动请求"],
+  "forbidden_unconfirmed_commitments": ["保留自动重试一次", "删除或重写原始请求", "无需重新审查"],
+  "allowed_deferred": ["业务层具体登录策略"]
+}

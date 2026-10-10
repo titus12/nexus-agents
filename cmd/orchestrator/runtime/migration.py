@@ -1,4 +1,4 @@
-﻿"""One-time conversion of legacy JSON state into a New runtime snapshot.
+"""One-time conversion of legacy JSON state into a New runtime snapshot.
 
 The converter accepts an untyped persisted mapping only.  The removed mutable
 context class is intentionally not imported here, so the new runtime has no

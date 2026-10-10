@@ -1,99 +1,33 @@
 """Durable execution lifecycle for externally performed effects."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass, replace
 from collections.abc import Mapping
 from typing import Protocol
 import uuid
-
 from ..domain.decisions import EffectRequest
-from ..domain.errors import (
-    CONTRACT_REJECTED_EVENT,
-    DomainError,
-    FailureRecord,
-    InvariantViolation,
-    OUTPUT_OVERFLOW_FEEDBACK,
-    UNSTRUCTURED_REPLY_EVENT,
-    is_output_overflow_reply,
-)
+from ..domain.errors import CONTRACT_REJECTED_EVENT, DomainError, FailureRecord, InvariantViolation, OUTPUT_OVERFLOW_FEEDBACK, UNSTRUCTURED_REPLY_EVENT, is_output_overflow_reply
 from .event_inbox import effect_result_event
 from .repository import EffectRecord, EffectResult, WorkflowRepository
-
-
-# Synthetic actions a transport may use for a delivered-but-unusable reply: a body
-# that is not the required JSON contract at all, or JSON that the role validator
-# refused.  Neither is a domain action, so a dispatch must never surface either as
-# a completed event; both become a retryable reply-shape failure so the workflow
-# re-asks the agent instead of reporting a missing result.
-REPLY_EVENT_FAILURES = {
-    UNSTRUCTURED_REPLY_EVENT: (
-        "AGENT_REPLY_UNSTRUCTURED",
-        "agent reply was not the required JSON result contract",
-    ),
-    CONTRACT_REJECTED_EVENT: (
-        "AGENT_REPLY_CONTRACT_REJECTED",
-        "agent reply violated the role result contract",
-    ),
-}
-
+REPLY_EVENT_FAILURES = {UNSTRUCTURED_REPLY_EVENT: ('AGENT_REPLY_UNSTRUCTURED',
+    'agent reply was not the required JSON result contract: return exactly one complete JSON object '
+    'with all required business fields, not an analysis summary or delivery confirmation; '
+    'reuse existing research and do not repeat the repository investigation'),
+    CONTRACT_REJECTED_EVENT: ('AGENT_REPLY_CONTRACT_REJECTED', 'agent reply violated the role result contract')}
 
 class EffectRunner(Protocol):
     """Executes exactly one external operation for an effect request."""
 
-    def run_once(self, request: EffectRequest) -> object: ...
-
+    def run_once(self, request: EffectRequest) -> object:
+        ...
 
 class EffectRunnerNotFound(InvariantViolation):
     """Raised when an effect type has no registered external runner."""
-
-    error_code = "EFFECT_RUNNER_NOT_FOUND"
-
-
-class PlanStructurePreflightRunner:
-    """Persist a mechanical repair request without dispatching a model."""
-
-    def run_once(self, request: EffectRequest) -> EffectOutcome:
-        return EffectOutcome(status="SUCCEEDED", event_name="NODE_COMPLETED", event_payload={
-            "action": "REQUEST_STRUCTURE_REPAIR", "sequence": request.payload.get("sequence"),
-            "structure_issues": list(request.payload.get("structure_issues") or []),
-            "worker_results": [],
-        })
-
-
-class FastTrackRunner:
-    """Synthesize the NODE_COMPLETED of an auto-approved stage.
-
-    The fast-track flag lets a stage finish without dispatching agents: this
-    runner converts the effect request into the same NODE_COMPLETED event a
-    real worker aggregate would have produced, so the FSM loop, the reducer
-    and the next-stage dispatch all behave exactly as they do for a live wave.
-    """
-
-    def run_once(self, request: EffectRequest) -> EffectOutcome:
-        payload = request.payload
-        action = str(payload.get("action") or "")
-        if not action:
-            raise InvariantViolation("fast track effect requires a domain action")
-        return EffectOutcome(
-            status="SUCCEEDED",
-            event_name="NODE_COMPLETED",
-            event_payload={
-                "action": action,
-                "aggregate": {"action": action},
-                "node_run_id": str(payload.get("node_run_id") or request.effect_id),
-                "worker_results": [],
-                "fast_track": True,
-                "sequence": payload.get("sequence"),
-            },
-        )
-
+    error_code = 'EFFECT_RUNNER_NOT_FOUND'
 
 @dataclass(frozen=True)
 class EffectOutcome:
     """Optional richer result returned by an external effect runner."""
-
-    status: str = "SUCCEEDED"
+    status: str = 'SUCCEEDED'
     event_name: str | None = None
     event_payload: object | None = None
     request_id: str | None = None
@@ -101,17 +35,14 @@ class EffectOutcome:
     deadline_at: str | None = None
     failure: FailureRecord | None = None
 
-
 class EffectManager:
     """Own effect lifecycle persistence without making workflow decisions."""
 
-    def __init__(
-        self,
-        repository: WorkflowRepository,
-        runners: Mapping[str, EffectRunner],
-    ) -> None:
+    def __init__(self, repository: WorkflowRepository, runners: Mapping[str, EffectRunner], *, result_event_sink=None, effect_guard=None) -> None:
         self._repository = repository
         self._runners = dict(runners)
+        self._result_event_sink = result_event_sink
+        self._effect_guard = effect_guard
 
     def execute_pending(self, task_id: str) -> tuple[EffectResult, ...]:
         """Execute each distinct pending effect and persist its terminal result.
@@ -120,15 +51,21 @@ class EffectManager:
         failures are deliberately outside the runner boundary and propagate to
         the caller, because losing a lifecycle record must never be hidden.
         """
-
         results: list[EffectResult] = []
         for effect in self._deduplicate(self._repository.pending_effects(task_id)):
+            if self._effect_guard is not None and (not self._effect_guard(effect)):
+                self._repository.commit_effect_result(EffectResult(effect.effect_id, task_id, 'SUCCEEDED'))
+                continue
             runner = self._runner_for(effect)
             self._repository.mark_effect_running(effect.effect_id)
             result = self._run(effect, runner)
             self._repository.commit_effect_result(result)
+            if self._result_event_sink is not None:
+                self._result_event_sink(result, effect)
+                results.append(result)
+                continue
             event = effect_result_event(result, effect)
-            if event is not None and hasattr(self._repository, "append_domain_event"):
+            if event is not None and hasattr(self._repository, 'append_domain_event'):
                 self._repository.append_domain_event(event)
             results.append(result)
         return tuple(results)
@@ -138,9 +75,7 @@ class EffectManager:
         try:
             return self._runners[effect_type]
         except KeyError as error:
-            raise EffectRunnerNotFound(
-                f"no effect runner registered for {effect_type!r}"
-            ) from error
+            raise EffectRunnerNotFound(f'no effect runner registered for {effect_type!r}') from error
 
     @staticmethod
     def _deduplicate(effects: tuple[EffectRecord, ...]) -> tuple[EffectRecord, ...]:
@@ -151,9 +86,7 @@ class EffectManager:
                 unique[effect.effect_id] = effect
                 continue
             if existing != effect:
-                raise InvariantViolation(
-                    f"conflicting pending effect records: {effect.effect_id}"
-                )
+                raise InvariantViolation(f'conflicting pending effect records: {effect.effect_id}')
         return tuple(unique.values())
 
     @classmethod
@@ -162,147 +95,41 @@ class EffectManager:
             outcome = runner.run_once(effect.request)
         except DomainError as error:
             failure = error.failure or FailureRecord.from_effect_exception(effect, error)
-            return EffectResult(
-                effect.effect_id,
-                effect.task_id,
-                "FAILED",
-                failure,
-                "FAIL",
-                {"error_code": failure.error_code, "reason": failure.message},
-                None,
-                None,
-                effect.request.deadline_at,
-            )
+            return EffectResult(effect.effect_id, effect.task_id, 'FAILED', failure, 'FAIL', {'error_code': failure.error_code, 'reason': failure.message}, None, None, effect.request.deadline_at)
         except Exception as error:
             failure = cls._unknown_failure(effect, error)
-            return EffectResult(
-                effect.effect_id,
-                effect.task_id,
-                "FAILED",
-                failure,
-                "FAIL",
-                {"error_code": failure.error_code, "reason": failure.message},
-                None,
-                None,
-                effect.request.deadline_at,
-            )
+            return EffectResult(effect.effect_id, effect.task_id, 'FAILED', failure, 'FAIL', {'error_code': failure.error_code, 'reason': failure.message}, None, None, effect.request.deadline_at)
         else:
             if not isinstance(outcome, EffectOutcome):
-                return EffectResult(effect.effect_id, effect.task_id, "SUCCEEDED")
-            if outcome.status not in {"SUCCEEDED", "FAILED"}:
-                failure = FailureRecord(
-                    failure_id=uuid.uuid4().hex,
-                    stage="effect",
-                    owner_component=effect.request.effect_type,
-                    task_id=effect.task_id,
-                    state=effect.state,
-                    sequence=effect.sequence,
-                    node_run_id=None,
-                    worker_id=None,
-                    effect_id=effect.effect_id,
-                    error_code="INVALID_EFFECT_OUTCOME",
-                    retryable=False,
-                    message=f"invalid effect outcome status: {outcome.status}",
-                    cause_type="EffectOutcome",
-                )
-                return EffectResult(effect.effect_id, effect.task_id, "FAILED", failure)
-            if (
-                outcome.status == "SUCCEEDED"
-                and outcome.event_name in REPLY_EVENT_FAILURES
-            ):
+                return EffectResult(effect.effect_id, effect.task_id, 'SUCCEEDED')
+            if outcome.status not in {'SUCCEEDED', 'FAILED'}:
+                failure = FailureRecord(failure_id=uuid.uuid4().hex, stage='effect', owner_component=effect.request.effect_type, task_id=effect.task_id, state=effect.state, sequence=effect.sequence, node_run_id=None, worker_id=None, effect_id=effect.effect_id, error_code='INVALID_EFFECT_OUTCOME', retryable=False, message=f'invalid effect outcome status: {outcome.status}', cause_type='EffectOutcome')
+                return EffectResult(effect.effect_id, effect.task_id, 'FAILED', failure)
+            if outcome.status == 'SUCCEEDED' and outcome.event_name in REPLY_EVENT_FAILURES:
                 error_code, default_message = REPLY_EVENT_FAILURES[outcome.event_name]
-                reason = ""
+                reason = ''
                 if isinstance(outcome.event_payload, Mapping):
-                    reason = str(outcome.event_payload.get("contract_rejection") or "")
+                    reason = str(outcome.event_payload.get('contract_rejection') or '')
                     if is_output_overflow_reply(outcome.event_payload):
-                        # The platform dropped an oversized output wholesale:
-                        # the correction is the delivery channel, not formatting.
-                        error_code = "AGENT_REPLY_OUTPUT_OVERFLOW"
+                        error_code = 'AGENT_REPLY_OUTPUT_OVERFLOW'
                         default_message = OUTPUT_OVERFLOW_FEEDBACK
-                message = f"{default_message}: {reason}" if reason else default_message
-                # Stamp the dispatch target state, not the FSM state the
-                # effect was created in.  ``retry_feedback`` only restates the
-                # failure of the state being re-dispatched, so a
-                # creation-time stamp (REQUEST_INTAKE for the first hop,
-                # RETRY_WAIT for every retry) never matched and the single-
-                # dispatch re-asks went out byte-identical and blind
-                # (task-20260929-73fc9c: prompt1 == prompt3).
+                message = f'{default_message}: {reason}' if reason else default_message
                 reply_state = effect.state
                 if isinstance(effect.request.payload, Mapping):
-                    reply_state = str(
-                        effect.request.payload.get("target_state")
-                        or effect.request.payload.get("state")
-                        or effect.state
-                    )
-                failure = FailureRecord(
-                    failure_id=uuid.uuid4().hex,
-                    stage="agent_result",
-                    owner_component=effect.request.effect_type,
-                    task_id=effect.task_id,
-                    state=reply_state,
-                    sequence=effect.sequence,
-                    node_run_id=None,
-                    worker_id=None,
-                    effect_id=effect.effect_id,
-                    error_code=error_code,
-                    retryable=True,
-                    message=message,
-                    cause_type="AgentReply",
-                )
-                return EffectResult(
-                    effect.effect_id,
-                    effect.task_id,
-                    "FAILED",
-                    failure,
-                    "FAIL",
-                    {
-                        "error_code": failure.error_code,
-                        "reason": failure.message,
-                        "retryable": True,
-                    },
-                    outcome.request_id,
-                    outcome.operation_id,
-                    outcome.deadline_at,
-                )
-            return EffectResult(
-                effect.effect_id,
-                effect.task_id,
-                outcome.status,
-                outcome.failure,
-                outcome.event_name,
-                outcome.event_payload,
-                outcome.request_id,
-                outcome.operation_id,
-                outcome.deadline_at,
-            )
-        return EffectResult(
-            effect.effect_id,
-            effect.task_id,
-            "FAILED",
-            failure,
-            "FAIL",
-            {"error_code": failure.error_code, "reason": failure.message},
-            None,
-            None,
-            effect.request.deadline_at,
-        )
+                    reply_state = str(effect.request.payload.get('target_state') or effect.request.payload.get('state') or effect.state)
+                failure = FailureRecord(failure_id=uuid.uuid4().hex, stage='agent_result', owner_component=effect.request.effect_type, task_id=effect.task_id, state=reply_state, sequence=effect.sequence, node_run_id=None, worker_id=None, effect_id=effect.effect_id, error_code=error_code, retryable=True, message=message, cause_type='AgentReply')
+                diagnostics = {key: outcome.event_payload[key] for key in ('result_artifact_id','raw_reply_path')
+                               if isinstance(outcome.event_payload, Mapping) and outcome.event_payload.get(key)}
+                return EffectResult(effect.effect_id, effect.task_id, 'FAILED', failure, 'FAIL',
+                                    {'error_code': failure.error_code, 'reason': failure.message,
+                                     'retryable': True, **diagnostics},
+                                    outcome.request_id, outcome.operation_id, outcome.deadline_at)
+            return EffectResult(effect.effect_id, effect.task_id, outcome.status, outcome.failure, outcome.event_name, outcome.event_payload, outcome.request_id, outcome.operation_id, outcome.deadline_at)
+        return EffectResult(effect.effect_id, effect.task_id, 'FAILED', failure, 'FAIL', {'error_code': failure.error_code, 'reason': failure.message}, None, None, effect.request.deadline_at)
 
     @staticmethod
     def _unknown_failure(effect: EffectRecord, error: Exception) -> FailureRecord:
-        wrapped = InvariantViolation(
-            f"unknown effect runner failure: {type(error).__name__}: {error}"
-        )
+        wrapped = InvariantViolation(f'unknown effect runner failure: {type(error).__name__}: {error}')
         failure = FailureRecord.from_effect_exception(effect, wrapped)
         return replace(failure, cause_type=type(error).__name__)
-
-
-__all__ = [
-    "EffectManager",
-    "EffectOutcome",
-    "EffectRunner",
-    "EffectRunnerNotFound",
-    "FastTrackRunner",
-    "CONTRACT_REJECTED_EVENT",
-    "REPLY_EVENT_FAILURES",
-    "UNSTRUCTURED_REPLY_EVENT",
-]
+__all__ = ['EffectManager', 'EffectOutcome', 'EffectRunner', 'EffectRunnerNotFound',  'CONTRACT_REJECTED_EVENT', 'REPLY_EVENT_FAILURES', 'UNSTRUCTURED_REPLY_EVENT']

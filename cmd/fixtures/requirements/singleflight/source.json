@@ -1,0 +1,6 @@
+{
+  "requirements_source": "D:\\workspace\\src\\rtc-integration-unity-client\\docs\\superpowers\\specs\\2026-09-23-rtc-compat-login-singleflight-requirements.md",
+  "requirements_sha256": "9789c6ea6a5820efaf204e57ffdc80ae82dfb1e743d85bd54767b8ee0b4540aa",
+  "implementation_reference": "D:\\workspace\\src\\rtc-integration-unity-client\\docs\\superpowers\\plans\\2026-09-23-rtc-compat-login-singleflight-implementation-plan.md",
+  "implementation_sha256": "43e6e10c7803e15d05bb54224447f8806040f70f034f6620ca6ece16d7df7504"
+}

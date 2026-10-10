@@ -217,7 +217,7 @@ def is_reply_failure(error_code: object) -> bool:
     # feedback (task-20260924-beb814 died re-sending group_docs=null while
     # the feedback channel stayed empty).  Imported lazily because the policy
     # module already imports this one for the structure prefix.
-    from .policies.solver_plan import is_retryable_solver_reply_error
+    from .policies.reply_errors import is_retryable_solver_reply_error
 
     return is_retryable_solver_reply_error(str(error_code or ""))
 

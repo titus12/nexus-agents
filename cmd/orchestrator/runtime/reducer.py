@@ -35,6 +35,11 @@ class LinearContextReducer:
 
         context = snapshot.context
         update = decision.update
+        request = context.request
+        if update.repair_decision_actor_ids is not None:
+            from ..domain.requirements.owner_recovery import validate_owner_recovery
+            validate_owner_recovery(context, update.repair_decision_actor_ids)
+            request = replace(request,decision_actor_ids=update.repair_decision_actor_ids)
         target_state = context.progression.state
         resume_state = context.progression.resume_state
         if decision.transition is not None:
@@ -48,7 +53,7 @@ class LinearContextReducer:
                 decision.transition.action,
                 resume_for_transition,
             )
-            if target_state not in {"HUMAN_GATE", "RETRY_WAIT", "BLOCKED", "PERSISTENCE_DEGRADED"}:
+            if target_state not in self._transitions.resume_sources:
                 resume_state = None
 
         if update.progression is not None:
@@ -62,7 +67,7 @@ class LinearContextReducer:
                 raise InvariantViolation(
                     "progression update conflicts with registered transition"
                 )
-        if target_state in {"HUMAN_GATE", "RETRY_WAIT", "BLOCKED", "PERSISTENCE_DEGRADED"}:
+        if target_state in self._transitions.resume_sources:
             if not isinstance(resume_state, str) or not resume_state:
                 raise InvariantViolation(
                     f"state {target_state!r} requires a recorded resume_state"
@@ -70,6 +75,7 @@ class LinearContextReducer:
 
         next_context = replace(
             context,
+            request=request,
             progression=ProgressState(
                 state=target_state,
                 sequence=context.progression.sequence + 1,
@@ -87,6 +93,7 @@ class LinearContextReducer:
             human_gate=self._human_gate(context.human_gate, update),
             parallel=self._parallel(context.parallel, update),
             audit=self._audit(context.audit, update),
+            requirements=update.requirements if update.requirements is not None else context.requirements,
         )
         return WorkflowSnapshot(
             task_id=snapshot.task_id,
@@ -210,6 +217,10 @@ class LinearContextReducer:
 
     @staticmethod
     def _review(current: ReviewState | None, update: ContextUpdate) -> ReviewState | None:
+        if update.clear_review:
+            if update.review is not None:
+                raise InvariantViolation('cannot clear and replace review in one update')
+            return None
         return apply_review_update(current, update.review)
 
     @staticmethod

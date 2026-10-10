@@ -42,7 +42,9 @@ class DefectScript(Scripted):
         elif request.target_state=='REQ_DRAFT' and request.context['open_issues']:
             for section in body['document']['sections']:
                 if section['kind']=='acceptance':
-                    section['markdown']+=' 每个调用方最多收到一次完成通知。'
+                    # 回归测试 keeps the repaired draft free of advisory lint,
+                    # so this test only tracks the blocking critic findings.
+                    section['markdown']+=' 回归测试：每个调用方最多收到一次完成通知。'
             body['issue_responses']=[{'issue_id':i['issue_id'],'response':'补充一次完成通知的验收条款'}
                 for i in request.context['open_issues'] if i['owner']=='solver']
         self.replies[request.request_id][0]=ExternalMessage(request.agent_id,json.loads(json.dumps(body)),request.request_id)
@@ -154,10 +156,13 @@ class WorkflowTests(unittest.TestCase):
             app=OrchestratorApp(context(),directory,multica=adapter,poll_interval=0,timeout_seconds=2)
             pump(app,'REQ_ENGINE_ERROR')
             self.assertEqual(len(adapter.dispatched),3)
-            self.assertEqual(app.ctx.requirements.budget.calls,3)
+            # Policy v2: the two format repairs are free; only total_calls grows.
+            self.assertEqual(app.ctx.requirements.budget.calls,1)
+            self.assertEqual(app.ctx.requirements.budget.total_calls,3)
+            self.assertEqual(app.ctx.requirements.budget.dispatch_charges[0].format_repairs,2)
             restored=OrchestratorApp(context(),directory,multica=adapter,poll_interval=0,timeout_seconds=2)
             self.assertTrue(restored.step())  # Deliver the committed local failure notice.
             self.assertFalse(restored.step())
             self.assertEqual(len(adapter.dispatched),3)
-            self.assertEqual(restored.ctx.requirements.budget.calls,3)
+            self.assertEqual(restored.ctx.requirements.budget.calls,1)
             self.assertFalse(restored.ctx.requirements.approval)

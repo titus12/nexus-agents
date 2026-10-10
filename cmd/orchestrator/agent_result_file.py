@@ -41,6 +41,7 @@ def _validate_structured_shape(
     expected_state: str,
     expected_role_mode: str,
     allowed_role_modes: Sequence[str] = (),
+    workflow: str = 'requirements-v1',
 ) -> None:
     """Reject transport-only envelopes before they become canonical results."""
     if not expected_schema_hash:
@@ -53,6 +54,7 @@ def _validate_structured_shape(
         role_mode=expected_role_mode,
         allowed_role_modes=allowed_role_modes,
         expected_schema_hash=expected_schema_hash,
+        workflow=workflow,
     )
     if error:
         raise AgentResultFileError(f"structured result shape invalid: {error}")
@@ -71,6 +73,7 @@ def write_agent_result_file(
     expected_state: str = "",
     expected_role_mode: str = "",
     allowed_role_modes: Sequence[str] = (),
+    workflow: str = 'requirements-v1',
 ) -> AgentResultFile:
     """Persist an Agent result under Orchestrator ownership, then validate it."""
     if not isinstance(payload, dict):
@@ -137,12 +140,13 @@ def write_agent_result_file(
             )
         normalized["structured_output_protocol"] = STRUCTURED_OUTPUT_PROTOCOL
         normalized["structured_output_schema_hash"] = expected_schema_hash
-    fill_role_defaults(normalized, phase=phase, role=role, state=expected_state)
-    normalize_role_payload(normalized, phase=phase, role=role, state=expected_state)
+    fill_role_defaults(normalized, phase=phase, role=role, state=expected_state,workflow=workflow)
+    normalize_role_payload(normalized, phase=phase, role=role, state=expected_state,workflow=workflow)
     if not normalized.get("action"):
         raise AgentResultFileError("inline result action is missing")
     _validate_structured_shape(
         normalized,
+        workflow=workflow,
         phase=phase,
         role=role,
         expected_schema_hash=expected_schema_hash,
@@ -202,6 +206,7 @@ def write_agent_result_file(
     }
     result = read_agent_result_file(
         reference,
+        workflow=workflow,
         task_id=task_id,
         request_id=request_id,
         phase=phase,
@@ -248,6 +253,7 @@ def read_agent_result_file(
     expected_role_mode: str = "",
     allowed_role_modes: Sequence[str] = (),
     allow_transport_backfill: bool = False,
+    workflow: str = 'requirements-v1',
 ) -> AgentResultFile:
     raw_path = str(reference.get("result_path") or "").strip()
     if not raw_path:
@@ -459,9 +465,10 @@ def read_agent_result_file(
     # scalar identity strings (item_id as null/number) are canonicalized
     # before the contract validator runs, so the two entry points accept the
     # same reply shapes.
-    normalize_role_payload(payload, phase=phase, role=role, state=expected_state)
+    normalize_role_payload(payload, phase=phase, role=role, state=expected_state,workflow=workflow)
     _validate_structured_shape(
         payload,
+        workflow=workflow,
         phase=phase,
         role=role,
         expected_schema_hash=expected_schema_hash,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
@@ -11,10 +10,11 @@ import logging
 import os
 from pathlib import Path
 import time
+import threading
 import uuid
 
 from .adapters import MulticaCliAdapter, feishu_notifications_enabled
-from .notifications import DirectNotificationEmitter, ROLE_NAMES
+from .notifications import ROLE_NAMES
 from .domain.context import (
     ProgressState,
     RequestState,
@@ -22,50 +22,16 @@ from .domain.context import (
     WorkflowContext,
     context_to_dto,
 )
-from .domain.decisions import EffectRequest
 from .domain.events import DomainEvent
-from .domain.transitions import TERMINAL_STATES
-from .domain.policies.menxia import MENXIA_ITEM_TARGETS
 from .feishu_command_parser import normalize_task_request
 from .logging_setup import configure_logging
-from .locks import TaskLock
+from .locks import TaskLock, TaskLockError
 from .runtime.agent_effects import (
     COMPLETED_RESULT_GRACE_SECONDS,
     resolve_dispatch_role_timeouts,
 )
-from .runtime import (
-    AgentNodeJoiner,
-    AgentNodeWorkerRunner,
-    AgentWorkerRunner,
-    ConcurrentNodeExecutor,
-    ConcurrencyLimits,
-    EffectManager,
-    FileArtifactStore,
-    JsonDomainEventInbox,
-    JsonWorkflowRepository,
-    LinearContextReducer,
-    MulticaTransportAdapter,
-    NodeContext,
-    NodeEffectRunner,
-    NodeExecutor,
-    NodeResult,
-    NotificationRequest,
-    ReviewNode,
-    WorkerBinding,
-    WorkerProgressCallback,
-    WorkerResult,
-    FeishuNotificationPort,
-    NullNotificationPort,
-    RuntimeConcurrencyAdmission,
-    TaskLockAdapter,
-    WorkflowSnapshot,
-    EffectRecord,
-    WorkflowEngine,
-)
-from .runtime.migration import legacy_dto_to_snapshot
-from .runtime.effects import FastTrackRunner, PlanStructurePreflightRunner
+from .runtime import AgentNodeJoiner, AgentNodeWorkerRunner, AgentWorkerRunner, ConcurrentNodeExecutor, ConcurrencyLimits, EffectManager, FileArtifactStore, JsonDomainEventInbox, JsonWorkflowRepository, LinearContextReducer, MulticaTransportAdapter, NodeContext, NodeEffectRunner, NodeExecutor, NodeResult, NotificationRequest, ReviewNode, WorkerBinding, WorkerProgressCallback, WorkerResult, FeishuNotificationPort, NullNotificationPort, RuntimeConcurrencyAdmission, TaskLockAdapter, WorkflowSnapshot, WorkflowEngine
 from .runtime.plan_effects import PlanArtifactRunner
-from .transport.external import HumanGate
 
 
 logger = logging.getLogger("review_orchestrator_fsm")
@@ -86,19 +52,6 @@ DEFAULT_ANALYST_LENSES = (
 )
 
 
-def _analyst_lenses() -> tuple[str, ...]:
-    """Return the per-worker evidence lenses for a Zhongshu Analyst fan-out.
-
-    Overridable with the ``ANALYST_LENSES`` environment variable (comma
-    separated).  Lens text must not contain an ASCII comma.
-    """
-
-    raw = os.environ.get("ANALYST_LENSES", "").strip()
-    if raw:
-        lenses = tuple(item.strip() for item in raw.split(",") if item.strip())
-        if lenses:
-            return lenses
-    return DEFAULT_ANALYST_LENSES
 
 
 class _FanoutNodeExecutor:
@@ -148,12 +101,8 @@ _FALSY = frozenset({"0", "false", "no", "off"})
 # Other gates retain their existing reply-to-continue semantics.
 
 
-def _is_plan_review_rejection(answer: str) -> bool:
-    return bool(str(answer or "").strip()) and not _is_plan_review_approval(answer)
 
 
-def _is_plan_review_approval(answer: str) -> bool:
-    return str(answer or "").strip() == "通过"
 
 
 def _env_flag(name: str) -> bool | None:
@@ -166,48 +115,14 @@ def _env_flag(name: str) -> bool | None:
     return None
 
 
-def _with_parallel_flag_overrides(context: WorkflowContext) -> WorkflowContext:
-    """Apply explicit parallel-limit env flags to new and resumed tasks.
-
-    The persisted workflow-state carries the parallel limits it was created
-    with, and the loader restores them verbatim.  Without this override there
-    is no way to exercise a different execution mode (e.g. the Menxia item
-    phase) against a baseline-derived task.
-    """
-    item_flag = _env_flag("ZHONGSHU_ITEM_WORKFLOW_ENABLED")
-    menxia_flag = _env_flag("NEXUS_MENXIA_ENABLED")
-    fast_track_flag = _env_flag("NEXUS_FAST_TRACK")
-    plan_review_flag = _env_flag("ZHONGSHU_PLAN_REVIEW_GATE")
-    mechanical_freeze_flag = _env_flag("ZHONGSHU_MECHANICAL_FREEZE")
-    prompt_slicing_flag = _env_flag("ZHONGSHU_PROMPT_SLICING")
-    review_unit = os.environ.get("ZHONGSHU_REVIEW_UNIT", "").strip().lower()
-    # The Menxia group pipeline is on by default: when the env flag is unset,
-    # new and resumed tasks both get enabled=True.  An explicit
-    # NEXUS_MENXIA_ENABLED=0 still opts out.  The equality check in the caller
-    # skips the repository patch when nothing actually changes.
-    if menxia_flag is None:
-        menxia_flag = True
-    zhongshu = context.parallel.zhongshu
-    if item_flag is not None:
-        zhongshu = replace(zhongshu, item_workflow_enabled=item_flag)
-    if review_unit in ("group", "item"):
-        zhongshu = replace(zhongshu, review_unit=review_unit)
-    if fast_track_flag is not None:
-        zhongshu = replace(zhongshu, fast_track=fast_track_flag)
-    if plan_review_flag is not None:
-        zhongshu = replace(zhongshu, plan_review_gate=plan_review_flag)
-    # Production cannot opt out of the user's approval rule. Machine-only
-    # fixtures remain available through the notification-isolated test runner.
-    if _env_flag("NEXUS_TEST_NO_EXTERNAL_NOTIFICATIONS") is not True:
-        zhongshu = replace(zhongshu, plan_review_gate=True)
-    if mechanical_freeze_flag is not None:
-        zhongshu = replace(zhongshu, mechanical_freeze=mechanical_freeze_flag)
-    menxia = replace(context.parallel.menxia, enabled=menxia_flag)
-    parallel = replace(
-        context.parallel, zhongshu=zhongshu, menxia=menxia
-    )
-    if prompt_slicing_flag is not None:
-        parallel = replace(parallel, prompt_slicing=prompt_slicing_flag)
+def _with_parallel_flag_overrides(context):
+    flag = _env_flag('NEXUS_MENXIA_ENABLED')
+    parallel = replace(context.parallel, menxia=replace(context.parallel.menxia, enabled=True if flag is None else flag))
+    slicing = _env_flag('NEXUS_PROMPT_SLICING')
+    if slicing is None:
+        slicing = _env_flag('ZHONGSHU_PROMPT_SLICING')
+    if slicing is not None:
+        parallel = replace(parallel, prompt_slicing=slicing)
     return replace(context, parallel=parallel)
 
 
@@ -222,10 +137,11 @@ def _agent_pool_by_state() -> dict[str, str]:
     """
 
     return {
-        "ZHONGSHU_ANALYST": os.environ.get("AGENT_ANALYST_ID", ""),
-        "ZHONGSHU_SOLVER": os.environ.get("AGENT_SOLVER_ID", ""),
-        "ZHONGSHU_CRITIC": os.environ.get("AGENT_CRITIC_ID", ""),
-        "ZHONGSHU_FREEZE_CHECK": os.environ.get("AGENT_CRITIC_ID", ""),
+        'REQ_ANALYZE':os.environ.get('AGENT_ANALYST_ID',''),
+        'REQ_EVIDENCE':os.environ.get('AGENT_ANALYST_ID',''),
+        'REQ_DRAFT':os.environ.get('AGENT_SOLVER_ID',''),
+        'REQ_REVIEW':os.environ.get('AGENT_CRITIC_ID',''),
+        'MENXIA_REQUIREMENTS_INTAKE':os.environ.get('AGENT_SOLVER_ID',''),
         "MENXIA_ITEM_SOLVER": os.environ.get("AGENT_SOLVER_ID", ""),
         "MENXIA_ITEM_ANALYST": os.environ.get("AGENT_ANALYST_ID", ""),
         "MENXIA_ITEM_CRITIC": os.environ.get("AGENT_CRITIC_ID", ""),
@@ -248,9 +164,12 @@ class OrchestratorApp:
         poll_interval: float = 8.0,
         timeout_seconds: int = 900,
         notification_port: object | None = None,
+        requirements_port: object | None = None,
     ) -> None:
         if not isinstance(context, WorkflowContext):
             raise TypeError("OrchestratorApp requires WorkflowContext")
+        from .runtime.requirements_cutover import require_current_workflow
+        require_current_workflow(context)
         self.root = _resolve_task_root(root, context.identity.task_id)
         self.root.mkdir(parents=True, exist_ok=True)
         self.repository = JsonWorkflowRepository(self.root)
@@ -260,6 +179,7 @@ class OrchestratorApp:
         else:
             snapshot = WorkflowSnapshot(context.identity.task_id, context, 0)
             self.repository.initialize(snapshot)
+        require_current_workflow(snapshot.context)
         # Explicit env flags win over persisted parallel limits for both new
         # and resumed tasks.  The repository is the source of truth and every
         # step reloads from it, so a correction must be persisted, not just
@@ -267,15 +187,14 @@ class OrchestratorApp:
         overridden = _with_parallel_flag_overrides(snapshot.context)
         if overridden != snapshot.context:
             logger.info(
-                "PARALLEL_FLAG_OVERRIDE task_id=%s menxia_enabled=%s item_workflow=%s "
-                "fast_track=%s",
+                "PARALLEL_FLAG_OVERRIDE task_id=%s menxia_enabled=%s prompt_slicing=%s",
                 snapshot.task_id,
                 overridden.parallel.menxia.enabled,
-                overridden.parallel.zhongshu.item_workflow_enabled,
-                overridden.parallel.zhongshu.fast_track,
+                overridden.parallel.prompt_slicing,
             )
             self.repository.patch_context(snapshot.task_id, overridden)
             snapshot = replace(snapshot, context=overridden)
+        require_current_workflow(snapshot.context)
         self.context = snapshot.context
         self.multica = multica or MulticaCliAdapter(self.root / "transport")
         self.transport = (
@@ -294,9 +213,8 @@ class OrchestratorApp:
         self._last_gate_poll = 0.0
         self.notification_port = notification_port or (
             FeishuNotificationPort(task_root=self.root)
-            if feishu_notifications_enabled()
-            else NullNotificationPort()
-        )
+            if context.request.communication == 'feishu' and feishu_notifications_enabled()
+            else NullNotificationPort())
         self.admission = RuntimeConcurrencyAdmission(
             ConcurrencyLimits(
                 global_max=int(os.environ.get("GLOBAL_MAX_WORKERS", "6")),
@@ -360,28 +278,24 @@ class OrchestratorApp:
         )
         self.node_effects = NodeEffectRunner(executor_factory=self._build_node_executor)
         self.plan_effects = PlanArtifactRunner(self.artifacts, task_root=self.root)
-        self.effects = EffectManager(
-            self.repository,
-            {
-                "agent_dispatch": self.runner,
-                "node_dispatch": self.node_effects,
-                "plan_artifact": self.plan_effects,
-                "plan_review_doc": self.plan_effects,
-                "fast_track": FastTrackRunner(),
-                "mechanical_freeze": FastTrackRunner(),
-                "plan_structure_preflight": PlanStructurePreflightRunner(),
-            },
-        )
         self.inbox = JsonDomainEventInbox(self.repository)
-        from .domain.states import StateRegistry
-
-        self.engine = WorkflowEngine(
-            self.repository,
-            StateRegistry.default(),
-            TaskLockAdapter(context.identity.task_id, TaskLock(self.root / "task.lock")),
-            LinearContextReducer(),
-            DirectNotificationEmitter(self.notification_port),
-        )
+        from .runtime.requirements_workflow import RequirementsRuntime
+        from .runtime.requirements_agent import RequirementsAgentRunner
+        from .runtime.requirements_scouts import ScoutFanoutRunner
+        from .domain.requirements.states import EFFECT_STATES
+        runtime = RequirementsRuntime(self.repository, self.root, self.context, requirements_port)
+        self.requirements_runtime = runtime
+        scout = ScoutFanoutRunner(self.runner, report_dir=self.root.parent / 'scout-reports',
+                                  close_child=self._close_fanout_child)
+        runners = {'agent_dispatch':RequirementsAgentRunner(scout, allowed_root=self.root.parent),
+                   'node_dispatch':self.node_effects, 'plan_artifact':self.plan_effects}
+        runners.update({kind:runtime.effects for kind in {*EFFECT_STATES.values(),
+            'requirements_cleanup','requirements_clarification_refresh','requirements_notice','requirements_progress'}})
+        self.effects = EffectManager(self.repository, runners,
+            result_event_sink=runtime.coordinator.accept_result, effect_guard=runtime.guard)
+        self.engine = WorkflowEngine(self.repository, runtime.states,
+            TaskLockAdapter(context.identity.task_id, TaskLock(self.root/'task.lock')),
+            LinearContextReducer(runtime.transitions), None)
         self._max_idle_seconds = max(1.0, self.timeout_seconds)
 
     @property
@@ -398,43 +312,10 @@ class OrchestratorApp:
         child_supported = callable(
             getattr(self.transport, "ensure_child_issue", None)
         )
-        fanout_analyst = (
-            node_context.state == "ZHONGSHU_ANALYST"
-            and node_context.dispatch_mode != "task_review"
-            and total > 1
-            and pool_size == 1
-            and child_supported
-        )
-        fanout_critic = (
-            node_context.state == "ZHONGSHU_CRITIC"
-            and node_context.dispatch_mode in ("task_review", "group_review")
-            and total > 1
-            and pool_size == 1
-            and child_supported
-        )
-        fanout_item_revise = (
-            node_context.state == "ZHONGSHU_SOLVER"
-            and node_context.dispatch_mode in ("item_revise", "group_revise")
-            and total > 1
-            and pool_size == 1
-            and child_supported
-        )
-        fanout_menxia = (
-            node_context.state in MENXIA_ITEM_TARGETS
-            and node_context.dispatch_mode == "menxia_item_pipeline"
-            and total > 1
-            and pool_size == 1
-            and child_supported
-        )
-        fanout = (
-            fanout_analyst or fanout_critic or fanout_item_revise or fanout_menxia
-        )
+        fanout = (node_context.state.startswith('MENXIA_') and total > 1
+                  and pool_size == 1 and child_supported)
         if fanout:
-            cap = (
-                total
-                if (fanout_analyst or fanout_item_revise or fanout_menxia)
-                else self._critic_max_workers
-            )
+            cap = total
             max_workers = min(self._node_max_workers, cap, total)
         else:
             max_workers = min(
@@ -503,76 +384,13 @@ class OrchestratorApp:
             )
         return executor
 
-    def _prepare_fanout_node(self, node: ReviewNode, context: NodeContext) -> ReviewNode:
-        """Move each fan-out worker onto its own child issue.
-
-        Applies to the whole-plan Analyst node (each worker is a distinct
-        evidence lens) and to the per-task Critic node (each worker owns one
-        mandatory task).  The child issue is created later, inside the transport
-        dispatch, with the dispatch payload as its description; that keeps a
-        single assignment run per worker (no placeholder run, no poisoned
-        session).
-        """
-
-        if not context.issue_id:
-            return node
-        analyst = context.state == "ZHONGSHU_ANALYST"
-        menxia_wave = (
-            context.state in MENXIA_ITEM_TARGETS
-            and context.dispatch_mode == "menxia_item_pipeline"
-        )
-        lenses = _analyst_lenses() if analyst else ()
-        bindings: list[WorkerBinding] = []
-        for position, binding in enumerate(node.bindings):
-            suffix = binding.worker_id.rsplit("-", 1)[-1]
-            if analyst:
-                title = (
-                    f"Analyst 维度 {suffix} · {context.task_id} "
-                    f"· seq{context.sequence}"
-                )
-            elif menxia_wave:
-                title = (
-                    f"Menxia {binding.role} {binding.item_id or suffix} "
-                    f"· {context.task_id} · seq{context.sequence}"
-                )
-            else:
-                task_label = binding.item_id or binding.group_id or suffix
-                title = (
-                    f"Critic 任务 {task_label} · {context.task_id} "
-                    f"· seq{context.sequence}"
-                )
-            dispatch_context = dict(binding.dispatch_context or {})
-            if lenses:
-                dispatch_context["worker_lens"] = lenses[position % len(lenses)]
-                dispatch_context.setdefault("worker_index", position + 1)
-            bindings.append(
-                replace(
-                    binding,
-                    issue_id="",
-                    fanout_parent_id=context.issue_id,
-                    fanout_title=title,
-                    dispatch_context=dispatch_context,
-                )
-            )
-        if lenses and len(lenses) != len(node.bindings):
-            logger.warning(
-                "FANOUT_LENS_COUNT_MISMATCH task_id=%s node_run_id=%s lenses=%s "
-                "bindings=%s",
-                context.task_id,
-                context.node_run_id,
-                len(lenses),
-                len(node.bindings),
-            )
-        logger.info(
-            "FANOUT_CHILDREN_READY task_id=%s node_run_id=%s state=%s parent=%s "
-            "children=%s",
-            context.task_id,
-            context.node_run_id,
-            context.state,
-            context.issue_id,
-            len(bindings),
-        )
-        return replace(node, bindings=tuple(bindings))
+    def _prepare_fanout_node(self, node, context):
+            if not context.issue_id:
+                return node
+            bindings = tuple(replace(binding, issue_id='', fanout_parent_id=context.issue_id,
+                fanout_title=f'Menxia {binding.role} {binding.item_id or binding.group_id or binding.worker_id} · {context.task_id} · seq{context.sequence}')
+                for binding in node.bindings)
+            return replace(node, bindings=bindings)
 
     def _finalize_fanout_children(self, result: NodeResult) -> None:
         close = getattr(self.transport, "close_issue", None)
@@ -587,6 +405,13 @@ class OrchestratorApp:
                     else "cancelled"
                 )
                 close(child_id, status)
+
+    def _close_fanout_child(self, child_id: str, status: str) -> None:
+        """Close one scout probe child issue (mirrors _finalize_fanout_children)."""
+        close = getattr(self.transport, "close_issue", None)
+        if not callable(close) or not child_id:
+            return
+        close(str(child_id), status)
 
     def _make_worker_progress_callback(
         self,
@@ -662,249 +487,90 @@ class OrchestratorApp:
             )
 
     def run(self) -> bool:
-        task_id = self.context.identity.task_id
-        self._ensure_start_event()
-        idle_since = time.monotonic()
-        while True:
-            snapshot = self.repository.load(task_id)
-            state = snapshot.context.progression.state
-            if state in TERMINAL_STATES:
-                logger.info(
-                    "PROCESS_EXIT task_id=%s state=%s sequence=%s outcome=%s",
-                    task_id,
-                    state,
-                    snapshot.context.progression.sequence,
-                    state.lower(),
-                )
-                return state == "DONE"
+        lease = TaskLock(self.root/'requirements-run.lock')
+        lease.acquire()
+        stopped = threading.Event()
+        self._requirements_lease_errors = []
+        def refresh():
+            while not stopped.wait(10):
+                try:
+                    lease.refresh()
+                except Exception as error:
+                    self._requirements_lease_errors.append(error)
+                    return
+        thread = threading.Thread(target=refresh,daemon=True)
+        thread.start()
+        try:
+            return self._run_loop()
+        finally:
+            stopped.set()
+            thread.join(timeout=1)
+            lease.release()
 
-            event = self.inbox.next(task_id)
-            if event is not None:
-                self.engine.dispatch(event)
-                self.inbox.ack(event)
-                self.effects.execute_pending(task_id)
-                idle_since = time.monotonic()
-                continue
-
-            if self.repository.pending_effects(task_id):
-                self.effects.execute_pending(task_id)
-                idle_since = time.monotonic()
-                continue
-
-            if state == "RETRY_WAIT":
-                # Retry wait is an internal bounded recovery state.  The
-                # runner resumes it after the persisted failure has been
-                # observed; the retry counter is enforced by the domain.
-                logger.info(
-                    "RETRY_WAIT_AUTO_RESUMED task_id=%s sequence=%s",
-                    task_id,
-                    snapshot.context.progression.sequence,
-                )
-                self.resume()
-                idle_since = time.monotonic()
-                continue
-            if state in {"HUMAN_GATE", "BLOCKED", "PERSISTENCE_DEGRADED"}:
-                # These states require an explicit operator/human decision;
-                # an idle clock must never turn waiting for a person into a
-                # synthetic failure.
-                if state == "HUMAN_GATE":
-                    self._poll_human_gate_reply(task_id)
+    def _run_loop(self):
+            from .requirements_observability import record, answer_progress
+            task_id = self.context.identity.task_id
+            self._ensure_start_event()
+            next_health = 0
+            while True:
+                if getattr(self, '_requirements_lease_errors', ()):
+                    raise self._requirements_lease_errors[0]
+                snapshot = self.repository.load(task_id)
+                state = snapshot.context.progression.state
+                if time.monotonic() >= next_health:
+                    aggregate = snapshot.context.requirements
+                    round_id = aggregate.rounds[-1].round_id if aggregate and aggregate.rounds else ''
+                    record('WORKFLOW_HEALTH', task_id=task_id, pid=os.getpid(), state=state,
+                           sequence=snapshot.context.progression.sequence,
+                           **answer_progress(aggregate, round_id))
+                    next_health = time.monotonic() + 60
+                if state in self.requirements_runtime.terminal_states:
+                    self.effects.execute_pending(task_id)
+                    return state == 'DONE'
+                progressed = self.step()
+                if not progressed and state == 'RETRY_WAIT':
+                    self.resume()
                 if self.poll_interval:
                     time.sleep(min(self.poll_interval, 0.25))
-                continue
 
-            if time.monotonic() - idle_since >= self._max_idle_seconds:
-                current = self.repository.load(task_id)
-                logger.warning(
-                    "EVENT_INPUT_TIMEOUT_PUBLISHED task_id=%s sequence=%s "
-                    "max_idle_seconds=%s",
-                    task_id,
-                    current.context.progression.sequence,
-                    self._max_idle_seconds,
-                )
-                self.inbox.publish(
-                    DomainEvent(
-                        name="TIMEOUT",
-                        task_id=task_id,
-                        sequence=current.context.progression.sequence,
-                        payload={
-                            "error_code": "EVENT_INPUT_TIMEOUT",
-                            "reason": "no event or pending effect before deadline",
-                        },
-                        occurred_at=_now(),
-                        event_id=f"timeout:{task_id}:{current.context.progression.sequence}",
-                    )
-                )
-                idle_since = time.monotonic()
-                continue
-            if self.poll_interval:
-                time.sleep(min(self.poll_interval, 0.25))
-
-    def cancel(self) -> bool:
+    def cancel(self):
         snapshot = self.repository.load(self.context.identity.task_id)
-        if snapshot.context.progression.state in TERMINAL_STATES:
+        if snapshot.context.progression.state in self.requirements_runtime.terminal_states:
             return False
-        self.engine.dispatch(
-            DomainEvent(
-                name="CANCEL",
-                task_id=snapshot.task_id,
-                sequence=snapshot.context.progression.sequence,
-                payload={"reason": "operator cancellation"},
-                occurred_at=_now(),
-                event_id=f"cancel:{snapshot.task_id}:{snapshot.context.progression.sequence}",
-            )
-        )
-        return True
-
-    def _poll_human_gate_reply(self, task_id: str) -> None:
-        """Consume approval or revision feedback matched to review messages.
-
-        Plan review requires exact approval; other gates retain their existing
-        resume semantics. Replies are matched by the Feishu adapter
-        (threaded reply to the gate message, or a message quoting the gate's
-        decision id), so unrelated chat traffic never triggers a resume.
-        """
-
-        now = time.monotonic()
-        if now - self._last_gate_poll < self._gate_poll_interval:
-            return
-        self._last_gate_poll = now
-        poller = getattr(self.notification_port, "poll_reply", None)
-        if not callable(poller):
-            return
-        snapshot = self.repository.load(task_id)
-        gate = snapshot.context.human_gate
-        if gate is None or not str(gate.decision_id or "").strip():
-            return
-        ensure_delivery = getattr(self.notification_port, "ensure_plan_review_delivery", None)
-        if gate.reason_code == "PLAN_REVIEW" and callable(ensure_delivery):
-            try:
-                if not ensure_delivery(snapshot.context):
-                    return
-            except Exception:
-                logger.exception("PLAN_REVIEW_DOCUMENT_DELIVERY_FAILED task_id=%s", task_id)
-                return
-        request = HumanGate(
-            decision_id=gate.decision_id,
-            task_id=task_id,
-            resume_state=gate.resume_state or "",
-            prompt="",
-            message_id=gate.message_id or "",
-        )
+        self.requirements_runtime.submit('CANCEL', {'reason':'operator cancellation'}, 'cancel:'+uuid.uuid4().hex)
+        lease = TaskLock(self.root/'requirements-run.lock')
         try:
-            replies = poller(request)
-        except Exception:
-            logger.exception(
-                "HUMAN_GATE_POLL_FAILED task_id=%s decision_id=%s",
-                task_id,
-                gate.decision_id,
-            )
-            return
-        if not replies and gate.reason_code != "PLAN_REVIEW":
-            return
-        answers = [
-            str(getattr(reply, "answer", "") or "").strip()
-            for reply in replies
-            if str(getattr(reply, "answer", "") or "").strip()
-        ]
-        if gate.reason_code == "PLAN_REVIEW":
-            seen = {entry.get("external_id") for entry in
-                    (snapshot.context.review.plan_review.get("feedback_history", [])
-                     if snapshot.context.review else []) if entry.get("external_id")}
-            # The adapter returns newest first; retain all fresh feedback in
-            # chronological order. A pass cannot approve unprocessed changes.
-            messages = [{"answer": str(reply.answer),
-                         "external_id": getattr(reply, "external_id", ""),
-                         "author_id": getattr(reply, "author_id", ""),
-                         "decision_id": gate.decision_id}
-                        for reply in reversed(replies)
-                        if reply.decision_id == gate.decision_id
-                        and str(reply.answer or "").strip()
-                        and (not getattr(reply, "external_id", "")
-                             or reply.external_id not in seen)]
-            # A synchronous LLM run cannot poll the chat while it is revising.
-            # Recover comments added to earlier review threads afterwards;
-            # their pass replies never authorize the newer document.
-            anchors = (snapshot.context.review.plan_review.get("feedback_gates", [])
-                       if snapshot.context.review else [])
-            for anchor in anchors:
-                if anchor["decision_id"] == gate.decision_id:
-                    continue
-                try:
-                    delayed = poller(HumanGate(decision_id=anchor["decision_id"], task_id=task_id,
-                                              resume_state="MENXIA_GROUP_SOLVER", prompt="",
-                                              message_id=anchor.get("message_id") or ""))
-                except Exception:
-                    logger.exception("PLAN_REVIEW_LATE_FEEDBACK_POLL_FAILED task_id=%s", task_id)
-                    return  # Hold approval until older feedback can be checked.
-                for reply in reversed(delayed or []):
-                    identity = getattr(reply, "external_id", "")
-                    if (reply.decision_id == anchor["decision_id"] and identity and identity not in seen
-                            and _is_plan_review_rejection(reply.answer)):
-                        messages.append({**anchor, "answer": str(reply.answer), "external_id": identity,
-                                         "author_id": getattr(reply, "author_id", "")})
-            feedback = [entry for entry in messages if _is_plan_review_rejection(entry["answer"])]
-            answer = "\n\n".join(entry["answer"] for entry in feedback) if feedback else ("通过" if messages else "")
-            resumed = self.resume(answer, feedback_messages=feedback)
-        else:
-            answer = " | ".join(answers)
-            resumed = self.resume(answer)
-        if not resumed:
-            return
-        logger.info(
-            "HUMAN_GATE_REPLY_CONSUMED task_id=%s decision_id=%s replies=%s",
-            task_id,
-            gate.decision_id,
-            len(replies),
-        )
+            lease.acquire()
+        except TaskLockError:
+            return True  # The active runner will consume the durable cancellation.
+        try:
+            # Drain committed events under the run lease, never dispatch business
+            # effects while trying to cancel. Pending early callbacks cannot
+            # prevent the local cancellation from being selected by the bridge.
+            while self.ctx.progression.state not in self.requirements_runtime.terminal_states:
+                self.requirements_runtime.coordinator.flush_one(snapshot.task_id)
+                event = self.inbox.next(snapshot.task_id)
+                if event is None:
+                    raise RuntimeError('QUEUED_CANCELLATION_NOT_BRIDGED')
+                self.engine.dispatch(event)
+                self.inbox.ack(event)
+                lease.refresh()
+            self.effects.execute_pending(snapshot.task_id)
+            return self.ctx.progression.state == 'REQ_CANCELLED'
+        finally:
+            lease.release()
 
-    def resume(self, answer: str = "", *, feedback_messages: list[dict] | None = None) -> bool:
-        """Apply one operator/human resume decision to a recoverable state."""
 
-        snapshot = self.repository.load(self.context.identity.task_id)
-        if snapshot.context.progression.state not in {
-            "HUMAN_GATE",
-            "RETRY_WAIT",
-            "BLOCKED",
-            "PERSISTENCE_DEGRADED",
-        }:
-            return False
-        event_name = "RESUME"
-        gate = snapshot.context.human_gate
-        if (
-            gate is not None
-            and str(getattr(gate, "reason_code", "") or "") == "PLAN_REVIEW"
-        ):
-            if not str(answer or "").strip():
+    def resume(self, answer='', *, feedback_messages=None):
+            snapshot = self.repository.load(self.context.identity.task_id)
+            if snapshot.context.progression.state not in ('HUMAN_GATE','BLOCKED','RETRY_WAIT','PERSISTENCE_DEGRADED'):
                 return False
-            if _is_plan_review_rejection(answer):
-                event_name = "PLAN_REVIEW_REJECTED"
-            else:
-                from .domain.plan_review import matches_current
-                if not snapshot.context.review or not matches_current(snapshot.context.review, gate.document_hash):
-                    logger.warning("PLAN_REVIEW_STALE_APPROVAL task_id=%s", snapshot.task_id)
-                    return False
-                verify_document = getattr(self.notification_port, "verify_plan_review_document", None)
-                if callable(verify_document):
-                    try:
-                        verify_document(snapshot.context)
-                    except Exception:
-                        logger.exception("PLAN_REVIEW_DOCUMENT_APPROVAL_HELD task_id=%s", snapshot.task_id)
-                        return False
-        payload = {"answer": answer} if answer else {}
-        if feedback_messages:
-            payload["feedback_messages"] = feedback_messages
-        self.inbox.publish(
-            DomainEvent(
-                name=event_name,
-                task_id=snapshot.task_id,
-                sequence=snapshot.context.progression.sequence,
-                payload=payload,
-                occurred_at=_now(),
-                event_id=f"resume:{snapshot.task_id}:{snapshot.context.progression.sequence}",
-            )
-        )
-        return True
+            if not str(snapshot.context.progression.resume_state or '').startswith('MENXIA_'):
+                return False
+            self.inbox.publish(DomainEvent(name='RESUME', task_id=snapshot.task_id,
+                sequence=snapshot.context.progression.sequence, payload={'answer':answer},
+                occurred_at=_now(), event_id='menxia-resume:'+uuid.uuid4().hex))
+            return True
 
     def inspect(self) -> dict[str, object]:
         snapshot = self.repository.load(self.context.identity.task_id)
@@ -919,23 +585,44 @@ class OrchestratorApp:
     def _ensure_start_event(self) -> None:
         snapshot = self.repository.load(self.context.identity.task_id)
         if (
-            snapshot.context.progression.state == "REQUEST_INTAKE"
-            and snapshot.context.progression.sequence == 0
+            snapshot.context.progression.state == 'REQ_INTAKE'
             and not self.repository.pending_domain_events(snapshot.task_id)
         ):
             self.inbox.publish(
                 DomainEvent(
                     name="START",
                     task_id=snapshot.task_id,
-                    sequence=0,
+                    sequence=snapshot.context.progression.sequence,
                     payload={"raw_request": snapshot.context.request.raw_request},
                     occurred_at=_now(),
                     event_id=f"start:{snapshot.task_id}",
                 )
             )
 
+    def step(self) -> bool:
+        """Advance one committed event/effect batch; deterministic scripted tests use this path."""
+        task_id = self.context.identity.task_id
+        self._ensure_start_event()
+        self.requirements_runtime.coordinator.flush_one(task_id)
+        event = self.inbox.next(task_id)
+        if event is not None:
+            self.engine.dispatch(event)
+            self.inbox.ack(event)
+            return True
+        if self.requirements_runtime.store.next(task_id):
+            return False  # A verified early callback holds the model result until receipt reconciliation.
+        if self.repository.pending_effects(task_id):
+            self.effects.execute_pending(task_id)
+            return True
+        return False
+
 
 def build_context(args: argparse.Namespace, issue_id: str, raw_request: str, task_id: str) -> WorkflowContext:
+    workflow = getattr(args,'workflow',None) or 'requirements-v1'
+    if workflow != 'requirements-v1':
+        raise ValueError('legacy Zhongshu workflow is retired; use requirements-v1')
+    from .domain.requirements.model import RequirementsState, SourceRecord
+    aggregate = RequirementsState.empty(SourceRecord('src-000001','request',raw_request))
     return WorkflowContext(
         identity=TaskIdentity(
             task_id=task_id,
@@ -944,7 +631,7 @@ def build_context(args: argparse.Namespace, issue_id: str, raw_request: str, tas
             request_id=f"request-{task_id}",
         ),
         progression=ProgressState(
-            state="REQUEST_INTAKE",
+            state='REQ_INTAKE',
             sequence=0,
             entered_at=_now(),
         ),
@@ -952,8 +639,13 @@ def build_context(args: argparse.Namespace, issue_id: str, raw_request: str, tas
             raw_request=raw_request,
             project_type=str(args.project_type),
             task_type=str(args.task_type),
-            plan_schema=getattr(args, "plan_schema", None) or "legacy-v1",
+            plan_schema='canonical-v1',
+            workflow=workflow,decision_actor_ids=tuple(getattr(args,'decision_actor_id',None) or ()),
+            decision_owner_policy='explicit' if getattr(args,'decision_actor_id',None) else 'chat-members',
+            communication=getattr(args,'communication',None) or 'feishu',
+            project_root=str(getattr(args,'project_root',None) or ''),
         ),
+        requirements=aggregate,
     )
 
 
@@ -977,24 +669,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume")
     parser.add_argument("--cancel")
     parser.add_argument("--inspect-task")
+    parser.add_argument('--check-prerequisites', action='store_true', help='Verify communication readiness without creating an issue or running a model.')
+    parser.add_argument("--migrate-task", help="Copy a historical task into the sole requirements workflow without dispatching workers.")
     parser.add_argument("--project", default="")
+    parser.add_argument('--project-root', help='Absolute target repository directory used to resolve evidence paths; fixed when creating a task.')
     parser.add_argument("--allow-duplicate", action="store_true")
     parser.add_argument("--project-type", default="unknown")
+    parser.add_argument('--workflow',choices=('requirements-v1',),default=None)
+    parser.add_argument('--communication',choices=('feishu','local'),default=None)
+    parser.add_argument('--decision-actor-id','--decision-owner',action='append',help='Authorized Feishu open_id; repeat for multiple owners.')
+    parser.add_argument('--repair-decision-owner', action='append', help='Fill missing owners on a blocked task before any card or approval; use with --resume.')
+    parser.add_argument('--answer-file','--requirements-answer',help='Structured answers JSON for a persisted requirements task.')
+    parser.add_argument('--feedback-file','--requirements-feedback',help='UTF-8 requirements feedback for a persisted task.')
+    parser.add_argument('--approve-requirements',metavar='DOCUMENT_SHA256')
+    parser.add_argument('--recovery-note-file','--recovery-note',help='Verified prerequisite_changed or bind_card_receipt JSON.')
     parser.add_argument("--task-type", default="review")
-    parser.add_argument("--plan-schema", choices=("legacy-v1", "canonical-v1"), default=None,
+    parser.add_argument("--plan-schema", choices=("canonical-v1",), default=None,
                         help="Select plan authority for a new task; resumes use the persisted schema.")
     parser.add_argument("--runs-root", default=os.environ.get("ORCHESTRATOR_RUNS_ROOT", "runs"))
     parser.add_argument("--poll-interval", type=float, default=float(os.environ.get("POLL_INTERVAL_SEC", "8")))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("PHASE_TIMEOUT_SEC", "900")))
-    parser.add_argument(
-        "--fast-track",
-        action="store_true",
-        help=(
-            "Fast track: the Zhongshu Critic approves the whole plan without a "
-            "review wave and the freeze check releases it immediately, so the "
-            "run reaches the Menxia group pipeline right after Analyst + Solver."
-        ),
-    )
     parser.add_argument(
         "--no-external-notifications",
         action="store_true",
@@ -1004,25 +698,55 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    actions = (args.new is not None, bool(args.resume), bool(args.cancel),
+               bool(args.inspect_task), bool(args.migrate_task), args.check_prerequisites)
+    if sum(actions) != 1:
+        parser.error('choose exactly one of --new, --resume, --cancel, --inspect-task, --migrate-task')
+    resuming = args.resume or args.cancel or args.inspect_task
+    if resuming and any((args.workflow,args.communication,args.decision_actor_id,args.project_root)):
+        parser.error('workflow, communication, decision owners and project root are fixed when creating a task')
+    if args.project_root:
+        project_root = Path(args.project_root)
+        if not project_root.is_absolute() or not project_root.is_dir():
+            parser.error('--project-root must be an existing absolute directory')
+        args.project_root = str(project_root.resolve())
+    for actor in (args.decision_actor_id or []) + (args.repair_decision_owner or []):
+        if (not actor.startswith('ou_') or not actor[3:] or not actor[3:].isascii()
+            or not actor[3:].isalnum()):
+            parser.error('--decision-actor-id must be a real Feishu open_id (ou_ followed by letters/digits); '
+                         'replace the example placeholder before starting a task')
+    inputs = [args.answer_file,args.feedback_file,args.approve_requirements,args.recovery_note_file,args.repair_decision_owner]
+    if any(inputs) and (not args.resume or sum(bool(x) for x in inputs)!=1):
+        parser.error('use exactly one requirements input with --resume TASK_ID')
     if args.plan_schema is not None and (args.resume or args.cancel or args.inspect_task):
         parser.error("--plan-schema is only valid when creating a new task")
     if args.no_external_notifications:
         # Must be set before the app wires its notification port.
         os.environ["NEXUS_TEST_NO_EXTERNAL_NOTIFICATIONS"] = "1"
-    if args.fast_track:
-        # Ride the persisted parallel-flag override path so both --new and
-        # --resume pick the flag up through the same code path as the env.
-        os.environ["NEXUS_FAST_TRACK"] = "1"
-    multica = MulticaCliAdapter(Path(args.runs_root) / "transport")
-
     try:
-        if args.inspect_task:
-            task_id = args.inspect_task
-            root = _resolve_task_root(args.runs_root, task_id)
-            repository = JsonWorkflowRepository(root)
-            context = repository.load(task_id).context
-            print(json.dumps(OrchestratorApp(context, args.runs_root, multica=multica).inspect(), ensure_ascii=False, indent=2))
+        if args.check_prerequisites or args.new is not None:
+            from .requirements_startup import check_startup
+            readiness = check_startup(args.runs_root,args.communication or 'feishu',tuple(args.decision_actor_id or ()))
+            if readiness.get('decision_actor_ids'):
+                args.decision_actor_id=readiness['decision_actor_ids']
+            if args.check_prerequisites:
+                print(json.dumps(readiness,ensure_ascii=False,indent=2))
+                return 0
+        if args.migrate_task:
+            from .runtime.requirements_cutover import migrate_historical_task
+            result = migrate_historical_task(args.runs_root, args.migrate_task,
+                communication=args.communication, actor_ids=args.decision_actor_id)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.inspect_task:
+            from .runtime.requirements_cutover import inspect_task
+            print(json.dumps(inspect_task(args.runs_root, args.inspect_task), ensure_ascii=False, indent=2))
+            return 0
+        if args.resume or args.cancel:
+            from .runtime.requirements_cutover import inspect_task
+            if inspect_task(args.runs_root, args.resume or args.cancel)['historical_read_only']:
+                parser.error('Historical task requires --migrate-task '+(args.resume or args.cancel))
+        multica = MulticaCliAdapter(Path(args.runs_root) / "transport")
         if args.cancel:
             task_id = args.cancel
             root = _resolve_task_root(args.runs_root, task_id)
@@ -1036,17 +760,7 @@ def main(argv: list[str] | None = None) -> int:
             if repository.state_path.exists():
                 context = repository.load(task_id).context
             else:
-                legacy_path = root / "state.json"
-                value = json.loads(legacy_path.read_text(encoding="utf-8"))
-                migrated = legacy_dto_to_snapshot(
-                    value,
-                    artifact_port=FileArtifactStore(root / "artifacts"),
-                    task_id=task_id,
-                )
-                repository.initialize(migrated)
-                _seed_legacy_inflight_effect(repository, migrated)
-                _migrate_legacy_pending_events(repository, root, task_id)
-                context = migrated.context
+                parser.error('Historical task requires --migrate-task '+task_id)
         else:
             task_id = f"task-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
             raw_request = normalize_task_request(args.new or "")
@@ -1080,146 +794,47 @@ def main(argv: list[str] | None = None) -> int:
         timeout_seconds=args.timeout,
     )
     if args.resume:
-        app.resume()
+        if app.requirements_runtime:
+            if args.answer_file:
+                payload = json.loads(Path(args.answer_file).read_text(encoding='utf-8-sig'))
+                payload['actor_id'] = 'local-operator'
+                app.requirements_runtime.submit('ANSWERS_SUBMITTED',payload,'local-answer:'+uuid.uuid4().hex)
+            elif args.feedback_file:
+                text = Path(args.feedback_file).read_text(encoding='utf-8-sig').strip()
+                if not text:
+                    parser.error('feedback must not be empty')
+                app.requirements_runtime.submit('REQUIREMENTS_FEEDBACK',{'text':text,'actor_id':'local-operator'},'local-feedback:'+uuid.uuid4().hex)
+            elif args.approve_requirements:
+                current = app.ctx.requirements
+                app.requirements_runtime.submit('REQUIREMENTS_APPROVED',{'document_digest':args.approve_requirements,
+                    'gate_id':current.review_gate_id,'actor_id':'local-operator'},'local-approval:'+uuid.uuid4().hex)
+            elif args.recovery_note_file:
+                from .runtime.requirements_recovery import verified_recovery
+                evidence = json.loads(Path(args.recovery_note_file).read_text(encoding='utf-8-sig'))
+                try:
+                    verified = verified_recovery(app.requirements_runtime,app.ctx.requirements,evidence)
+                except (ValueError,KeyError,OSError) as error:
+                    parser.error(str(error))
+                app.requirements_runtime.submit('RECOVERY_INPUT',verified,'local-recovery:'+uuid.uuid4().hex)
+            elif args.repair_decision_owner:
+                from .runtime.requirements_recovery import verified_owner_recovery
+                try:
+                    verified = verified_owner_recovery(app.requirements_runtime,app.ctx,tuple(args.repair_decision_owner))
+                except ValueError as error:
+                    parser.error(str(error))
+                app.requirements_runtime.submit('DECISION_OWNERS_REPAIRED',verified,'local-owner-recovery:'+uuid.uuid4().hex)
+        if not any(inputs):
+            app.resume()
+    if app.requirements_runtime and any(inputs) and TaskLock(app.root/'requirements-run.lock').has_live_owner():
+        print('Input durably queued for the active requirements runtime.')
+        return 0
     return 0 if app.run() else 1
 
 
-def _seed_legacy_inflight_effect(
-    repository: JsonWorkflowRepository,
-    snapshot: WorkflowSnapshot,
-) -> None:
-    """Turn a legacy in-flight dispatch into a durable New effect intent."""
-
-    context = snapshot.context
-    delivery = context.delivery
-    if (
-        context.progression.state in TERMINAL_STATES
-        or delivery.status not in {"PENDING", "RUNNING"}
-        or not delivery.active_request_id
-    ):
-        return
-    request_id = delivery.active_request_id
-    idempotency_key = delivery.idempotency_key or request_id
-    request = EffectRequest(
-        effect_id=f"dispatch:legacy:{request_id}",
-        effect_type="agent_dispatch",
-        task_id=snapshot.task_id,
-        idempotency_key=idempotency_key,
-        payload_ref=context.request.payload_ref,
-        payload={
-            "issue_id": context.identity.issue_id,
-            "request_id": request_id,
-            "agent_id": delivery.expected_agent_id,
-            "role": delivery.role,
-            "phase": delivery.phase,
-            "target_state": context.progression.state,
-            "prompt_ref": context.request.payload_ref or context.request.raw_request,
-            "request_payload_ref": context.request.payload_ref or "",
-            "revision_id": context.review.revision_id if context.review else "",
-            "plan_hash": context.review.plan_hash if context.review else "",
-            "sequence": context.progression.sequence,
-        },
-    )
-    repository.seed_effect(
-        EffectRecord(
-            effect_id=request.effect_id,
-            task_id=snapshot.task_id,
-            request=request,
-            status="PENDING",
-            attempt=max(0, delivery.attempt),
-            state=context.progression.state,
-            sequence=context.progression.sequence,
-        )
-    )
 
 
-def _migrate_legacy_pending_events(
-    repository: JsonWorkflowRepository,
-    root: Path,
-    task_id: str,
-) -> None:
-    """Import explicitly pending legacy events; audit lines are not inboxes.
-
-    The removed V2 persistence format wrote every consumed transition to
-    ``events.jsonl`` after the state update.  Those lines are historical audit
-    records and must never be replayed.  A legacy producer that really has an
-    unconsumed input must mark it with ``pending: true`` (or an equivalent
-    explicit unacknowledged marker) before this one-time bridge will import it.
-    """
-
-    legacy_path = root / "events.jsonl"
-    if not legacy_path.exists():
-        return
-    current_sequence = repository.load(task_id).context.progression.sequence
-    pending: list[DomainEvent] = []
-    for index, line in enumerate(legacy_path.read_text(encoding="utf-8").splitlines()):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ValueError(f"invalid legacy event at line {index + 1}") from error
-        if not isinstance(value, dict):
-            raise ValueError(f"legacy event at line {index + 1} is not an object")
-        event_value = value.get("event") if isinstance(value.get("event"), dict) else value
-        if not _legacy_event_is_pending(value, event_value):
-            # V2's normal event record is an audit record written after the
-            # transition.  Treating it as an inbox item would replay every
-            # historical transition on the first New-runtime restart.
-            continue
-        event_task_id = str(event_value.get("task_id") or task_id)
-        if event_task_id != task_id:
-            continue
-        sequence = event_value.get("sequence")
-        if type(sequence) is not int:
-            raise ValueError(f"legacy event at line {index + 1} has invalid sequence")
-        if sequence < current_sequence:
-            continue
-        if sequence > current_sequence:
-            raise ValueError("legacy event sequence contains a gap")
-        raw_name = (
-            event_value.get("name")
-            or event_value.get("event_name")
-            or (event_value.get("event") if isinstance(event_value.get("event"), str) else "")
-        )
-        name = str(raw_name or "")
-        if not name:
-            raise ValueError(f"legacy event at line {index + 1} has no name")
-        pending.append(
-            DomainEvent(
-                name=name,
-                task_id=task_id,
-                sequence=sequence,
-                payload=event_value.get("payload", {}),
-                occurred_at=str(event_value.get("occurred_at") or _now()),
-                event_id=str(
-                    event_value.get("event_id")
-                    or f"legacy:{task_id}:{sequence}:{name}"
-                ),
-            )
-        )
-    if len(pending) > 1:
-        raise ValueError("legacy inbox contains multiple pending events")
-    for event in pending:
-        repository.append_domain_event(event)
 
 
-def _legacy_event_is_pending(
-    record: Mapping[str, object],
-    event_value: Mapping[str, object],
-) -> bool:
-    """Recognize only explicit pending/unacknowledged legacy envelopes."""
-
-    for source in (record, event_value):
-        if source.get("pending") is True:
-            return True
-        if source.get("acked") is False:
-            return True
-        if source.get("acknowledged") is False:
-            return True
-        if source.get("consumed") is False:
-            return True
-    return False
 
 
 __all__ = ["OrchestratorApp", "build_context", "main"]

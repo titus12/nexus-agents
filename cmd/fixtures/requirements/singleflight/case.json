@@ -1,0 +1,18 @@
+{
+  "case_id": "singleflight",
+  "input_file": "input.md",
+  "source": "User-provided RTC singleflight requirements, copied with SHA-256 provenance in source.json",
+  "known_facts": [],
+  "answers": [],
+  "required_semantics": [
+    "会话由 projectId + uid 区分，不同会话独立",
+    "并发 Login 只创建一个 Runtime、一次认证，每个调用方最多完成一次",
+    "Connected 复用成功，Connecting 等待登录，Reconnecting 等待恢复结果",
+    "认证发出前使用最新 Token，发出后的请求保持原 Token，后续认证用新 Token",
+    "Close 开始后禁止旧回调影响新生命周期，不出现双 Runtime",
+    "Endpoint 改变建立新连接并隔离旧回调",
+    "singleflight 在 autoRelogin=false 时仍成立"
+  ],
+  "forbidden_unconfirmed_commitments": ["开启自动重连", "修改服务端协议", "改变公开 API", "预先指定锁或实现类"],
+  "allowed_deferred": ["实现锁、票据、代码改动和任务 DAG 留给门下省"]
+}

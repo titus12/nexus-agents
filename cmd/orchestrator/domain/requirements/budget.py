@@ -1,16 +1,31 @@
-"""Durable finite work policy. Waiting and replay never consume model calls."""
+"""Durable finite work policy. Waiting and replay never consume model calls.
+
+Policy v2 (spec T8): format repairs are free — they only grow ``total_calls``
+(never ``calls``, so the per-task 12-call budget is untouched) and stay capped
+at two per dispatch.  ``TOTAL_CALLS_CAP`` is the safety net against endless
+format-repair accumulation.  v1 ledgers (persisted before this change) keep
+the old counting semantics.
+"""
 from dataclasses import replace
 from .model import BudgetLedger, DispatchCharge, EffectCharge, digest
+
+TOTAL_CALLS_CAP = 40
 
 
 class BudgetExceeded(ValueError):
     pass
 
 
+def _v2(ledger):
+    return ledger.policy_version == 'requirements-policy-v2'
+
+
 def charge_dispatch(ledger, logical_dispatch_id, kind='initial', attempt=1):
     previous = next((c for c in ledger.dispatch_charges if c.logical_dispatch_id == logical_dispatch_id), None)
     if previous and attempt <= previous.attempts:
         return ledger
+    if _v2(ledger) and ledger.total_calls >= TOTAL_CALLS_CAP:
+        raise BudgetExceeded('TOTAL_CALL_BUDGET_EXHAUSTED')
     if ledger.calls >= 12:
         raise BudgetExceeded('MODEL_CALL_BUDGET_EXHAUSTED')
     if kind == 'semantic' and ledger.semantic_repairs >= 3:
@@ -26,7 +41,8 @@ def charge_dispatch(ledger, logical_dispatch_id, kind='initial', attempt=1):
     row = DispatchCharge(logical_dispatch_id, previous.kind if previous else kind, attempt,
                          formats + (kind == 'format'), externals + (kind == 'external'))
     charges = tuple(c for c in ledger.dispatch_charges if c.logical_dispatch_id != logical_dispatch_id) + (row,)
-    return replace(ledger, calls=ledger.calls+1, total_calls=ledger.total_calls+1,
+    free = _v2(ledger) and kind == 'format'
+    return replace(ledger, calls=ledger.calls + (0 if free else 1), total_calls=ledger.total_calls+1,
                    semantic_repairs=ledger.semantic_repairs+(kind == 'semantic'),
                    evidence_repairs=ledger.evidence_repairs+(kind == 'evidence'), dispatch_charges=charges)
 

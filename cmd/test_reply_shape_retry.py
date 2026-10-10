@@ -11,7 +11,7 @@ from orchestrator.domain.context import (
 )
 from orchestrator.domain.errors import is_reply_failure
 from orchestrator.domain.events import DomainEvent
-from orchestrator.domain.states import ZhongshuSolverState
+from orchestrator.domain.states import MenxiaGroupSolverState
 from orchestrator.runtime.reducer import LinearContextReducer
 from orchestrator.runtime.repository import WorkflowSnapshot
 
@@ -27,9 +27,9 @@ def _event(error_code: str) -> DomainEvent:
             "failure": {
                 "failure_id": "solver-reply:11",
                 "stage": "agent_reply",
-                "owner_component": "ZHONGSHU_SOLVER",
+                "owner_component": "MENXIA_GROUP_SOLVER",
                 "task_id": "task-1",
-                "state": "ZHONGSHU_SOLVER",
+                "state": "MENXIA_GROUP_SOLVER",
                 "sequence": 11,
                 "node_run_id": "node-1",
                 "worker_id": None,
@@ -83,7 +83,7 @@ class UnusableSolverReplyRetryTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.state = ZhongshuSolverState()
+        self.state = MenxiaGroupSolverState()
         self.reducer = LinearContextReducer()
 
     def _context(
@@ -95,7 +95,7 @@ class UnusableSolverReplyRetryTests(unittest.TestCase):
     ) -> WorkflowContext:
         return WorkflowContext(
             identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
-            progression=ProgressState("ZHONGSHU_SOLVER", 11, "2026-09-16T00:00:00Z"),
+            progression=ProgressState("MENXIA_GROUP_SOLVER", 11, "2026-09-16T00:00:00Z"),
             recovery=RecoveryState(
                 reply_retry_count=reply,
                 max_reply_retries=3,

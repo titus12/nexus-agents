@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from ...zhongshu_review_queue import structural_gate
+from ...graph_validation import structural_gate
 
 BLOCKING_STRUCTURE_PREFIXES = (
     "PLAN_NOT_OBJECT", "PLAN_HAS_NO_ITEMS", "ITEM_IN_MULTIPLE_GROUPS",

@@ -370,6 +370,8 @@ class PromptBundleBuilder:
             files.append(PromptFile(name="active-skill.md", purpose="authoritative runtime Skill snapshot; read before prompt.txt", required=True, sha256=_sha256_bytes(skill_bytes), bytes=len(skill_bytes)))
         manifest = {
             "protocol": "nexus-prompt-bundle-v1",
+            "workflow": str(context_value.get('workflow') or 'legacy-v1'),
+            "runtime_state": meter_state,
             "task_id": task_id,
             "request_id": request_id,
             "phase": phase,

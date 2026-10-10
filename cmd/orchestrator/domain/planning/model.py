@@ -53,7 +53,7 @@ class PlanRevision:
                     plan=self.plan, schema_version=self.schema_version, policy_version=self.policy_version)
 
     @classmethod
-    def from_dict(cls, value):
+    def from_dict(cls, value, *, approved_requirements=None):
         from .compiler import compile_plan
         if (value.get("schema_version") != CANONICAL_PLAN_SCHEMA
                 or value.get("policy_version") != PLAN_POLICY_VERSION):
@@ -64,7 +64,7 @@ class PlanRevision:
             raise ValueError("invalid PlanRevision lineage")
         if (number == 1 and parent) or (number > 1 and not parent.startswith(f"{CANONICAL_PLAN_SCHEMA}:{number - 1}:")):
             raise ValueError("invalid PlanRevision parent")
-        plan = compile_plan(value.get("plan"))
+        plan = compile_plan(value.get("plan"),approved_requirements=approved_requirements)
         if plan != value.get("plan") or content_hash(plan) != value.get("content_hash"):
             raise ValueError("PlanRevision content hash or normalization mismatch")
         return cls(number, parent, content_hash(plan), canonical_json(plan))

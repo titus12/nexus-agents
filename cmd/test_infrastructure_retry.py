@@ -11,7 +11,7 @@ from orchestrator.domain.context import (
 )
 from orchestrator.domain.errors import FailureRecord, is_infrastructure_failure
 from orchestrator.domain.events import DomainEvent
-from orchestrator.domain.states import ZhongshuCriticState
+from orchestrator.domain.states import MenxiaGroupCriticState
 from orchestrator.runtime import nodes
 from orchestrator.runtime.agent_effects import AgentNodeWorkerRunner, AgentWorkerRunner
 from orchestrator.runtime.nodes import (
@@ -37,7 +37,7 @@ def _failure(code: str, *, retryable: bool = True) -> FailureRecord:
         stage="remote_run",
         owner_component="agent_dispatch",
         task_id="task-1",
-        state="ZHONGSHU_CRITIC",
+        state="MENXIA_GROUP_CRITIC",
         sequence=6,
         node_run_id="node-1",
         worker_id="worker-a",
@@ -75,19 +75,19 @@ class InfrastructureRetryBudgetTests(unittest.TestCase):
     """A backend failure must not consume the plan-convergence retry budget."""
 
     def setUp(self) -> None:
-        self.state = ZhongshuCriticState()
+        self.state = MenxiaGroupCriticState()
 
     def _context(self, *, external: int = 0, retry: int = 0) -> WorkflowContext:
         return WorkflowContext(
             identity=TaskIdentity("task-1", "issue-1", "project-1", "request-1"),
-            progression=ProgressState("ZHONGSHU_CRITIC", 6, "2026-09-13T00:00:00Z"),
+            progression=ProgressState("MENXIA_GROUP_CRITIC", 6, "2026-09-13T00:00:00Z"),
             recovery=RecoveryState(
                 retry_count=retry,
                 max_retries=3,
                 external_retry_count=external,
                 max_external_retries=3,
             ),
-            review=ReviewState(revision_id="task-1:ZHONGSHU_ANALYST:2"),
+            review=ReviewState(revision_id="task-1:MENXIA_GROUP_ANALYST:2"),
         )
 
     def _event(self, code: str) -> DomainEvent:
@@ -103,7 +103,7 @@ class InfrastructureRetryBudgetTests(unittest.TestCase):
                     "stage": "remote_run",
                     "owner_component": "agent_dispatch",
                     "task_id": "task-1",
-                    "state": "ZHONGSHU_CRITIC",
+                    "state": "MENXIA_GROUP_CRITIC",
                     "sequence": 6,
                     "node_run_id": "node-1",
                     "worker_id": "worker-a",
@@ -188,7 +188,7 @@ class NodeWorkerRetryTests(unittest.TestCase):
         nodes._worker_retry_sleep = lambda _seconds: None
         self.addCleanup(lambda: setattr(nodes, "_worker_retry_sleep", self._real_sleep))
         self.context = NodeContext(
-            "task-1", "node-1", "revision-1", "group-1", None, "ZHONGSHU_CRITIC", 6
+            "task-1", "node-1", "revision-1", "group-1", None, "MENXIA_GROUP_CRITIC", 6
         )
         self.node = ReviewNode(
             "node-1",
@@ -360,22 +360,22 @@ class WorkerRetryReDispatchTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(nodes, "_worker_retry_sleep", self._real_sleep))
         self.context = NodeContext(
             "task-1",
-            "node:task-1:ZHONGSHU_CRITIC:6",
+            "node:task-1:MENXIA_GROUP_CRITIC:6",
             "revision-1",
             "group-1",
             None,
-            "ZHONGSHU_CRITIC",
+            "MENXIA_GROUP_CRITIC",
             6,
         )
         self.node = ReviewNode(
-            "node:task-1:ZHONGSHU_CRITIC:6",
+            "node:task-1:MENXIA_GROUP_CRITIC:6",
             "ZHONGSHU",
             (
                 WorkerBinding(
                     worker_id="zhongshu_critic-worker-01",
                     agent_id="agent-a",
                     task_id="task-1",
-                    request_id="task-1:ZHONGSHU_CRITIC:6:worker-01",
+                    request_id="task-1:MENXIA_GROUP_CRITIC:6:worker-01",
                     role="review-critic",
                     phase="ZHONGSHU",
                 ),
@@ -402,8 +402,8 @@ class WorkerRetryReDispatchTests(unittest.TestCase):
         self.assertEqual(
             transport.dispatched_request_ids,
             [
-                "task-1:ZHONGSHU_CRITIC:6:worker-01",
-                "task-1:ZHONGSHU_CRITIC:6:worker-01:attempt-2",
+                "task-1:MENXIA_GROUP_CRITIC:6:worker-01",
+                "task-1:MENXIA_GROUP_CRITIC:6:worker-01:attempt-2",
             ],
         )
         self.assertEqual(worker_result.status, "SUCCEEDED")
@@ -416,7 +416,7 @@ class WorkerRetryReDispatchTests(unittest.TestCase):
 
         self.assertEqual(
             transport.dispatched_request_ids,
-            ["task-1:ZHONGSHU_CRITIC:6:worker-01"],
+            ["task-1:MENXIA_GROUP_CRITIC:6:worker-01"],
         )
         self.assertEqual(worker_result.status, "SUCCEEDED")
 

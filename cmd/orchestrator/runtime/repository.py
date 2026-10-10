@@ -334,6 +334,21 @@ class JsonWorkflowRepository:
             }
         )
 
+    def list_effect_results(self, task_id: str) -> tuple[tuple[EffectResult, EffectRecord], ...]:
+        results = []
+        for row in self._read_journal():
+            if row.get('record_type') != 'effect_result' or row.get('task_id') != task_id:
+                continue
+            effect = self._find_effect(str(row['effect_id']))
+            if effect is None:
+                raise PersistenceError('result without effect intent')
+            failure = FailureRecord(**row['failure']) if row.get('failure') else None
+            result = EffectResult(effect.effect_id, task_id, str(row['status']), failure,
+                                  row.get('event_name'), row.get('event_payload'), row.get('request_id'),
+                                  row.get('operation_id'), row.get('deadline_at'))
+            results.append((result, effect))
+        return tuple(results)
+
     def append_domain_event(self, event: DomainEvent) -> None:
         event_id = event.event_id or f"{event.task_id}:{event.sequence}:{event.name}"
         candidate = {
@@ -533,6 +548,8 @@ class JsonWorkflowRepository:
 
     def _append_record(self, record: dict[str, object]) -> None:
         try:
+            from datetime import datetime, timezone
+            record = {**record, 'recorded_at':datetime.now(timezone.utc).isoformat()}
             self.event_path.parent.mkdir(parents=True, exist_ok=True)
             with self.event_path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")

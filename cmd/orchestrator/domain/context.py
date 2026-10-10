@@ -1,4 +1,4 @@
-﻿"""Immutable aggregates that represent the workflow's durable domain state."""
+"""Immutable aggregates that represent the workflow's durable domain state."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field, replace
 from .findings import Finding
 from .errors import FailureRecord, InvariantViolation
 from .planning.model import PlanRevision, LEGACY_PLAN_SCHEMA, CANONICAL_PLAN_SCHEMA
+from .requirements.model import RequirementsState
+from .requirements.handoff import from_dict as approved_requirements_from_dict
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,20 @@ class RequestState:
     project_type: str = "unknown"
     task_type: str = "review"
     plan_schema: str = LEGACY_PLAN_SCHEMA
+    workflow: str = 'legacy-v1'
+    decision_actor_ids: tuple[str, ...] = ()
+    communication: str = 'feishu'
+    project_root: str = ''
+    decision_owner_policy: str = 'explicit'
+
+    def __post_init__(self):
+        if self.workflow not in ('legacy-v1', 'requirements-v1'):
+            raise ValueError('unsupported request workflow')
+        if self.communication not in ('local','feishu'):
+            raise ValueError('unsupported requirements communication')
+        if self.decision_owner_policy not in ('explicit','chat-members'):
+            raise ValueError('unsupported decision owner policy')
+        object.__setattr__(self, 'decision_actor_ids', tuple(self.decision_actor_ids))
 
 
 @dataclass(frozen=True)
@@ -257,6 +273,7 @@ class ReviewState:
     salvaged_worker_payloads: tuple[dict[str, object], ...] = ()
     plan_schema: str = LEGACY_PLAN_SCHEMA
     plan_revision: PlanRevision | None = None
+    approved_requirements_input: object | None = None
 
     def next_menxia_item(self) -> ReviewTaskItem | None:
         completed = set(self.completed_item_ids)
@@ -756,6 +773,7 @@ class ReviewUpdate:
     salvaged_worker_payloads: tuple[dict[str, object], ...] | None = None
     plan_schema: str | None = None
     plan_base_ref: str | None = None
+    approved_requirements_input: object | None = None
 
 
 def _regrouped_zhongshu_rows(
@@ -850,6 +868,8 @@ def apply_review_update(
         revision_id=revision_id,
         plan_schema=plan_schema,
         plan_revision=plan_revision,
+        approved_requirements_input=(update.approved_requirements_input if update.approved_requirements_input is not None
+                                     else current.approved_requirements_input if current else None),
         plan_review=(dict(update.plan_review) if update.plan_review is not None
                      else dict(current.plan_review) if current else {}),
         active_group_id=(
@@ -1082,7 +1102,8 @@ class WorkflowContext:
     request: RequestState = field(default_factory=RequestState)
     parallel: ParallelState = field(default_factory=ParallelState)
     audit: AuditState = field(default_factory=AuditState)
-    schema_version: str = "4.0"
+    schema_version: str = "5.0"
+    requirements: RequirementsState | None = None
 
 
 def context_to_dto(context: WorkflowContext) -> dict[str, object]:
@@ -1146,12 +1167,17 @@ def context_to_dto(context: WorkflowContext) -> dict[str, object]:
         "human_gate": asdict(context.human_gate) if context.human_gate else None,
         "audit": asdict(context.audit),
         "schema_version": context.schema_version,
+        "requirements": context.requirements.to_dict() if context.requirements else None,
     }
 
 
 def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
     """Deserialize a DTO into fresh immutable value objects."""
 
+    if str(value.get('schema_version') or '4.0') not in ('4.0', '5.0'):
+        raise ValueError('unsupported context schema version')
+    raw_requirements = value.get('requirements')
+    requirements_aggregate = RequirementsState.from_dict(raw_requirements) if raw_requirements is not None else None
     identity = _context_part(value, "identity", TaskIdentity)
     request = _context_part(value, "request", RequestState, default=RequestState())
     progression = _context_part(value, "progression", ProgressState)
@@ -1219,6 +1245,8 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
         )
         raw_attempted_findings = review_value.get("attempted_finding_ids")
         raw_evidence_packet = review_value.get("evidence_packet")
+        approved_source = (approved_requirements_from_dict(review_value['approved_requirements_input'])
+                           if review_value.get('approved_requirements_input') else None)
         review = ReviewState(
             revision_id=str(review_value.get("revision_id") or ""),
             active_group_id=review_value.get("active_group_id"),
@@ -1271,9 +1299,10 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
             requirements=requirements,
             plan=_plan_from_dto(review_value.get("plan")),
             plan_schema=str(review_value.get("plan_schema") or LEGACY_PLAN_SCHEMA),
-            plan_revision=(PlanRevision.from_dict(review_value["plan_revision"])
+            plan_revision=(PlanRevision.from_dict(review_value["plan_revision"],approved_requirements=approved_source)
                            if isinstance(review_value.get("plan_revision"), Mapping) else None),
             plan_review=dict(review_value.get("plan_review") or {}),
+            approved_requirements_input=approved_source,
             salvaged_task_reviews=tuple(
                 dict(row)
                 for row in review_value.get("salvaged_task_reviews", [])
@@ -1309,6 +1338,21 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
         else None
     )
     audit = _audit_from_dto(value.get("audit"))
+    if request.workflow == 'requirements-v1':
+        from .requirements.transitions import RequirementsTransitionRegistry, MENXIA
+        registry = RequirementsTransitionRegistry()
+        if not requirements_aggregate or requirements_aggregate.consensus is None or progression.state not in registry.allowed_states:
+            raise ValueError('requirements workflow aggregate/state mismatch')
+        if progression.state in ('REQ_BLOCKED','REQ_ENGINE_ERROR','REQ_RETRY_WAIT'):
+            if not requirements_aggregate.recovery or progression.resume_state != requirements_aggregate.recovery.retry_return_to:
+                raise ValueError('requirements recovery target mismatch')
+        if progression.state in MENXIA:
+            if not review or not review.approved_requirements_input or not requirements_aggregate.approval:
+                raise ValueError('Menxia continuation requires approved requirements')
+            if review.approved_requirements_input.approval != requirements_aggregate.approval:
+                raise ValueError('Menxia approval source mismatch')
+    elif requirements_aggregate is not None or progression.state.startswith('REQ_') or progression.state=='MENXIA_REQUIREMENTS_INTAKE' or (review and review.approved_requirements_input):
+        raise ValueError('legacy workflow cannot restore requirements state')
     return WorkflowContext(
         identity,
         progression,
@@ -1320,6 +1364,7 @@ def context_from_dto(value: Mapping[str, object]) -> WorkflowContext:
         parallel,
         audit,
         str(value.get("schema_version") or "4.0"),
+        requirements_aggregate,
     )
 
 

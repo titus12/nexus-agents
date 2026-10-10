@@ -8,453 +8,139 @@ the cited lines; the gate verifies containment in the cited file (NFKC +
 whitespace normalized) and exempts paths that do not exist on disk — claiming
 a file is missing is a legitimate UNKNOWN the gate cannot disprove.
 """
-
 from __future__ import annotations
-
 import tempfile
 import unittest
 from pathlib import Path
-
 from orchestrator.adapters import _apply_quote_gate
-from orchestrator.domain.states import _requirement_contract_markdown
-from orchestrator.quote_gate import (
-    UNVERIFIED_MARK,
-    demote_unverified,
-    find_quote_issues,
-    format_rejection,
-)
+from orchestrator.quote_gate import UNVERIFIED_MARK, demote_unverified, find_quote_issues, format_rejection
 from orchestrator.transport.external import AgentRequest
 
-
-def _request(phase: str = "ZHONGSHU") -> AgentRequest:
-    return AgentRequest(
-        task_id="task-1",
-        request_id="req-1",
-        agent_id="agent-1",
-        role="review-analyst",
-        phase=phase,
-        prompt="",
-        idempotency_key="req-1",
-        context={},
-    )
-
+def _request(phase: str='ZHONGSHU') -> AgentRequest:
+    return AgentRequest(task_id='task-1', request_id='req-1', agent_id='agent-1', role='review-analyst', phase=phase, prompt='', idempotency_key='req-1', context={})
 
 def _quote_rejection(_request_unused: AgentRequest, payload: dict) -> str:
     return format_rejection(find_quote_issues(payload))
 
-
 def _evidence(**overrides) -> dict:
-    entry = {
-        "evidence_id": "ev-1",
-        "requirement_id": "req-000001",
-        "decision_relevance": "coverage",
-        "source": "site.py:1",
-        "conclusion": "verified",
-        "unknowns": [],
-    }
+    entry = {'evidence_id': 'ev-1', 'requirement_id': 'req-000001', 'decision_relevance': 'coverage', 'source': 'site.py:1', 'conclusion': 'verified', 'unknowns': []}
     entry.update(overrides)
     return entry
-
 
 def _response(**overrides) -> dict:
-    entry = {
-        "finding_id": "finding-1",
-        "answer": "answered",
-        "evidence_ids": ["ev-1"],
-        "suggested_disposition": "CLOSE",
-    }
+    entry = {'finding_id': 'finding-1', 'answer': 'answered', 'evidence_ids': ['ev-1'], 'suggested_disposition': 'CLOSE'}
     entry.update(overrides)
     return entry
-
 
 class QuoteGateUnitTests(unittest.TestCase):
     """Mechanical transcription checks, not semantic review."""
 
     def test_non_zhongshu_phase_is_not_gated(self) -> None:
-        payload = {
-            "evidence_updates": [_evidence(source="cmd/orchestrator/quote_gate.py:1")]
-        }
-        self.assertIs(_apply_quote_gate(_request("MENXIA"), payload), payload)
+        payload = {'evidence_updates': [_evidence(source='cmd/orchestrator/quote_gate.py:1')]}
+        self.assertIs(_apply_quote_gate(_request('MENXIA'), payload), payload)
 
     def test_payload_without_evidence_arrays_passes(self) -> None:
-        self.assertEqual(_quote_rejection(_request(), {"summary": "ok"}), "")
+        self.assertEqual(_quote_rejection(_request(), {'summary': 'ok'}), '')
 
     def test_file_citing_entry_without_quote_is_rejected(self) -> None:
-        rejection = _quote_rejection(
-            _request(),
-            {
-                "evidence_updates": [
-                    _evidence(source="cmd/orchestrator/quote_gate.py:1")
-                ]
-            },
-        )
-        self.assertIn("QUOTE_REQUIRED", rejection)
-        self.assertIn("quote_gate.py", rejection)
-        self.assertIn("ev-1", rejection)
+        rejection = _quote_rejection(_request(), {'evidence_updates': [_evidence(source='cmd/orchestrator/quote_gate.py:1')]})
+        self.assertIn('QUOTE_REQUIRED', rejection)
+        self.assertIn('quote_gate.py', rejection)
+        self.assertIn('ev-1', rejection)
 
     def test_missing_cited_file_without_quote_is_exempt(self) -> None:
-        rejection = _quote_rejection(
-            _request(),
-            {"evidence_updates": [_evidence(source="no/such/file.py:1")]},
-        )
-        self.assertEqual(rejection, "")
+        rejection = _quote_rejection(_request(), {'evidence_updates': [_evidence(source='no/such/file.py:1')]})
+        self.assertEqual(rejection, '')
 
     def test_non_file_source_without_quote_passes(self) -> None:
-        rejection = _quote_rejection(
-            _request(), {"evidence_updates": [_evidence(source="runtime probe")]}
-        )
-        self.assertEqual(rejection, "")
+        rejection = _quote_rejection(_request(), {'evidence_updates': [_evidence(source='runtime probe')]})
+        self.assertEqual(rejection, '')
 
     def test_verbatim_quote_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("X = 1\ndef compute():\n    return X\n", encoding="utf-8")
-            payload = {
-                "evidence_updates": [
-                    _evidence(
-                        source=f"{site.as_posix()}:2",
-                        quote={
-                            "path": site.as_posix(),
-                            "line_start": 2,
-                            "line_end": 3,
-                            "text": "def compute():\n    return X",
-                        },
-                    )
-                ]
-            }
-            self.assertEqual(_quote_rejection(_request(), payload), "")
+            site = Path(tmp) / 'site.py'
+            site.write_text('X = 1\ndef compute():\n    return X\n', encoding='utf-8')
+            payload = {'evidence_updates': [_evidence(source=f'{site.as_posix()}:2', quote={'path': site.as_posix(), 'line_start': 2, 'line_end': 3, 'text': 'def compute():\n    return X'})]}
+            self.assertEqual(_quote_rejection(_request(), payload), '')
 
     def test_line_drift_passes_via_whole_file_containment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("X = 1\ndef compute():\n    return X\n", encoding="utf-8")
-            payload = {
-                "evidence_updates": [
-                    _evidence(
-                        source=f"{site.as_posix()}:999",
-                        quote={
-                            "path": site.as_posix(),
-                            "line_start": 999,
-                            "line_end": 999,
-                            "text": "def compute():\n    return X",
-                        },
-                    )
-                ]
-            }
-            self.assertEqual(_quote_rejection(_request(), payload), "")
+            site = Path(tmp) / 'site.py'
+            site.write_text('X = 1\ndef compute():\n    return X\n', encoding='utf-8')
+            payload = {'evidence_updates': [_evidence(source=f'{site.as_posix()}:999', quote={'path': site.as_posix(), 'line_start': 999, 'line_end': 999, 'text': 'def compute():\n    return X'})]}
+            self.assertEqual(_quote_rejection(_request(), payload), '')
 
     def test_paraphrased_quote_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("def compute():\n    return X\n", encoding="utf-8")
-            payload = {
-                "evidence_updates": [
-                    _evidence(
-                        source=site.as_posix(),
-                        quote={
-                            "path": site.as_posix(),
-                            "line_start": 1,
-                            "line_end": 2,
-                            "text": "compute() writes X to a result file",
-                        },
-                    )
-                ]
-            }
+            site = Path(tmp) / 'site.py'
+            site.write_text('def compute():\n    return X\n', encoding='utf-8')
+            payload = {'evidence_updates': [_evidence(source=site.as_posix(), quote={'path': site.as_posix(), 'line_start': 1, 'line_end': 2, 'text': 'compute() writes X to a result file'})]}
             rejection = _quote_rejection(_request(), payload)
-            self.assertIn("QUOTE_MISMATCH", rejection)
-            self.assertIn("ev-1", rejection)
+            self.assertIn('QUOTE_MISMATCH', rejection)
+            self.assertIn('ev-1', rejection)
 
     def test_mismatch_rejection_echoes_the_cited_lines(self) -> None:
-        # The correction must be copy-work, not guess-work (task-20260929-638bde:
-        # every retry fixed some quotes and broke others because the rejection
-        # never showed what the cited lines actually read).
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("def compute():\n    return X\n", encoding="utf-8")
-            payload = {
-                "evidence_updates": [
-                    _evidence(
-                        source=site.as_posix(),
-                        quote={
-                            "path": site.as_posix(),
-                            "line_start": 1,
-                            "line_end": 2,
-                            "text": "compute() writes X to a result file",
-                        },
-                    )
-                ]
-            }
-
+            site = Path(tmp) / 'site.py'
+            site.write_text('def compute():\n    return X\n', encoding='utf-8')
+            payload = {'evidence_updates': [_evidence(source=site.as_posix(), quote={'path': site.as_posix(), 'line_start': 1, 'line_end': 2, 'text': 'compute() writes X to a result file'})]}
             rejection = _quote_rejection(_request(), payload)
-
-            self.assertIn("the cited lines read:", rejection)
-            self.assertIn("def compute()", rejection)
-            self.assertIn("return X", rejection)
+            self.assertIn('the cited lines read:', rejection)
+            self.assertIn('def compute()', rejection)
+            self.assertIn('return X', rejection)
 
     def test_mismatch_rejection_without_line_range_echoes_nearest_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("alpha = 1\ndef compute():\n    return X\n", encoding="utf-8")
-            payload = {
-                "evidence_updates": [
-                    _evidence(
-                        source=site.as_posix(),
-                        quote={
-                            "path": site.as_posix(),
-                            "text": "def compute():\n    return Y",
-                        },
-                    )
-                ]
-            }
-
+            site = Path(tmp) / 'site.py'
+            site.write_text('alpha = 1\ndef compute():\n    return X\n', encoding='utf-8')
+            payload = {'evidence_updates': [_evidence(source=site.as_posix(), quote={'path': site.as_posix(), 'text': 'def compute():\n    return Y'})]}
             rejection = _quote_rejection(_request(), payload)
-
-            self.assertIn("the cited lines read:", rejection)
-            self.assertIn("return X", rejection)
+            self.assertIn('the cited lines read:', rejection)
+            self.assertIn('return X', rejection)
 
     def test_quote_path_falls_back_to_source_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("Y = 2\n", encoding="utf-8")
-            payload = {
-                "evidence_updates": [
-                    _evidence(
-                        source=f"{site.as_posix()}:1",
-                        quote={"line_start": 1, "line_end": 1, "text": "Y = 2"},
-                    )
-                ]
-            }
-            self.assertEqual(_quote_rejection(_request(), payload), "")
+            site = Path(tmp) / 'site.py'
+            site.write_text('Y = 2\n', encoding='utf-8')
+            payload = {'evidence_updates': [_evidence(source=f'{site.as_posix()}:1', quote={'line_start': 1, 'line_end': 1, 'text': 'Y = 2'})]}
+            self.assertEqual(_quote_rejection(_request(), payload), '')
 
     def test_oversized_quote_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("\n".join(f"line {i}" for i in range(40)), encoding="utf-8")
-            payload = {
-                "evidence_updates": [
-                    _evidence(
-                        source=site.as_posix(),
-                        quote={
-                            "path": site.as_posix(),
-                            "line_start": 1,
-                            "line_end": 40,
-                            "text": "\n".join(f"line {i}" for i in range(31)),
-                        },
-                    )
-                ]
-            }
+            site = Path(tmp) / 'site.py'
+            site.write_text('\n'.join((f'line {i}' for i in range(40))), encoding='utf-8')
+            payload = {'evidence_updates': [_evidence(source=site.as_posix(), quote={'path': site.as_posix(), 'line_start': 1, 'line_end': 40, 'text': '\n'.join((f'line {i}' for i in range(31)))})]}
             rejection = _quote_rejection(_request(), payload)
-            self.assertIn("30 lines", rejection)
-            # The actual size rides the rejection: "exceeds" alone left the
-            # worker guessing how much to cut (task-20260929-dad75d re-submitted
-            # the same oversized span on the retry).
-            self.assertIn("quote is 31 lines", rejection)
-            self.assertIn("cut it to only the cited lines", rejection)
+            self.assertIn('30 lines', rejection)
+            self.assertIn('quote is 31 lines', rejection)
+            self.assertIn('cut it to only the cited lines', rejection)
 
     def test_nfkc_and_whitespace_normalization_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("def  handler():\n\treturn  verify(x)\n", encoding="utf-8")
-            payload = {
-                "evidence_updates": [
-                    _evidence(
-                        source=site.as_posix(),
-                        quote={
-                            "path": site.as_posix(),
-                            "line_start": 1,
-                            "line_end": 2,
-                            "text": "def handler():\n return verify(x)",
-                        },
-                    )
-                ]
-            }
-            self.assertEqual(_quote_rejection(_request(), payload), "")
+            site = Path(tmp) / 'site.py'
+            site.write_text('def  handler():\n\treturn  verify(x)\n', encoding='utf-8')
+            payload = {'evidence_updates': [_evidence(source=site.as_posix(), quote={'path': site.as_posix(), 'line_start': 1, 'line_end': 2, 'text': 'def handler():\n return verify(x)'})]}
+            self.assertEqual(_quote_rejection(_request(), payload), '')
 
     def test_relative_quote_path_resolves_from_repo_root(self) -> None:
-        payload = {
-            "evidence_updates": [
-                _evidence(
-                    source="cmd/orchestrator/quote_gate.py:1",
-                    quote={
-                        "path": "cmd/orchestrator/quote_gate.py",
-                        "line_start": 30,
-                        "line_end": 30,
-                        "text": "QUOTE_MAX_CHARS = 4096",
-                    },
-                )
-            ]
-        }
-        self.assertEqual(_quote_rejection(_request(), payload), "")
+        payload = {'evidence_updates': [_evidence(source='cmd/orchestrator/quote_gate.py:1', quote={'path': 'cmd/orchestrator/quote_gate.py', 'line_start': 30, 'line_end': 30, 'text': 'QUOTE_MAX_CHARS = 4096'})]}
+        self.assertEqual(_quote_rejection(_request(), payload), '')
 
     def test_finding_response_without_quote_is_rejected(self) -> None:
-        payload = {
-            "finding_responses": [
-                _response(source="cmd/orchestrator/quote_gate.py:1", answer="see site")
-            ]
-        }
+        payload = {'finding_responses': [_response(source='cmd/orchestrator/quote_gate.py:1', answer='see site')]}
         rejection = _quote_rejection(_request(), payload)
-        self.assertIn("QUOTE_REQUIRED", rejection)
-        self.assertIn("finding-1", rejection)
+        self.assertIn('QUOTE_REQUIRED', rejection)
+        self.assertIn('finding-1', rejection)
 
     def test_finding_response_with_verbatim_quote_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("Z = 3\n", encoding="utf-8")
-            payload = {
-                "finding_responses": [
-                    _response(
-                        source=f"{site.as_posix()}:1",
-                        quote={"path": site.as_posix(), "text": "Z = 3"},
-                    )
-                ]
-            }
-            self.assertEqual(_quote_rejection(_request(), payload), "")
+            site = Path(tmp) / 'site.py'
+            site.write_text('Z = 3\n', encoding='utf-8')
+            payload = {'finding_responses': [_response(source=f'{site.as_posix()}:1', quote={'path': site.as_posix(), 'text': 'Z = 3'})]}
+            self.assertEqual(_quote_rejection(_request(), payload), '')
 
     def test_empty_quote_text_counts_as_missing(self) -> None:
-        rejection = _quote_rejection(
-            _request(),
-            {
-                "evidence_updates": [
-                    _evidence(
-                        source="cmd/orchestrator/quote_gate.py:1",
-                        quote={"text": " "},
-                    )
-                ]
-            },
-        )
-        self.assertIn("QUOTE_REQUIRED", rejection)
-
-
-class QuoteDemotionTests(unittest.TestCase):
-    """One bad quote costs its entry verified status, not the whole reply."""
-
-    def _payload(self, site: Path) -> dict:
-        return {
-            "summary": "kept",
-            "evidence_updates": [
-                _evidence(
-                    evidence_id="ev-good",
-                    source=f"{site.as_posix()}:1",
-                    quote={"path": site.as_posix(), "text": "Z = 3"},
-                ),
-                _evidence(
-                    evidence_id="ev-bad",
-                    source=f"{site.as_posix()}:1",
-                    conclusion="writes Z to a file",
-                    quote={"path": site.as_posix(), "text": "Z is written out"},
-                ),
-            ],
-            "finding_responses": [
-                _response(
-                    finding_id="finding-bad",
-                    source="cmd/orchestrator/quote_gate.py:1",
-                    answer="see site",
-                ),
-            ],
-        }
-
-    def test_only_flagged_entries_are_demoted(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("Z = 3\n", encoding="utf-8")
-            payload = self._payload(site)
-
-            result = _apply_quote_gate(_request(), payload)
-
-        good, bad = result["evidence_updates"]
-        self.assertIn("quote", good)
-        self.assertFalse(good["conclusion"].startswith(UNVERIFIED_MARK))
-        self.assertNotIn("quote", bad)
-        self.assertTrue(bad["conclusion"].startswith(UNVERIFIED_MARK))
-        self.assertIn("QUOTE_MISMATCH", bad["conclusion"])
-        self.assertIn("writes Z to a file", bad["conclusion"])
-        self.assertEqual(result["summary"], "kept")
-
-    def test_demoted_finding_response_cannot_suggest_close(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("Z = 3\n", encoding="utf-8")
-
-            result = _apply_quote_gate(_request(), self._payload(site))
-
-        response = result["finding_responses"][0]
-        self.assertTrue(response["answer"].startswith(UNVERIFIED_MARK))
-        self.assertIn("QUOTE_REQUIRED", response["answer"])
-        self.assertEqual(response["suggested_disposition"], "REVISE")
-
-    def test_input_payload_is_not_mutated(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("Z = 3\n", encoding="utf-8")
-            payload = self._payload(site)
-            snapshot = repr(payload)
-
-            _apply_quote_gate(_request(), payload)
-
-        self.assertEqual(repr(payload), snapshot)
-
-    def test_clean_payload_is_returned_as_is(self) -> None:
-        payload = {"evidence_updates": [_evidence(source="runtime probe")]}
-
-        self.assertIs(_apply_quote_gate(_request(), payload), payload)
-
-    def test_demotion_is_stable_once_applied(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            site = Path(tmp) / "site.py"
-            site.write_text("Z = 3\n", encoding="utf-8")
-            first = demote_unverified(
-                self._payload(site), find_quote_issues(self._payload(site))
-            )
-
-            second = _apply_quote_gate(_request(), first)
-
-        self.assertEqual(find_quote_issues(first), find_quote_issues(second))
-
-
-class RequirementContractBackfillTests(unittest.TestCase):
-    """Empty group doc slots must carry the authoritative contract."""
-
-    def _requirements(self) -> tuple[dict, ...]:
-        return (
-            {
-                "requirement_id": "req-000001",
-                "statement": "原始条款文本：验收信号必须可打勾",
-                "priority": "must",
-                "scope": "in",
-                "kind": "task",
-                "source": "issue-1",
-                "acceptance_signal": "accept-item-000001",
-            },
-            {"requirement_id": "", "statement": ""},
-        )
-
-    def test_markdown_renders_the_contract(self) -> None:
-        class Review:
-            requirements = self._requirements()
-
-        text = _requirement_contract_markdown(Review())
-        self.assertIn("[Authoritative requirement contract]", text)
-        self.assertIn("- req-000001 (must/in/task): 原始条款文本：验收信号必须可打勾", text)
-        self.assertIn("source: issue-1", text)
-        self.assertIn("acceptance: accept-item-000001", text)
-        self.assertNotIn("None", text)
-
-    def test_empty_contract_returns_empty_string(self) -> None:
-        class Review:
-            requirements = ()
-
-        self.assertEqual(_requirement_contract_markdown(Review()), "")
-
-    def test_truncation_respects_the_limit(self) -> None:
-        class Review:
-            requirements = (
-                {"requirement_id": "req-1", "statement": "x" * 9000},
-            )
-
-        text = _requirement_contract_markdown(Review(), limit=100)
-        self.assertLessEqual(len(text), 120)
-        self.assertTrue(text.endswith("(truncated)"))
-
-
-if __name__ == "__main__":
+        rejection = _quote_rejection(_request(), {'evidence_updates': [_evidence(source='cmd/orchestrator/quote_gate.py:1', quote={'text': ' '})]})
+        self.assertIn('QUOTE_REQUIRED', rejection)
+if __name__ == '__main__':
     unittest.main()

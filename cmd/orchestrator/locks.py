@@ -81,6 +81,9 @@ class TaskLock:
             raise TaskLockError(f"task lock ownership lost: {self.path}")
         self._write_metadata()
 
+    def has_live_owner(self) -> bool:
+        return self.path.exists() and not self._can_reclaim(self._read_metadata())
+
     def release(self) -> None:
         if self._handle is None:
             return
@@ -137,6 +140,8 @@ class TaskLock:
             return {}
 
     def _can_reclaim(self, metadata: dict[str, Any]) -> bool:
+        if metadata.get('host') and metadata['host'] != socket.gethostname():
+            return False  # A local PID cannot establish liveness on another host.
         try:
             lease_until = float(metadata.get("lease_until", 0))
             pid = int(metadata.get("pid", 0) or 0)
@@ -144,8 +149,35 @@ class TaskLock:
             return False
         if lease_until >= time.time() or pid <= 0:
             return False
+        return not process_is_alive(pid)
+
+
+def process_is_alive(pid: int) -> bool:
+    """Read-only probe. In particular, os.kill(pid, 0) kills Windows processes."""
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD,wintypes.BOOL,wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE,wintypes.DWORD)
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.OpenProcess(0x00100000,False,pid)  # SYNCHRONIZE only.
+        if not handle:
+            # Invalid PID is absent; access denied and unknown errors fail closed.
+            return ctypes.get_last_error() != 87
         try:
-            os.kill(pid, 0)
-        except OSError:
-            return True
+            return kernel.WaitForSingleObject(handle,0) != 0  # WAIT_OBJECT_0 = exited.
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid,0)
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True

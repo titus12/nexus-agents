@@ -295,10 +295,11 @@ __all__ = ["FileArtifactStore", "MulticaTransportAdapter"]
 
 
 _SKILLS = {
-    "ZHONGSHU_ANALYST": "zhongshu-analyst",
-    "ZHONGSHU_SOLVER": "zhongshu-solver",
-    "ZHONGSHU_CRITIC": "zhongshu-critic",
-    "ZHONGSHU_FREEZE_CHECK": "zhongshu-critic",
+    'REQ_ANALYZE':'requirements-analyst',
+    'REQ_EVIDENCE':'requirements-analyst',
+    'REQ_DRAFT':'requirements-solver',
+    'REQ_REVIEW':'requirements-critic',
+    'MENXIA_REQUIREMENTS_INTAKE':'menxia-requirements-intake',
     "MENXIA_ITEM_SOLVER": "menxia-solver",
     "MENXIA_ITEM_ANALYST": "menxia-analyst",
     "MENXIA_ITEM_CRITIC": "menxia-critic",
@@ -317,7 +318,7 @@ def _skill_directive(state: str) -> str:
     skill = _skill_name(state)
     if not skill:
         return ""
-    phase = "ZHONGSHU" if str(state).startswith("ZHONGSHU") else "MENXIA"
+    phase = "ZHONGSHU" if str(state).startswith(("ZHONGSHU",'REQ_')) else "MENXIA"
     return f"ACTIVE_RUNTIME_SKILL: {skill}\nACTIVE_RUNTIME_PHASE: {phase}\nACTIVE_RUNTIME_STATE: {state}"
 
 
@@ -330,7 +331,7 @@ def _skill_lock(state: str) -> dict[str, object]:
     # <repo>/cmd).  Using parents[2] silently returned a "missing" lock and
     # blocked every Zhongshu/Menxia dispatch before the prompt was built.
     path = Path(__file__).resolve().parents[3] / "docs" / "multi" / f"{skill}-skill.md"
-    if str(state).startswith("ZHONGSHU"):
+    if str(state).startswith(("ZHONGSHU",'REQ_')):
         path = path.parent / "runtime" / path.name
     try:
         content = path.read_bytes()

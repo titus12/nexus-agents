@@ -1,150 +1,69 @@
 """Direct, event-bound Feishu notifications for the linear workflow."""
-
 from __future__ import annotations
-
 from collections.abc import Mapping
 import json
 import logging
-
 from .domain.context import WorkflowContext
 from .domain.errors import is_infrastructure_failure, is_reply_failure
 from .domain.events import DomainEvent
-from .domain.policies.solver_plan import is_retryable_solver_reply_error
+from .domain.policies.reply_errors import is_retryable_solver_reply_error
 from .runtime.ports import NotificationPort, NotificationRequest
-
-
-logger = logging.getLogger("review_orchestrator_fsm")
-
-# Reply slips charged to the dedicated reply budget (see RecoveryState).
-_REPLY_RETRY_ERROR_CODES = ("NODE_TASK_REVIEW_RESULT_INVALID",)
-
-ROLE_NAMES = {
-    "ZHONGSHU_ANALYST": "分析师",
-    "ZHONGSHU_SOLVER": "规划师",
-    "ZHONGSHU_CRITIC": "审查员",
-    "ZHONGSHU_FREEZE_CHECK": "审查员",
-    "HUMAN_GATE": "人工审批",
-    "MENXIA_ITEM_SOLVER": "规划师",
-    "MENXIA_ITEM_ANALYST": "分析师",
-    "MENXIA_ITEM_CRITIC": "审查员",
-    "MENXIA_GROUP_GATE": "审查员",
-}
-
-ACTION_LABELS = {
-    "READY_FOR_SOLVER": "证据已提交给规划师",
-    "EVIDENCE_PACKET_READY_FOR_CRITIC": "证据已直通审查员",
-    "READY_FOR_CRITIC": "方案已提交给审查员",
-    "READY_FOR_ANALYST": "条目已提交给分析师",
-    "EVIDENCE_SUFFICIENT": "证据审查通过",
-    "APPROVE_ITEM": "条目审查通过",
-    "APPROVE_GROUP": "当前组审查通过",
-    "APPROVE_CRITIC": "审查通过",
-    "TASK_APPROVED": "任务审查通过",
-    "REQUEST_ANALYST_EVIDENCE": "需要分析师补充证据",
-    "NEEDS_MORE_EVIDENCE": "需要补充证据",
-    "REQUEST_SOLVER_REVISION": "需要规划师修订",
-    "REQUEST_REGROUP": "需要重新分组",
-    "REVISE_ITEM": "当前条目需要修订",
-    "HUMAN_GATE": "需要人工决策",
-    "HUMAN_DECISION_RECEIVED": "已收到人工决策",
-    "RETRY_RESUMED": "系统自动重试",
-    "DONE": "任务已完成",
-}
-
-PRESENTATION_EVENTS = frozenset(
-    {
-        "STATE_ENTER",
-        "AGENT_REPLY_ACCEPTED",
-        "AGENT_REPLY_REJECTED",
-        "AGENT_REPLY_CONTRACT_REJECTED",
-        "LOCAL_VALIDATION_PASSED",
-        "HUMAN_DECISION_RECEIVED",
-        "RETRY_RESUMED",
-        "HEARTBEAT",
-        "ZHONGSHU_FANOUT_STARTED",
-        "ZHONGSHU_WORKER_RETRY",
-        "ZHONGSHU_FANIN_COMPLETED",
-    }
-)
-
-HIDDEN_EVENTS = frozenset({"POLL_START", "POLL_END", "DISPATCH_START", "DISPATCH_END"})
-SYSTEM_EVENTS = frozenset(
-    {
-        "START",
-        "RESUME",
-        "RETRY",
-        "BLOCK",
-        "BLOCKED",
-        "OPEN_HUMAN_GATE",
-        "HUMAN_GATE",
-        "FAIL",
-        "CANCEL",
-        "TIMEOUT",
-        "NOOP",
-        "NODE_COMPLETED",
-    }
-)
-
+logger = logging.getLogger('review_orchestrator_fsm')
+_REPLY_RETRY_ERROR_CODES = ('NODE_TASK_REVIEW_RESULT_INVALID',)
+ROLE_NAMES = {'ZHONGSHU_ANALYST': '分析师', 'ZHONGSHU_SOLVER': '规划师', 'ZHONGSHU_CRITIC': '审查员', 'ZHONGSHU_FREEZE_CHECK': '审查员', 'HUMAN_GATE': '人工审批', 'MENXIA_ITEM_SOLVER': '规划师', 'MENXIA_ITEM_ANALYST': '分析师', 'MENXIA_ITEM_CRITIC': '审查员', 'MENXIA_GROUP_GATE': '审查员'}
+ACTION_LABELS = {'READY_FOR_SOLVER': '证据已提交给规划师', 'EVIDENCE_PACKET_READY_FOR_CRITIC': '证据已直通审查员', 'READY_FOR_CRITIC': '方案已提交给审查员', 'READY_FOR_ANALYST': '条目已提交给分析师', 'EVIDENCE_SUFFICIENT': '证据审查通过', 'APPROVE_ITEM': '条目审查通过', 'APPROVE_GROUP': '当前组审查通过', 'APPROVE_CRITIC': '审查通过', 'TASK_APPROVED': '任务审查通过', 'REQUEST_ANALYST_EVIDENCE': '需要分析师补充证据', 'NEEDS_MORE_EVIDENCE': '需要补充证据', 'REQUEST_SOLVER_REVISION': '需要规划师修订', 'REQUEST_REGROUP': '需要重新分组', 'REVISE_ITEM': '当前条目需要修订', 'HUMAN_GATE': '需要人工决策', 'HUMAN_DECISION_RECEIVED': '已收到人工决策', 'RETRY_RESUMED': '系统自动重试', 'DONE': '任务已完成'}
+PRESENTATION_EVENTS = frozenset({'STATE_ENTER', 'AGENT_REPLY_ACCEPTED', 'AGENT_REPLY_REJECTED', 'AGENT_REPLY_CONTRACT_REJECTED', 'LOCAL_VALIDATION_PASSED', 'HUMAN_DECISION_RECEIVED', 'RETRY_RESUMED', 'HEARTBEAT', 'ZHONGSHU_FANOUT_STARTED', 'ZHONGSHU_WORKER_RETRY', 'ZHONGSHU_FANIN_COMPLETED'})
+HIDDEN_EVENTS = frozenset({'POLL_START', 'POLL_END', 'DISPATCH_START', 'DISPATCH_END'})
+SYSTEM_EVENTS = frozenset({'START', 'RESUME', 'RETRY', 'BLOCK', 'BLOCKED', 'OPEN_HUMAN_GATE', 'HUMAN_GATE', 'FAIL', 'CANCEL', 'TIMEOUT', 'NOOP', 'NODE_COMPLETED'})
 
 def should_emit_notification(event_name: str) -> bool:
     return event_name in PRESENTATION_EVENTS
 
-
-def build_notification(
-    state: str,
-    event_name: str,
-    event: DomainEvent,
-    context: WorkflowContext,
-    *,
-    limit: int = 1400,
-) -> str:
+def build_notification(state: str, event_name: str, event: DomainEvent, context: WorkflowContext, *, limit: int=1400) -> str:
     """Render a bounded human-facing update without transport envelopes."""
-
     payload = event.payload if isinstance(event.payload, Mapping) else {}
     role = ROLE_NAMES.get(state, state)
-    action = str(payload.get("action") or event.name or "").strip()
-    label = ACTION_LABELS.get(action, ACTION_LABELS.get(event_name, "任务状态更新"))
-    if event_name == "STATE_ENTER":
-        label = "开始处理" if context.progression.sequence <= 1 else f"进入{role}阶段"
-    if event_name == "HEARTBEAT":
-        label = "任务仍在运行"
-    if event_name == "AGENT_REPLY_REJECTED":
-        label = "Agent 回复需要修正"
-    if state == "HUMAN_GATE" and event_name != "HUMAN_DECISION_RECEIVED":
-        label = "需要人工决策"
-
-    lines = [f"【{role}｜{label}】", f"任务：{context.identity.task_id}", f"状态：{state}"]
+    action = str(payload.get('action') or event.name or '').strip()
+    label = ACTION_LABELS.get(action, ACTION_LABELS.get(event_name, '任务状态更新'))
+    if event_name == 'STATE_ENTER':
+        label = '开始处理' if context.progression.sequence <= 1 else f'进入{role}阶段'
+    if event_name == 'HEARTBEAT':
+        label = '任务仍在运行'
+    if event_name == 'AGENT_REPLY_REJECTED':
+        label = 'Agent 回复需要修正'
+    if state == 'HUMAN_GATE' and event_name != 'HUMAN_DECISION_RECEIVED':
+        label = '需要人工决策'
+    lines = [f'【{role}｜{label}】', f'任务：{context.identity.task_id}', f'状态：{state}']
     if context.request.raw_request:
-        lines.append(f"请求：{_brief(context.request.raw_request, 220)}")
+        lines.append(f'请求：{_brief(context.request.raw_request, 220)}')
     if context.review and context.review.active_item_id:
-        lines.append(f"当前条目：{context.review.active_item_id}")
-
-    if event_name == "HEARTBEAT":
+        lines.append(f'当前条目：{context.review.active_item_id}')
+    if event_name == 'HEARTBEAT':
         lines.append(f"已等待：{payload.get('elapsed_seconds', 0)} 秒")
         lines.append(f"等待角色：{payload.get('expected_agent_id') or context.delivery.expected_agent_id or role}")
-    elif event_name in {"AGENT_REPLY_REJECTED", "AGENT_REPLY_CONTRACT_REJECTED"}:
-        reason = payload.get("reason") or payload.get("message") or payload.get("error_code")
+    elif event_name in {'AGENT_REPLY_REJECTED', 'AGENT_REPLY_CONTRACT_REJECTED'}:
+        reason = payload.get('reason') or payload.get('message') or payload.get('error_code')
         if reason:
-            lines.append(f"原因：{_brief(reason, 420)}")
-    elif event_name == "HUMAN_DECISION_RECEIVED":
-        answer = payload.get("answer") or payload.get("selected")
+            lines.append(f'原因：{_brief(reason, 420)}')
+    elif event_name == 'HUMAN_DECISION_RECEIVED':
+        answer = payload.get('answer') or payload.get('selected')
         if answer:
-            lines.append(f"选择：{_brief(answer, 180)}")
-    elif event_name == "RETRY_RESUMED":
+            lines.append(f'选择：{_brief(answer, 180)}')
+    elif event_name == 'RETRY_RESUMED':
         failure = context.recovery.last_failure
-        reason = str(getattr(failure, "error_code", "") or "")
+        reason = str(getattr(failure, 'error_code', '') or '')
         if reason:
-            lines.append(f"重试原因：{reason}")
-        lines.append(f"重试次数：{_retry_budget(context)}")
-    elif event_name == "DONE" or state == "DONE":
-        _append_payload(lines, payload, "final_delivery")
-        lines.append("方案已完成；不代表代码已实现或测试已执行。")
+            lines.append(f'重试原因：{reason}')
+        lines.append(f'重试次数：{_retry_budget(context)}')
+    elif event_name == 'DONE' or state == 'DONE':
+        _append_payload(lines, payload, 'final_delivery')
+        lines.append('方案已完成；不代表代码已实现或测试已执行。')
     else:
         gate_block = _human_gate_block(state, payload, context)
         if gate_block:
             lines.extend(gate_block)
         else:
-            for field in ("notification", "summary", "confirmed_facts", "questions_for_solver"):
+            for field in ('notification', 'summary', 'confirmed_facts', 'questions_for_solver'):
                 _append_payload(lines, payload, field)
             progress = _review_progress_lines(state, event_name, payload, context)
             if progress:
@@ -152,83 +71,32 @@ def build_notification(
             else:
                 finding_lines = _finding_lines(payload, context)
                 if finding_lines:
-                    lines.append("待解决问题：")
+                    lines.append('待解决问题：')
                     lines.extend(finding_lines)
                 else:
-                    _append_payload(lines, payload, "findings")
+                    _append_payload(lines, payload, 'findings')
             evidence_lines = _missing_evidence_lines(payload)
             if evidence_lines:
-                lines.append("缺少的证据：")
+                lines.append('缺少的证据：')
                 lines.extend(evidence_lines)
             else:
-                _append_payload(lines, payload, "missing_evidence")
+                _append_payload(lines, payload, 'missing_evidence')
+    return _brief('\n'.join(lines), limit)
 
-    return _brief("\n".join(lines), limit)
-
-
-def build_agent_notification(
-    role: str,
-    state: str,
-    event_name: str,
-    context: object,
-    payload: Mapping[str, object] | None = None,
-    limit: int = 1400,
-) -> str:
+def build_agent_notification(role: str, state: str, event_name: str, context: object, payload: Mapping[str, object] | None=None, limit: int=1400) -> str:
     """Compatibility renderer for callers of the legacy notification API."""
-
     if isinstance(context, WorkflowContext):
         task_id = context.identity.task_id
         workflow_context = context
     else:
-        task_id = str(getattr(context, "task_id", ""))
+        task_id = str(getattr(context, 'task_id', ''))
         workflow_context = _legacy_context(task_id, state, context)
-    event = DomainEvent(
-        name=event_name,
-        task_id=task_id or "legacy-task",
-        sequence=workflow_context.progression.sequence,
-        payload=dict(payload or {}),
-        occurred_at=workflow_context.progression.entered_at,
-    )
+    event = DomainEvent(name=event_name, task_id=task_id or 'legacy-task', sequence=workflow_context.progression.sequence, payload=dict(payload or {}), occurred_at=workflow_context.progression.entered_at)
     return build_notification(state, event_name, event, workflow_context, limit=limit)
 
-
-def build_notification_parts(
-    state: str, event_name: str, event: DomainEvent, context: WorkflowContext,
-) -> tuple[str, ...]:
-    """PLAN_REVIEW has one brief notice; the full body travels as metadata."""
+def build_notification_parts(state: str, event_name: str, event: DomainEvent, context: WorkflowContext) -> tuple[str, ...]:
     body = build_notification(state, event_name, event, context)
-    gate = context.human_gate
-    if state != "HUMAN_GATE" or not gate or gate.reason_code != "PLAN_REVIEW":
-        return (body,) if body else ()
-    version = int(context.review.plan_review.get("version") or 1) if context.review else 1
-    summary = str(context.review.plan_review.get("revision_summary") or "") if context.review else ""
-    notice = (f"【中书省方案待审｜v{version}】\n"
-              f"任务：{context.identity.task_id}\n决策编号：{gate.decision_id}\n"
-              "请打开完整文档审查，并回复这条消息。\n"
-              "仅回复「通过」交门下省；其他非空回复交 Solver 修订，再送你审查。")
-    if summary:
-        notice += "\n本轮修改：" + summary[:400]
-    return (notice,)
-
-
-def plan_review_notification_request(context: WorkflowContext, key: str | None = None,
-                                     body: str | None = None) -> NotificationRequest:
-    from .domain.plan_review import text_hash
-    from .zhongshu_plan_doc import render_plan_review_packet
-
-    gate = context.human_gate
-    if not gate or gate.reason_code != "PLAN_REVIEW":
-        raise ValueError("PLAN_REVIEW_GATE_REQUIRED")
-    if body is None:
-        event = DomainEvent("HUMAN_GATE", context.identity.task_id,
-                            context.progression.sequence, {}, context.progression.entered_at)
-        body = build_notification_parts("HUMAN_GATE", "HUMAN_GATE", event, context)[0]
-    packet = render_plan_review_packet(context)
-    version = int(context.review.plan_review.get("version") or 1) if context.review else 1
-    return NotificationRequest(context.identity.task_id,
-                               key or f"{context.identity.task_id}:{context.progression.sequence}:human-gate:HUMAN_GATE",
-                               body, packet, version, text_hash(packet), gate.decision_id)
-
+    return (body,) if body else ()
 
 class DirectNotificationEmitter:
     """Send notifications at the workflow event boundary and return keys."""
@@ -236,617 +104,426 @@ class DirectNotificationEmitter:
     def __init__(self, port: NotificationPort) -> None:
         self._port = port
 
-    def emit(
-        self,
-        before: WorkflowContext,
-        event: DomainEvent,
-        after: WorkflowContext,
-    ) -> tuple[str, ...]:
+    def emit(self, before: WorkflowContext, event: DomainEvent, after: WorkflowContext) -> tuple[str, ...]:
         notifications: list[tuple[str, str, WorkflowContext, DomainEvent]] = []
         event_name = _presentation_event_name(event, before.progression.state)
         if event_name:
-            notifications.append((event_name, "event", before, event))
+            notifications.append((event_name, 'event', before, event))
         if before.progression.state != after.progression.state:
-            if after.progression.state == "HUMAN_GATE":
-                notifications.append(("HUMAN_GATE", "human-gate", after, event))
-            elif after.progression.state == "DONE":
-                notifications.append(("DONE", "done", after, event))
+            if after.progression.state == 'HUMAN_GATE':
+                notifications.append(('HUMAN_GATE', 'human-gate', after, event))
+            elif after.progression.state == 'DONE':
+                notifications.append(('DONE', 'done', after, event))
             else:
-                notifications.append(("STATE_ENTER", "state-enter", after, event))
-
+                notifications.append(('STATE_ENTER', 'state-enter', after, event))
         sent: list[str] = []
         already_sent = set(after.audit.sent_notification_keys)
         parts: list[tuple[str, str, WorkflowContext, str]] = []
         for presentation_event, suffix, context, source in notifications:
-            key = f"{event.task_id}:{after.progression.sequence}:{suffix}:{presentation_event}"
+            key = f'{event.task_id}:{after.progression.sequence}:{suffix}:{presentation_event}'
             bodies = build_notification_parts(context.progression.state, presentation_event, source, context)
             for index, body in enumerate(bodies, start=1):
-                part_key = f"{key}:part-{index:03d}" if len(bodies) > 1 else key
+                part_key = f'{key}:part-{index:03d}' if len(bodies) > 1 else key
                 parts.append((presentation_event, part_key, context, body))
         for presentation_event, key, context, body in parts:
             if key in already_sent:
                 continue
             if not body:
                 continue
-            logger.info(
-                "FEISHU_NOTIFY_START task_id=%s sequence=%s state=%s event=%s notification_key=%s text_chars=%s",
-                event.task_id,
-                after.progression.sequence,
-                context.progression.state,
-                presentation_event,
-                key,
-                len(body),
-            )
+            logger.info('FEISHU_NOTIFY_START task_id=%s sequence=%s state=%s event=%s notification_key=%s text_chars=%s', event.task_id, after.progression.sequence, context.progression.state, presentation_event, key, len(body))
             try:
-                request = (plan_review_notification_request(context, key, body)
-                           if presentation_event == "HUMAN_GATE" and context.human_gate
-                           and context.human_gate.reason_code == "PLAN_REVIEW"
-                           else NotificationRequest(event.task_id, key, body))
+                request = NotificationRequest(event.task_id, key, body)
                 receipt = self._port.send(request)
                 if receipt.delivered:
-                    logger.info("FEISHU_NOTIFY_SUCCESS task_id=%s sequence=%s event=%s notification_key=%s", event.task_id, after.progression.sequence, presentation_event, key)
+                    logger.info('FEISHU_NOTIFY_SUCCESS task_id=%s sequence=%s event=%s notification_key=%s', event.task_id, after.progression.sequence, presentation_event, key)
                 else:
-                    logger.warning("FEISHU_NOTIFY_FAILED task_id=%s sequence=%s event=%s notification_key=%s reason=not_delivered", event.task_id, after.progression.sequence, presentation_event, key)
+                    logger.warning('FEISHU_NOTIFY_FAILED task_id=%s sequence=%s event=%s notification_key=%s reason=not_delivered', event.task_id, after.progression.sequence, presentation_event, key)
                     continue
             except Exception:
-                logger.exception("FEISHU_NOTIFY_FAILED task_id=%s sequence=%s event=%s notification_key=%s", event.task_id, after.progression.sequence, presentation_event, key)
+                logger.exception('FEISHU_NOTIFY_FAILED task_id=%s sequence=%s event=%s notification_key=%s', event.task_id, after.progression.sequence, presentation_event, key)
                 continue
             sent.append(key)
             already_sent.add(key)
         return tuple(sent)
 
-
-def _presentation_event_name(event: DomainEvent, from_state: str = "") -> str | None:
+def _presentation_event_name(event: DomainEvent, from_state: str='') -> str | None:
     if event.name in PRESENTATION_EVENTS:
         return event.name
-    if event.name == "FAIL":
-        return "AGENT_REPLY_REJECTED"
-    if event.name == "RESUME":
-        # Only a resume from a state that actually waits for a person is a human
-        # decision.  RETRY_WAIT (and PERSISTENCE_DEGRADED) are resumed
-        # automatically by the runner, so labelling those "已收到人工决策" is wrong.
-        if from_state in {"HUMAN_GATE", "BLOCKED"}:
-            return "HUMAN_DECISION_RECEIVED"
-        return "RETRY_RESUMED"
-    if event.name == "NODE_COMPLETED":
+    if event.name == 'FAIL':
+        return 'AGENT_REPLY_REJECTED'
+    if event.name == 'RESUME':
+        if from_state in {'HUMAN_GATE', 'BLOCKED'}:
+            return 'HUMAN_DECISION_RECEIVED'
+        return 'RETRY_RESUMED'
+    if event.name == 'NODE_COMPLETED':
         payload = event.payload if isinstance(event.payload, Mapping) else {}
-        return "AGENT_REPLY_ACCEPTED" if payload.get("action") else "ZHONGSHU_FANIN_COMPLETED"
+        return 'AGENT_REPLY_ACCEPTED' if payload.get('action') else 'ZHONGSHU_FANIN_COMPLETED'
     if event.name in HIDDEN_EVENTS or event.name in SYSTEM_EVENTS:
         return None
-    return "AGENT_REPLY_ACCEPTED"
-
-
-_BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
-_RESOLVED_FINDING_STATUSES = frozenset({"RESOLVED", "WONT_FIX", "DEFERRED", "WONT_VERIFY"})
-_AFFECTED_REASON_LABELS = {
-    "content_changed": "内容更新后重审",
-    "dependency_changed": "依赖变更重审",
-    "re_reviewed": "重新审查",
-}
-_OWNER_LABELS = {
-    "review-solver": "规划师",
-    "review-analyst": "分析师",
-    "review-critic": "审查员",
-    "human": "人工",
-}
-_REVIEW_PROGRESS_STATES = frozenset(
-    {
-        "ZHONGSHU_CRITIC",
-        "ZHONGSHU_FREEZE_CHECK",
-        "ZHONGSHU_SOLVER",
-        "MENXIA_ITEM_SOLVER",
-        "MENXIA_ITEM_ANALYST",
-        "MENXIA_ITEM_CRITIC",
-        "MENXIA_GROUP_GATE",
-    }
-)
-
+    return 'AGENT_REPLY_ACCEPTED'
+_BLOCKING_SEVERITIES = frozenset({'P0', 'P1'})
+_RESOLVED_FINDING_STATUSES = frozenset({'RESOLVED', 'WONT_FIX', 'DEFERRED', 'WONT_VERIFY'})
+_AFFECTED_REASON_LABELS = {'content_changed': '内容更新后重审', 'dependency_changed': '依赖变更重审', 're_reviewed': '重新审查'}
+_OWNER_LABELS = {'review-solver': '规划师', 'review-analyst': '分析师', 'review-critic': '审查员', 'human': '人工'}
+_REVIEW_PROGRESS_STATES = frozenset({'ZHONGSHU_CRITIC', 'ZHONGSHU_FREEZE_CHECK', 'ZHONGSHU_SOLVER', 'MENXIA_ITEM_SOLVER', 'MENXIA_ITEM_ANALYST', 'MENXIA_ITEM_CRITIC', 'MENXIA_GROUP_GATE'})
 
 def _human_gate_lines(payload: Mapping[str, object]) -> list[str]:
     """Render the structured human-gate reason and decision as a short block."""
-
-    gate = payload.get("human_gate_request")
+    gate = payload.get('human_gate_request')
     if not isinstance(gate, Mapping):
-        # Backward compatibility for payloads persisted before the field was
-        # renamed away from the FSM's ``context.human_gate``.
-        gate = payload.get("human_gate")
+        gate = payload.get('human_gate')
     if not isinstance(gate, Mapping) or not gate:
         return []
     lines: list[str] = []
-    reason = str(gate.get("reason") or "").strip()
+    reason = str(gate.get('reason') or '').strip()
     if reason:
-        lines.append(f"人工门原因：{_brief(reason, 320)}")
-    question = str(gate.get("question") or "").strip()
+        lines.append(f'人工门原因：{_brief(reason, 320)}')
+    question = str(gate.get('question') or '').strip()
     if question:
-        lines.append(f"需要你决策：{_brief(question, 320)}")
-    options = [str(item) for item in gate.get("options") or [] if str(item)]
+        lines.append(f'需要你决策：{_brief(question, 320)}')
+    options = [str(item) for item in gate.get('options') or [] if str(item)]
     for index, option in enumerate(options, 1):
-        lines.append(f"  {index}) {_brief(option, 160)}")
-    details = [str(item) for item in gate.get("details") or [] if str(item)]
+        lines.append(f'  {index}) {_brief(option, 160)}')
+    details = [str(item) for item in gate.get('details') or [] if str(item)]
     if details:
-        lines.append("具体问题：")
+        lines.append('具体问题：')
         for detail in details[:6]:
-            lines.append(f"  - {_brief(detail, 200)}")
+            lines.append(f'  - {_brief(detail, 200)}')
     return lines
 
-
-def _human_gate_block(
-    state: str,
-    payload: Mapping[str, object],
-    context: WorkflowContext,
-) -> list[str]:
+def _human_gate_block(state: str, payload: Mapping[str, object], context: WorkflowContext) -> list[str]:
     """Readable escalation block: plain-language reason, blockers, decision ask.
 
     The gate audience is a human who must decide in seconds, so this renders
     the escalation in operator language instead of dumping raw JSON records.
     """
-
     structured = _human_gate_lines(payload)
     if structured:
         structured.extend(_human_decision_guidance(context.identity.task_id))
         return structured
-    if state != "HUMAN_GATE":
+    if state != 'HUMAN_GATE':
         return []
     from .contracts.analyst_gate import analyst_questions
     questions = analyst_questions(payload)
     human_gate = context.human_gate
-    reason_code = (
-        str(getattr(human_gate, "reason_code", "") or "").strip()
-        if human_gate is not None
-        else ""
-    )
+    reason_code = str(getattr(human_gate, 'reason_code', '') or '').strip() if human_gate is not None else ''
     lines: list[str] = []
     if reason_code:
-        lines.append(f"需要人工决策：{_human_reason_text(reason_code, payload, context)}")
+        lines.append(f'需要人工决策：{_human_reason_text(reason_code, payload, context)}')
     if questions:
-        summary = str(payload.get("summary") or "").strip()
+        summary = str(payload.get('summary') or '').strip()
         if summary:
-            lines.append(f"决策原因：{_brief(summary, 600)}")
-        entries = payload.get("questions_for_user") or []
+            lines.append(f'决策原因：{_brief(summary, 600)}')
+        entries = payload.get('questions_for_user') or []
         for entry in entries:
-            if isinstance(entry, Mapping) and isinstance(entry.get("reason"), str) and entry["reason"].strip():
+            if isinstance(entry, Mapping) and isinstance(entry.get('reason'), str) and entry['reason'].strip():
                 lines.append(f"决策原因：{_brief(entry['reason'], 600)}")
-        lines.append("需要你回答的问题：")
-        lines.extend(f"- {_brief(question, 600)}" for question in questions)
+        lines.append('需要你回答的问题：')
+        lines.extend((f'- {_brief(question, 600)}' for question in questions))
     progress = _gate_progress_line(context)
     if progress:
         lines.append(progress)
     finding_lines = _finding_lines(payload, context)
     if finding_lines:
-        lines.append("当前拦路的问题：")
+        lines.append('当前拦路的问题：')
         lines.extend(finding_lines)
     evidence_lines = _missing_evidence_lines(payload)
     if evidence_lines:
-        lines.append("缺少的证据：")
+        lines.append('缺少的证据：')
         lines.extend(evidence_lines)
     if reason_code:
-        lines.append(f"（原因码：{reason_code}）")
-    decision_id = (
-        str(getattr(human_gate, "decision_id", "") or "").strip()
-        if human_gate is not None
-        else ""
-    )
-    if reason_code == "PLAN_REVIEW":
-        lines.extend([
-            "怎么回复：审阅全部需求文档后，仅回复「通过」交门下省；其他非空回复作为修订意见交给 LLM，修订后再次送审。",
-            f"决策编号：{decision_id}",
-        ])
+        lines.append(f'（原因码：{reason_code}）')
+    decision_id = str(getattr(human_gate, 'decision_id', '') or '').strip() if human_gate is not None else ''
+    if reason_code == 'PLAN_REVIEW':
+        lines.extend(['怎么回复：审阅全部需求文档后，仅回复「通过」交门下省；其他非空回复作为修订意见交给 LLM，修订后再次送审。', f'决策编号：{decision_id}'])
     else:
         lines.extend(_human_decision_guidance(context.identity.task_id, decision_id))
     return lines
 
-
-def _human_reason_text(
-    reason_code: str,
-    payload: Mapping[str, object],
-    context: WorkflowContext,
-) -> str:
+def _human_reason_text(reason_code: str, payload: Mapping[str, object], context: WorkflowContext) -> str:
     """Translate a gate reason code into one operator-readable sentence."""
-
-    if reason_code == "PLAN_REVIEW":
-        return (
-            "中书省方案已定稿，下面附完整审阅稿及各组需求文档原文，"
-            "请审阅：仅回复「通过」交门下省；"
-            "其他非空回复交 LLM 修订，完成后再次送你审查"
-        )
-    if reason_code == "ZHONGSHU_DISCARD_NEEDS_HUMAN":
-        return (
-            "品菜师建议丢弃、规划师已复核并从计划中移除了覆盖 must 级需求的任务；"
-            "回复任意内容 = 确认丢弃并继续审查，如不同意请取消任务后重新发起"
-        )
-    if reason_code == "ZHONGSHU_STUCK_FINDING":
+    if reason_code == 'PLAN_REVIEW':
+        return '中书省方案已定稿，下面附完整审阅稿及各组需求文档原文，请审阅：仅回复「通过」交门下省；其他非空回复交 LLM 修订，完成后再次送你审查'
+    if reason_code == 'ZHONGSHU_DISCARD_NEEDS_HUMAN':
+        return '品菜师建议丢弃、规划师已复核并从计划中移除了覆盖 must 级需求的任务；回复任意内容 = 确认丢弃并继续审查，如不同意请取消任务后重新发起'
+    if reason_code == 'ZHONGSHU_STUCK_FINDING':
         rounds = context.recovery.max_stuck_finding_rounds
-        return (
-            f"规划师与审查员对同样的问题连续 {rounds} 轮未达成一致，"
-            "继续自动重试不会有进展"
-        )
-    if reason_code == "ZHONGSHU_ITEM_STALLED":
-        items = "、".join(
-            str(value) for value in (payload.get("affected_item_ids") or [])[:4]
-        )
+        return f'规划师与审查员对同样的问题连续 {rounds} 轮未达成一致，继续自动重试不会有进展'
+    if reason_code == 'ZHONGSHU_ITEM_STALLED':
+        items = '、'.join((str(value) for value in (payload.get('affected_item_ids') or [])[:4]))
         rounds = context.review.max_item_revision_rounds if context.review else 0
-        scope = items or "部分任务"
+        scope = items or '部分任务'
         if rounds:
-            return f"{scope} 连续 {rounds} 轮修订仍未通过审查"
-        return f"{scope} 多轮修订仍未通过审查"
-    if reason_code == "ZHONGSHU_REVISION_BUDGET_EXHAUSTED":
+            return f'{scope} 连续 {rounds} 轮修订仍未通过审查'
+        return f'{scope} 多轮修订仍未通过审查'
+    if reason_code == 'ZHONGSHU_REVISION_BUDGET_EXHAUSTED':
         if context.review:
-            return (
-                f"整体修订轮数已达上限（{context.review.zhongshu_revision_round}"
-                f"/{context.review.max_zhongshu_revision_rounds}），仍有问题未解决"
-            )
-        return "整体修订轮数已达上限，仍有问题未解决"
-    if reason_code == "NODE_FAIL_STREAK_EXHAUSTED":
+            return f'整体修订轮数已达上限（{context.review.zhongshu_revision_round}/{context.review.max_zhongshu_revision_rounds}），仍有问题未解决'
+        return '整体修订轮数已达上限，仍有问题未解决'
+    if reason_code == 'NODE_FAIL_STREAK_EXHAUSTED':
         rounds = context.recovery.max_node_fail_streak
         state = context.recovery.node_fail_state or context.progression.state
-        return (
-            f"{state} 连续 {rounds} 个执行波失败（错误码可能不同），"
-            "继续自动重试大概率重复同样的失败"
-        )
-    return "系统自动处理已到边界，需要人工介入"
-
+        return f'{state} 连续 {rounds} 个执行波失败（错误码可能不同），继续自动重试大概率重复同样的失败'
+    return '系统自动处理已到边界，需要人工介入'
 
 def _gate_progress_line(context: WorkflowContext) -> str:
     review = context.review
     if review is None:
-        return ""
-    rounds = int(getattr(review, "zhongshu_revision_round", 0) or 0)
-    limit = int(getattr(review, "max_zhongshu_revision_rounds", 0) or 0)
-    findings = list(getattr(review, "findings", ()) or ())
-    open_count = sum(1 for finding in findings if _finding_active(finding))
-    return f"当前进度：已修订 {rounds}/{limit} 轮，未解决问题 {open_count} 个"
+        return ''
+    rounds = int(getattr(review, 'zhongshu_revision_round', 0) or 0)
+    limit = int(getattr(review, 'max_zhongshu_revision_rounds', 0) or 0)
+    findings = list(getattr(review, 'findings', ()) or ())
+    open_count = sum((1 for finding in findings if _finding_active(finding)))
+    return f'当前进度：已修订 {rounds}/{limit} 轮，未解决问题 {open_count} 个'
 
-
-def _finding_lines(
-    payload: Mapping[str, object],
-    context: WorkflowContext,
-    limit: int = 4,
-) -> list[str]:
+def _finding_lines(payload: Mapping[str, object], context: WorkflowContext, limit: int=4) -> list[str]:
     """Render active findings as one readable bullet each; empty when none."""
-
-    raw = payload.get("findings")
+    raw = payload.get('findings')
     if not (isinstance(raw, list) and raw):
-        review = getattr(context, "review", None)
-        raw = list(getattr(review, "findings", ()) or ()) if review is not None else []
+        review = getattr(context, 'review', None)
+        raw = list(getattr(review, 'findings', ()) or ()) if review is not None else []
     active = [finding for finding in raw if _finding_active(finding)]
-    active.sort(
-        key=lambda finding: (
-            0 if _finding_severity(finding) in _BLOCKING_SEVERITIES else 1,
-            _finding_severity(finding),
-        )
-    )
+    active.sort(key=lambda finding: (0 if _finding_severity(finding) in _BLOCKING_SEVERITIES else 1, _finding_severity(finding)))
     lines: list[str] = []
     for finding in active[:limit]:
         severity = _finding_severity(finding)
         item_id = _finding_item_id(finding)
-        claim = (
-            _finding_field(finding, "claim")
-            or _finding_field(finding, "required_action")
-            or _finding_field(finding, "target")
-        )
+        claim = _finding_field(finding, 'claim') or _finding_field(finding, 'required_action') or _finding_field(finding, 'target')
         if not claim:
             continue
-        category = _finding_field(finding, "category")
-        prefix = f"[{severity}] " if severity else ""
-        if category == "task_discard":
-            prefix += "品菜师建议丢弃 · "
-        location = f"{item_id}：" if item_id else ""
-        lines.append(f"· {prefix}{location}{_brief(claim, 120)}")
+        category = _finding_field(finding, 'category')
+        prefix = f'[{severity}] ' if severity else ''
+        if category == 'task_discard':
+            prefix += '品菜师建议丢弃 · '
+        location = f'{item_id}：' if item_id else ''
+        lines.append(f'· {prefix}{location}{_brief(claim, 120)}')
     return lines
 
-
-def _missing_evidence_lines(
-    payload: Mapping[str, object],
-    limit: int = 3,
-) -> list[str]:
+def _missing_evidence_lines(payload: Mapping[str, object], limit: int=3) -> list[str]:
     """Render missing-evidence records as readable bullets; empty when none."""
-
-    raw = payload.get("missing_evidence")
+    raw = payload.get('missing_evidence')
     if not isinstance(raw, list):
         return []
     lines: list[str] = []
     for record in raw:
         if not isinstance(record, Mapping):
             continue
-        needed = str(record.get("needed") or "").strip()
+        needed = str(record.get('needed') or '').strip()
         if not needed:
             continue
-        owner = str(record.get("owner_item_id") or record.get("item_id") or "").strip()
-        location = f"{owner}：" if owner else ""
-        lines.append(f"· {location}{_brief(needed, 130)}")
+        owner = str(record.get('owner_item_id') or record.get('item_id') or '').strip()
+        location = f'{owner}：' if owner else ''
+        lines.append(f'· {location}{_brief(needed, 130)}')
         if len(lines) >= limit:
             break
     return lines
 
-
-def _human_decision_guidance(task_id: str, decision_id: str = "") -> list[str]:
+def _human_decision_guidance(task_id: str, decision_id: str='') -> list[str]:
     """Tell the operator exactly what a reply does and how to abort.
 
     The decision id is rendered into the message body so the gate reply
     poller can match a threaded reply back to this gate even when the
     original message id is unknown (e.g. after a restart).
     """
-
-    lines = [
-        "怎么回复：直接回复本条消息任意内容 = 继续审查流程；"
-        f"如需终止任务：python cmd/review_orchestrator_v2.py --cancel {task_id}",
-        "提示：回复文字不会自动转达给 agent；要给出具体意见请到对应 multica issue 下评论。",
-    ]
+    lines = [f'怎么回复：直接回复本条消息任意内容 = 继续审查流程；如需终止任务：python cmd/review_orchestrator_v2.py --cancel {task_id}', '提示：回复文字不会自动转达给 agent；要给出具体意见请到对应 multica issue 下评论。']
     if decision_id:
-        lines.append(f"决策编号：{decision_id}")
+        lines.append(f'决策编号：{decision_id}')
     return lines
 
-
-def _review_progress_lines(
-    state: str,
-    event_name: str,
-    payload: Mapping[str, object],
-    context: WorkflowContext,
-) -> list[str]:
+def _review_progress_lines(state: str, event_name: str, payload: Mapping[str, object], context: WorkflowContext) -> list[str]:
     """Render an item-scoped review view: pass/fail per task and current target."""
-
-    review = getattr(context, "review", None)
+    review = getattr(context, 'review', None)
     if review is None or state not in _REVIEW_PROGRESS_STATES:
         return []
     findings = _progress_findings(payload, review)
     items = _progress_items(review)
-    if not findings and not items:
+    if not findings and (not items):
         return []
-    blocking = [
-        finding
-        for finding in findings
-        if _finding_severity(finding) in _BLOCKING_SEVERITIES
-        and _finding_active(finding)
-    ]
+    blocking = [finding for finding in findings if _finding_severity(finding) in _BLOCKING_SEVERITIES and _finding_active(finding)]
     scoped_blocking = [finding for finding in blocking if _finding_item_id(finding)]
     global_blocking = [finding for finding in blocking if not _finding_item_id(finding)]
-    blocked_items = _ordered_unique(
-        _finding_item_id(finding) for finding in scoped_blocking
-    )
+    blocked_items = _ordered_unique((_finding_item_id(finding) for finding in scoped_blocking))
     item_ids = [item.item_id for item in items]
     if not item_ids:
-        item_ids = _ordered_unique(
-            _finding_item_id(finding)
-            for finding in findings
-            if _finding_item_id(finding)
-        )
+        item_ids = _ordered_unique((_finding_item_id(finding) for finding in findings if _finding_item_id(finding)))
     blocked_set = set(blocked_items)
-
-    if state.startswith("MENXIA"):
+    if state.startswith('MENXIA'):
         return _menxia_progress_lines(review, item_ids)
-
     lines: list[str] = []
     labels = _item_labels(items)
     reasons = _affected_reason_map(payload)
     if item_ids and scoped_blocking:
         passed = [item_id for item_id in item_ids if item_id not in blocked_set]
-        lines.append(
-            f"任务级审查：通过 {len(passed)}/{len(item_ids)}，"
-            f"未通过 {len(blocked_items)}"
-        )
-        details = "、".join(
-            f"{item_id}（{_blocked_label(scoped_blocking, item_id)}"
-            + (
-                f"，{_AFFECTED_REASON_LABELS[reasons[item_id]]}"
-                if item_id in reasons and reasons[item_id] in _AFFECTED_REASON_LABELS
-                else ""
-            )
-            + "）"
-            for item_id in blocked_items[:8]
-        )
+        lines.append(f'任务级审查：通过 {len(passed)}/{len(item_ids)}，未通过 {len(blocked_items)}')
+        details = '、'.join((f'{item_id}（{_blocked_label(scoped_blocking, item_id)}' + (f'，{_AFFECTED_REASON_LABELS[reasons[item_id]]}' if item_id in reasons and reasons[item_id] in _AFFECTED_REASON_LABELS else '') + '）' for item_id in blocked_items[:8]))
         if len(blocked_items) > 8:
-            details += " …"
-        lines.append(f"未通过：{details}")
+            details += ' …'
+        lines.append(f'未通过：{details}')
         if passed:
-            lines.append(f"通过：{_item_list(passed, labels)}")
-        reverified = [
-            f"{item_id}（{_AFFECTED_REASON_LABELS[reasons[item_id]]}）"
-            for item_id in blocked_items[:6]
-            if item_id in reasons and reasons[item_id] in _AFFECTED_REASON_LABELS
-        ]
+            lines.append(f'通过：{_item_list(passed, labels)}')
+        reverified = [f'{item_id}（{_AFFECTED_REASON_LABELS[reasons[item_id]]}）' for item_id in blocked_items[:6] if item_id in reasons and reasons[item_id] in _AFFECTED_REASON_LABELS]
         if reverified:
-            lines.append("上轮已通过、本轮重新确认：" + "、".join(reverified))
-    elif item_ids and not blocking:
-        lines.append(f"任务级审查：全部通过（{len(item_ids)} 项）")
-        lines.append(f"通过：{_item_list(item_ids, labels)}")
+            lines.append('上轮已通过、本轮重新确认：' + '、'.join(reverified))
+    elif item_ids and (not blocking):
+        lines.append(f'任务级审查：全部通过（{len(item_ids)} 项）')
+        lines.append(f'通过：{_item_list(item_ids, labels)}')
     elif item_ids:
-        lines.append(f"任务级审查：{len(item_ids)} 项均未标注任务归属")
-
+        lines.append(f'任务级审查：{len(item_ids)} 项均未标注任务归属')
     if global_blocking:
         counts = _severity_counts(global_blocking)
-        lines.append(f"全局未解决：{counts}，共 {len(global_blocking)} 项")
+        lines.append(f'全局未解决：{counts}，共 {len(global_blocking)} 项')
         for finding in global_blocking[:2]:
             detail = _finding_detail(finding)
             if detail:
-                lines.append(f"  · {_brief(detail, 140)}")
-
+                lines.append(f'  · {_brief(detail, 140)}')
     group_line = _group_progress_lines(review, blocked_set)
     if group_line:
         lines.append(group_line)
-
-    if state == "ZHONGSHU_SOLVER":
+    if state == 'ZHONGSHU_SOLVER':
         parts: list[str] = []
         if blocked_items:
-            parts.append("任务 " + "、".join(blocked_items[:6]))
+            parts.append('任务 ' + '、'.join(blocked_items[:6]))
         if global_blocking:
-            parts.append(f"全局 {len(global_blocking)} 项")
+            parts.append(f'全局 {len(global_blocking)} 项')
         if parts:
-            lines.append("规划师本轮待处理：" + "；".join(parts))
-
+            lines.append('规划师本轮待处理：' + '；'.join(parts))
     return lines
-
 
 def _severity_counts(findings: list[object]) -> str:
     counts: dict[str, int] = {}
     for finding in findings:
-        severity = _finding_severity(finding) or "?"
+        severity = _finding_severity(finding) or '?'
         counts[severity] = counts.get(severity, 0) + 1
-    return "、".join(f"{severity}×{counts[severity]}" for severity in sorted(counts))
-
+    return '、'.join((f'{severity}×{counts[severity]}' for severity in sorted(counts)))
 
 def _affected_reason_map(payload: Mapping[str, object]) -> dict[str, str]:
-    raw = payload.get("affected_item_reasons")
+    raw = payload.get('affected_item_reasons')
     if not isinstance(raw, Mapping):
         return {}
     return {str(key): str(value) for key, value in raw.items()}
 
-
 def _finding_detail(finding: object) -> str:
-    for name in ("claim", "required_action", "target"):
+    for name in ('claim', 'required_action', 'target'):
         value = _finding_field(finding, name)
         if value:
             return value
-    return ""
-
+    return ''
 
 def _menxia_progress_lines(review: object, item_ids: list[str]) -> list[str]:
     lines: list[str] = []
-    active_item = getattr(review, "active_item_id", None)
+    active_item = getattr(review, 'active_item_id', None)
     if active_item:
-        active_group = getattr(review, "active_group_id", None)
-        suffix = f"（组 {_short_group(active_group)}）" if active_group else ""
-        lines.append(f"当前条目：{active_item}{suffix}")
+        active_group = getattr(review, 'active_group_id', None)
+        suffix = f'（组 {_short_group(active_group)}）' if active_group else ''
+        lines.append(f'当前条目：{active_item}{suffix}')
     total = len(item_ids)
     if total:
-        completed = len(getattr(review, "completed_item_ids", ()) or ())
-        lines.append(f"门下省完成：{completed}/{total}")
+        completed = len(getattr(review, 'completed_item_ids', ()) or ())
+        lines.append(f'门下省完成：{completed}/{total}')
     return lines
 
-
-def _progress_findings(
-    payload: Mapping[str, object],
-    review: object,
-) -> list[object]:
-    raw = payload.get("findings")
+def _progress_findings(payload: Mapping[str, object], review: object) -> list[object]:
+    raw = payload.get('findings')
     if isinstance(raw, list) and raw:
         return list(raw)
-    return list(getattr(review, "findings", ()) or ())
-
+    return list(getattr(review, 'findings', ()) or ())
 
 def _progress_items(review: object) -> list[object]:
-    items = list(getattr(review, "task_items", ()) or ())
-    return sorted(
-        items,
-        key=lambda item: (getattr(item, "order", 0), getattr(item, "item_id", "")),
-    )
-
+    items = list(getattr(review, 'task_items', ()) or ())
+    return sorted(items, key=lambda item: (getattr(item, 'order', 0), getattr(item, 'item_id', '')))
 
 def _item_labels(items: list[object]) -> dict[str, str]:
     """Map item_id to a human-readable ``item_id（title）`` label."""
-
     labels: dict[str, str] = {}
     for item in items:
-        item_id = str(getattr(item, "item_id", "") or "")
+        item_id = str(getattr(item, 'item_id', '') or '')
         if not item_id:
             continue
-        title = str(getattr(item, "title", "") or "").strip()
-        labels[item_id] = f"{item_id}（{_brief(title, 48)}）" if title else item_id
+        title = str(getattr(item, 'title', '') or '').strip()
+        labels[item_id] = f'{item_id}（{_brief(title, 48)}）' if title else item_id
     return labels
 
-
-def _item_list(
-    item_ids: list[str], labels: Mapping[str, str], limit: int = 8
-) -> str:
-    shown = "、".join(labels.get(item_id, item_id) for item_id in item_ids[:limit])
+def _item_list(item_ids: list[str], labels: Mapping[str, str], limit: int=8) -> str:
+    shown = '、'.join((labels.get(item_id, item_id) for item_id in item_ids[:limit]))
     if len(item_ids) > limit:
-        shown += " …"
+        shown += ' …'
     return shown
 
-
 def _finding_severity(finding: object) -> str:
-    return _finding_field(finding, "severity").upper()
-
+    return _finding_field(finding, 'severity').upper()
 
 def _finding_item_id(finding: object) -> str:
-    return _finding_field(finding, "item_id")
-
+    return _finding_field(finding, 'item_id')
 
 def _finding_field(finding: object, name: str) -> str:
     if isinstance(finding, Mapping):
-        value = finding.get(name, "")
+        value = finding.get(name, '')
     else:
-        value = getattr(finding, name, "")
-    return str(value or "")
-
+        value = getattr(finding, name, '')
+    return str(value or '')
 
 def _finding_active(finding: object) -> bool:
     if isinstance(finding, Mapping):
-        status = str(finding.get("status") or "").strip().upper()
+        status = str(finding.get('status') or '').strip().upper()
         return not status or status not in _RESOLVED_FINDING_STATUSES
-    return bool(getattr(finding, "active", False))
-
+    return bool(getattr(finding, 'active', False))
 
 def _blocked_label(blocking: list[object], item_id: str) -> str:
-    severities = sorted(
-        {
-            _finding_severity(finding)
-            for finding in blocking
-            if _finding_item_id(finding) == item_id and _finding_severity(finding)
-        }
-    )
+    severities = sorted({_finding_severity(finding) for finding in blocking if _finding_item_id(finding) == item_id and _finding_severity(finding)})
     owners: list[str] = []
     for finding in blocking:
         if _finding_item_id(finding) != item_id:
             continue
-        owner = _finding_field(finding, "owner_role")
+        owner = _finding_field(finding, 'owner_role')
         label = _OWNER_LABELS.get(owner, owner)
         if label and label not in owners:
             owners.append(label)
-    severity_label = "/".join(severities) if severities else "问题"
-    return f"{severity_label},{owners[0]}" if owners else severity_label
-
+    severity_label = '/'.join(severities) if severities else '问题'
+    return f'{severity_label},{owners[0]}' if owners else severity_label
 
 def _group_progress_lines(review: object, blocked_set: set[str]) -> str:
-    groups = list(getattr(review, "task_groups", ()) or ())
+    groups = list(getattr(review, 'task_groups', ()) or ())
     if not groups:
-        return ""
+        return ''
     parts: list[str] = []
-    for group in sorted(
-        groups,
-        key=lambda item: (getattr(item, "order", 0), getattr(item, "group_id", "")),
-    ):
-        group_items = [str(item) for item in (getattr(group, "item_ids", ()) or ())]
+    for group in sorted(groups, key=lambda item: (getattr(item, 'order', 0), getattr(item, 'group_id', ''))):
+        group_items = [str(item) for item in getattr(group, 'item_ids', ()) or ()]
         if not group_items:
             continue
-        passed = sum(1 for item_id in group_items if item_id not in blocked_set)
+        passed = sum((1 for item_id in group_items if item_id not in blocked_set))
         parts.append(f"{_short_group(getattr(group, 'group_id', ''))} {passed}/{len(group_items)}")
     if not parts:
-        return ""
-    return "分组：" + "、".join(parts[:12])
-
+        return ''
+    return '分组：' + '、'.join(parts[:12])
 
 def _short_group(group_id: object) -> str:
-    text = str(group_id or "")
-    if text.startswith("group-"):
-        stripped = text[len("group-"):].lstrip("0")
-        return "G" + (stripped or "0")
-    return text or "G"
-
+    text = str(group_id or '')
+    if text.startswith('group-'):
+        stripped = text[len('group-'):].lstrip('0')
+        return 'G' + (stripped or '0')
+    return text or 'G'
 
 def _ordered_unique(values) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
-        text = str(value or "")
+        text = str(value or '')
         if text and text not in seen:
             seen.add(text)
             result.append(text)
     return result
 
-
 def _append_payload(lines: list[str], payload: Mapping[str, object], name: str) -> None:
     value = payload.get(name)
-    if value in (None, "", [], {}):
+    if value in (None, '', [], {}):
         return
     if isinstance(value, (dict, list)):
-        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    lines.append(f"{name}：{_brief(value, 420)}")
-
+        value = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    lines.append(f'{name}：{_brief(value, 420)}')
 
 def _brief(value: object, limit: int) -> str:
-    text = str(value).replace("\r", " ").strip()
-    return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
-
+    text = str(value).replace('\r', ' ').strip()
+    return text if len(text) <= limit else text[:max(1, limit - 1)] + '…'
 
 def _retry_budget(context: WorkflowContext) -> str:
     """Report the counter the failed attempt was actually charged to.
@@ -855,31 +532,18 @@ def _retry_budget(context: WorkflowContext) -> str:
     reply).  Showing only the convergence counter after an infrastructure or
     reply retry reads as "0/3" and hides that a retry really happened.
     """
-
     recovery = context.recovery
-    code = str(getattr(recovery.last_failure, "error_code", "") or "")
-    if (
-        code in _REPLY_RETRY_ERROR_CODES
-        or is_reply_failure(code)
-        or is_retryable_solver_reply_error(code)
-    ):
-        used, cap = recovery.reply_retry_count, recovery.max_reply_retries
+    code = str(getattr(recovery.last_failure, 'error_code', '') or '')
+    if code in _REPLY_RETRY_ERROR_CODES or is_reply_failure(code) or is_retryable_solver_reply_error(code):
+        used, cap = (recovery.reply_retry_count, recovery.max_reply_retries)
     elif is_infrastructure_failure(code):
-        used, cap = recovery.external_retry_count, recovery.max_external_retries
+        used, cap = (recovery.external_retry_count, recovery.max_external_retries)
     else:
-        used, cap = recovery.retry_count, recovery.max_retries
-    return f"{used}/{cap}"
-
+        used, cap = (recovery.retry_count, recovery.max_retries)
+    return f'{used}/{cap}'
 
 def _legacy_context(task_id: str, state: str, value: object) -> WorkflowContext:
     from .domain.context import ProgressState, RequestState, TaskIdentity
-
-    raw_request = str(getattr(value, "raw_request", ""))
-    return WorkflowContext(
-        identity=TaskIdentity(task_id or "legacy-task", "", "", ""),
-        progression=ProgressState(state, 0, ""),
-        request=RequestState(raw_request=raw_request),
-    )
-
-
-__all__ = ["DirectNotificationEmitter", "HIDDEN_EVENTS", "PRESENTATION_EVENTS", "build_agent_notification", "build_notification", "should_emit_notification"]
+    raw_request = str(getattr(value, 'raw_request', ''))
+    return WorkflowContext(identity=TaskIdentity(task_id or 'legacy-task', '', '', ''), progression=ProgressState(state, 0, ''), request=RequestState(raw_request=raw_request))
+__all__ = ['DirectNotificationEmitter', 'HIDDEN_EVENTS', 'PRESENTATION_EVENTS', 'build_agent_notification', 'build_notification', 'should_emit_notification']

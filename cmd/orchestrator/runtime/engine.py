@@ -12,6 +12,7 @@ from ..domain.errors import InvariantViolation, PostCommitLeaseReleaseError
 from ..domain.events import DomainEvent
 from .repository import CommitResult, WorkflowRepository, WorkflowSnapshot
 from .ports import LockPort
+from ..requirements_observability import record, answer_progress
 
 logger = logging.getLogger("review_orchestrator_fsm")
 
@@ -151,6 +152,12 @@ class WorkflowEngine:
             self._validate_after(before, after)
             commit_result = self._repository.commit_transition(before, after, decision)
             after_context = commit_result.snapshot.context
+            if event.name == 'ANSWERS_SUBMITTED':
+                record('CARD_ANSWERS_COMMITTED', task_id=event.task_id, event_id=event.event_id,
+                       state=after_context.progression.state, sequence=after_context.progression.sequence,
+                       new_answer_count=(len(after_context.requirements.answers) - len(before.context.requirements.answers)
+                                         if after_context.requirements and before.context.requirements else 0),
+                       **answer_progress(after_context.requirements, event.payload.get('round_id', '')))
             logger.info(
                 "DOMAIN_TRANSITION task_id=%s transition_id=%s event=%s "
                 "before=%s:%s after=%s:%s action=%s reason=%s effects=%s",

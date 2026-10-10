@@ -144,6 +144,8 @@ def coerce_enum_values(value: Any, schema: Mapping[str, Any]) -> Any:
 
     if not isinstance(schema, Mapping):
         return value
+    if schema.get('strictEnum'):
+        return value
     enum = schema.get("enum")
     if isinstance(value, str) and enum:
         members = [str(member) for member in enum]
@@ -197,7 +199,7 @@ def coerce_scalar_strings(value: Any, schema: Mapping[str, Any]) -> Any:
     Enum/const fields opt out: their coercion is ``coerce_enum_values``.
     """
 
-    if not isinstance(schema, Mapping):
+    if not isinstance(schema, Mapping) or schema.get('strictTypes'):
         return value
     if schema.get("type") == "string" and "enum" not in schema and "const" not in schema:
         if value is None:
@@ -253,8 +255,14 @@ def validate_schema(value: Any, schema: Mapping[str, Any], path: str, errors: li
     if "const" in schema and value != schema["const"]:
         errors.append(f"{path}: must equal {schema['const']}")
     enum = schema.get("enum")
-    if enum is not None and not _enum_members_match(enum, value):
-        errors.append(f"{path}: invalid enum")
+    if enum is not None and (value not in enum if schema.get('strictEnum') else not _enum_members_match(enum, value)):
+        detail = f"; expected one of {list(enum)!r}, got {value!r}" if schema.get('strictEnum') else ''
+        errors.append(f"{path}: invalid enum{detail}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            errors.append(f"{path}: must be >= {schema['minimum']}")
+        if "maximum" in schema and value > schema["maximum"]:
+            errors.append(f"{path}: must be <= {schema['maximum']}")
     if isinstance(value, str):
         if "pattern" in schema and re.search(str(schema["pattern"]), value) is None:
             errors.append(f"{path}: must match pattern {schema['pattern']}")
@@ -273,6 +281,9 @@ def validate_schema(value: Any, schema: Mapping[str, Any], path: str, errors: li
                 item_path = f"{path}[{index}]" if path else f"[{index}]"
                 validate_schema(item, item_schema, item_path, errors)
     if isinstance(value, dict):
+        if schema.get('additionalProperties') is False:
+            for key in value.keys() - schema.get('properties', {}).keys():
+                errors.append(f"{path + '.' if path else ''}{key}: unknown field")
         for key in schema.get("required", ()):
             if key not in value:
                 errors.append(f"{path + '.' if path else ''}{key}: required")
@@ -324,7 +335,7 @@ def _empty_value(schema: Mapping[str, Any]) -> Any:
     if expected == "boolean":
         return False
     if expected in {"number", "integer"}:
-        return 0
+        return schema.get('minimum', 0)
     return ""
 
 

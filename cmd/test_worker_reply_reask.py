@@ -52,7 +52,7 @@ def _context() -> NodeContext:
         task_id="task-1",
         node_run_id="node-1",
         revision_id="R1",
-        state="ZHONGSHU_CRITIC",
+        state="MENXIA_GROUP_CRITIC",
         prompt_ref="node-level prompt",
     )
 
@@ -126,7 +126,7 @@ def _failed_reply() -> WorkerResult:
             stage="agent_reply",
             owner_component="agent_dispatch",
             task_id="task-1",
-            state="ZHONGSHU_CRITIC",
+            state="MENXIA_GROUP_CRITIC",
             sequence=1,
             node_run_id="node-1",
             worker_id="worker-01",
@@ -215,7 +215,7 @@ class ReplyDebtClearingTests(unittest.TestCase):
         return WorkflowContext(
             identity=TaskIdentity("task-1", "issue-1", "proj", "req-1"),
             progression=ProgressState(
-                "ZHONGSHU_ANALYST", 1, "2026-09-28T00:00:00Z"
+                "MENXIA_GROUP_ANALYST", 1, "2026-09-28T00:00:00Z"
             ),
             recovery=RecoveryState(reply_retry_count=reply_retry_count),
         )
@@ -223,14 +223,14 @@ class ReplyDebtClearingTests(unittest.TestCase):
     def test_single_dispatch_success_pays_the_debt(self) -> None:
         # Regression: Solver doc retries drained the budget and the Critic's
         # first wave failed straight to the human gate (task-20260928-eaea40).
-        state = StateRegistry.default().get("ZHONGSHU_ANALYST")
+        state = StateRegistry.default().get("MENXIA_GROUP_ANALYST")
         event = DomainEvent(
-            name="EVIDENCE_PACKET_READY",
+            name="EVIDENCE_SUFFICIENT",
             task_id="task-1",
             sequence=1,
             payload={},
             occurred_at="2026-09-28T00:00:01Z",
-            event_id="effect:dispatch:task-1:ZHONGSHU_ANALYST:1:SUCCEEDED",
+            event_id="effect:dispatch:task-1:MENXIA_GROUP_ANALYST:1:SUCCEEDED",
         )
 
         decision = state._transition_decision(self._context(), event)
@@ -252,7 +252,7 @@ class ReplyDebtClearingTests(unittest.TestCase):
             WorkflowContext(
                 identity=TaskIdentity("task-1", "issue-1", "proj", "req-1"),
                 progression=ProgressState(
-                    "HUMAN_GATE", 2, "2026-09-28T00:00:00Z", "ZHONGSHU_SOLVER"
+                    "HUMAN_GATE", 2, "2026-09-28T00:00:00Z", "MENXIA_GROUP_SOLVER"
                 ),
                 recovery=RecoveryState(reply_retry_count=3),
             ),

@@ -14,7 +14,7 @@ class PlanCompileError(ValueError):
     pass
 
 
-def compile_plan(draft):
+def compile_plan(draft, *, approved_requirements=None):
     if not isinstance(draft, Mapping):
         raise PlanCompileError("SOLVER_PLAN_STRUCTURE_INVALID:plan_object")
     try:
@@ -71,16 +71,26 @@ def compile_plan(draft):
                for s in item["acceptance_signals"]):
             raise PlanCompileError(f"SOLVER_PLAN_STRUCTURE_INVALID:acceptance_line:{iid}")
     errors = blocking_structure_errors(plan)
+    if approved_requirements is not None:
+        if len(plan['groups']) != 1:
+            raise PlanCompileError('REQUIREMENTS_IMPLEMENTATION_REQUIRES_ONE_GROUP')
+        errors = [e for e in errors if not e.startswith('GROUP_MAX_ITEMS')]
+        baseline = {c.requirement_id for c in approved_requirements.claims}
+        if set(requirement_ids) != baseline:
+            raise PlanCompileError('APPROVED_REQUIREMENT_BASELINE_MISMATCH')
+        covered = {rid for item in plan['items'] for rid in item['source_requirement_ids']}
+        if covered != baseline:
+            raise PlanCompileError('APPROVED_REQUIREMENT_COVERAGE_INCOMPLETE')
     if errors:
         raise PlanCompileError("SOLVER_PLAN_STRUCTURE_INVALID:" + ";".join(errors[:10]))
     return plan
 
 
-def commit_plan(current, draft, *, expected_ref, requirements=None, frozen_group_ids=()):
+def commit_plan(current, draft, *, expected_ref, requirements=None, frozen_group_ids=(), approved_requirements=None):
     expected = current.reference if current else ""
     if expected_ref != expected:
         raise PlanCompileError("SOLVER_PLAN_VERSION_CONFLICT:expected_base")
-    plan = compile_plan(draft)
+    plan = compile_plan(draft, approved_requirements=approved_requirements)
     if requirements is None and current:
         requirements = current.plan["requirements"]
     if requirements is not None and canonical_json(plan["requirements"]) != canonical_json(list(requirements)):
@@ -143,14 +153,21 @@ def validate_projection(review):
             raise PlanCompileError("canonical formal plan requires PlanRevision")
         return
     revision = review.plan_revision
-    PlanRevision.from_dict(revision.to_dict())
+    PlanRevision.from_dict(revision.to_dict(),approved_requirements=review.approved_requirements_input)
     if content_hash(review.plan) != revision.content_hash or review.plan_hash != revision.content_hash:
         raise PlanCompileError("canonical plan mirror mismatch")
     items, groups = project_tasks(revision.plan, review.task_items)
     if items != review.task_items or groups != review.task_groups or list(review.requirements) != revision.plan["requirements"]:
         raise PlanCompileError("canonical task projection mismatch")
+    if review.approved_requirements_input is not None:
+        compile_plan(revision.plan, approved_requirements=review.approved_requirements_input)
+        if review.zhongshu_groups:
+            raise PlanCompileError('APPROVED_INPUT_CANNOT_HAVE_ZHONGSHU_GROUPS')
+        if any(row.requirement_markdown != review.approved_requirements_input.markdown for row in review.menxia_groups):
+            raise PlanCompileError('MENXIA_APPROVED_REQUIREMENTS_CHANGED')
+        return
     from .render import render_document
-    from ..plan_review import text_hash
+    from ..document_utils import text_hash
     by_group = {r.group_id: r for r in review.zhongshu_groups}
     if len(by_group) != len(review.zhongshu_groups) or set(by_group) != {g["group_id"] for g in revision.plan["groups"]}:
         raise PlanCompileError("canonical document group mismatch")
@@ -166,15 +183,19 @@ def prepare_update(current, update):
     from ..context import ReviewState
     from .render import render_group_rows
     current = current or ReviewState(revision_id=update.revision_id or "", plan_schema="canonical-v1")
+    approved = update.approved_requirements_input or current.approved_requirements_input
+    if current.approved_requirements_input is not None and approved != current.approved_requirements_input:
+        raise PlanCompileError('APPROVED_INPUT_IMMUTABLE')
     validate_projection(current)
     revision = current.plan_revision
     if update.plan is not None and "items" in update.plan:
         baseline = update.requirements if update.human_revision_validated else current.requirements
         revision = commit_plan(revision, update.plan, expected_ref=update.plan_base_ref,
                                requirements=baseline or None,
-                               frozen_group_ids=[r.group_id for r in current.zhongshu_groups if r.stage == "FROZEN"])
+                               frozen_group_ids=[r.group_id for r in current.zhongshu_groups if r.stage == "FROZEN"],
+                               approved_requirements=approved)
         items, groups = project_tasks(revision.plan, update.task_items or current.task_items)
-        rows = render_group_rows(revision.plan, current.zhongshu_groups,
+        rows = () if approved is not None else render_group_rows(revision.plan, current.zhongshu_groups,
                                  update.zhongshu_groups if update.zhongshu_groups is not None else current.zhongshu_groups,
                                  validated_stage=update.human_revision_validated)
         update = replace(update, plan=revision.plan, plan_hash=revision.content_hash,

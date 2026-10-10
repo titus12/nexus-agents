@@ -16,6 +16,7 @@ from .context import (
     ReviewUpdate,
 )
 from .events import TransitionRequest
+from .requirements.model import RequirementsState
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,9 @@ class ContextUpdate:
     recovery: RecoveryUpdate | None = None
     parallel: ParallelUpdate | None = None
     audit: AuditUpdate | None = None
+    requirements: RequirementsState | None = None
+    clear_review: bool = False
+    repair_decision_actor_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)

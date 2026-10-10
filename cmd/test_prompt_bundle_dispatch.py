@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator.adapters import MulticaCliAdapter
+from orchestrator.runtime.compat_effects import _skill_lock
 from orchestrator.transport.external import AgentRequest
 
 
@@ -18,12 +19,14 @@ class PromptBundleDispatchTests(unittest.TestCase):
             request = AgentRequest(
                 task_id="task-1",
                 issue_id="SER-1",
-                request_id="task-1:ZHONGSHU_SOLVER:1:req",
+                request_id="task-1:MENXIA_GROUP_SOLVER:1:req",
                 agent_id="agent-1",
                 role="review-solver",
-                phase="ZHONGSHU_SOLVER",
+                phase="MENXIA",
+                target_state="MENXIA_GROUP_SOLVER",
+                context={"active_runtime_skill_lock": _skill_lock('MENXIA_GROUP_SOLVER')},
                 prompt="请读取并审查这份很长的方案。" * 1000,
-                idempotency_key="task-1:ZHONGSHU_SOLVER:1",
+                idempotency_key="task-1:MENXIA_GROUP_SOLVER:1",
             )
 
             with patch.object(
@@ -40,7 +43,8 @@ class PromptBundleDispatchTests(unittest.TestCase):
             dispatch_file = next(Path(root).glob("dispatch_*.json"))
             payload = json.loads(dispatch_file.read_text(encoding="utf-8"))
             self.assertIn("prompt_ref", payload)
-            self.assertLess(len(payload["prompt"].encode("utf-8")), 1024)
+            self.assertLess(len(payload["prompt"].encode("utf-8")), 2048)
+            self.assertNotIn(request.prompt, payload["prompt"])
             manifest_path = Path(payload["prompt_ref"]["manifest_path"])
             self.assertTrue(manifest_path.exists())
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

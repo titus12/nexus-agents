@@ -12,6 +12,7 @@ from .effects import EffectOutcome
 from ..domain.requirements.model import RequirementsState, canonical, text_digest
 from ..domain.requirements.document import render_markdown, validate_draft
 from ..domain.requirements.review import review_input_digest
+from ..domain.requirements.provenance import render_provenance
 from ..domain.errors import DomainError
 
 logger = logging.getLogger('review_orchestrator_fsm')
@@ -50,7 +51,8 @@ def materialize(root, state, approved=False):
              'traceability.json':canonical({'sections':[{'section_id':s.section_id,'requirement_ids':s.requirement_ids,
                 'decision_ids':s.decision_ids,'fact_ids':s.fact_ids} for s in draft.sections],
                 'sources':state.sources,'decisions':state.decisions}).encode('utf-8'),
-             'review.json':canonical(stamp).encode('utf-8')}
+             'review.json':canonical(stamp).encode('utf-8'),
+             'provenance.md':render_provenance(state).encode('utf-8')}
     if approved:
         files['approval.json'] = canonical(state.approval).encode('utf-8')
     for name, content in files.items():

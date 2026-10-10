@@ -66,33 +66,33 @@ class DirectEventNotificationTests(unittest.TestCase):
         keys = emitter.emit(
             context("REQUEST_INTAKE", 0),
             DomainEvent("START", "task-1", 0, {"raw_request": "检查当前项目"}, "now"),
-            context("ZHONGSHU_ANALYST", 1),
+            context("MENXIA_GROUP_ANALYST", 1),
         )
         self.assertEqual(len(port.requests), 1)
         self.assertIn("task-1", port.requests[0].body)
-        self.assertIn("ZHONGSHU_ANALYST", port.requests[0].body)
+        self.assertIn("MENXIA_GROUP_ANALYST", port.requests[0].body)
         self.assertEqual(keys, ("task-1:1:state-enter:STATE_ENTER",))
 
     def test_agent_action_sends_reply_and_next_state_entry(self):
         port = RecordingPort()
         emitter = DirectNotificationEmitter(port)
         keys = emitter.emit(
-            context("ZHONGSHU_ANALYST", 1),
+            context("MENXIA_GROUP_ANALYST", 1),
             DomainEvent("READY_FOR_SOLVER", "task-1", 1, {"action": "READY_FOR_SOLVER", "summary": "证据齐全"}, "now"),
-            context("ZHONGSHU_SOLVER", 2),
+            context("MENXIA_GROUP_SOLVER", 2),
         )
         self.assertEqual(len(port.requests), 2)
         self.assertEqual(len(keys), 2)
-        self.assertIn("ZHONGSHU_ANALYST", port.requests[0].body)
-        self.assertIn("ZHONGSHU_SOLVER", port.requests[1].body)
+        self.assertIn("MENXIA_GROUP_ANALYST", port.requests[0].body)
+        self.assertIn("MENXIA_GROUP_SOLVER", port.requests[1].body)
 
     def test_hidden_event_does_not_send(self):
         port = RecordingPort()
         emitter = DirectNotificationEmitter(port)
         keys = emitter.emit(
-            context("ZHONGSHU_ANALYST", 1),
+            context("MENXIA_GROUP_ANALYST", 1),
             DomainEvent("DISPATCH_END", "task-1", 1, {}, "now"),
-            context("ZHONGSHU_ANALYST", 1),
+            context("MENXIA_GROUP_ANALYST", 1),
         )
         self.assertEqual(keys, ())
         self.assertEqual(port.requests, [])
@@ -101,7 +101,7 @@ class DirectEventNotificationTests(unittest.TestCase):
         port = RecordingPort()
         emitter = DirectNotificationEmitter(port)
         before = context("REQUEST_INTAKE", 0)
-        after = context("ZHONGSHU_ANALYST", 1)
+        after = context("MENXIA_GROUP_ANALYST", 1)
         after = WorkflowContext(
             after.identity,
             after.progression,
@@ -114,7 +114,7 @@ class DirectEventNotificationTests(unittest.TestCase):
 
     def test_engine_persists_direct_notification_keys_in_transition(self):
         port = RecordingPort()
-        initial = WorkflowSnapshot("task-1", context("REQUEST_INTAKE", 0), 0)
+        initial = WorkflowSnapshot("task-1", context("MENXIA_GROUP_SOLVER", 0), 0)
         repository = Repository(initial)
         engine = WorkflowEngine(
             repository,
@@ -123,7 +123,7 @@ class DirectEventNotificationTests(unittest.TestCase):
             LinearContextReducer(),
             DirectNotificationEmitter(port),
         )
-        engine.dispatch(DomainEvent("START", "task-1", 0, {}, "now", "event-1"))
+        engine.dispatch(DomainEvent("CANCEL", "task-1", 0, {}, "now", "event-1"))
         self.assertEqual(len(port.requests), 1)
         self.assertIn(
             "task-1:1:state-enter:STATE_ENTER",

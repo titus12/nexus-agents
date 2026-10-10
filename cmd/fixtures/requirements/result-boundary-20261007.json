@@ -1,0 +1,426 @@
+{
+  "origin": "task-20261007-4bd681 attempt-1; exact question/alias/quote defects retained",
+  "sources": [
+    {
+      "author_id": "local-operator",
+      "created_at": "",
+      "external_id": "",
+      "kind": "request",
+      "source_id": "src-000001",
+      "supersedes_ids": [],
+      "text": "RTC-SDK 项目 D:\\workspace\\src\\rtc-integration-unity-client，优化 Packages\\com.centurygame.rtc.sdk\\Runtime 中 RTC SDK 网络层 TLV 的性能和 GC 分配"
+    }
+  ],
+  "analysis": {
+    "assumptions": [
+      {
+        "assumption_id": "ASM-001",
+        "blocking": false,
+        "disposition": "proposed",
+        "local_key": "decode-is-hotpath",
+        "source_ids": [
+          "src-000001"
+        ],
+        "statement": "主要 GC 压力来自解码路径（RtcMsgPackReader → RtcValue），编码路径使用 ArrayPool 且无每值堆分配"
+      },
+      {
+        "assumption_id": "ASM-002",
+        "blocking": true,
+        "disposition": "proposed",
+        "local_key": "api-compat",
+        "source_ids": [
+          "src-000001"
+        ],
+        "statement": "此优化不能破坏现有公共 API（RtcValue、RtcTlvDecodedMessage 等的外部接口）"
+      },
+      {
+        "assumption_id": "ASM-003",
+        "blocking": true,
+        "disposition": "proposed",
+        "local_key": "runtime-target",
+        "source_ids": [
+          "src-000001"
+        ],
+        "statement": "目标运行时为 Unity IL2CPP（默认全静态裁剪，无 JIT，struct 泛型特化完整）"
+      }
+    ],
+    "claims": [
+      {
+        "decision_ids": [],
+        "kind": "goal",
+        "local_key": "perf-goal",
+        "origin": "explicit",
+        "quote": "优化 Packages\\com.centurygame.rtc.sdk\\Runtime 中 RTC SDK 网络层 TLV 的性能和 GC 分配",
+        "requirement_id": "REQ-001",
+        "source_ids": [
+          "src-000001"
+        ],
+        "statement": "优化 RTC SDK 网络层 TLV 的性能",
+        "status": "active",
+        "topic_key": "goals"
+      },
+      {
+        "decision_ids": [],
+        "kind": "goal",
+        "local_key": "gc-goal",
+        "origin": "explicit",
+        "quote": "优化 Packages\\com.centurygame.rtc.sdk\\Runtime 中 RTC SDK 网络层 TLV 的性能和 GC 分配",
+        "requirement_id": "REQ-002",
+        "source_ids": [
+          "src-000001"
+        ],
+        "statement": "优化 RTC SDK 网络层 TLV 的 GC 分配",
+        "status": "active",
+        "topic_key": "goals"
+      },
+      {
+        "decision_ids": [],
+        "kind": "constraint",
+        "local_key": "scope-boundary",
+        "origin": "explicit",
+        "quote": "优化 Packages\\com.centurygame.rtc.sdk\\Runtime 中 RTC SDK 网络层 TLV 的性能和 GC 分配",
+        "requirement_id": "REQ-003",
+        "source_ids": [
+          "src-000001"
+        ],
+        "statement": "变更范围限于 Packages\\com.centurygame.rtc.sdk\\Runtime 目录下的代码",
+        "status": "active",
+        "topic_key": "scope"
+      },
+      {
+        "decision_ids": [],
+        "kind": "behavior",
+        "local_key": "tlv-focus",
+        "origin": "derived",
+        "quote": "RTC SDK 网络层 TLV",
+        "requirement_id": "REQ-004",
+        "source_ids": [
+          "src-000001"
+        ],
+        "statement": "聚焦于网络层 TLV 协议编解码路径（RtcTlvProtocolDecoder、RtcTlvProtocolEncoder、RtcMsgPackReader、RtcValue）",
+        "status": "active",
+        "topic_key": "scope"
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "FCT-001",
+        "local_key": "rtcvalue-heap-alloc",
+        "observation": "RtcValue 是 sealed class，每个 Of() 静态工厂方法都分配新的堆对象",
+        "quote": "public static RtcValue Of(bool value) { return new RtcValue(RtcValueKind.Boolean) { BooleanValue = value }; }",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-0.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-002",
+        "local_key": "msgpack-map-alloc",
+        "observation": "RtcMsgPackReader.ReadMap() 每次解码 map 时分配 new RtcField[count] 数组",
+        "quote": "var fields = new RtcField[count];",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-1.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-003",
+        "local_key": "msgpack-array-alloc",
+        "observation": "RtcMsgPackReader.ReadArray() 每次解码 array 时分配 new RtcValue[count] 数组",
+        "quote": "var items = new RtcValue[count];",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-2.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-004",
+        "local_key": "msgpack-string-alloc",
+        "observation": "RtcMsgPackReader.ReadStringValue() 通过 UTF8.GetString 分配托管字符串",
+        "quote": "string value = Utf8Lenient.GetString(buffer, offset, length);",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-3.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-005",
+        "local_key": "msgpack-binary-alloc",
+        "observation": "RtcMsgPackReader.ReadBinary() 每次解码 binary 时分配 new byte[length] 并拷贝",
+        "quote": "byte[] data = new byte[length]; Array.Copy(buffer, offset, data, 0, length);",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-4.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-006",
+        "local_key": "int-key-tostring",
+        "observation": "整数类型 map key 通过 Int64.ToString() 产生额外字符串分配",
+        "quote": "keyString = key.Int64Value.ToString();",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-5.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-007",
+        "local_key": "buffer-pooled",
+        "observation": "RtcByteBufferWriter 使用 ArrayPool<byte>.Shared 管理编码缓冲区，堆分配集中在初始租用和扩容时",
+        "quote": "_buffer = pool.Rent(initialCapacity);",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-6.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-008",
+        "local_key": "receive-pooled",
+        "observation": "RtcTlvReceiveBuffer 使用 ArrayPool<byte>.Shared.Rent 管理接收帧缓冲区",
+        "quote": "_frame = ArrayPool<byte>.Shared.Rent(_frameLength);",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-7.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-009",
+        "local_key": "empty-singletons",
+        "observation": "EmptyMap 和 EmptyArray 静态单例已存在，用于空容器复用",
+        "quote": "internal static readonly RtcValue EmptyMap = new RtcValue(RtcValueKind.Map) { MapValue = Array.Empty<RtcField>() }; internal static readonly RtcValue EmptyArray = new RtcValue(RtcValueKind.Array) { ArrayValue = Array.Empty<RtcValue>() };",
+        "requirement_ids": [
+          "REQ-002"
+        ],
+        "source": "fact-8.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-010",
+        "local_key": "direct-factories",
+        "observation": "OfArrayDirect 和 OfMapDirect 内部工厂已存在，用于跳过非必要防御性拷贝",
+        "quote": "internal static RtcValue OfArrayDirect(RtcValue[] ownedItems) { return ownedItems.Length == 0 ? EmptyArray : new RtcValue(RtcValueKind.Array) { ArrayValue = ownedItems }; }",
+        "requirement_ids": [
+          "REQ-002"
+        ],
+        "source": "fact-9.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-011",
+        "local_key": "linq-removed",
+        "observation": "代码中已用 for 循环替代 LINQ FirstOrDefault，消除了 lambda 闭包分配",
+        "quote": "// 质量改进项 1.3：用 for 循环替代 LINQ FirstOrDefault，消除高频解析路径（History/Conversation）上的 lambda 闭包分配与迭代器分配。",
+        "requirement_ids": [
+          "REQ-002"
+        ],
+        "source": "fact-10.cs",
+        "status": "observed"
+      },
+      {
+        "fact_id": "FCT-012",
+        "local_key": "decode-path",
+        "observation": "解码路径必经 RtcMsgPackReader.ReadCore，每个 MsgPack 原始类型都产生一次 RtcValue 堆分配",
+        "quote": "RtcValue payload = RtcMsgPackReader.Read(frame.Buffer, payloadEnd, ref offset);",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "source": "fact-11.cs",
+        "status": "observed"
+      }
+    ],
+    "gaps": [
+      "缺少具体的性能指标目标：如延迟降低幅度、吞吐量提升、每消息 GC 分配量减少的量化值",
+      "缺少优化优先级：哪些场景/消息类型应优先优化（如 History/Conversation 大消息解析 vs 实时小信令）",
+      "缺少公共 API 变更约束的明确边界：RtcValue 能否从 class 改为 struct？能否修改现有方法签名？",
+      "缺少目标运行时的明确说明（Unity IL2CPP / Mono / .NET Standard）",
+      "缺少验收标准：如何验证优化效果，用什么基准测试"
+    ]
+  },
+  "questions": [
+    {
+      "answer_kind": "multi",
+      "blocking": true,
+      "default_assumption_id": "",
+      "depends_on_question_ids": [],
+      "impact": "缺少验收指标将无法判断优化是否完成，也无法在回归测试中量化退化风险。",
+      "local_key": "perf-target",
+      "options": [
+        {
+          "consequence": "需要微基准测试测量解码耗时，重点优化 RtcMsgPackReader 的热路径",
+          "label": "降低单次 TLV 解码延迟",
+          "option_id": "perf-latency"
+        },
+        {
+          "consequence": "需要压测框架，测量批量消息处理能力",
+          "label": "提高单位时间可处理的消息数量",
+          "option_id": "perf-throughput"
+        },
+        {
+          "consequence": "需要 CPU profile，关注非分配性开销（如字符串编码、分支预测）",
+          "label": "降低解码路径的 CPU 占用",
+          "option_id": "perf-cpu"
+        }
+      ],
+      "question": "性能优化的量化目标是什么？请选择或描述性能指标",
+      "question_id": "Q-001",
+      "reason": "优化目标需要可度量的标准来验证效果。原始需求仅说\"优化性能\"，但没有说明是降低延迟、提高吞吐量还是减少 CPU 占用，也没有具体数值目标。",
+      "recommendation": "建议优先关注延迟和 GC 分配量，两者紧密相关且在 Unity/IL2CPP 环境下影响最大",
+      "related_requirement_ids": [
+        "REQ-001",
+        "REQ-002"
+      ],
+      "revision": 0,
+      "topic_key": "acceptance"
+    },
+    {
+      "answer_kind": "text",
+      "blocking": true,
+      "default_assumption_id": "",
+      "depends_on_question_ids": [
+        "Q-001"
+      ],
+      "impact": "决定优化幅度：是要完全消除堆分配（如改用 struct），还是减少分配次数（如引入对象池），还是仅优化明显的过量分配。",
+      "local_key": "gc-target",
+      "question": "GC 分配减少的量化目标是什么？",
+      "question_id": "Q-002",
+      "reason": "当前解码路径中每个 MsgPack 值都对应一次 RtcValue 堆分配。需要明确减少幅度或绝对值目标。",
+      "recommendation": "建议以典型消息（如含 10-50 个字段的 History/Conversation 响应）解码时 GC Allocation 的字节数或分配次数作为基准，设定减少百分比或绝对值",
+      "related_requirement_ids": [
+        "REQ-002"
+      ],
+      "revision": 0,
+      "topic_key": "acceptance"
+    },
+    {
+      "answer_kind": "single",
+      "blocking": true,
+      "default_assumption_id": "ASM-002",
+      "depends_on_question_ids": [],
+      "impact": "决定能否采用激进优化方案（struct 化 RtcValue）。若必须保持 class 不变，则优化方案局限在对象池复用。",
+      "local_key": "api-constraint",
+      "options": [
+        {
+          "consequence": "只能内部优化：引入 RtcValue 对象池、优化 RtcMsgPackReader 内部分配",
+          "label": "RtcValue 的公开 API 不可变更（签名、类型、namespace 均不变）",
+          "option_id": "api-frozen"
+        },
+        {
+          "consequence": "可彻底消除每值堆分配，但需处理 struct 默认值问题和装箱场景",
+          "label": "RtcValue 的公开方法签名不变，允许将 class 改为 struct（值语义）",
+          "option_id": "api-internal-change"
+        },
+        {
+          "consequence": "可引入新内部数据结构（如 RtcValueBlittable struct），长期可迁移，但需协调外部对接方",
+          "label": "允许有限的公开 API 变更（如增加新类型、标记旧 API 为废弃）",
+          "option_id": "api-breaking"
+        }
+      ],
+      "question": "公共 API（RtcValue 类）的兼容性约束是什么？",
+      "question_id": "Q-003",
+      "reason": "RtcValue 是 sealed class，每次创建都产生 GC 分配。若将其改为 struct 可以彻底消除每值堆分配，但会改变公共 API 语义（装箱、默认值、继承封闭性）。同样，修改方法签名或移除 public 方法也会破坏兼容性。",
+      "recommendation": "若 SDK 的外部使用者较少且可协调，推荐 option 2（struct 化）以根本解决 GC 问题；否则推荐 option 1 加对象池方案",
+      "related_requirement_ids": [
+        "REQ-001",
+        "REQ-002"
+      ],
+      "revision": 0,
+      "topic_key": "constraints"
+    },
+    {
+      "answer_kind": "multi",
+      "blocking": true,
+      "default_assumption_id": "ASM-003",
+      "depends_on_question_ids": [],
+      "impact": "决定了可以使用的 C# 语言特性和底层优化手段。IL2CPP 支持 ref struct 和 Span<T>（有限），但某些 unsafe 代码或运行时内部 API 可能受限。",
+      "local_key": "runtime-target",
+      "options": [
+        {
+          "consequence": "支持 Span<T>/Memory<T>（需 System.Memory 包），不支持 dynamic 和某些反射",
+          "label": "Unity IL2CPP（默认，无 JIT）",
+          "option_id": "target-il2cpp"
+        },
+        {
+          "consequence": "支持常规 .NET API，但 GC 压力已大，需额外注意分配",
+          "label": "Unity Mono（有 JIT）",
+          "option_id": "target-mono"
+        },
+        {
+          "consequence": "支持 Span<T>/Memory<T> 原生，可用最新的零分配技术",
+          "label": ".NET Standard 2.1",
+          "option_id": "target-netstd"
+        }
+      ],
+      "question": "目标运行时 / 平台是什么？",
+      "question_id": "Q-004",
+      "reason": "Unity 项目可在 IL2CPP、Mono、.NET Standard 2.1 等不同运行时下运行。IL2CPP 对 struct 泛型特化完整但无 JIT，Mono 有 JIT 但有 GC 问题。不同运行时对优化方案（如 Unsafe.As、ref struct、Span<T>）的支持程度不同。",
+      "recommendation": "若只支持 IL2CPP，可安全使用 Span<T> 优化解码路径，减少字符串和数组中间分配",
+      "related_requirement_ids": [
+        "REQ-001",
+        "REQ-002"
+      ],
+      "revision": 0,
+      "topic_key": "constraints"
+    },
+    {
+      "answer_kind": "single",
+      "blocking": false,
+      "default_assumption_id": "ASM-001",
+      "depends_on_question_ids": [],
+      "impact": "若只优化解码路径则范围较小，编码路径的改进（如预计算 payload 大小的缓存）可作为后续步骤。",
+      "local_key": "encode-scope",
+      "options": [
+        {
+          "consequence": "覆盖主要 GC 源头，变更范围有限",
+          "label": "仅优化解码路径（RtcMsgPackReader → RtcValue）",
+          "option_id": "scope-decode-only"
+        },
+        {
+          "consequence": "更全面的优化，但涉及更多文件变更和测试覆盖",
+          "label": "同时优化编码和解码路径",
+          "option_id": "scope-both"
+        }
+      ],
+      "question": "优化范围是否也包括编码路径（RtcMsgPackWriter / RtcTlvProtocolEncoder）？",
+      "question_id": "Q-005",
+      "reason": "原始需求说\"网络层 TLV\"，解码路径（RtcMsgPackReader）是 GC 分配的主要源头。编码路径使用 RtcByteBufferWriter（ArrayPool 管理）且无每值堆分配，但 EstimatePayloadSize() 递归遍历 RtcValue 树有 CPU 开销。",
+      "recommendation": "建议优先解码路径，这是 GC 的主要来源且改动收益最明显",
+      "related_requirement_ids": [
+        "REQ-001",
+        "REQ-002"
+      ],
+      "revision": 0,
+      "topic_key": "scope"
+    }
+  ],
+  "source_texts": [
+    "        }\n\n        public static RtcValue Of(bool value)\n        {\n            return new RtcValue(RtcValueKind.Boolean) { BooleanValue = value };\n        }\n",
+    "var fields = new RtcField[count];",
+    "var items = new RtcValue[count];",
+    "string value = Utf8Lenient.GetString(buffer, offset, length);",
+    "            ValidateFieldLength(length, endOffset - offset, \"binary\");\n            RequireRemaining(endOffset, ref offset, length);\n            byte[] data = new byte[length];\n            Array.Copy(buffer, offset, data, 0, length);\n            offset += length;\n            return RtcValue.Of(data);",
+    "keyString = key.Int64Value.ToString();",
+    "_buffer = pool.Rent(initialCapacity);",
+    "_frame = ArrayPool<byte>.Shared.Rent(_frameLength);",
+    "        // GC：空 Map/Array 单例。心跳应答、空 Answer、空容器解码等高频路径复用，\n        // 避免每次分配空数组 + RtcValue 对象（MapValue/ArrayValue 为空数组，无内容可改，安全）。\n        internal static readonly RtcValue EmptyMap =\n            new RtcValue(RtcValueKind.Map) { MapValue = Array.Empty<RtcField>() };\n        internal static readonly RtcValue EmptyArray =\n            new RtcValue(RtcValueKind.Array) { ArrayValue = Array.Empty<RtcValue>() };\n\n        private RtcValue(RtcValueKind kind)",
+    "        // GC-4：跳过防御性拷贝的 internal 构造。调用方（如 RtcMsgPackReader）已持有\n        // 独占数组，无需再复制一份。仅 SDK 内部使用（internal），不对外暴露。\n        internal static RtcValue OfArrayDirect(RtcValue[] ownedItems)\n        {\n            return ownedItems.Length == 0\n                ? EmptyArray\n                : new RtcValue(RtcValueKind.Array) { ArrayValue = ownedItems };\n        }\n\n        // The caller transfers ownership of ownedFields to the returned value.\n        // The array must not be modified or reused after this call.\n        public static RtcValue OfMapDirect(RtcField[] ownedFields)\n        {\n            if (ownedFields == null)\n            {\n                throw new ArgumentNullException(nameof(ownedFields));\n            }\n\n            return ownedFields.Length == 0\n                ? EmptyMap\n                : new RtcValue(RtcValueKind.Map) { MapValue = ownedFields };\n        }\n\n        // 索引器只在 Kind == Map 时可用；缺失字段返回 Null()，不抛异常",
+    "                }\n\n                // 质量改进项 1.3：用 for 循环替代 LINQ FirstOrDefault，\n                // 消除高频解析路径（History/Conversation）上的 lambda 闭包分配与迭代器分配。\n                RtcField[] map = MapValue;\n                for (int i = 0; i < map.Length; i++)",
+    "RtcValue payload = RtcMsgPackReader.Read(frame.Buffer, payloadEnd, ref offset);"
+  ]
+}

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator.adapters import MulticaCliAdapter
+from orchestrator.runtime.compat_effects import _skill_lock
 from orchestrator.transport.external import AgentRequest
 
 
@@ -17,7 +18,9 @@ def _request(**overrides) -> AgentRequest:
         "request_id": "task-1:ZHONGSHU_ANALYST:1:req",
         "agent_id": "agent-1",
         "role": "review-analyst",
-        "phase": "OTHER",
+        "phase": "MENXIA",
+        "target_state": "MENXIA_GROUP_ANALYST",
+        "context": {"active_runtime_skill_lock": _skill_lock('MENXIA_GROUP_ANALYST')},
         "prompt": "analyze",
         "idempotency_key": "task-1:ZHONGSHU_ANALYST:1",
     }
@@ -104,7 +107,7 @@ class MulticaDispatchAssignmentTests(unittest.TestCase):
             adapter = self._adapter(directory)
 
             with self.assertRaises(RuntimeError) as raised:
-                adapter.dispatch(_request(phase="ZHONGSHU"))
+                adapter.dispatch(_request(phase="ZHONGSHU",context={}))
 
         self.assertEqual(str(raised.exception), "ACTIVE_RUNTIME_SKILL_BINDING_MISSING")
 

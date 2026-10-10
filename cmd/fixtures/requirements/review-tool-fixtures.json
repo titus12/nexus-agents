@@ -1,0 +1,31 @@
+{
+  "status": "MANUAL_TOOL_QA",
+  "passing_sample": {
+    "scores": {
+      "intent": 3,
+      "scenarios": 3,
+      "consistency": 3,
+      "acceptance": 3,
+      "coherence": 3
+    },
+    "findings": [],
+    "business_confirmed": true
+  },
+  "failing_sample": {
+    "scores": {
+      "intent": 3,
+      "scenarios": 1,
+      "consistency": 2,
+      "acceptance": 2,
+      "coherence": 3
+    },
+    "findings": [
+      {
+        "critical": true,
+        "reason": "没有定义 Connecting/Reconnecting 的完成回调"
+      }
+    ],
+    "business_confirmed": true
+  },
+  "note": "工具门槛样本，不是模型正文的人工评审或上线证据"
+}
