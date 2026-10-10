@@ -14,3 +14,10 @@ restart_local*.ps1
 multica/
 runs/
 tmp/
+
+# Per-run scratch root of cmd/run_core_tests.py (removed on clean exit).
+.core-test-tmp-*/
+
+# Isolated requirements card gateway runtime and installer cache.
+.tools/
+.venv-requirements-gateway/
