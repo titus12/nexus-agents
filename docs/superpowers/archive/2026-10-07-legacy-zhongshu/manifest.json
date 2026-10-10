@@ -1,0 +1,888 @@
+[
+  {
+    "source": "cmd/orchestrator/app.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/app.py.txt",
+    "sha256": "0154fb65b2280df00ab6e65b99e4be36bc9ee521209310f94e8c63b55b6a8860"
+  },
+  {
+    "source": "cmd/orchestrator/contracts/__init__.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/contracts/__init__.py.txt",
+    "sha256": "022ba9e38233da63298bb266de5ffa0d792b41ccff4dd8dfb4e9705fe91916b8"
+  },
+  {
+    "source": "cmd/orchestrator/adapters.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/adapters.py.txt",
+    "sha256": "131dd08bb66f6b349c7518e0208cefa11ac865e4c62a0bf3c498ddbde115cb92"
+  },
+  {
+    "source": "cmd/orchestrator/structured_output.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/structured_output.py.txt",
+    "sha256": "91aa83f1b37545d37c4f7a1338dfd78f53c4e24e6a8f5e1bc7cebc74d7057afa"
+  },
+  {
+    "source": "cmd/orchestrator/agent_result_file.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/agent_result_file.py.txt",
+    "sha256": "ccbf742fb7a9fbf9d61f187bac71dacb856a06e19cb03a4eff06df1dc6091ffc"
+  },
+  {
+    "source": "cmd/orchestrator/runtime/nodes.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/runtime/nodes.py.txt",
+    "sha256": "ff067939efeeb871a70f0eb8aad4801b82a819113aac4b50b3b4a7067555d793"
+  },
+  {
+    "source": "cmd/orchestrator/runtime/node_effects.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/runtime/node_effects.py.txt",
+    "sha256": "9af215a453febef098ce0c815c8c8f713710a6e9a688893a477ac0333304612f"
+  },
+  {
+    "source": "cmd/orchestrator/runtime/compat_effects.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/runtime/compat_effects.py.txt",
+    "sha256": "157d229cc60159147e2a01ad9bd0fc24d10f790eaeaf2911ae65edbad8698002"
+  },
+  {
+    "source": "cmd/orchestrator/domain/states.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/states.py.txt",
+    "sha256": "4d475bc460d7419b3431869f51752fa34005818197c8ae24566927b0aa0cf972"
+  },
+  {
+    "source": "cmd/orchestrator/domain/transitions.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/transitions.py.txt",
+    "sha256": "b45f7f28561dbad9cda075a18f5e6393dedd5733b1433d0f491f409d58f726fa"
+  },
+  {
+    "source": "cmd/orchestrator/runtime/agent_effects.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/runtime/agent_effects.py.txt",
+    "sha256": "e23905bf09303eadeadb55a058927838f7495396c97e98b8238e6f30881d0d13"
+  },
+  {
+    "source": "cmd/orchestrator/domain/zhongshu/contracts.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/zhongshu/contracts.py.txt",
+    "sha256": "f6c04c7d06312aeb7d174f727c7de4eaaa37a11ef44f62b96ca0e8711edb2c78",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/zhongshu/critic.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/zhongshu/critic.py.txt",
+    "sha256": "c8c959b44b6b7efbe27aa2bdeed0962ed83d4ad381ea434cfaecdf5e34bf46fc",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/zhongshu/solver.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/zhongshu/solver.py.txt",
+    "sha256": "d5ed7f89f8f022aa87ee567c0c535948d1fbce4fc0fab4442288eb0ab4a0024c",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/zhongshu/stages.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/zhongshu/stages.py.txt",
+    "sha256": "6aaa64b0d9f5d03e75f6d6dd99590495e8f6472dae99ad5ef88fea6954fc0010",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/zhongshu/__init__.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/zhongshu/__init__.py.txt",
+    "sha256": "0791930331dbe5a29bb33696e5bba2a837d7b03b5a2ec258ecc589ee04d38d43",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/zhongshu_parallel.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/zhongshu_parallel.py.txt",
+    "sha256": "c8ee66292894c5da1ffafaf8919a0904adb1dd2466c4776beb82a1364610d565",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/zhongshu_review.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/zhongshu_review.py.txt",
+    "sha256": "5a780057c417627c129dd88af78c51e24de54c0510d4f21bf32ec8ed6eab624f",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/zhongshu_review_queue.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/zhongshu_review_queue.py.txt",
+    "sha256": "f1e8812fe1aa5bc77a645c349fb6474c941c231b8fff59adc292c1071e55477f",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/zhongshu_plan_doc.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/zhongshu_plan_doc.py.txt",
+    "sha256": "6215a490da1379ec4acc94646a43cee68d219d0f3588fa5c5968ac385090dd90",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/zhongshu_solver_contract.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/zhongshu_solver_contract.py.txt",
+    "sha256": "53428749e00c10f43a8e3ecf6b2e8b08acf87f36590401f50c23785fb8b99586",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/contracts/zhongshu_analyst.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/contracts/zhongshu_analyst.py.txt",
+    "sha256": "ab64b46118c23520948dd6daa270847e09fa1d20b2f66667580ca579f04c54f5",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/contracts/zhongshu_solver.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/contracts/zhongshu_solver.py.txt",
+    "sha256": "956fe971809de7c867dac360109d977f75f9ce439c2a2658b7f13d299087f3d6",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/contracts/zhongshu_critic.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/contracts/zhongshu_critic.py.txt",
+    "sha256": "6e59d297403490428b7280225c9bbac0bf0c590ff9b7e46b1b52eca4b6934df6",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/contracts/zhongshu_freeze_check.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/contracts/zhongshu_freeze_check.py.txt",
+    "sha256": "845854befe19dea653e6fcdbb3af1a03a58532819c3d9d4b06c456fb3bdd416b",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/contracts/zhongshu_item_solver.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/contracts/zhongshu_item_solver.py.txt",
+    "sha256": "a9dfdf1e90f63df2bb5bfa6ea1fee968ca3c54bec38de7300ce36b01f14701e7",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/policies/parallel.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/policies/parallel.py.txt",
+    "sha256": "bfedc1bf0f4baa5c1169ee51ac09fd09a69f52aeb9e4a65ea60bbaf2abbbc636",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/policies/zhongshu.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/policies/zhongshu.py.txt",
+    "sha256": "ab332192de1912b946ee6bc8d46a6646c61f0202e7a78f7d9ee88d46a0511f4f",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/policies/zhongshu_group.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/policies/zhongshu_group.py.txt",
+    "sha256": "013f9f28e78032c5bde2541724a48bc28583c9be0b396c35f196cef286e23c24",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/policies/item_revise.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/orchestrator/domain/policies/item_revise.py.txt",
+    "sha256": "7a5c6ab54e866aec28f9e72f2be32535f1d4d6bb220402627a403d3c4841a2f7",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_analyst_empty_human_gate.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_analyst_empty_human_gate.py.txt",
+    "sha256": "ad94eac768f9cb0dda40db39f552963f4d2abbeddf55f3d999aca87edc68af57",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_analyst_fanin_contract.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_analyst_fanin_contract.py.txt",
+    "sha256": "04ff7cb43d1a88cf64944216845ac697b5d2201e6313be511a34843f832d2f93",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_analyst_wave_salvage.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_analyst_wave_salvage.py.txt",
+    "sha256": "79af634a1f9c5a75e648b21ed0e999263cb5dd4bfc336e2c1e59f21c8f379006",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_critic_evidence_context.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_critic_evidence_context.py.txt",
+    "sha256": "9f31698a5543e91227a122f8c2a1e3b0466cf5d8bf567cd9595a49359b662a00",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_evidence_direct_routing.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_evidence_direct_routing.py.txt",
+    "sha256": "00a71dd171e6e734362a515f153aa5234d104dffaa9fda8653701bd0eafe0e23",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_fast_track_entrypoint.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_fast_track_entrypoint.py.txt",
+    "sha256": "54ae69e178030ed03198911bb2139f5af474f7061270d1eb2f9af7b352564d46",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_freeze_check_contract.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_freeze_check_contract.py.txt",
+    "sha256": "9c2df47631684e5bc5d6d9573ceb6ea6f701821037e4690cda0d003d5ba270af",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_group_doc_loop.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_group_doc_loop.py.txt",
+    "sha256": "66a62220d730f33c136cd80606f2c45510c89124e7cf23b1d20e85f30aa55857",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_group_prompt_feedback.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_group_prompt_feedback.py.txt",
+    "sha256": "769712ffd2e5801de2c22a0200303ccd628b40eda106760f17e22d15d175fe67",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_group_revise_partial_salvage.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_group_revise_partial_salvage.py.txt",
+    "sha256": "eab329641d485a12d2cbd936e0c2f588f5d2d06e094d3874bb0b78fa427a0e35",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_human_document_loop.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_human_document_loop.py.txt",
+    "sha256": "9a7a404c1790a3df19714f46fc0e4a259742f595f8a98bdc784b9c82646af117",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_item_revise.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_item_revise.py.txt",
+    "sha256": "5913d8bcf8c9b05d8290b22c9df58459756f0de7ce0d95743ebcf0f6115b934a",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_mechanical_freeze.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_mechanical_freeze.py.txt",
+    "sha256": "a7f654a2d1093eda86e5013da0e30ec55e26991f026dfe0a9215a70f0f61fd21",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_orchestrator_stabilization.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_orchestrator_stabilization.py.txt",
+    "sha256": "a390d06247a8418f9475fd163d103b551996fe2e9f7c0504878f693e92a40a01",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_plan_review_gate.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_plan_review_gate.py.txt",
+    "sha256": "75c54f403bfbe93f95bf328e5dae3283807ce368202799c305dc525e7ba53ddc",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_plan_structure_repair.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_plan_structure_repair.py.txt",
+    "sha256": "2a013d7400eaffa7478b5d879634593bf5b4262d218d3ad5f307a495797bca0c",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_recipe_and_discard.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_recipe_and_discard.py.txt",
+    "sha256": "a2c8100242a64d6f7ff7d5e68e9122d2d4e70eb53cc281f203247a091ceb5d0a",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_solver_batch_handoff.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_solver_batch_handoff.py.txt",
+    "sha256": "664096b8244dba7b837d085a06d02ab01790aae3ce98a686e54c7c8cf712c4c3",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_solver_disposition_ledger.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_solver_disposition_ledger.py.txt",
+    "sha256": "856c01a1626cb233699c264872234a0e12eafd895378ea55824df964cca4db6d",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_solver_group_doc_scope.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_solver_group_doc_scope.py.txt",
+    "sha256": "5d3ca80d17776c43ef3a1796e8f3c445909d071dddb7ef28ffee35aeb531b8b3",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_targeted_evidence_repair.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_targeted_evidence_repair.py.txt",
+    "sha256": "09ee15c90aafdca8a3e2ca324d9499f1447f6d9fde2fd6d04f2e0b8bdc8c8e73",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_task_review_result_invalid_retry.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_task_review_result_invalid_retry.py.txt",
+    "sha256": "e56c396c0b7420169ca4401223187e859a81183219f420877978b25d7b51cb96",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_task_review_surface_hash.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_task_review_surface_hash.py.txt",
+    "sha256": "2bd36d8988f803d798aa5a5eb722373948e34f28864a7985fbcab7e490706e88",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_worker_fail_group_salvage.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_worker_fail_group_salvage.py.txt",
+    "sha256": "486ba5359eec20df634eeca6f27e4060de094358b5d506378f0c385a99db7e4e",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_analyst_fanout.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_analyst_fanout.py.txt",
+    "sha256": "5ac9212523a8f0f56d8044cce3929aef50208fe05f7e9097c616785b60b63955",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_approval_ratchet.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_approval_ratchet.py.txt",
+    "sha256": "e22e500b178067d799802b12fd7f79393fe263985d296b900b43e442d43659d4",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_contract_repair.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_contract_repair.py.txt",
+    "sha256": "6498324b3b2b94ec54c0f2eeced0be72533a40e0aa27ace8eba8d0bee60d6421",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_convergence_e2e.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_convergence_e2e.py.txt",
+    "sha256": "e9e98279d4f47a3c408639df92bfd018cbf689ebd43b19490452e7a6562b81ff",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_critic_group_gate.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_critic_group_gate.py.txt",
+    "sha256": "a50867e4ab015491c7b1070084e61aab504ee53a607a9b10d3a8748141091eb2",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_deferred_item_stall.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_deferred_item_stall.py.txt",
+    "sha256": "8016d7caec4bfa8c6a6cdd09a29d46ea889dc4235c860bd8c61f741f385ccea9",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_delta_disposition.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_delta_disposition.py.txt",
+    "sha256": "911a5327a5c0129a1c237706790022cfb6138ffe3161e147b91e8be3add48af8",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_doc.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_doc.py.txt",
+    "sha256": "78230e68f181471f9cc169d839114918a3e025e5434d063bde09715d95c73f62",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_doc_repair.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_doc_repair.py.txt",
+    "sha256": "9d09d803b90c1369d06e302ce56dff5b6cc77c4f755219383253d623d6a67da0",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_efficiency.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_efficiency.py.txt",
+    "sha256": "1b0c330a42553a2aff4ce236f783a78c3dbf938be4bbac7394cc5856105e4514",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_evidence_demotion.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_evidence_demotion.py.txt",
+    "sha256": "f035ecfa0c4a10c32b92d963aa326df6a885971716be986fa56d1288ab3defbd",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_evidence_efficiency.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_evidence_efficiency.py.txt",
+    "sha256": "0f46253a120ba45f8cf23242ede3937cb5c99ab81d0b0a14f7ae4ae41b9038cc",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_finding_identity_and_stall.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_finding_identity_and_stall.py.txt",
+    "sha256": "210b3aae893a936acb05aa5b5cb4be8327f50d00cd1c0ed237f96c07db82504e",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_freeze_groups.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_freeze_groups.py.txt",
+    "sha256": "a41d48c136492180959b3e3a5d5819ee69531e7627eac10cefed0e7ce28cbfcc",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_group_pipeline_e2e.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_group_pipeline_e2e.py.txt",
+    "sha256": "2548bb70c0759f3cf6b4d8d7e2de6c9765132ab7aada4b2f013d8a18ec76d195",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_group_policy.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_group_policy.py.txt",
+    "sha256": "3a3837a59501ebe0305b2c2e9298a3a0a9c7ad14158351ae7bdfd9f57e1d80bc",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_group_review.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_group_review.py.txt",
+    "sha256": "c1b68b596c26bc087d10acd3b3ae4eca6b7d979d7938af6e6ed2f24f2c2dd02e",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_group_state.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_group_state.py.txt",
+    "sha256": "2df4efcf2b2c4ca5c77e47beaa9aa3d7559cb12426951db266617c2623a08a3f",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_item_workflow_e2e.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_item_workflow_e2e.py.txt",
+    "sha256": "d5a034f46163505bc1d48e64b2e01b9b1c95932745d9b672347b3a698935ee46",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_logic_isolation.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_logic_isolation.py.txt",
+    "sha256": "8cafdca69d6b8a5a08510931cc95b7bb70d31276ee66522c4cd47147afdadcf4",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_reliability.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_reliability.py.txt",
+    "sha256": "b8f577d422a33ffd5bfee96f2a040983f0fad972e66127a78b9443b059595ea3",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_revision_budget.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_revision_budget.py.txt",
+    "sha256": "c1909fafaef5dc674cedbcc2868daabbf257a428a890ca0538f28b62260ac0e8",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_stuck_finding.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_stuck_finding.py.txt",
+    "sha256": "b6d64d7d941068f2dcccad1f11e02d9aae697b200ef2512c9aa1d65da80923bf",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_stuck_treadmill.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_stuck_treadmill.py.txt",
+    "sha256": "c6bcd0bb050c0f453320ced254aea58a34cc91b4dda4d95da632eb6a817dc51f",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_task_review_ledger.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_task_review_ledger.py.txt",
+    "sha256": "c6bcc0dda73efcf75f8a7290f81654cd64ca738df51d031b7c12c351a50827d9",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_task_review_queue_v2.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_task_review_queue_v2.py.txt",
+    "sha256": "eed4e2d71fb1cef9b1ba87983263fed502c71cd3c5b9831eb35ea49a72803fdd",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "cmd/test_zhongshu_task_review_wiring.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cmd/test_zhongshu_task_review_wiring.py.txt",
+    "sha256": "15312af3aa12698dd52b3115e57e6cdff2a3014b1ce5e194277971f0766867a4",
+    "retired": true,
+    "reason": "Tests for removed Zhongshu task/group/freeze implementation; requirements-v1 mechanism tests replace this contract."
+  },
+  {
+    "source": "docs/multi/zhongshu-analyst-skill.md",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/docs/multi/zhongshu-analyst-skill.md.txt",
+    "sha256": "c4b41d835307bd23982239fa2c97ed1c8f18940d8ec28cdd4a7e6650c2ad100e",
+    "retired": true
+  },
+  {
+    "source": "docs/multi/runtime/zhongshu-analyst-skill.md",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/docs/multi/runtime/zhongshu-analyst-skill.md.txt",
+    "sha256": "25aed88103d229722e5f620bfb404b6b8933c62065aa24d4a423db4f6b57cd5e",
+    "retired": true
+  },
+  {
+    "source": "docs/multi/zhongshu-solver-skill.md",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/docs/multi/zhongshu-solver-skill.md.txt",
+    "sha256": "cd1ff4e3de8385b5d078d2f91c241d99110fcab816ee0249190c837b4e0a20aa",
+    "retired": true
+  },
+  {
+    "source": "docs/multi/runtime/zhongshu-solver-skill.md",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/docs/multi/runtime/zhongshu-solver-skill.md.txt",
+    "sha256": "0b91df17a573ec0bd49d944b5f0dd9d9241fe055f126162ca46906ec2138394a",
+    "retired": true
+  },
+  {
+    "source": "docs/multi/zhongshu-critic-skill.md",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/docs/multi/zhongshu-critic-skill.md.txt",
+    "sha256": "4356b8cc2ce0fabfe903d88ee87a3d4f2d42b3a80efc4cd86fddca673d924e45",
+    "retired": true
+  },
+  {
+    "source": "docs/multi/runtime/zhongshu-critic-skill.md",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/docs/multi/runtime/zhongshu-critic-skill.md.txt",
+    "sha256": "4c1ca20e25af626c1daf3f8a3f6a970e7d35cd55ca70a989497640a534ed1218",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_single_document_review.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_single_document_review.py.txt",
+    "sha256": "e2c0328a399a14fe6d852936c6ecf36f0590af7ceadf06542bd161b3992eff7e",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_solver_plan_materialization.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_solver_plan_materialization.py.txt",
+    "sha256": "0e0d37b23594ea7b17cf73e5c919040bf233e4521ebb16a0fba51306a5de9db3",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_contract_enum_canonicalization.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_contract_enum_canonicalization.py.txt",
+    "sha256": "94410e70db0e7b2a20eef3ca59c408a7a8fa6cc39504b335da755e648b1dbce9",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_finding_id_remint.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_finding_id_remint.py.txt",
+    "sha256": "6332d9b0c4516f3f900c0bb63c8ee145039cf9cde81563e4266eae789849caca",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_human_gate_reply_poll.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_human_gate_reply_poll.py.txt",
+    "sha256": "e2f7fd156f4133806c8c759a5d65da8a4b65b78604d94400be45f5a76abbb987",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_linear_fsm_migration.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_linear_fsm_migration.py.txt",
+    "sha256": "cbcbfd491aebf61d707c8ed7aacb201a904d3d04d04541cdbb71388cfb0a4bf1",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_dispatch_envelope.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_dispatch_envelope.py.txt",
+    "sha256": "47a641febf2586969191ef16db3565b1c7465720ba4526699d88cd58792ffafc",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_item_workflows.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_item_workflows.py.txt",
+    "sha256": "ddd375da303ad8d40e74c050eed34c63e6559dbd01321f8616b150a3cf736c45",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_analyst_partition.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_analyst_partition.py.txt",
+    "sha256": "5b391cc590cadbde8a24fbc3db641be83557a028fe613295e5701cd1e78fb2f6",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_agent_result_file_poll.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_agent_result_file_poll.py.txt",
+    "sha256": "9c60677feab41b31939d8e34376ce3d4fa786d8499cc61eb7175efc59b98a316",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_finding_identity_merge.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_finding_identity_merge.py.txt",
+    "sha256": "1dae49fd706f9a93219a0e23dd9f6ce31702ebd624030bc0dc50e8baa6f50b70",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_finding_item_scope_resolution.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_finding_item_scope_resolution.py.txt",
+    "sha256": "51a4756a112fe3160dacfc5cb905ffdfb88c8bf022b82702511d8e7d848fab8e",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_evidence_quote_gate.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_evidence_quote_gate.py.txt",
+    "sha256": "d7da4c5dc9ed325df81b1a26bd8930c186cd20f05b9cd1a9e659ce91eb33f6f1",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_acceptance_standards.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_acceptance_standards.py.txt",
+    "sha256": "da4dc966a2bc3dccc4798fa5c05ad7727eb1dc94c4835a56368aac9269cedbf5",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_menxia_pipeline.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_menxia_pipeline.py.txt",
+    "sha256": "18d2582b15f02c2902569a34f82ddbd6b6132da2a196618f59fc92760bfce7f0",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_menxia_alignment.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_menxia_alignment.py.txt",
+    "sha256": "5c54f9438f9e064c9833cab91568a48e1316c2c1a1021031c2173ce0291cbf54",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_active_runtime_skill_binding.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_active_runtime_skill_binding.py.txt",
+    "sha256": "57e681ea757bd16a147efbb0d09b6aefc20bbc1e698333bce17bcb96386e8217",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_citation_recovery.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_citation_recovery.py.txt",
+    "sha256": "2a38d0fbcd4a2a7b5d3b679fcc76d1e3386b19fb538e9ca8be8331e46c26635e",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_linear_fsm_reducer.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_linear_fsm_reducer.py.txt",
+    "sha256": "480d15a1a0e6f2201843c6265d35fd735a16d6dff1b22093530aa46dc9ed4e2d",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_linear_fsm_timeout.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_linear_fsm_timeout.py.txt",
+    "sha256": "491a34f2e4eaf08b7dd89fb496f42c8d3b6c5fee9ca48e1e3e38bacba55ffc3d",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_node_fail_brake.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_node_fail_brake.py.txt",
+    "sha256": "fff1d621723d657feb73cef2e267f4a2bb0bfc552b6da946bab6c2fd339a2471",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_reply_shape_retry.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_reply_shape_retry.py.txt",
+    "sha256": "a5bf2b9b473a9ed5da15ac82f2de4da754988a2b7a8830fc5f46cfe6a878910d",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_infrastructure_retry.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_infrastructure_retry.py.txt",
+    "sha256": "e18a03233bfc6af693a302b290b1a0585c60e4d1f08c0c9c48a49be743c41567",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_worker_reply_reask.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_worker_reply_reask.py.txt",
+    "sha256": "ac54335de1677ca6070011e20685018b7bd0e7866092ad91b4552e102d391852",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_retry_feedback_prompt.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_retry_feedback_prompt.py.txt",
+    "sha256": "4e0005e34b4f7c816e71674c473a40d2d89e221c09b7146881ec01c56f2558a9",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_node_join_unstructured.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_node_join_unstructured.py.txt",
+    "sha256": "8fd93e770598a66cb6083c24fda53580c908e727970da7139028a675e294fe05",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_linear_fsm_event_notifications.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_linear_fsm_event_notifications.py.txt",
+    "sha256": "3798a9882de81d714c4b6ba4d8881ce973e88cfb86138abcdb36a28ba413bcf4",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_dispatch_timeouts.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_dispatch_timeouts.py.txt",
+    "sha256": "3cf2be2f7350c40809bbf31137229dbe7698c4e5d785411da4d6a589304bcebd",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_requirements_contracts.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_requirements_contracts.py.txt",
+    "sha256": "adb668ca99cd94822c26380e5e401c7e03f1fb23700fc9864ee739440e8215d6",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_linear_fsm_transitions.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_linear_fsm_transitions.py.txt",
+    "sha256": "83f2b09a48350c63365ca748a2817e091d129778f09ca13466d6cf4b978b9dd8",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_canonical_plan_revision.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_canonical_plan_revision.py.txt",
+    "sha256": "b09d62f9f5f940fc673a1664a6d9388d567b5439677f88be035751626b2da102",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_linear_fsm_states.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_linear_fsm_states.py.txt",
+    "sha256": "00677d1cdb570870659542c66564cb638ef0db5bd51faebe8cdaeb2ece6d7bd1",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_prompt_bundle_dispatch.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_prompt_bundle_dispatch.py.txt",
+    "sha256": "9c2f4a39147c991df3db812585df1526cdb82b828bc7916c443a62b6870ff5a6",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_multica_dispatch_assignment.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_multica_dispatch_assignment.py.txt",
+    "sha256": "b7c683049031ae5c66331402c8d22a1542cb0e9d0dfdd1094cbdb13353814794",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_schema_hash_echo_and_identity_coercion.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_schema_hash_echo_and_identity_coercion.py.txt",
+    "sha256": "663a5ab45f48a19cbae9070d32220c89250c6aa9e44d4b5ba3dd9134c8bd29ba",
+    "retired": false
+  },
+  {
+    "source": "cmd/test_structured_backfill.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_structured_backfill.py.txt",
+    "sha256": "f1ba8cd7405401ab8440e7e97bb5dcbb68fe81c8c075abd895a34a5806acfb3b",
+    "retired": true
+  },
+  {
+    "source": "cmd/test_linear_fsm_entrypoint.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/test_linear_fsm_entrypoint.py.txt",
+    "sha256": "75fbbe8dba109c30f01393d7ac90c83d7af1bcf2caae1c9d2d0ad5c10c37116c",
+    "retired": true
+  },
+  {
+    "source": "cmd/run_core_tests.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/run_core_tests.py.txt",
+    "sha256": "64114cf9a5accffb5bda3960913561002d97588b5af9f402523031a3b0bd5ead",
+    "retired": false
+  },
+  {
+    "source": "cmd/smoke_orchestrator_plan_pipeline.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/smoke_orchestrator_plan_pipeline.py.txt",
+    "sha256": "cb236ff03559cbcc802b22f0d851b82c4d03b8d9e081a138a20306df793910fc",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/adapters.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/adapters.py.txt",
+    "sha256": "b32e5c1811a3e0c57e7e3e38c365dfc1f368ce853c4998b6013f9b0bd2f93597",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/app.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/app.py.txt",
+    "sha256": "6ae0ab45513935a88f1b0d92cd4675a9f8664d9bd45d3e6e5157e63b0c5e380e",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/notifications.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/notifications.py.txt",
+    "sha256": "13b9da27bc1b19d196a0209a6a72489a0a9edc7c36cb1e15f29bf581270ad09b",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/plan_utils.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/plan_utils.py.txt",
+    "sha256": "f5fa1a29d18a4e4830007798b585fb38af18bb2aae547e3a620df0a9b020e5ab",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/structured_output.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/structured_output.py.txt",
+    "sha256": "09204134a2d8c79d6d663231d4cb0ff3c30d7f1a749b009950e1aba967d0663a",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/domain/errors.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/domain/errors.py.txt",
+    "sha256": "c3e154375afbc86562769bd16025f55118f1b01df15db778f98b40b613735839",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/domain/menxia_doc.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/domain/menxia_doc.py.txt",
+    "sha256": "4275f9127ab8746820e9478cdc468f29f72a54b913da916ad3a3c90e5a22a043",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/domain/plan_review.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/domain/plan_review.py.txt",
+    "sha256": "82d893100c394a2f7e8e09511bb4f8b88ee82bd2ba0bd297e42784e79198d9f0",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/domain/states.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/domain/states.py.txt",
+    "sha256": "1db586c1391a893e18e700c2b3583adc75dc8872163ec93097654d375ab06692",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/domain/zhongshu_doc_repair.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/domain/zhongshu_doc_repair.py.txt",
+    "sha256": "f4e4318ac3b157f54ede6e4721d9e1f056cc1f9a205a92d78e85bc88aae327ca",
+    "retired": true
+  },
+  {
+    "source": "cmd/orchestrator/runtime/effects.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/runtime/effects.py.txt",
+    "sha256": "150b832def0af81989594f3ee7b0b59bab1858dc049da47d4b68baa13b81405f",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/runtime/notification_effects.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/runtime/notification_effects.py.txt",
+    "sha256": "4cdf8859cc4894967a64ec84cf8d3fa0fa44f4fac58c3ed6c25d6448e8ce71f8",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/runtime/plan_effects.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/runtime/plan_effects.py.txt",
+    "sha256": "7af7863608c8a73dd6daf1f73f737f8b3c40d02b2fe1a6d670ecd8c1fe296320",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/domain/planning/compiler.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/domain/planning/compiler.py.txt",
+    "sha256": "96a59a920bdad41a788be4463ca33019cc881cf1ad7b00511ec6a559742bf8e4",
+    "retired": false
+  },
+  {
+    "source": "cmd/orchestrator/domain/policies/solver_plan.py",
+    "archive": "docs/superpowers/archive/2026-10-07-legacy-zhongshu/cutover-tests/cmd/orchestrator/domain/policies/solver_plan.py.txt",
+    "sha256": "56dcc89eb48a79ab667f61693c3af594792d3a3e3c6c494dad4927aee3157d1a",
+    "retired": true
+  }
+]

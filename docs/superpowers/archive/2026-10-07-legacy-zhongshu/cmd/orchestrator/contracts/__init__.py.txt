@@ -1,0 +1,61 @@
+"""Registry for the canonical machine contract of each Orchestrator state."""
+from __future__ import annotations
+
+from .common import PhaseContract
+from .menxia_group_analyst import CONTRACT as MENXIA_GROUP_ANALYST
+from .menxia_group_critic import CONTRACT as MENXIA_GROUP_CRITIC
+from .menxia_group_gate import CONTRACT as MENXIA_GROUP_GATE
+from .menxia_group_solver import CONTRACT as MENXIA_GROUP_SOLVER
+from .menxia_item_analyst import CONTRACT as MENXIA_ITEM_ANALYST
+from .menxia_item_critic import CONTRACT as MENXIA_ITEM_CRITIC
+from .menxia_item_solver import CONTRACT as MENXIA_ITEM_SOLVER
+from .zhongshu_analyst import CONTRACT as ZHONGSHU_ANALYST
+from .zhongshu_critic import CONTRACT as ZHONGSHU_CRITIC
+from .zhongshu_freeze_check import CONTRACT as ZHONGSHU_FREEZE_CHECK
+from .zhongshu_solver import CONTRACT as ZHONGSHU_SOLVER
+
+
+_BY_STATE: dict[str, PhaseContract] = {
+    "ZHONGSHU_ANALYST": ZHONGSHU_ANALYST,
+    "ZHONGSHU_SOLVER": ZHONGSHU_SOLVER,
+    "ZHONGSHU_CRITIC": ZHONGSHU_CRITIC,
+    "ZHONGSHU_FREEZE_CHECK": ZHONGSHU_FREEZE_CHECK,
+    "MENXIA_ITEM_SOLVER": MENXIA_ITEM_SOLVER,
+    "MENXIA_ITEM_ANALYST": MENXIA_ITEM_ANALYST,
+    "MENXIA_ITEM_CRITIC": MENXIA_ITEM_CRITIC,
+    "MENXIA_GROUP_SOLVER": MENXIA_GROUP_SOLVER,
+    "MENXIA_GROUP_ANALYST": MENXIA_GROUP_ANALYST,
+    "MENXIA_GROUP_CRITIC": MENXIA_GROUP_CRITIC,
+    "MENXIA_GROUP_GATE": MENXIA_GROUP_GATE,
+}
+
+
+def contract_for_state(state: str, *, workflow: str = 'legacy-v1') -> PhaseContract:
+    if workflow == 'requirements-v1' or str(state).startswith('REQ_'):
+        from .requirements_analyst import CONTRACT as analyst, EVIDENCE_CONTRACT
+        from .requirements_solver import CONTRACT as solver
+        from .requirements_critic import CONTRACT as critic
+        new = {c.state: c for c in (analyst, EVIDENCE_CONTRACT, solver, critic)}
+        if state in new:
+            return new[state]
+        if state == 'MENXIA_REQUIREMENTS_INTAKE':
+            from .menxia_requirements import INTAKE
+            return INTAKE
+        if str(state).startswith('MENXIA_') and workflow == 'requirements-v1':
+            from .menxia_requirements import variant
+            return variant(_BY_STATE[state])
+        if workflow == 'requirements-v1' and not str(state).startswith('MENXIA_'):
+            raise KeyError(f'UNSUPPORTED_CONTRACT_STATE:{state}')
+    try:
+        return _BY_STATE[str(state).upper()]
+    except KeyError as error:
+        raise KeyError(f"UNSUPPORTED_CONTRACT_STATE:{state}") from error
+
+
+def all_contracts(*, workflow: str = 'legacy-v1') -> tuple[PhaseContract, ...]:
+    if workflow == 'requirements-v1':
+        return tuple(contract_for_state(state, workflow=workflow) for state in ('REQ_ANALYZE','REQ_EVIDENCE','REQ_DRAFT','REQ_REVIEW'))
+    return tuple(_BY_STATE.values())
+
+
+__all__ = ["PhaseContract", "all_contracts", "contract_for_state"]

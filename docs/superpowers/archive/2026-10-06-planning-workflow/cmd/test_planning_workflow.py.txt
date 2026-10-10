@@ -1,0 +1,422 @@
+"""Scripted production-engine checks for the formal planning recipe."""
+import copy
+import json
+from argparse import Namespace
+from collections import Counter
+from dataclasses import replace
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from orchestrator.adapters import FakeMulticaAdapter
+from orchestrator.app import OrchestratorApp, build_context
+from orchestrator.domain.context import context_to_dto, context_from_dto
+from orchestrator.domain.planning.compiler import compile_plan, PlanCompileError
+from orchestrator.domain.planning.execution import execution_issues, execution_order
+from orchestrator.domain.planning.model import PlanRevision
+from orchestrator.domain.transitions import TERMINAL_STATES, TransitionRegistry, TransitionError
+from orchestrator.transport.external import ExternalMessage
+
+RAW = "帮我审核当前项目未提交的代码，生成可执行的审核方案"
+BASELINE = [{"requirement_id": "req-000001", "statement": RAW, "source_quote": RAW,
+             "priority": "must", "acceptance_signal": "审核方案可以按步骤执行并输出风险报告"}]
+
+
+def draft(count=2, interleaved=False):
+    items = [{"item_id": f"item-{n:06d}", "group_id": "group-000001", "title": f"审核步骤 {n}",
+              "objective": f"产出审核步骤 {n} 的检查报告", "dependencies": [] if n == 1 else [f"item-{n-1:06d}"],
+              "source_requirement_ids": ["req-000001"], "acceptance_signals": [f"步骤 {n} 的风险报告可读取"]}
+             for n in range(1, count + 1)]
+    groups = [{"group_id": "group-000001", "title": "代码审核", "objective": "产生审核方案", "item_ids": [i["item_id"] for i in items]}]
+    if interleaved:
+        for n, i in enumerate(items):
+            i["group_id"] = f"group-{(n % 2) + 1:06d}"
+        groups = [{"group_id": f"group-{n:06d}", "title": f"业务组 {n}", "objective": "审核方案",
+                   "item_ids": [i["item_id"] for i in items if i["group_id"] == f"group-{n:06d}"]} for n in (1, 2)]
+    return {"requirements": copy.deepcopy(BASELINE), "items": items, "groups": groups,
+            "scope": "输出审核方案；实际代码检查待执行", "unknowns": []}
+
+
+def executable(plan):
+    plan = copy.deepcopy(plan)
+    for i in plan["items"]:
+        i.update(inputs=[{"name": "审核需求", "kind": "requirement", "source_id": "req-000001", "output_name": ""}],
+                 steps=["读取 diff 并记录涉及模块", "检查变更并记录证据及风险"],
+                 outputs=[{"name": "risk-report", "description": "变更风险与证据列表"}],
+                 verification=[{"method": "检查报告中的结论是否均有代码位置或测试证据", "expected_result": "风险报告完整且可追溯", "status": "planned"}],
+                 risks="缺少运行环境时记录未验证项", compatibility="只生成方案，不改变当前项目接口", rollback="不适用：本工作项是只读审核")
+    plan["decisions"] = []
+    return plan
+
+
+def context():
+    return build_context(Namespace(project="example-project", project_type="python", task_type="planning", plan_schema=None, workflow=None),
+                         "issue-planning", RAW, "task-planning-test")
+
+
+class ScriptedPlanning(FakeMulticaAdapter):
+    def __init__(self, mutate=None, plan=None):
+        super().__init__()
+        self.mutate = mutate
+        self.plan = plan or draft()
+        self.counts = Counter()
+
+    def dispatch(self, request):
+        receipt = super().dispatch(request)
+        state = request.target_state
+        self.counts[state] += 1
+        payload = {"action": {"PLANNING_BASELINE": "BASELINE_READY", "PLANNING_EVIDENCE": "EVIDENCE_READY",
+                              "PLANNING_DRAFT": "DRAFT_READY", "PLANNING_EXECUTION_DRAFT": "EXECUTION_READY",
+                              "PLANNING_EXECUTION_REVIEW": "REVIEW_APPROVED"}[state], "questions": []}
+        if state == "PLANNING_BASELINE":
+            payload["requirements"] = copy.deepcopy(BASELINE)
+        elif state == "PLANNING_EVIDENCE":
+            payload["evidence"] = []
+        elif state == "PLANNING_DRAFT":
+            payload["plan"] = copy.deepcopy(self.plan)
+        elif state == "PLANNING_EXECUTION_DRAFT":
+            payload["plan"] = executable(request.context["plan"])
+        else:
+            payload.update(reviewed_revision_ref=request.context["plan_revision_ref"], issues=[])
+        if self.mutate:
+            self.mutate(self, request, payload)
+        payload.update(task_id=request.task_id, request_id=request.request_id, phase=request.phase, role=request.role,
+                       contract_id=request.context["contract_id"], state=state, mode="PLAN")
+        self.queue_reply(request.request_id, ExternalMessage(request.agent_id, payload))
+        return receipt
+
+
+class PlanningApplicationTests(unittest.TestCase):
+    def step(self, app):
+        task = app.context.identity.task_id
+        event = app.inbox.next(task)
+        if event:
+            app.engine.dispatch(event)
+            app.inbox.ack(event)
+        elif not app.repository.pending_effects(task):
+            self.fail("No work in " + app.ctx.progression.state)
+        app.effects.execute_pending(task)
+
+    def drive(self, app, *, approve=True):
+        app._ensure_start_event()
+        for _ in range(150):
+            c = app.ctx
+            if c.progression.state in TERMINAL_STATES:
+                return c
+            if c.progression.state == "HUMAN_GATE":
+                if not approve or c.human_gate.reason_code != "PLAN_REVIEW":
+                    return c
+                self.assertTrue(app.resume("通过"))
+            self.step(app)
+        self.fail("Planning failed to finish in a bounded number of steps")
+
+    def app(self, directory, adapter):
+        return OrchestratorApp(context(), root=directory, multica=adapter, poll_interval=0, timeout_seconds=2)
+
+    def test_default_recipe_publishes_verified_revision_and_planned_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ScriptedPlanning()
+            app = self.app(directory, adapter)
+            final = self.drive(app)
+            self.assertEqual(final.progression.state, "PLAN_READY", final.planning.reason)
+            self.assertEqual(final.planning.calls, 5)
+            self.assertEqual(final.review.plan_revision.number, 2)
+            self.assertEqual(final.planning.reviewed_revision_ref, final.review.plan_revision.reference)
+            self.assertNotEqual(final.planning.requirements_approval_ref, final.planning.reviewed_revision_ref)
+            path = Path(final.planning.result_ref)
+            self.assertTrue(path.is_file())
+            self.assertIn("验证均为待执行", path.read_text(encoding="utf-8"))
+            report = json.loads(path.with_name("validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["work_verification_status"], "planned")
+            saved = context_from_dto(context_to_dto(final))
+            self.assertEqual(saved.planning, final.planning)
+            self.assertTrue(app.run())
+            from orchestrator.notifications import build_notification
+            from orchestrator.domain.events import DomainEvent
+            notice = build_notification("PLAN_READY", "DONE", DomainEvent("PUBLISHED", final.identity.task_id,
+                                        final.progression.sequence, {}, "now"), final)
+            self.assertIn(final.planning.result_ref, notice)
+            self.assertIn("验证仍待执行", notice)
+            self.assertTrue(all(r.phase == "PLANNING" and r.target_state.startswith("PLANNING_") for r in adapter.dispatched))
+
+    def test_large_business_group_and_interleaved_labels_are_schedulable(self):
+        for plan in (draft(8), draft(3, True)):
+            with self.subTest(groups=plan["groups"]), tempfile.TemporaryDirectory() as directory:
+                final = self.drive(self.app(directory, ScriptedPlanning(plan=plan)))
+                self.assertEqual(final.progression.state, "PLAN_READY", final.planning.reason)
+                self.assertEqual(len(execution_order(final.review.plan_revision.plan)), len(plan["items"]))
+                with self.assertRaises(PlanCompileError):
+                    compile_plan(plan)
+
+    def test_human_requirement_rejection_and_restart_require_fresh_approval(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_DRAFT" and adapter.counts[request.target_state] == 2:
+                reply["plan"]["items"][0]["objective"] = "按用户反馈细化审核范围"
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ScriptedPlanning(mutate)
+            app = self.app(directory, adapter)
+            first = self.drive(app, approve=False)
+            self.assertEqual(first.human_gate.reason_code, "PLAN_REVIEW")
+            self.assertFalse(app.resume())
+            self.assertTrue(app.resume("拒绝：细化审核范围"))
+            self.step(app)
+            second = self.drive(app, approve=False)
+            self.assertEqual(second.review.plan_revision.number, 2)
+            self.assertNotEqual(second.human_gate.document_hash, first.human_gate.document_hash)
+            restored = OrchestratorApp(first, root=directory, multica=adapter, poll_interval=0, timeout_seconds=2)
+            self.assertEqual(restored.ctx.review.plan_revision, second.review.plan_revision)
+            final = self.drive(restored)
+            self.assertEqual(final.progression.state, "PLAN_READY", final.planning.reason)
+
+    def test_execution_scope_change_reopens_requirement_gate(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_EXECUTION_DRAFT" and adapter.counts[request.target_state] == 1:
+                reply["plan"]["items"][0]["objective"] = "增加用户需确认的执行目标"
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ScriptedPlanning(mutate)
+            app = self.app(directory, adapter)
+            first = self.drive(app, approve=False)
+            self.assertTrue(app.resume("通过"))
+            self.step(app)
+            second = self.drive(app, approve=False)
+            self.assertEqual(second.progression.state, "HUMAN_GATE")
+            self.assertNotEqual(first.human_gate.document_hash, second.human_gate.document_hash)
+            self.assertEqual(adapter.counts["PLANNING_EXECUTION_REVIEW"], 0)
+            self.assertEqual(self.drive(app).progression.state, "PLAN_READY")
+
+    def test_critic_revision_is_bounded_and_only_solver_changes_the_plan(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_EXECUTION_REVIEW" and adapter.counts[request.target_state] == 1:
+                reply["issues"] = [{"issue_id": "risk-1", "rule": "RISK_DETAIL", "path": "items.item-000001.risks",
+                                    "message": "补充具体风险", "severity": "blocking", "repair": "solver"}]
+                reply["plan"] = draft(3)
+            if request.target_state == "PLANNING_EXECUTION_DRAFT" and adapter.counts[request.target_state] == 2:
+                reply["plan"]["items"][0]["risks"] = "差异中可能缺少配置变更，应检查部署配置清单"
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ScriptedPlanning(mutate)
+            final = self.drive(self.app(directory, adapter))
+            self.assertEqual(final.progression.state, "PLAN_READY", final.planning.reason)
+            self.assertEqual(final.planning.semantic_repairs, 1)
+            self.assertEqual(len(final.review.plan_revision.plan["items"]), 2)
+            self.assertEqual(final.review.plan_revision.number, 3)
+
+    def test_unchanged_repair_stops_without_another_human_gate(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_EXECUTION_REVIEW":
+                reply["issues"] = [{"issue_id": "risk-1", "rule": "RISK_DETAIL", "path": "items.item-000001.risks",
+                                    "message": "补充具体风险", "severity": "blocking", "repair": "solver"}]
+        with tempfile.TemporaryDirectory() as directory:
+            final = self.drive(self.app(directory, ScriptedPlanning(mutate)))
+            self.assertEqual(final.progression.state, "ENGINE_ERROR")
+            self.assertEqual(final.planning.reason, "PLANNING_REPAIR_NO_PROGRESS")
+
+    def test_format_retries_cannot_commit_an_invented_baseline(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_DRAFT":
+                reply["plan"]["requirements"][0]["statement"] = "Invented feature"
+        with tempfile.TemporaryDirectory() as directory:
+            final = self.drive(self.app(directory, ScriptedPlanning(mutate)))
+            self.assertEqual(final.progression.state, "ENGINE_ERROR")
+            self.assertEqual(final.planning.format_repairs, 3)
+            self.assertIsNone(final.review)
+
+    def test_user_question_and_environment_prerequisite_have_distinct_outcomes(self):
+        for owner, expected in (("user", "HUMAN_GATE"), ("environment", "BLOCKED_BY_PREREQUISITE")):
+            def mutate(adapter, request, reply):
+                if request.target_state == "PLANNING_BASELINE":
+                    reply.update(action="NEEDS_USER_DECISION", questions=[{"question_id": "Q1", "question": "确认项目路径",
+                                "impact": "否则无法绑定代码审核范围", "owner": owner, "blocking": True}])
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                app = self.app(directory, ScriptedPlanning(mutate))
+                final = self.drive(app)
+                self.assertEqual(final.progression.state, expected)
+                self.assertEqual(final.planning.outcome, "NEEDS_USER_DECISION" if owner == "user" else expected)
+                if owner == "user":
+                    self.assertFalse(app.resume())
+
+    def test_publication_failure_cannot_report_plan_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.app(directory, ScriptedPlanning())
+            from orchestrator.runtime.planning_effects import PlanningPublishRunner
+            runner = PlanningPublishRunner(directory)
+            with patch.object(runner, "run_once", side_effect=OSError("publication unavailable")):
+                app.effects._runners["planning_publish"] = runner
+                final = self.drive(app)
+            self.assertEqual(final.progression.state, "ENGINE_ERROR")
+            self.assertEqual(final.planning.result_ref, "")
+
+    def test_evidence_only_repair_does_not_rewrite_the_approved_plan(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_EXECUTION_REVIEW" and adapter.counts[request.target_state] == 1:
+                reply["issues"] = [{"issue_id": "ev-1", "rule": "ENVIRONMENT", "path": "evidence",
+                    "message": "需要执行环境说明", "severity": "blocking", "repair": "evidence", "evidence_question": "确认目标 Python 版本"}]
+            if request.target_state == "PLANNING_EVIDENCE" and adapter.counts[request.target_state] == 2:
+                reply["evidence"] = [{"evidence_id": "EV1", "source": "test runtime", "observation": "Python 3.14",
+                                      "status": "observed", "quote": None}]
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ScriptedPlanning(mutate)
+            final = self.drive(self.app(directory, adapter))
+            self.assertEqual(final.progression.state, "PLAN_READY", final.planning.reason)
+            self.assertEqual(final.review.plan_revision.number, 2)
+            self.assertEqual(adapter.counts["PLANNING_EXECUTION_DRAFT"], 1)
+            self.assertEqual(adapter.counts["PLANNING_EVIDENCE"], 2)
+
+    def test_user_answer_returns_to_solver_to_resolve_a_blocking_unknown(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_EXECUTION_DRAFT":
+                reply["plan"]["unknowns"] = ([] if request.context["clarifications"] else
+                    [{"question_id": "Q1", "question": "选择检查范围", "impact": "影响审核输入", "owner": "user", "blocking": True}])
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.app(directory, ScriptedPlanning(mutate))
+            waiting = self.drive(app)
+            self.assertEqual(waiting.human_gate.reason_code, "NEEDS_USER_DECISION")
+            self.assertEqual(waiting.progression.resume_state, "PLANNING_EXECUTION_DRAFT")
+            self.assertTrue(app.resume("检查全部未提交变更"))
+            self.step(app)
+            self.assertEqual(self.drive(app).progression.state, "PLAN_READY")
+
+    def test_external_and_whole_task_budgets_are_persisted_and_finite(self):
+        def mutate(adapter, request, reply):
+            raise RuntimeError("external runtime unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ScriptedPlanning(mutate)
+            final = self.drive(self.app(directory, adapter))
+            self.assertEqual(final.progression.state, "ENGINE_ERROR")
+            self.assertEqual(final.planning.external_retries, 2)
+            self.assertEqual(adapter.counts["PLANNING_BASELINE"], 3)
+        with tempfile.TemporaryDirectory() as directory:
+            c = context()
+            c = replace(c, planning=replace(c.planning, calls=15))
+            adapter = ScriptedPlanning()
+            app = OrchestratorApp(c, root=directory, multica=adapter, poll_interval=0, timeout_seconds=2)
+            final = self.drive(app)
+            self.assertEqual(final.progression.state, "ENGINE_ERROR")
+            self.assertEqual(final.planning.calls, 16)
+            self.assertEqual(sum(adapter.counts.values()), 1)
+
+    def test_stale_critic_verdict_is_retried_without_publishing(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_EXECUTION_REVIEW":
+                reply["reviewed_revision_ref"] = "stale-version"
+        with tempfile.TemporaryDirectory() as directory:
+            final = self.drive(self.app(directory, ScriptedPlanning(mutate)))
+            self.assertEqual(final.progression.state, "ENGINE_ERROR")
+            self.assertEqual(final.planning.format_repairs, 3)
+            self.assertFalse(final.planning.published_revision_ref)
+
+    def test_repeated_evidence_demand_stops_on_its_own_budget(self):
+        def mutate(adapter, request, reply):
+            if request.target_state == "PLANNING_EXECUTION_REVIEW":
+                n = adapter.counts[request.target_state]
+                reply["issues"] = [{"issue_id": f"ev-{n}", "rule": "ENVIRONMENT", "path": "evidence",
+                    "message": f"需要前提证据 {n}", "severity": "blocking", "repair": "evidence", "evidence_question": f"确认执行条件 {n}"}]
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ScriptedPlanning(mutate)
+            final = self.drive(self.app(directory, adapter))
+            self.assertEqual(final.progression.state, "ENGINE_ERROR")
+            self.assertEqual(final.planning.reason, "PLANNING_EVIDENCE_BUDGET_EXHAUSTED")
+            self.assertEqual(final.planning.evidence_repairs, 2)
+            self.assertEqual(adapter.counts["PLANNING_EXECUTION_DRAFT"], 1)
+
+    def test_success_publication_is_replayable_and_changed_bytes_are_rejected(self):
+        from orchestrator.runtime.planning_effects import PlanningPublishRunner
+        from orchestrator.domain.decisions import EffectRequest
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.app(directory, ScriptedPlanning())
+            final = self.drive(app)
+            payload = {"plan_revision": final.review.plan_revision.to_dict(), "evidence": final.planning.evidence,
+                       "requirements_approval_ref": final.planning.requirements_approval_ref,
+                       "requirements_scope_hash": final.planning.requirements_scope_hash,
+                       "reviewed_revision_ref": final.planning.reviewed_revision_ref,
+                       "reviewed_evidence_hash": final.planning.reviewed_evidence_hash}
+            request = EffectRequest("publish", "planning_publish", final.identity.task_id, "publish", payload=payload)
+            runner = PlanningPublishRunner(app.root)
+            first = runner.run_once(request)
+            self.assertEqual(first, runner.run_once(request))
+            Path(final.planning.result_ref).write_text("tampered", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                runner.run_once(request)
+
+    def test_tampered_success_or_mismatched_workflow_cannot_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final = self.drive(self.app(directory, ScriptedPlanning()))
+            dto = context_to_dto(final)
+            dto["planning"]["reviewed_revision_ref"] = "stale"
+            with self.assertRaises(ValueError):
+                context_from_dto(dto)
+            dto = context_to_dto(final)
+            dto["request"]["workflow"] = "legacy-v1"
+            with self.assertRaises(ValueError):
+                context_from_dto(dto)
+
+
+class PlanningPolicyTests(unittest.TestCase):
+    def test_production_reply_contract_and_schema_follow_each_exact_stage(self):
+        from orchestrator.contracts.planning import CONTRACTS
+        from orchestrator.structured_output import build_structured_output_spec, role_result_template
+        from orchestrator.adapters import _response_contract_for
+        from orchestrator.transport.external import AgentRequest
+        for active in CONTRACTS:
+            with self.subTest(state=active.state):
+                dispatch_context = {"active_runtime_state": active.state, "target_state": active.state}
+                spec = build_structured_output_spec(active.phase, active.role, dispatch_context)
+                self.assertEqual(spec.state, active.state)
+                request = AgentRequest("t", "r", "a", active.role, active.phase, "prompt", "key",
+                                       context=dispatch_context, target_state=active.state, structured_output=spec.to_dict())
+                response = _response_contract_for(request)
+                self.assertEqual(response["allowed_actions"], list(active.actions))
+                self.assertEqual(response["required"], list(active.required_fields))
+                template = role_result_template(active.phase, active.role, state=active.state, schema_hash=spec.schema_hash,
+                                                action=active.actions[0])
+                self.assertEqual(active.validate(template), ())
+                self.assertEqual(spec.schema["required"], response["required"])
+                fields = spec.to_dict()["stable_fields"]
+                if active.state == "PLANNING_EVIDENCE":
+                    self.assertIn("evidence", fields)
+                    self.assertNotIn("requirements", fields)
+
+    def test_file_evidence_preserves_existing_verbatim_quote_gate(self):
+        from orchestrator.domain.planning.execution import validate_evidence
+        source = Path(__file__).resolve()
+        row = {"evidence_id": "EV1", "source": str(source), "observation": "tests exist", "status": "observed"}
+        with self.assertRaises(ValueError):
+            validate_evidence([row])
+        row["quote"] = {"path": str(source), "line_start": 1, "line_end": 1, "text": source.read_text(encoding="utf-8").splitlines()[0]}
+        self.assertEqual(validate_evidence([row]), [row])
+    def test_explicit_legacy_and_old_snapshots_keep_the_old_workflow(self):
+        args = Namespace(project="p", project_type="python", task_type="review", plan_schema=None, workflow="legacy-v1")
+        c = build_context(args, "i", RAW, "t")
+        self.assertEqual((c.request.workflow, c.request.plan_schema), ("legacy-v1", "legacy-v1"))
+        dto = context_to_dto(c)
+        dto["request"].pop("workflow")
+        dto.pop("planning")
+        self.assertEqual(context_from_dto(dto).request.workflow, "legacy-v1")
+        args.workflow = "planning-v1"
+        args.plan_schema = "legacy-v1"
+        with self.assertRaises(ValueError):
+            build_context(args, "i", RAW, "t")
+
+    def test_planning_graph_cannot_resume_into_legacy_states(self):
+        with self.assertRaises(TransitionError):
+            TransitionRegistry.planning().target_for("HUMAN_GATE", "RESUME", "MENXIA_GROUP_SOLVER")
+
+    def test_cycle_and_unknown_inputs_still_fail_without_group_batch_limits(self):
+        p = draft(8)
+        self.assertEqual(len(compile_plan(p, policy_version="planning-v1")["items"]), 8)
+        p["items"][0]["dependencies"] = [p["items"][-1]["item_id"]]
+        with self.assertRaises(PlanCompileError):
+            compile_plan(p, policy_version="planning-v1")
+        p = executable(draft())
+        p["items"][0]["inputs"][0].update(kind="evidence", source_id="invented")
+        self.assertTrue(any(i["rule"] == "INPUT_UNBOUND" for i in execution_issues(p, [])))
+        p["items"][0]["verification"][0]["status"] = "passed"
+        self.assertTrue(any(i["rule"] == "VERIFICATION_PLANNED" for i in execution_issues(p, [])))
+        p = draft()
+        p["dependencies"] = [{"from": "item-000002", "to": "item-000001"}]
+        with self.assertRaises(PlanCompileError):
+            compile_plan(p, policy_version="planning-v1")
+
+
+if __name__ == "__main__":
+    unittest.main()

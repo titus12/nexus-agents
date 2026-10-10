@@ -1,0 +1,67 @@
+"""Strict final publication: failure must not be reported as PLAN_READY."""
+import json
+import os
+from pathlib import Path
+
+from .effects import EffectOutcome
+from ..domain.planning.execution import execution_issues, requirement_scope, render_execution, execution_order
+from ..domain.planning.model import PlanRevision, content_hash, canonical_json
+
+
+class PlanningStepRunner:
+    def run_once(self, request):
+        return EffectOutcome(status="SUCCEEDED", event_name=str(request.payload["action"]),
+                             event_payload=dict(request.payload))
+
+
+class PlanningPublishRunner:
+    def __init__(self, task_root):
+        self.root = Path(task_root)
+
+    @staticmethod
+    def _write_immutable(path, data):
+        if path.exists():
+            if path.read_bytes() != data:
+                raise ValueError("PLANNING_PUBLICATION_VERSION_COLLISION:" + path.name)
+            return
+        temp = path.with_suffix(path.suffix + ".pending")
+        with temp.open("wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp.replace(path)
+
+    def run_once(self, request):
+        payload = request.payload
+        revision = PlanRevision.from_dict(payload["plan_revision"])
+        evidence = payload["evidence"]
+        if (revision.policy_version != "planning-v1" or payload["reviewed_revision_ref"] != revision.reference
+                or payload["reviewed_evidence_hash"] != content_hash(evidence)
+                or not payload["requirements_approval_ref"]
+                or payload["requirements_scope_hash"] != requirement_scope(revision.plan)
+                or execution_issues(revision.plan, evidence)
+                or any(q["blocking"] for q in revision.plan["unknowns"])):
+            raise ValueError("PLANNING_PUBLICATION_VALIDATION_FAILED")
+        markdown = render_execution(revision, evidence, payload["requirements_approval_ref"])
+        validation = {"revision_ref": revision.reference, "compiler_policy": revision.policy_version,
+                      "deterministic_validation": "passed", "semantic_review_ref": payload["reviewed_revision_ref"],
+                      "requirements_approval_ref": payload["requirements_approval_ref"],
+                      "requirements_scope_hash": payload["requirements_scope_hash"],
+                      "reviewed_evidence_hash": payload["reviewed_evidence_hash"],
+                      "execution_order": execution_order(revision.plan), "work_verification_status": "planned"}
+        files = {"execution-plan.json": json.dumps(revision.to_dict(), ensure_ascii=False, indent=2) + "\n",
+                 "execution-plan.md": markdown,
+                 "validation.json": json.dumps(validation, ensure_ascii=False, indent=2) + "\n"}
+        destination = self.root / "planning" / f"v{revision.number:03d}-{revision.content_hash}"
+        destination.mkdir(parents=True, exist_ok=True)
+        manifest = {"revision_ref": revision.reference, "files": {name: content_hash(text) for name, text in files.items()}}
+        # Per-revision files are immutable. Replay after a crash can fill missing files.
+        for name, text in files.items():
+            path = destination / name
+            data = text.encode("utf-8")
+            self._write_immutable(path, data)
+        marker = destination / "manifest.json"
+        self._write_immutable(marker, canonical_json(manifest).encode("utf-8"))
+        return EffectOutcome(status="SUCCEEDED", event_name="PUBLISHED",
+                             event_payload={"action": "PUBLISHED", "revision_ref": revision.reference,
+                                            "result_ref": str(destination / "execution-plan.md")})

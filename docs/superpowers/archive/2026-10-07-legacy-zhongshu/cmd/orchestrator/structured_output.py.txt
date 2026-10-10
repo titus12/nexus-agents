@@ -1,0 +1,430 @@
+"""Adapter for the canonical state-specific machine contracts."""
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
+
+from .contracts import all_contracts, contract_for_state
+from .contracts.analyst_gate import analyst_gate_error
+from .contracts.common import (
+    STRUCTURED_OUTPUT_PROTOCOL,
+    PhaseContract,
+    coerce_enum_values,
+    coerce_scalar_strings,
+    empty_payload,
+    validate_schema,
+)
+
+
+STRUCTURED_OUTPUT_MODE = "inline"
+_ENVELOPE_FIELDS = {
+    "action", "contract_id", "task_id", "request_id", "phase", "state", "role", "mode",
+    "structured_output_protocol", "structured_output_schema_hash",
+}
+
+
+@dataclass(frozen=True)
+class StructuredOutputSpec:
+    """Immutable transport contract attached to one Agent request."""
+
+    mode: str
+    protocol: str
+    schema: dict[str, Any]
+    schema_hash: str
+    state: str = ""
+    role_mode: str = ""
+    workflow: str = 'legacy-v1'
+
+    def to_dict(self) -> dict[str, Any]:
+        properties = self.schema.get("properties", {})
+        phase = str(properties.get("phase", {}).get("const") or "")
+        role = str(properties.get("role", {}).get("const") or "")
+        # Loud on purpose: a dispatched state without a registered contract is
+        # exactly the bug that let the freeze check fall back to the critic
+        # contract and deadlock its own reply validation (task-20260919-67a1a3
+        # freeze attempts 17/19/21/23 were all rejected either way the worker
+        # filled the state field).
+        selected = contract_for_state(self.state, workflow=self.workflow)
+        contract_id = selected.contract_id
+        return {
+            "mode": self.mode,
+            "protocol": self.protocol,
+            "schema": copy.deepcopy(self.schema),
+            "schema_hash": self.schema_hash,
+            "phase": phase,
+            "role": role,
+            "state": self.state,
+            "role_mode": self.role_mode,
+            "contract_id": contract_id,
+            "stable_fields": [f for f in selected.required_fields if f not in _ENVELOPE_FIELDS],
+            "role_modes": list(selected.modes),
+            "workflow": self.workflow,
+        }
+
+
+def _matching_contracts(phase: str, role: str) -> list[PhaseContract]:
+    normalized_phase = str(phase).upper()
+    normalized_role = str(role)
+    return [
+        contract
+        for contract in all_contracts()
+        if contract.phase == normalized_phase and contract.role == normalized_role
+    ]
+
+
+def _contract_for(
+    phase: str,
+    role: str,
+    *,
+    state: str = "",
+    context: Mapping[str, Any] | None = None,
+) -> PhaseContract | None:
+    context = context or {}
+    requested_state = str(
+        state or context.get("active_runtime_state") or context.get("target_state") or ""
+    ).upper()
+    if requested_state:
+        try:
+            candidate = contract_for_state(requested_state, workflow=str(context.get('workflow') or 'legacy-v1'))
+        except KeyError:
+            candidate = None
+        if candidate is not None and candidate.phase == str(phase).upper() and candidate.role == str(role):
+            return candidate
+        if context.get('workflow') == 'requirements-v1' or requested_state.startswith('REQ_'):
+            raise ValueError(f'UNSUPPORTED_REQUIREMENTS_CONTRACT:{requested_state}')
+    candidates = _matching_contracts(phase, role)
+    return candidates[0] if candidates else None
+
+
+def stable_role_fields(phase: str, role: str) -> list[str]:
+    contract = _contract_for(phase, role)
+    if contract is None:
+        return []
+    return [field for field in contract.required_fields if field not in _ENVELOPE_FIELDS]
+
+
+def role_modes(phase: str, role: str) -> list[str]:
+    modes: list[str] = []
+    for contract in _matching_contracts(phase, role):
+        for mode in contract.modes:
+            if mode not in modes:
+                modes.append(mode)
+    return modes
+
+
+def role_states(phase: str, role: str) -> list[str]:
+    return [contract.state for contract in _matching_contracts(phase, role)]
+
+
+def state_actions(state: str) -> list[str]:
+    try:
+        return list(contract_for_state(state).actions)
+    except KeyError:
+        return []
+
+
+def role_mode_for(
+    phase: str,
+    role: str,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    contract = _contract_for(phase, role, context=context)
+    if contract is None:
+        return ""
+    context = context or {}
+    if contract.state == "ZHONGSHU_ANALYST":
+        if context.get("contract_mode") or str(context.get("zhongshu_dispatch_mode") or "") == "requirement_contract":
+            return "REQUIREMENT_CONTRACT_ONLY"
+        return "EVIDENCE_COLLECTION_READ_ONLY"
+    if contract.state == "ZHONGSHU_SOLVER":
+        return "TASK_GRAPH_FORMALIZATION_READ_ONLY_RESUME" if context.get("solver_resume_mode") else "TASK_GRAPH_FORMALIZATION_READ_ONLY"
+    if contract.state == "ZHONGSHU_CRITIC":
+        dispatch_mode = str(context.get("zhongshu_dispatch_mode") or "")
+        if dispatch_mode == "group_review":
+            return "REVIEW_GROUP"
+        return "REVIEW_ONE_TASK" if dispatch_mode == "task_review" else "REVIEW_CURRENT_TASK_GRAPH"
+    return contract.modes[0] if contract.modes else ""
+
+
+def narrow_schema_for_role_mode(
+    schema: Mapping[str, Any], *, state: str = "", role_mode: str = ""
+) -> Mapping[str, Any]:
+    """Narrow one role schema to the dispatched role mode.
+
+    The analyst contract covers two very different hops: requirement
+    extraction and evidence collection.  The un-scoped schema advertised
+    evidence actions and evidence arrays on a contract hop, so a worker
+    answered ``REQUIREMENT_CONTRACT_ONLY`` with an evidence packet and the
+    reply died in the quote gate (task-20260929-73fc9c).  The narrowed schema
+    keeps each hop's product unambiguous: the contract hop may only return
+    ``REQUIREMENT_CONTRACT_READY`` with empty evidence arrays, the evidence
+    hop may never claim the contract action.
+    """
+
+    if str(state).upper() != "ZHONGSHU_ANALYST" or not role_mode:
+        return schema
+    narrowed = copy.deepcopy(dict(schema))
+    properties = narrowed.get("properties")
+    if not isinstance(properties, dict):
+        return narrowed
+    action = properties.get("action")
+    if not isinstance(action, dict) or not isinstance(action.get("enum"), list):
+        return narrowed
+    if role_mode == "REQUIREMENT_CONTRACT_ONLY":
+        allowed = ("REQUIREMENT_CONTRACT_READY", "HUMAN_GATE", "BLOCKED")
+        for key in ("evidence_updates", "finding_responses"):
+            field = properties.get(key)
+            if isinstance(field, dict):
+                field["maxItems"] = 0
+    elif role_mode == "EVIDENCE_COLLECTION_READ_ONLY":
+        allowed = ("EVIDENCE_PACKET_READY", "READY_FOR_SOLVER", "HUMAN_GATE", "BLOCKED")
+    else:
+        return narrowed
+    kept = [member for member in action["enum"] if member in allowed]
+    if kept:
+        action["enum"] = kept
+    return narrowed
+
+
+def _schema_for(
+    phase: str,
+    role: str,
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    contract = _contract_for(phase, role, context=context)
+    if contract is None:
+        return None
+    schema = copy.deepcopy(contract.schema)
+    _bind_solver_requirement_schema(schema, context or {})
+    return schema
+
+
+def _bind_solver_requirement_schema(
+    schema: dict[str, Any],
+    context: Mapping[str, Any],
+) -> None:
+    """Bind Solver requirement references to the canonical Analyst contract."""
+    state = str(
+        context.get("active_runtime_state")
+        or context.get("target_state")
+        or ""
+    ).upper()
+    if state != "ZHONGSHU_SOLVER":
+        return
+    analyst_plan = context.get("analyst_plan")
+    if not isinstance(analyst_plan, Mapping):
+        return
+    requirements = analyst_plan.get("requirements")
+    if not isinstance(requirements, list):
+        return
+    requirement_ids = [
+        str(item.get("requirement_id") or "").strip()
+        for item in requirements
+        if isinstance(item, Mapping) and str(item.get("requirement_id") or "").strip()
+    ]
+    if len(requirement_ids) != len(requirements) or len(set(requirement_ids)) != len(requirement_ids):
+        return
+    plan_schema = schema.get("properties", {}).get("plan")
+    if not isinstance(plan_schema, Mapping):
+        return
+    requirements_schema = plan_schema.get("properties", {}).get("requirements")
+    if not isinstance(requirements_schema, dict):
+        return
+    requirements_schema["minItems"] = len(requirement_ids)
+    requirements_schema["maxItems"] = len(requirement_ids)
+    requirement_schema = requirements_schema.get("items")
+    if not isinstance(requirement_schema, dict):
+        return
+    properties = requirement_schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+    requirement_id_schema = properties.get("requirement_id")
+    if isinstance(requirement_id_schema, dict):
+        requirement_id_schema["enum"] = requirement_ids
+
+
+def build_structured_output_spec(
+    phase: str,
+    role: str,
+    context: dict[str, Any] | None = None,
+) -> StructuredOutputSpec | None:
+    """Build the schema that the selected state validator will enforce."""
+    context = context or {}
+    contract = _contract_for(phase, role, context=context)
+    if contract is None:
+        return None
+    schema = copy.deepcopy(contract.schema)
+    _bind_solver_requirement_schema(schema, context)
+    state = str(context.get("active_runtime_state") or context.get("target_state") or contract.state)
+    role_mode = role_mode_for(phase, role, context)
+    schema = narrow_schema_for_role_mode(schema, state=state, role_mode=role_mode)
+    encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return StructuredOutputSpec(
+        mode=STRUCTURED_OUTPUT_MODE,
+        protocol=STRUCTURED_OUTPUT_PROTOCOL,
+        schema=schema,
+        schema_hash=hashlib.sha256(encoded).hexdigest(),
+        state=state,
+        role_mode=role_mode,
+        workflow=str(context.get('workflow') or 'legacy-v1'),
+    )
+
+
+def role_result_template(
+    phase: str,
+    role: str,
+    *,
+    task_id: str = "",
+    request_id: str = "",
+    state: str = "",
+    role_mode: str = "",
+    schema_hash: str = "",
+    action: str = "",
+    workflow: str = 'legacy-v1',
+) -> dict[str, Any]:
+    """Return a complete role envelope generated from one state contract."""
+    contract = _contract_for(phase, role, state=state,context={'workflow':workflow})
+    if contract is None:
+        return {}
+    template = empty_payload(contract.schema)
+    template.update(
+        {
+            "action": action,
+            "contract_id": contract.contract_id,
+            "task_id": task_id,
+            "request_id": request_id,
+            "phase": contract.phase,
+            "state": state or contract.state,
+            "role": contract.role,
+            "mode": role_mode or contract.modes[0],
+            "structured_output_protocol": STRUCTURED_OUTPUT_PROTOCOL,
+            "structured_output_schema_hash": schema_hash
+            or "<exact structured_output_schema_hash from the injected contract; copy verbatim>",
+        }
+    )
+    return template
+
+
+def fill_role_defaults(
+    payload: dict[str, Any],
+    *,
+    phase: str,
+    role: str,
+    state: str = "",
+    workflow: str = 'legacy-v1',
+) -> dict[str, Any]:
+    """Backfill role fields a model omitted with the contract's empty value.
+
+    The contract tells the model to always emit every stable field (``[]``/null
+    when unused); models frequently drop one.  Filling the empty default keeps a
+    substantially complete result from being rejected outright.
+    """
+
+    if workflow == 'requirements-v1' or state.startswith('REQ_'):
+        return payload
+    contract = _contract_for(phase, role, state=state,context={'workflow':workflow})
+    if contract is None:
+        return payload
+    template = empty_payload(contract.schema)
+    for key in contract.required_fields:
+        if key not in payload:
+            payload[key] = copy.deepcopy(template.get(key))
+    return payload
+
+
+def normalize_role_payload(
+    payload: dict[str, Any],
+    *,
+    phase: str,
+    role: str,
+    state: str = "",
+    workflow: str = 'legacy-v1',
+) -> dict[str, Any]:
+    """Canonicalize tolerant fields before contract validation.
+
+    Runs the scalar identity pass (``item_id`` as null/number becomes text)
+    and the enum-label pass, so one model type slip cannot discard a
+    substantially complete result.
+    """
+
+    contract = _contract_for(phase, role, state=state,context={'workflow':workflow})
+    if contract is None:
+        return payload
+    coerce_scalar_strings(payload, contract.schema)
+    return coerce_enum_values(payload, contract.schema)
+
+
+def accepted_role_modes(expected: str, allowed: Sequence[str] = ()) -> frozenset[str]:
+    """Return the role modes an agent reply may legitimately declare.
+
+    A role contract can publish several modes (the Solver declares both the
+    initial ``..._READ_ONLY`` and the revision ``..._READ_ONLY_RESUME``).  The
+    dispatched mode tells the agent which one the orchestrator had in mind, but
+    a reply that used another *declared* mode is still a valid reply: which
+    materialization runs is decided by the reply content, not by the label.
+    Reading only the dispatched mode turned a legitimate revision reply into a
+    rejection that the pipeline reported as "no reply at all".
+    """
+
+    modes = {str(expected)} if str(expected or "") else set()
+    modes.update(str(item) for item in allowed if str(item or ""))
+    return frozenset(modes)
+
+
+def validate_role_result_shape(
+    payload: dict[str, Any],
+    *,
+    phase: str,
+    role: str,
+    state: str = "",
+    role_mode: str = "",
+    allowed_role_modes: Sequence[str] = (),
+    expected_schema_hash: str = "",
+    schema: Mapping[str, Any] | None = None,
+    workflow: str = 'legacy-v1',
+) -> str:
+    """Validate the selected contract before business-state validation."""
+    contract = _contract_for(phase, role, state=state,context={'workflow':workflow})
+    if contract is None:
+        return "STRUCTURED_ROLE_UNSUPPORTED"
+    missing = sorted(key for key in contract.required_fields if key not in payload)
+    if missing:
+        return "STRUCTURED_ROLE_FIELDS_MISSING:" + ",".join(missing)
+    if str(payload.get("phase") or "").upper() != contract.phase:
+        return "STRUCTURED_ROLE_PHASE_MISMATCH"
+    if str(payload.get("contract_id") or "") != contract.contract_id:
+        return "STRUCTURED_ROLE_CONTRACT_ID_MISMATCH"
+    if str(payload.get("role") or "") != contract.role:
+        return "STRUCTURED_ROLE_ROLE_MISMATCH"
+    if state and str(payload.get("state") or "") != state:
+        return "STRUCTURED_ROLE_STATE_MISMATCH"
+    supplied_mode = str(payload.get("mode") or "")
+    if supplied_mode and supplied_mode not in accepted_role_modes(role_mode, allowed_role_modes):
+        return "STRUCTURED_ROLE_MODE_MISMATCH"
+    if str(payload.get("structured_output_protocol") or "") != STRUCTURED_OUTPUT_PROTOCOL:
+        return "STRUCTURED_ROLE_PROTOCOL_MISMATCH"
+    actual_schema_hash = str(payload.get("structured_output_schema_hash") or "")
+    if len(actual_schema_hash) != 64 or any(char not in "0123456789abcdef" for char in actual_schema_hash.lower()):
+        return "STRUCTURED_ROLE_SCHEMA_HASH_INVALID"
+    # Echo mismatch is deliberately not rejected here: the agent hand-copies
+    # the 64-char hash and transcription typos are routine (task-20260927-de54aa
+    # CRITIC:6 group-01).  Callers stamp the expected hash onto the stored
+    # payload, and the structural validation below is the real gate.
+    if not isinstance(payload.get("action"), str) or not payload["action"]:
+        return "STRUCTURED_ROLE_ACTION_MISSING"
+    errors: list[str] = []
+    active_schema = schema if isinstance(schema, Mapping) else contract.schema
+    active_schema = narrow_schema_for_role_mode(
+        active_schema, state=contract.state, role_mode=role_mode
+    )
+    validate_schema(payload, active_schema, "", errors)
+    if errors:
+        return "STRUCTURED_ROLE_CONTRACT_INVALID:" + ";".join(errors[:20])
+    if contract.state == "ZHONGSHU_ANALYST":
+        error = analyst_gate_error(payload)
+        if error:
+            return "STRUCTURED_ROLE_CONTRACT_INVALID:" + error
+    return ""

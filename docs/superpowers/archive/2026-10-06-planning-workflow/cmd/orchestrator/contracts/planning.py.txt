@@ -1,0 +1,73 @@
+"""Small stage-specific products for the formal serial planning workflow."""
+from .common import array, make_contract, object_schema, string
+
+
+def obj(fields):
+    return object_schema(fields, required=tuple(fields))
+
+
+QUESTION = obj({"question_id": string(), "question": string(), "impact": string(),
+                "owner": string(enum=("user", "environment")), "blocking": {"type": "boolean"}})
+REQUIREMENT = obj({"requirement_id": string(), "statement": string(), "source_quote": string(),
+                   "acceptance_signal": string(), "priority": string(enum=("must", "should", "could"))})
+EVIDENCE = obj({"evidence_id": string(), "source": string(), "observation": string(),
+               "status": string(enum=("observed", "unavailable")),
+               "quote": object_schema({"path": string(), "line_start": {"type": "integer"},
+                                       "line_end": {"type": "integer"}, "text": string()},
+                                      required=("path", "line_start", "line_end", "text"), nullable=True)})
+INPUT = obj({"name": string(), "kind": string(enum=("requirement", "evidence", "item_output")),
+             "source_id": string(), "output_name": string()})
+OUTPUT = obj({"name": string(), "description": string()})
+VERIFICATION = obj({"method": string(), "expected_result": string(), "status": string(const="planned")})
+CORE_ITEM = {"item_id": string(), "group_id": string(), "title": string(), "objective": string(),
+             "dependencies": array(string()), "source_requirement_ids": array(string()),
+             "acceptance_signals": array(string())}
+EXECUTION_ITEM = {**CORE_ITEM, "inputs": array(INPUT), "steps": array(string()), "outputs": array(OUTPUT),
+                  "verification": array(VERIFICATION), "risks": string(), "compatibility": string(), "rollback": string()}
+GROUP = obj({"group_id": string(), "title": string(), "objective": string(), "item_ids": array(string())})
+DECISION = obj({"decision_id": string(), "choice": string(), "alternatives": array(string()),
+                "reason": string(), "evidence_ids": array(string())})
+ISSUE = obj({"issue_id": string(), "rule": string(), "path": string(), "message": string(),
+             "severity": string(enum=("blocking", "advisory")), "repair": string(enum=("solver", "evidence")),
+             "evidence_question": string()})
+
+
+def plan(execution=False):
+    fields = {"requirements": array(REQUIREMENT), "items": array(obj(EXECUTION_ITEM if execution else CORE_ITEM)),
+              "groups": array(GROUP), "scope": string(), "unknowns": array(QUESTION)}
+    if execution:
+        fields["decisions"] = array(DECISION)
+    return object_schema(fields, required=tuple(fields), nullable=True)
+
+
+def contract(state, role, action, fields, rules):
+    return make_contract(contract_id="nexus." + state.lower() + ".v1", state=state, phase="PLANNING",
+                         role=role, modes=("PLAN",),
+                         actions=(action, "NEEDS_USER_DECISION", "BLOCKED_BY_PREREQUISITE"),
+                         fields={**fields, "questions": array(QUESTION)}, prompt_rules=rules)
+
+
+CONTRACTS = (
+    contract("PLANNING_BASELINE", "Analyst", "BASELINE_READY", {"requirements": array(REQUIREMENT)}, (
+        "Extract user requirements with exact source_quote. Do not invent numeric thresholds or scope.",
+        "Ask only blocking questions that prevent a usable plan; explicitly identify impact and owner.",)),
+    contract("PLANNING_EVIDENCE", "Analyst", "EVIDENCE_READY", {"evidence": array(EVIDENCE)}, (
+        "Investigate only necessary prerequisites and requested evidence questions. Empty evidence is valid.",
+        "observed needs a concrete source and observation. Unread or inaccessible sources are unavailable.",
+        "File evidence needs a verbatim quote {path,line_start,line_end,text}; non-file evidence uses quote:null.",
+        "Do not review or change the plan. Do not claim a code audit has already completed.",)),
+    contract("PLANNING_DRAFT", "Solver", "DRAFT_READY", {"plan": plan()}, (
+        "Return a complete canonical requirement plan, retaining the exact baseline.",
+        "Groups are business labels; no six-item cap. The item dependency DAG must be acyclic.",)),
+    contract("PLANNING_EXECUTION_DRAFT", "Solver", "EXECUTION_READY", {"plan": plan(True)}, (
+        "Return a full plan with bound inputs, ordered steps, named outputs, planned verification, risks, compatibility and rollback.",
+        "Preserve baseline and approved requirement scope. Scope changes require renewed human approval.",
+        "Verification status is planned. No implementation/test/code-review has been executed by this workflow.",
+        "Input item_output must name a declared output of a direct dependency. Do not invent evidence.",)),
+    contract("PLANNING_EXECUTION_REVIEW", "Critic", "REVIEW_APPROVED", {
+        "reviewed_revision_ref": string(), "issues": array(ISSUE)}, (
+        "Review the exact supplied revision for completeness, feasibility, scope, unsupported assumptions and testability.",
+        "Return stable issues with paths and repair type. Evidence repair needs a concrete evidence_question.",
+        "REVIEW_APPROVED is a proposed verdict; blocking issues still cause bounded repair.",
+        "Do not return or modify the plan. Approval never means the work/tests/code audit have run.",)),
+)

@@ -1,0 +1,208 @@
+"""Deterministic executability checks; never claims to have run the work."""
+from .model import content_hash
+
+
+def requirement_scope(plan):
+    """Human-approved surface; execution detail is reviewed separately."""
+    return content_hash({
+        "requirements": plan["requirements"], "groups": plan["groups"],
+        "scope": plan.get("scope"),
+        "items": [{k: i.get(k) for k in ("item_id", "group_id", "title", "objective",
+                   "source_requirement_ids", "dependencies", "acceptance_signals")} for i in plan["items"]],
+    })
+
+
+def issue(rule, path, message):
+    return {"issue_id": content_hash([rule, path])[:16], "rule": rule, "path": path,
+            "severity": "blocking", "message": message, "repair": "solver"}
+
+
+def validate_baseline(rows, raw_request):
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("baseline requires a nonempty requirements array")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("requirement must be an object")
+        for key in ("requirement_id", "statement", "source_quote", "acceptance_signal"):
+            if not isinstance(row.get(key), str) or not row[key].strip():
+                raise ValueError("requirement missing " + key)
+        if row["source_quote"] not in raw_request:
+            raise ValueError("source_quote must be an exact substring of the user request")
+        if row["requirement_id"] in seen or row.get("priority") not in ("must", "should", "could"):
+            raise ValueError("invalid requirement identity or priority")
+        seen.add(row["requirement_id"])
+    return rows
+
+
+def validate_evidence(rows):
+    if not isinstance(rows, list):
+        raise ValueError("evidence must be an array; empty is valid when no investigation is needed")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("status") not in ("observed", "unavailable"):
+            raise ValueError("evidence status must be observed or unavailable")
+        for key in ("evidence_id", "source", "observation"):
+            if not isinstance(row.get(key), str) or not row[key].strip():
+                raise ValueError("evidence missing " + key)
+        if row["evidence_id"] in seen:
+            raise ValueError("duplicate evidence identity")
+        seen.add(row["evidence_id"])
+    from ...quote_gate import find_quote_issues, format_rejection
+    quote_issues = find_quote_issues({"evidence_updates": [row for row in rows if row["status"] == "observed"]})
+    if quote_issues:
+        raise ValueError(format_rejection(quote_issues))
+    return rows
+
+
+def validate_questions(rows):
+    if not isinstance(rows, list):
+        raise ValueError("questions must be an array")
+    for row in rows:
+        if (not isinstance(row, dict) or row.get("owner") not in ("user", "environment")
+                or type(row.get("blocking")) is not bool):
+            raise ValueError("question requires explicit owner and boolean blocking")
+        for key in ("question_id", "question", "impact"):
+            if not isinstance(row.get(key), str) or not row[key].strip():
+                raise ValueError("question missing " + key)
+    if len({q["question_id"] for q in rows}) != len(rows):
+        raise ValueError("duplicate question identity")
+    return rows
+
+
+def validate_issues(rows, plan):
+    if not isinstance(rows, list):
+        raise ValueError("review issues must be an array")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("repair") not in ("solver", "evidence"):
+            raise ValueError("issue requires a typed solver/evidence repair")
+        for key in ("issue_id", "rule", "path", "message"):
+            if not isinstance(row.get(key), str) or not row[key].strip():
+                raise ValueError("issue missing " + key)
+        if row["issue_id"] in seen or row.get("severity") not in ("blocking", "advisory"):
+            raise ValueError("invalid issue identity or severity")
+        if row["repair"] == "evidence" and not str(row.get("evidence_question") or "").strip():
+            raise ValueError("evidence repair requires a concrete evidence_question")
+        seen.add(row["issue_id"])
+    return rows
+
+
+def execution_issues(plan, evidence):
+    issues = []
+    items = {i["item_id"]: i for i in plan["items"]}
+    evidence_ids = {e["evidence_id"] for e in evidence if e["status"] == "observed"}
+    req_ids = {r["requirement_id"] for r in plan["requirements"]}
+    covered = {r for i in items.values() for r in i["source_requirement_ids"]}
+    for r in plan["requirements"]:
+        if r.get("priority", "must") == "must" and r["requirement_id"] not in covered:
+            issues.append(issue("REQUIREMENT_UNCOVERED", r["requirement_id"], "必须需求没有工作项覆盖"))
+    for iid, item in items.items():
+        def add(rule, field, message):
+            issues.append(issue(rule, f"items.{iid}.{field}", message))
+        steps = item.get("steps")
+        if not isinstance(steps, list) or not steps or any(not isinstance(s, str) or not s.strip() for s in steps):
+            add("STEPS_REQUIRED", "steps", "提供具体、按序的操作步骤")
+        outputs = item.get("outputs")
+        if (not isinstance(outputs, list) or not outputs or any(not isinstance(o, dict)
+                or not isinstance(o.get("name"), str) or not o["name"].strip()
+                or not isinstance(o.get("description"), str) or not o["description"].strip() for o in outputs)):
+            add("OUTPUTS_REQUIRED", "outputs", "提供有名称、描述的产物")
+        elif len({o["name"] for o in outputs}) != len(outputs):
+            add("OUTPUT_DUPLICATE", "outputs", "产物名称不能重复")
+        inputs = item.get("inputs")
+        if not isinstance(inputs, list) or not inputs:
+            add("INPUTS_REQUIRED", "inputs", "输入必须绑定需求、已观察证据或前序工作项产物")
+        else:
+            for n, row in enumerate(inputs):
+                valid = isinstance(row, dict) and isinstance(row.get("name"), str) and row["name"].strip()
+                if valid:
+                    kind, source = row.get("kind"), row.get("source_id")
+                    if kind == "requirement":
+                        valid = source in req_ids
+                    elif kind == "evidence":
+                        valid = source in evidence_ids
+                    elif kind == "item_output":
+                        producer = items.get(source, {})
+                        valid = (source in item.get("dependencies", []) and row.get("output_name") in
+                                 [o.get("name") for o in producer.get("outputs", []) if isinstance(o, dict)])
+                    else:
+                        valid = False
+                if not valid:
+                    add("INPUT_UNBOUND", f"inputs.{n}", "输入源无效或前序产物没有声明直接依赖")
+        verifications = item.get("verification")
+        if (not isinstance(verifications, list) or not verifications or any(not isinstance(v, dict)
+                or v.get("status") != "planned" or not isinstance(v.get("method"), str)
+                or not v["method"].strip() or not isinstance(v.get("expected_result"), str)
+                or not v["expected_result"].strip() for v in verifications)):
+            add("VERIFICATION_PLANNED", "verification", "提供验证方法与预期结果；尚未执行只能写 planned")
+        for field in ("risks", "compatibility", "rollback"):
+            if not isinstance(item.get(field), str) or not item[field].strip():
+                add("EXECUTION_FIELD_REQUIRED", field, "提供具体说明，不适用时说明原因")
+    decisions = plan.get("decisions")
+    if not isinstance(decisions, list):
+        issues.append(issue("DECISIONS_REQUIRED", "decisions", "提供决策列表，无选型可写空数组"))
+    else:
+        seen_decisions = set()
+        for n, d in enumerate(decisions):
+            if (not isinstance(d, dict) or any(not isinstance(d.get(k), str) or not d[k].strip()
+                    for k in ("decision_id", "choice", "reason"))
+                    or not isinstance(d.get("alternatives"), list) or not d["alternatives"]
+                    or any(not isinstance(a, str) or not a.strip() for a in d["alternatives"])
+                    or not isinstance(d.get("evidence_ids"), list)
+                    or any(e not in evidence_ids for e in d["evidence_ids"])
+                    or d.get("decision_id") in seen_decisions):
+                issues.append(issue("DECISION_INVALID", f"decisions.{n}", "决策需列出备选、理由及有效证据引用"))
+            elif isinstance(d.get("decision_id"), str):
+                seen_decisions.add(d["decision_id"])
+    try:
+        validate_questions(plan.get("unknowns"))
+    except ValueError as exc:
+        issues.append(issue("UNKNOWNS_INVALID", "unknowns", str(exc)))
+    return issues
+
+
+def execution_order(plan):
+    remaining = {i["item_id"]: set(i.get("dependencies", [])) for i in plan["items"]}
+    order = []
+    while remaining:
+        ready = [iid for iid, deps in remaining.items() if deps.issubset(order)]
+        if not ready:
+            raise ValueError("work item dependency graph cannot be scheduled")
+        order.extend(ready)
+        for iid in ready:
+            del remaining[iid]
+    return order
+
+
+def render_execution(revision, evidence, approval_ref):
+    plan = revision.plan
+    lines = ["# 可执行方案", "", f"方案版本：`{revision.reference}`", "",
+             f"需求审批版本：`{approval_ref}`", "", "所有工作项验证均为待执行；本产物不代表代码审核或测试已经通过。", "",
+             "## 需求基线", ""]
+    lines.extend(f"- {r['requirement_id']}：{r['statement']}" for r in plan["requirements"])
+    lines.extend(["", "## 执行顺序", "", " → ".join(execution_order(plan)), ""])
+    by_id = {i["item_id"]: i for i in plan["items"]}
+    for iid in execution_order(plan):
+        i = by_id[iid]
+        lines.extend([f"## {iid} · {i['title']}", "", i["objective"], "",
+                      "### 输入", ""])
+        lines.extend(f"- {r['name']}：{r['kind']} / {r['source_id']}" +
+                     (f" / {r['output_name']}" if r.get("output_name") else "") for r in i["inputs"])
+        lines.extend(["", "### 步骤", ""])
+        lines.extend(f"{n}. {step}" for n, step in enumerate(i["steps"], 1))
+        lines.extend(["", "### 产物", ""])
+        lines.extend(f"- {o['name']}：{o['description']}" for o in i["outputs"])
+        lines.extend(["", "### 验收与验证（待执行）", ""])
+        lines.extend(f"- {s}" for s in i["acceptance_signals"])
+        lines.extend(f"- {v['method']}；预期：{v['expected_result']}（planned）" for v in i["verification"])
+        for name, title in (("risks", "风险"), ("compatibility", "兼容"), ("rollback", "回退")):
+            lines.extend(["", f"### {title}", "", i[name]])
+        lines.append("")
+    lines.extend(["## 决策与证据", ""])
+    for d in plan["decisions"]:
+        lines.extend([f"- {d['decision_id']}：{d['choice']}；理由：{d['reason']}；备选：" + "、".join(d["alternatives"])])
+    lines.extend(f"- {e['evidence_id']} [{e['status']}] {e['source']}：{e['observation']}" for e in evidence)
+    lines.extend(["", "## 非阻塞待确认事项", ""])
+    lines.extend(f"- {q['question']}；影响：{q['impact']}；责任方：{q['owner']}" for q in plan["unknowns"])
+    return "\n".join(lines) + "\n"

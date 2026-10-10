@@ -1,0 +1,86 @@
+"""Shared data, hashing and validation helpers; no Zhongshu workflow execution."""
+from __future__ import annotations
+from dataclasses import field
+from typing import Any
+import copy
+import hashlib
+import json
+import re
+from .evidence_records import merge_evidence_updates, union_records
+
+def canonical_plan_json(plan: Any) -> str:
+    """Serialize a plan deterministically for cross-stage identity checks."""
+    value = plan if isinstance(plan, dict) else {}
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+def canonical_plan_hash(plan: Any) -> str:
+    """Return the canonical SHA-256 identity shared by prompt and fan-in."""
+    return hashlib.sha256(canonical_plan_json(plan).encode('utf-8')).hexdigest()
+_TASK_REQUIREMENT_KINDS = {'task', 'action', 'deliverable', 'outcome'}
+_CONSTRAINT_REQUIREMENT_KINDS = {'constraint', 'guardrail', 'invariant', 'non_goal', 'non-goal', 'prohibition'}
+_CONSTRAINT_MARKERS = ('do not ', "don't ", 'must not ', 'should not ', 'avoid ', '禁止', '不得', '不要', '不应', '不能', '不可', '无需', '不需要')
+
+def requirement_kind(requirement: Any) -> str:
+    """Classify a contract entry as executable work or a preserved constraint.
+
+    ``kind`` is the authoritative field for new contracts.  The fallback is
+    intentionally conservative and keeps older contracts (which did not have
+    ``kind``) compatible with the current task-coverage check.
+    """
+    if not isinstance(requirement, dict):
+        return 'task'
+    raw_kind = str(requirement.get('kind') or requirement.get('requirement_kind') or requirement.get('requirement_type') or '').strip().casefold()
+    if raw_kind in _CONSTRAINT_REQUIREMENT_KINDS:
+        return 'constraint'
+    if raw_kind in _TASK_REQUIREMENT_KINDS:
+        return 'task'
+    if str(requirement.get('scope') or '').strip().casefold() == 'out':
+        return 'constraint'
+    statement = str(requirement.get('statement') or '').strip().casefold()
+    if any((marker in statement for marker in _CONSTRAINT_MARKERS)):
+        return 'constraint'
+    return 'task'
+
+def requirement_requires_task(requirement: Any) -> bool:
+    """Return whether a contract entry must be mapped to an executable task."""
+    return requirement_kind(requirement) == 'task'
+
+def normalize_requirement_id(value: object) -> str:
+    """Collapse ``req-1`` / ``req-001`` / ``req-000001`` to one canonical id."""
+    text = str(value or '').strip().lower()
+    match = re.search('(\\d+)$', text)
+    if not match:
+        return text
+    return f'{text[:match.start()]}{match.group(1).zfill(6)}'
+
+def merge_zhongshu_evidence_packet(previous: Any, incoming: dict[str, Any]) -> dict[str, Any]:
+    """Persist supplements losslessly under the same authoritative contract.
+
+    A packet revision follows the plan, while observations retain their own
+    provenance. History is not a fresh verification of a changed code surface.
+    Storage is cumulative; worker and prompt projection budgets stay bounded.
+    """
+    packet = copy.deepcopy(incoming)
+    if not isinstance(previous, dict) or previous.get('phase') != 'ZHONGSHU' or incoming.get('phase') != 'ZHONGSHU':
+        return packet
+    old_requirements = previous.get('requirements')
+    new_requirements = incoming.get('requirements')
+    if not old_requirements or not new_requirements:
+        return packet
+
+    def contract(value: list[dict[str, Any]]) -> dict[str, Any]:
+        return {normalize_requirement_id(row.get('requirement_id')): {**row, 'requirement_id': normalize_requirement_id(row.get('requirement_id'))} for row in value if isinstance(row, dict)}
+    if contract(old_requirements) != contract(new_requirements):
+        return packet
+    for field in ('evidence_updates', 'deferred_evidence_updates'):
+        packet[field] = merge_evidence_updates(previous.get(field), incoming.get(field))
+    for field in ('confirmed_facts', 'constraints', 'conflicts', 'unknowns', 'risks', 'protected_paths', 'assumptions', 'unknown_requirement_ids', 'unknown_requirements'):
+        packet[field] = union_records(previous.get(field), incoming.get(field))
+    packet['worker_evidence'] = copy.deepcopy(previous.get('worker_evidence') or {})
+    packet['worker_evidence'].update(copy.deepcopy(incoming.get('worker_evidence') or {}))
+    responses = {str(row.get('finding_id')): copy.deepcopy(row) for row in previous.get('finding_responses') or [] if isinstance(row, dict)}
+    responses.update({str(row.get('finding_id')): copy.deepcopy(row) for row in incoming.get('finding_responses') or [] if isinstance(row, dict)})
+    packet['finding_responses'] = list(responses.values())
+    packet['evidence_packet_version'] = int(previous.get('evidence_packet_version') or 1) + 1
+    packet['evidence_history_revisions'] = union_records(previous.get('evidence_history_revisions'), previous.get('plan_revision_id'), incoming.get('plan_revision_id'))
+    return packet

@@ -1,0 +1,308 @@
+"""Pure, bounded recipe for requirement-to-executable-plan tasks."""
+from dataclasses import dataclass, replace
+import json
+
+from ..context import (DeliveryUpdate, HumanGateUpdate, ProgressUpdate, ReviewUpdate, apply_review_update)
+from ..decisions import ContextUpdate, EffectRequest, StateDecision
+from ..events import DomainEvent, TransitionRequest
+from ..errors import InvariantViolation
+from ..plan_review import matches_current, new_snapshot, prepare_human_revision
+from ..transitions import TransitionRegistry, TERMINAL_STATES
+from .model import canonical_json, content_hash
+from .execution import (execution_issues, requirement_scope, validate_baseline, validate_evidence,
+                        validate_issues, validate_questions)
+
+MAX_CALLS = 16
+MAX_FORMAT_REPAIRS = 3
+MAX_SEMANTIC_REPAIRS = 3
+MAX_EVIDENCE_REPAIRS = 2
+MAX_EXTERNAL_RETRIES = 2
+AGENT_STAGES = {"PLANNING_BASELINE": "Analyst", "PLANNING_EVIDENCE": "Analyst",
+                "PLANNING_DRAFT": "Solver", "PLANNING_EXECUTION_DRAFT": "Solver",
+                "PLANNING_EXECUTION_REVIEW": "Critic"}
+READY_ACTIONS = {"PLANNING_BASELINE": "BASELINE_READY", "PLANNING_EVIDENCE": "EVIDENCE_READY",
+                 "PLANNING_DRAFT": "DRAFT_READY", "PLANNING_EXECUTION_DRAFT": "EXECUTION_READY",
+                 "PLANNING_EXECUTION_REVIEW": "REVIEW_APPROVED"}
+
+
+def _effect(context, effect_type, payload):
+    identity = f"{context.identity.task_id}:{context.progression.sequence}:{effect_type}"
+    return EffectRequest(identity, effect_type, context.identity.task_id, identity, payload=payload)
+
+
+def _entry(context):
+    state = context.progression.state
+    ledger = context.planning
+    if state in AGENT_STAGES:
+        if ledger.calls >= MAX_CALLS:
+            # A durable event makes budget exhaustion use the same committed boundary.
+            return (_effect(context, "planning_step", {"action": "BUDGET_EXHAUSTED"}),), ledger, None
+        from ...contracts import contract_for_state
+        from ...dispatch_envelope import build_envelope
+        contract = contract_for_state(state)
+        revision = context.review.plan_revision if context.review else None
+        request_id = f"{context.identity.task_id}:planning:{context.progression.sequence}"
+        data = {"workflow": "planning-v1", "active_runtime_state": state, "target_state": state,
+                "mode": "PLAN", "contract_id": contract.contract_id, "plan_schema": "canonical-v1",
+                "plan_base_ref": revision.reference if revision else "", "plan_revision_ref": revision.reference if revision else "",
+                "raw_request": context.request.raw_request, "project": context.identity.project,
+                "baseline": ledger.baseline, "evidence": ledger.evidence,
+                "plan": revision.plan if revision else None, "issues": ledger.issues,
+                "questions": ledger.questions, "clarifications": json.loads(ledger.clarifications_json),
+                "repair_feedback": ledger.reason}
+        data["envelope"] = build_envelope(
+            ingredients=[{"key": k, "source": "context.json", "lifetime": "persisted"}
+                         for k in ("raw_request", "baseline", "evidence", "plan", "issues", "clarifications")],
+            tools={"editable": "plan" if contract.role == "Solver" else "evidence_or_verdict_only"},
+            product={"type": state.lower(), "contract_id": contract.contract_id})
+        prompt = "\n".join(contract.prompt_rules) + "\n只产出当前工序的结构化结果，按契约返回完整 JSON。\n"
+        payload = {"target_state": state, "sequence": context.progression.sequence,
+                   "issue_id": context.identity.issue_id, "request_id": request_id,
+                   "role": contract.role, "phase": "PLANNING", "worker_id": "planning-" + contract.role.lower(),
+                   "prompt_ref": prompt, "dispatch_context": data}
+        delivery = DeliveryUpdate(active_request_id=request_id, idempotency_key=f"{context.identity.task_id}:{context.progression.sequence}:agent_dispatch",
+                                  status="DISPATCHING", phase="PLANNING", role=contract.role)
+        return (_effect(context, "agent_dispatch", payload),), replace(ledger, calls=ledger.calls + 1), delivery
+    if state == "PLANNING_PUBLISH":
+        revision = context.review.plan_revision
+        payload = {"plan_revision": revision.to_dict(), "evidence": ledger.evidence,
+                   "requirements_approval_ref": ledger.requirements_approval_ref,
+                   "requirements_scope_hash": ledger.requirements_scope_hash,
+                   "reviewed_revision_ref": ledger.reviewed_revision_ref}
+        payload["reviewed_evidence_hash"] = ledger.reviewed_evidence_hash
+        return (_effect(context, "planning_publish", payload),), ledger, None
+    if state == "PLANNING_REQUIREMENTS_CHECK":
+        return (_effect(context, "planning_step", {"action": "CHECK_REQUIREMENTS"}),), ledger, None
+    if state == "RETRY_WAIT":
+        return (_effect(context, "planning_step", {"action": "RESUME"}),), ledger, None
+    return (), ledger, None
+
+
+def _move(context, event, action, *, ledger=None, review=None, gate=None, resume=None, extra_effects=()):
+    ledger = ledger or context.planning
+    registry = TransitionRegistry.planning()
+    target = registry.target_for(context.progression.state, action,
+                                 context.progression.resume_state if action == "RESUME" else None)
+    next_review = apply_review_update(context.review, review) if review is not None else context.review
+    next_context = replace(context, planning=ledger, review=next_review,
+                           progression=replace(context.progression, state=target, sequence=context.progression.sequence + 1))
+    effects, ledger, delivery = _entry(next_context)
+    return StateDecision(TransitionRequest(action, ledger.reason or action),
+                         ContextUpdate(planning=ledger, review=review, human_gate=gate,
+                                       progression=ProgressUpdate(resume_state=resume), delivery=delivery),
+                         tuple(extra_effects) + effects, event.event_id)
+
+
+def _stop(context, event, reason, outcome="ENGINE_ERROR"):
+    action = "PREREQUISITE_MISSING" if outcome == "BLOCKED_BY_PREREQUISITE" else "FAIL"
+    return _move(context, event, action, ledger=replace(context.planning, reason=reason, outcome=outcome))
+
+
+def _retry(context, event, reason, *, external=False):
+    ledger = context.planning
+    name = "external_retries" if external else "format_repairs"
+    maximum = MAX_EXTERNAL_RETRIES if external else MAX_FORMAT_REPAIRS
+    if getattr(ledger, name) >= maximum or ledger.calls >= MAX_CALLS:
+        return _stop(context, event, "PLANNING_RETRY_BUDGET_EXHAUSTED:" + reason)
+    ledger = replace(ledger, **{name: getattr(ledger, name) + 1}, reason=reason)
+    return _move(context, event, "RETRY", ledger=ledger, resume=context.progression.state)
+
+
+def _questions(context, event, rows):
+    rows = validate_questions(rows)
+    blocking = [q for q in rows if q["blocking"]]
+    if not blocking:
+        raise ValueError("a blocked outcome requires at least one concrete blocking question")
+    if any(q["owner"] == "environment" for q in blocking):
+        return _move(context, event, "PREREQUISITE_MISSING",
+                     ledger=replace(context.planning, questions_json=canonical_json(rows),
+                                    outcome="BLOCKED_BY_PREREQUISITE", reason="；".join(q["question"] for q in blocking)))
+    decision_id = f"{context.identity.task_id}:planning-question:{context.progression.sequence + 1}"
+    resume = ("PLANNING_EXECUTION_DRAFT" if context.progression.state in ("PLANNING_EXECUTION_REVIEW", "PLANNING_REQUIREMENTS_CHECK")
+              else context.progression.state)
+    return _move(context, event, "OPEN_HUMAN_GATE", resume=resume,
+                 ledger=replace(context.planning, questions_json=canonical_json(rows), outcome="NEEDS_USER_DECISION",
+                                reason="；".join(q["question"] + "（" + q["impact"] + "）" for q in blocking)),
+                 gate=HumanGateUpdate(decision_id=decision_id, resume_state=resume,
+                                      reason_code="NEEDS_USER_DECISION"))
+
+
+def _repair(context, event, issues):
+    ledger = context.planning
+    blocking = [i for i in issues if i["severity"] == "blocking"]
+    fingerprint = content_hash(sorted((i["rule"], i["path"], i["message"], i["repair"]) for i in blocking))
+    repeated = ledger.repeated_defects + 1 if ledger.last_defect == fingerprint else 1
+    if repeated >= 3 or ledger.semantic_repairs >= MAX_SEMANTIC_REPAIRS or ledger.calls >= MAX_CALLS:
+        return _stop(context, event, "PLANNING_NO_CONVERGENCE:" + canonical_json(blocking))
+    evidence = any(i["repair"] == "evidence" for i in blocking)
+    if evidence and ledger.evidence_repairs >= MAX_EVIDENCE_REPAIRS:
+        return _stop(context, event, "PLANNING_EVIDENCE_BUDGET_EXHAUSTED")
+    ledger = replace(ledger, issues_json=canonical_json(issues), last_defect=fingerprint,
+                     repeated_defects=repeated, semantic_repairs=ledger.semantic_repairs + 1,
+                     evidence_repairs=ledger.evidence_repairs + int(evidence),
+                     evidence_return_state="PLANNING_EXECUTION_REVIEW" if evidence else "PLANNING_EXECUTION_DRAFT",
+                     reviewed_revision_ref="", reason="修复可执行性问题")
+    return _move(context, event, "REPAIR_EVIDENCE" if evidence else "REPAIR_PLAN", ledger=ledger)
+
+
+@dataclass(frozen=True)
+class PlanningWorkflowState:
+    name: str
+
+    def enter(self, context):
+        if context.progression.state != self.name:
+            raise InvariantViolation("planning state/context mismatch")
+        effects, ledger, delivery = _entry(context)
+        return StateDecision(update=ContextUpdate(planning=ledger, delivery=delivery), effects=effects)
+
+    def on_timeout(self, context):
+        return self.handle(context, DomainEvent("TIMEOUT", context.identity.task_id, context.progression.sequence,
+                           {}, context.progression.entered_at))
+
+    def on_resume(self, context):
+        return self.handle(context, DomainEvent("RESUME", context.identity.task_id, context.progression.sequence,
+                           {}, context.progression.entered_at))
+
+    def handle(self, context, event):
+        if context.progression.state != self.name or event.task_id != context.identity.task_id:
+            raise InvariantViolation("planning event/context mismatch")
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        action = str(payload.get("action") or event.name)
+        if action == "CANCEL":
+            return _move(context, event, "CANCEL", ledger=replace(context.planning, outcome="CANCELLED"))
+        if self.name in TERMINAL_STATES:
+            return StateDecision(source_event_id=event.event_id)
+        if action == "BUDGET_EXHAUSTED":
+            return _stop(context, event, "PLANNING_CALL_BUDGET_EXHAUSTED")
+        if self.name == "REQUEST_INTAKE":
+            return _move(context, event, "START")
+        if self.name in ("RETRY_WAIT", "BLOCKED", "PERSISTENCE_DEGRADED") and action == "RESUME":
+            return _move(context, event, "RESUME")
+        if self.name == "HUMAN_GATE":
+            return self._human(context, event, action, payload)
+        if event.name in ("FAIL", "TIMEOUT") or action == "FAIL":
+            if self.name not in AGENT_STAGES:
+                return _stop(context, event, "PLANNING_EFFECT_FAILED:" + str(payload))
+            failure = payload.get("failure") or {}
+            code = str(failure.get("error_code") or payload.get("error_code") or "EXTERNAL_FAILURE")
+            reply_error = "REPLY" in code or "CONTRACT" in code or "OUTPUT" in code
+            return _retry(context, event, code + ":" + str(failure.get("message") or ""), external=not reply_error)
+        try:
+            if self.name in AGENT_STAGES:
+                if payload.get("request_id") != context.delivery.active_request_id:
+                    raise ValueError("reply request_id does not match the active dispatch")
+                if action in ("NEEDS_USER_DECISION", "BLOCKED_BY_PREREQUISITE"):
+                    return _questions(context, event, payload.get("questions"))
+                if action != READY_ACTIONS[self.name]:
+                    raise ValueError("action is not valid for this planning stage")
+                questions = validate_questions(payload.get("questions"))
+                if any(q["blocking"] for q in questions):
+                    return _questions(context, event, questions)
+            if self.name == "PLANNING_BASELINE":
+                raw = context.request.raw_request + "\n" + "\n".join(json.loads(context.planning.clarifications_json))
+                baseline = validate_baseline(payload.get("requirements"), raw)
+                return _move(context, event, "BASELINE_READY", ledger=replace(context.planning,
+                             baseline_json=canonical_json(baseline), outcome="", reason="", questions_json=canonical_json(questions)))
+            if self.name == "PLANNING_EVIDENCE":
+                incoming = validate_evidence(payload.get("evidence"))
+                by_id = {e["evidence_id"]: e for e in context.planning.evidence}
+                by_id.update({e["evidence_id"]: e for e in incoming})
+                target_action = "EXECUTION_EVIDENCE_READY" if context.planning.evidence_return_state == "PLANNING_EXECUTION_DRAFT" else "EVIDENCE_READY"
+                if context.planning.evidence_return_state == "PLANNING_EXECUTION_REVIEW":
+                    target_action = "REVIEW_EVIDENCE_READY"
+                return _move(context, event, target_action, ledger=replace(context.planning, evidence_json=canonical_json(list(by_id.values())), reason=""))
+            if self.name in ("PLANNING_DRAFT", "PLANNING_EXECUTION_DRAFT"):
+                update = ReviewUpdate(revision_id=f"planning:{context.progression.sequence}", plan_schema="canonical-v1",
+                                      plan_policy="planning-v1", plan=payload.get("plan"),
+                                      plan_base_ref=payload.get("plan_base_ref"), requirements=tuple(context.planning.baseline))
+                if not isinstance(update.plan, dict) or not update.plan.get("items"):
+                    raise ValueError("Solver must supply a complete formal plan")
+                # Check and project now so malformed replies never enter the reducer.
+                review = apply_review_update(context.review, update)
+                if canonical_json(review.plan_revision.plan["requirements"]) != context.planning.baseline_json:
+                    raise ValueError("requirement baseline cannot be changed by Solver")
+                if self.name == "PLANNING_EXECUTION_DRAFT" and context.review.plan_revision.reference == review.plan_revision.reference and context.planning.issues:
+                    return _stop(context, event, "PLANNING_REPAIR_NO_PROGRESS")
+                return _move(context, event, action, review=update,
+                             ledger=replace(context.planning, reviewed_revision_ref="", reason=""))
+            if self.name == "PLANNING_REQUIREMENTS_CHECK":
+                return self._requirements(context, event)
+            if self.name == "PLANNING_EXECUTION_REVIEW":
+                revision = context.review.plan_revision
+                if payload.get("reviewed_revision_ref") != revision.reference:
+                    raise ValueError("Critic verdict must bind the exact current revision")
+                unknowns = validate_questions(revision.plan.get("unknowns"))
+                if any(q["blocking"] for q in unknowns):
+                    return _questions(context, event, unknowns)
+                issues = validate_issues(payload.get("issues"), revision.plan) + execution_issues(revision.plan, context.planning.evidence)
+                if any(i["severity"] == "blocking" for i in issues):
+                    return _repair(context, event, issues)
+                return _move(context, event, "REVIEW_APPROVED", ledger=replace(context.planning,
+                             reviewed_revision_ref=revision.reference, reviewed_evidence_hash=content_hash(context.planning.evidence),
+                             issues_json=canonical_json(issues), reason=""))
+            if self.name == "PLANNING_PUBLISH":
+                revision = context.review.plan_revision
+                if (action != "PUBLISHED" or payload.get("revision_ref") != revision.reference
+                        or context.planning.reviewed_revision_ref != revision.reference
+                        or context.planning.reviewed_evidence_hash != content_hash(context.planning.evidence)
+                        or requirement_scope(revision.plan) != context.planning.requirements_scope_hash
+                        or execution_issues(revision.plan, context.planning.evidence)):
+                    raise ValueError("publication is not a verified success for the current approved scope and revision")
+                return _move(context, event, "PUBLISHED", ledger=replace(context.planning, outcome="PLAN_READY", reason="",
+                             published_revision_ref=revision.reference, result_ref=str(payload.get("result_ref") or "")))
+            raise ValueError("unsupported planning state/event")
+        except (ValueError, TypeError, KeyError) as exc:
+            if self.name in AGENT_STAGES:
+                return _retry(context, event, str(exc))
+            return _stop(context, event, "PLANNING_INVARIANT_FAILED:" + str(exc))
+
+    def _requirements(self, context, event):
+        revision = context.review.plan_revision
+        unknowns = validate_questions(revision.plan.get("unknowns"))
+        if any(q["blocking"] for q in unknowns):
+            return _questions(context, event, unknowns)
+        scope = requirement_scope(revision.plan)
+        if context.planning.requirements_approval_ref and context.planning.requirements_scope_hash == scope:
+            return _move(context, event, "SCOPE_APPROVED")
+        from ...zhongshu_plan_doc import plan_review_doc_effect
+        packet = new_snapshot(context)
+        target = "PLANNING_EXECUTION_DRAFT"
+        gate = HumanGateUpdate(decision_id=f"{context.identity.task_id}:plan-review:{context.progression.sequence + 1}",
+                               resume_state=target, reason_code="PLAN_REVIEW", document_hash=packet["hash"])
+        return _move(context, event, "PLAN_REVIEW", resume=target, gate=gate,
+                     review=ReviewUpdate(revision_id=context.review.revision_id, plan_review=packet),
+                     ledger=replace(context.planning, requirements_scope_hash=scope, requirements_approval_ref="",
+                                    outcome="NEEDS_USER_DECISION", reason="请确认需求方案"),
+                     extra_effects=(plan_review_doc_effect(context.identity.task_id, context.progression.sequence,
+                                   packet["markdown"], version=packet["version"]),))
+
+    def _human(self, context, event, action, payload):
+        if action == "PLAN_REVIEW_REJECTED":
+            feedback = str(payload.get("answer") or payload.get("feedback") or "需求方案被驳回")
+            messages = payload.get("feedback_messages") or [{"answer": feedback}]
+            prepared = prepare_human_revision(context.review, messages, context.human_gate.decision_id,
+                                              context.human_gate.message_id or "")
+            return _move(context, event, action, ledger=replace(context.planning, requirements_approval_ref="",
+                         reviewed_revision_ref="", outcome="", reason=feedback,
+                         issues_json=canonical_json([{"rule": "HUMAN_REQUIREMENTS_REVISION", "message": feedback}])),
+                         review=ReviewUpdate(revision_id=context.review.revision_id, plan_review=prepared.plan_review),
+                         gate=HumanGateUpdate(clear_gate=True))
+        if action != "RESUME":
+            raise InvariantViolation("human gate requires an explicit RESUME decision")
+        answer = str(payload.get("answer") or payload.get("feedback") or "").strip()
+        if not answer:
+            raise InvariantViolation("human gate requires a nonempty answer")
+        ledger = context.planning
+        update = None
+        if context.human_gate.reason_code == "PLAN_REVIEW":
+            if not matches_current(context.review, context.human_gate.document_hash):
+                raise InvariantViolation("human approval does not match the current requirement plan")
+            ledger = replace(ledger, requirements_scope_hash=requirement_scope(context.review.plan_revision.plan),
+                             requirements_approval_ref=context.review.plan_revision.reference, issues_json="[]")
+            update = ReviewUpdate(revision_id=context.review.revision_id,
+                                  plan_review={**context.review.plan_review, "approved_hash": context.review.plan_review["hash"]})
+        else:
+            ledger = replace(ledger, clarifications_json=canonical_json(json.loads(ledger.clarifications_json) + [answer]),
+                             questions_json="[]")
+        return _move(context, event, "RESUME", ledger=replace(ledger, outcome="", reason=""), review=update,
+                     gate=HumanGateUpdate(clear_gate=True))

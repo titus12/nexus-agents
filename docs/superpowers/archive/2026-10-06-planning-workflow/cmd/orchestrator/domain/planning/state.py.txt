@@ -1,0 +1,57 @@
+"""Persisted, immutable ledger for the serial planning recipe."""
+from dataclasses import dataclass
+import json
+
+
+@dataclass(frozen=True)
+class PlanningState:
+    baseline_json: str = "[]"
+    evidence_json: str = "[]"
+    issues_json: str = "[]"
+    questions_json: str = "[]"
+    clarifications_json: str = "[]"
+    calls: int = 0
+    format_repairs: int = 0
+    semantic_repairs: int = 0
+    evidence_repairs: int = 0
+    external_retries: int = 0
+    last_defect: str = ""
+    repeated_defects: int = 0
+    evidence_return_state: str = "PLANNING_DRAFT"
+    requirements_scope_hash: str = ""
+    requirements_approval_ref: str = ""
+    reviewed_revision_ref: str = ""
+    reviewed_evidence_hash: str = ""
+    outcome: str = ""
+    reason: str = ""
+    published_revision_ref: str = ""
+    result_ref: str = ""
+
+    def __post_init__(self):
+        for name in ("calls", "format_repairs", "semantic_repairs", "evidence_repairs", "external_retries", "repeated_defects"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"invalid planning budget: {name}")
+        for name in ("baseline_json", "evidence_json", "issues_json", "questions_json", "clarifications_json"):
+            if not isinstance(json.loads(getattr(self, name)), list):
+                raise ValueError(f"planning {name} must serialize an array")
+        if self.evidence_return_state not in ("PLANNING_DRAFT", "PLANNING_EXECUTION_DRAFT", "PLANNING_EXECUTION_REVIEW"):
+            raise ValueError("invalid planning evidence return state")
+        if self.outcome not in ("", "PLAN_READY", "NEEDS_USER_DECISION", "BLOCKED_BY_PREREQUISITE", "ENGINE_ERROR", "CANCELLED"):
+            raise ValueError("invalid planning outcome")
+
+    @property
+    def baseline(self):
+        return json.loads(self.baseline_json)
+
+    @property
+    def evidence(self):
+        return json.loads(self.evidence_json)
+
+    @property
+    def issues(self):
+        return json.loads(self.issues_json)
+
+    @property
+    def questions(self):
+        return json.loads(self.questions_json)

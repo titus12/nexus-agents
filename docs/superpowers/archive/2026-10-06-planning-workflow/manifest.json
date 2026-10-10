@@ -1,0 +1,32 @@
+[
+  {
+    "source": "cmd/orchestrator/contracts/planning.py",
+    "archive": "docs/superpowers/archive/2026-10-06-planning-workflow/cmd/orchestrator/contracts/planning.py.txt",
+    "sha256": "58f885167ba44a041ef0b91afb162f9bc74fd4c3f87e7c9e133635a994fb5319"
+  },
+  {
+    "source": "cmd/orchestrator/domain/planning/execution.py",
+    "archive": "docs/superpowers/archive/2026-10-06-planning-workflow/cmd/orchestrator/domain/planning/execution.py.txt",
+    "sha256": "8e024398f3f31e62ed333cb8e91ae75cf1ad20f29ce5f8769ba91386c230c0c0"
+  },
+  {
+    "source": "cmd/orchestrator/domain/planning/state.py",
+    "archive": "docs/superpowers/archive/2026-10-06-planning-workflow/cmd/orchestrator/domain/planning/state.py.txt",
+    "sha256": "7279c0ba33581cc5d1cb7b086c0b143c817e9f32ab21d39e12c23a1863e7683f"
+  },
+  {
+    "source": "cmd/orchestrator/domain/planning/workflow.py",
+    "archive": "docs/superpowers/archive/2026-10-06-planning-workflow/cmd/orchestrator/domain/planning/workflow.py.txt",
+    "sha256": "ef0f19e095e58092f318078a82e4a73560ffab7269e0a01b2b88b029670c7654"
+  },
+  {
+    "source": "cmd/orchestrator/runtime/planning_effects.py",
+    "archive": "docs/superpowers/archive/2026-10-06-planning-workflow/cmd/orchestrator/runtime/planning_effects.py.txt",
+    "sha256": "1fc663cda19fed72c4121bf22a9e1b54e956a67bb1b203b2cbeb1e8d9390aec5"
+  },
+  {
+    "source": "cmd/test_planning_workflow.py",
+    "archive": "docs/superpowers/archive/2026-10-06-planning-workflow/cmd/test_planning_workflow.py.txt",
+    "sha256": "56b7dface33868e7735890e6e9749bcf81f679dad8d553ce2acce5d8ebd79b6e"
+  }
+]

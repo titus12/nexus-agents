@@ -1,0 +1,39 @@
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from orchestrator.contracts import contract_for_state
+import hashlib
+from orchestrator.agent_result_file import write_agent_result_file, AgentResultFileError
+
+
+class ContractTests(unittest.TestCase):
+    def test_exact_contracts_reject_authority_fields_and_coercion(self):
+        for state in ('REQ_ANALYZE','REQ_EVIDENCE','REQ_DRAFT','REQ_REVIEW','MENXIA_REQUIREMENTS_INTAKE'):
+            with self.subTest(state=state):
+                contract=contract_for_state(state,workflow='requirements-v1')
+                payload=contract.example_payload()
+                self.assertEqual(contract.validate(payload),())
+                payload['approval']={}
+                self.assertTrue(contract.validate(payload))
+        contract=contract_for_state('REQ_ANALYZE',workflow='requirements-v1')
+        payload=contract.example_payload()
+        payload['analysis']['assumptions']=[{'statement':'automatic retry','blocking':'false'}]
+        self.assertTrue(contract.validate(payload))
+
+    def test_real_result_file_uses_workflow_specific_menxia_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state='MENXIA_GROUP_SOLVER'
+            contract=contract_for_state(state,workflow='requirements-v1')
+            payload=contract.example_payload()
+            payload['action']='REQUIREMENTS_CHANGE_REQUESTED'
+            payload['structured_output_schema_hash']=hashlib.sha256(json.dumps(contract.schema,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+            result=write_agent_result_file(payload,target_path=Path(directory)/'result.json',task_id='t',request_id='r',
+                phase='MENXIA',role='review-solver',allowed_root=directory,
+                expected_state=state,expected_role_mode=payload['mode'],expected_schema_hash=payload['structured_output_schema_hash'],
+                workflow='requirements-v1')
+            self.assertEqual(json.loads(result.path.read_text())['action'],'REQUIREMENTS_CHANGE_REQUESTED')
+            with self.assertRaises(AgentResultFileError):
+                write_agent_result_file(payload,target_path=Path(directory)/'legacy.json',task_id='t',request_id='r',
+                    phase='MENXIA',role='review-solver',allowed_root=directory,expected_state=state,
+                    expected_role_mode=payload['mode'],expected_schema_hash=payload['structured_output_schema_hash'])
