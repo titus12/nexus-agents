@@ -29,6 +29,10 @@ const (
 
 var ErrProfileNotFound = errors.New("knowledge sync profile not found")
 
+// DefaultScanExtensions is the generic Nexus Knowledge scan scope: git-managed
+// source code files. Projects can widen it through scan.extensions.
+var DefaultScanExtensions = []string{"cs", "go"}
+
 type Profile struct {
 	Version        int                    `json:"version" yaml:"version"`
 	Knowledge      KnowledgeSettings      `json:"knowledge" yaml:"knowledge"`
@@ -58,9 +62,10 @@ type DiscoverySettings struct {
 }
 
 type ScanSettings struct {
-	Source string     `json:"source" yaml:"source"`
-	Rules  []ScanRule `json:"rules" yaml:"rules"`
-	Limits ScanLimits `json:"limits" yaml:"limits"`
+	Source     string     `json:"source" yaml:"source"`
+	Extensions []string   `json:"extensions,omitempty" yaml:"extensions,omitempty"`
+	Rules      []ScanRule `json:"rules" yaml:"rules"`
+	Limits     ScanLimits `json:"limits" yaml:"limits"`
 }
 
 type ScanRule struct {
@@ -164,9 +169,10 @@ func DefaultProfile() Profile {
 		},
 		Discovery: DiscoverySettings{Strategy: "ai-assisted"},
 		Scan: ScanSettings{
-			Source: "git-tracked",
-			Rules:  []ScanRule{},
-			Limits: ScanLimits{MaxFileSizeKB: 512, MaxFilesPerRun: 3000},
+			Source:     "git-tracked",
+			Extensions: append([]string(nil), DefaultScanExtensions...),
+			Rules:      []ScanRule{},
+			Limits:     ScanLimits{MaxFileSizeKB: 512, MaxFilesPerRun: 3000},
 		},
 		Instructions: InstructionSettings{
 			RequiredTopics: []string{"service-responsibility", "integration-boundaries", "data-ownership", "verification-paths"},
@@ -267,6 +273,14 @@ func ValidateProfile(profile Profile) error {
 	if profile.Scan.Source != "git-tracked" {
 		return fmt.Errorf("scan.source must be git-tracked")
 	}
+	if len(profile.Scan.Extensions) > 32 {
+		return fmt.Errorf("scan.extensions exceeds the 32 extension limit")
+	}
+	for index, extension := range profile.Scan.Extensions {
+		if !scanExtensionPattern.MatchString(extension) {
+			return fmt.Errorf("scan.extensions[%d] must be a simple lowercase extension like cs or go", index)
+		}
+	}
 	if profile.Scan.Limits.MaxFileSizeKB < 1 || profile.Scan.Limits.MaxFileSizeKB > 10240 {
 		return fmt.Errorf("scan.limits.maxFileSizeKB must be between 1 and 10240")
 	}
@@ -350,6 +364,7 @@ func normalizeProfile(profile *Profile) {
 	profile.Knowledge.DefaultBranch = strings.TrimSpace(profile.Knowledge.DefaultBranch)
 	profile.Discovery.Strategy = strings.TrimSpace(profile.Discovery.Strategy)
 	profile.Scan.Source = strings.ToLower(strings.TrimSpace(profile.Scan.Source))
+	profile.Scan.Extensions = normalizeExtensions(profile.Scan.Extensions)
 	for index := range profile.Scan.Rules {
 		profile.Scan.Rules[index].Pattern = normalizeRelativePath(profile.Scan.Rules[index].Pattern)
 		profile.Scan.Rules[index].Action = strings.ToLower(strings.TrimSpace(profile.Scan.Rules[index].Action))
@@ -373,6 +388,142 @@ func normalizeProfile(profile *Profile) {
 	if profile.Ownership.Owners == nil {
 		profile.Ownership.Owners = []string{}
 	}
+}
+
+var scanExtensionPattern = regexp.MustCompile(`^[a-z0-9]{1,16}$`)
+
+func normalizeExtensions(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		extension := strings.ToLower(strings.TrimSpace(value))
+		extension = strings.TrimPrefix(extension, ".")
+		if extension == "" || seen[extension] {
+			continue
+		}
+		seen[extension] = true
+		result = append(result, extension)
+	}
+	if len(result) == 0 {
+		return append([]string(nil), DefaultScanExtensions...)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// EffectiveExtensions returns the normalized scan extension allowlist (no leading dots).
+func EffectiveExtensions(profile Profile) []string {
+	return normalizeExtensions(profile.Scan.Extensions)
+}
+
+// ExtensionAllowed reports whether a file extension (".cs", "cs") is in the allowlist.
+func ExtensionAllowed(allowlist []string, extension string) bool {
+	extension = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(extension), "."))
+	if extension == "" {
+		return false
+	}
+	for _, allowed := range allowlist {
+		if allowed == extension {
+			return true
+		}
+	}
+	return false
+}
+
+// RankScanPriority orders scan rule priorities so higher ranks are kept longer
+// when scan.limits.maxFilesPerRun truncates the manifest.
+func RankScanPriority(value string) int {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "high":
+		return 4
+	case "medium":
+		return 3
+	case "low":
+		return 1
+	default:
+		return 2
+	}
+}
+
+// ManifestPriority returns the highest priority of any include rule matching the path.
+func ManifestPriority(profile Profile, candidate string) int {
+	rank := 0
+	for _, rule := range profile.Scan.Rules {
+		if rule.Action != "include" || !matchScanPattern(rule.Pattern, candidate) {
+			continue
+		}
+		if value := RankScanPriority(rule.Priority); value > rank {
+			rank = value
+		}
+	}
+	if rank == 0 {
+		rank = RankScanPriority("")
+	}
+	return rank
+}
+
+// LimitManifest enforces scan.limits.maxFilesPerRun on the final manifest,
+// keeping the highest-priority matches first. It returns the kept paths and
+// the number of dropped paths.
+func LimitManifest(profile Profile, paths []string, limit int) ([]string, int) {
+	if limit <= 0 || len(paths) <= limit {
+		return paths, 0
+	}
+	ranked := append([]string(nil), paths...)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		left := ManifestPriority(profile, ranked[i])
+		right := ManifestPriority(profile, ranked[j])
+		if left != right {
+			return left > right
+		}
+		return ranked[i] < ranked[j]
+	})
+	return ranked[:limit], len(paths) - limit
+}
+
+// ProfileWarnings reports non-fatal scan rule problems: patterns that carry
+// both actions and include rules that can never win because an exclude rule
+// shadows them (exclude wins in the current semantics).
+func ProfileWarnings(profile Profile) []string {
+	var warnings []string
+	actions := map[string]map[string]bool{}
+	for _, rule := range profile.Scan.Rules {
+		if actions[rule.Pattern] == nil {
+			actions[rule.Pattern] = map[string]bool{}
+		}
+		actions[rule.Pattern][rule.Action] = true
+	}
+	for _, pattern := range sortedMapKeys(actions) {
+		if actions[pattern]["include"] && actions[pattern]["exclude"] {
+			warnings = append(warnings, fmt.Sprintf("scan.rules: pattern %q has both include and exclude actions; the exclude wins", pattern))
+		}
+	}
+	for index, rule := range profile.Scan.Rules {
+		if rule.Action != "include" {
+			continue
+		}
+		for otherIndex, other := range profile.Scan.Rules {
+			if otherIndex == index || other.Action != "exclude" {
+				continue
+			}
+			if excludeShadowsPattern(other.Pattern, rule.Pattern) {
+				warnings = append(warnings, fmt.Sprintf("scan.rules[%d]: include %q is shadowed by exclude %q and never takes effect", index, rule.Pattern, other.Pattern))
+				break
+			}
+		}
+	}
+	return warnings
+}
+
+func excludeShadowsPattern(excludePattern, includePattern string) bool {
+	if excludePattern == includePattern {
+		return true
+	}
+	if !strings.HasSuffix(excludePattern, "/**") {
+		return false
+	}
+	prefix := strings.TrimSuffix(excludePattern, "/**")
+	return includePattern == prefix || strings.HasPrefix(includePattern, prefix+"/")
 }
 
 func EffectiveRules(profile Profile) []ScanRule {

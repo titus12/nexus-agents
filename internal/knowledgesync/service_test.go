@@ -2,8 +2,10 @@ package knowledgesync
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 type fakeCompiler struct {
 	initializeCalls int
 	updateCalls     int
+	lastInput       wikicompiler.CompileInput
 }
 
 type fakeGraphCoordinator struct {
@@ -40,11 +43,13 @@ func (f *fakeGraphCoordinator) Runs(string) ([]knowledgegraph.SyncRun, error) {
 
 func (f *fakeCompiler) Initialize(ctx context.Context, input wikicompiler.CompileInput) (wikicompiler.GeneratedBundle, error) {
 	f.initializeCalls++
+	f.lastInput = input
 	return testGeneratedBundle(), nil
 }
 
 func (f *fakeCompiler) Update(ctx context.Context, input wikicompiler.CompileInput) (wikicompiler.GeneratedBundle, error) {
 	f.updateCalls++
+	f.lastInput = input
 	return testGeneratedBundle(), nil
 }
 
@@ -146,6 +151,64 @@ func TestProposalApplyDoesNotFailWhenGraphQueueFails(t *testing.T) {
 	}
 	if applied.Proposal == nil || applied.Proposal.Status != ProposalApplied {
 		t.Fatalf("applied = %#v", applied)
+	}
+}
+
+func TestCompileManifestUsesCodeExtensionsAndRecordsDiagnostics(t *testing.T) {
+	project := initTestRepository(t)
+	writeRepoFile(t, project, "cmd/server/main.go", "package main\n")
+	writeRepoFile(t, project, "Server/Program.cs", "class Program {}\n")
+	writeRepoFile(t, project, "docs/guide.md", "# guide\n")
+	writeRepoFile(t, project, "notes.txt", "noise\n")
+	runGit(t, project, "add", ".")
+	runGit(t, project, "commit", "-m", "initial")
+	profile := DefaultProfile()
+	profile.Scan.Rules = []ScanRule{
+		{Pattern: "docs/**", Action: "exclude"},
+		{Pattern: "docs/api.cs", Action: "include"},
+		{Pattern: "cmd/**", Action: "include", Priority: "high"},
+		{Pattern: "Server/**", Action: "include", Priority: "low"},
+	}
+	if err := SaveProfile(project, profile); err != nil {
+		t.Fatal(err)
+	}
+	compiler := &fakeCompiler{}
+	service := NewService(ServiceOptions{
+		Store: NewStateStore(t.TempDir()), Compiler: compiler,
+	})
+	result, err := service.InitializePreview(context.Background(), InitializeRequest{
+		ProjectRequest: ProjectRequest{ProjectID: "p1", ProjectRoot: project},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := map[string]bool{}
+	for _, path := range compiler.lastInput.ScanManifest {
+		manifest[path] = true
+	}
+	if !manifest["cmd/server/main.go"] || !manifest["Server/Program.cs"] {
+		t.Fatalf("code files missing from manifest: %#v", manifest)
+	}
+	for path := range manifest {
+		if path == "docs/guide.md" || path == "notes.txt" {
+			t.Fatalf("non-code file entered the manifest: %s", path)
+		}
+	}
+	var metadata map[string]int
+	if err := json.Unmarshal(result.Run.Metadata, &metadata); err != nil {
+		t.Fatalf("run metadata = %s (%v)", result.Run.Metadata, err)
+	}
+	if metadata["manifestFiles"] != len(compiler.lastInput.ScanManifest) || metadata["manifestChars"] <= 0 {
+		t.Fatalf("run metadata = %#v", metadata)
+	}
+	shadowed := false
+	for _, warning := range result.Run.Warnings {
+		if strings.Contains(warning, "docs/api.cs") && strings.Contains(warning, "shadowed") {
+			shadowed = true
+		}
+	}
+	if !shadowed {
+		t.Fatalf("shadowed include warning missing: %#v", result.Run.Warnings)
 	}
 }
 

@@ -214,48 +214,111 @@ func ensureDomainRoutingAliases(lines []string, destination, knowledgeRoot strin
 		return lines
 	}
 	routingIndex, aliasesIndex, hasAliases := locateRoutingAliases(lines)
-	if hasAliases {
-		return lines
-	}
-
 	title := frontmatterScalar(strings.Join(lines, "\n"), "title")
-	zhAliases := []string{}
+	var generatedZH []string
 	if containsCJKText(title) {
-		zhAliases = append(zhAliases, strings.TrimSpace(title))
+		generatedZH = append(generatedZH, strings.TrimSpace(title))
+	} else {
+		generatedZH = append(generatedZH, chineseDescriptionAliases(strings.Join(lines, "\n"))...)
 	}
 	domainSlug := strings.TrimSuffix(path.Base(path.Dir(destination)), path.Ext(path.Base(path.Dir(destination))))
-	enAliases := uniqueNonEmptyStrings(
+	generatedEN := uniqueNonEmptyStrings(
 		strings.ReplaceAll(domainSlug, "-", " "),
 		englishWords(title),
 	)
-	if len(zhAliases) == 0 && len(enAliases) == 0 {
-		return lines
+
+	if !hasAliases {
+		if len(generatedZH) == 0 && len(generatedEN) == 0 {
+			return lines
+		}
+		var aliasLines []string
+		if len(generatedZH) > 0 {
+			aliasLines = append(aliasLines, "    zh: "+yamlInlineList(generatedZH))
+		}
+		if len(generatedEN) > 0 {
+			aliasLines = append(aliasLines, "    en: "+yamlInlineList(generatedEN))
+		}
+		if aliasesIndex >= 0 {
+			block := append([]string{"  aliases:"}, aliasLines...)
+			return replaceLines(lines, aliasesIndex, routingAliasesBlockEnd(lines, aliasesIndex), block...)
+		}
+		if routingIndex >= 0 {
+			block := append([]string{"  aliases:"}, aliasLines...)
+			return insertLines(lines, routingIndex+1, block...)
+		}
+		block := append([]string{"routing:", "  aliases:"}, aliasLines...)
+		return append(lines, block...)
 	}
 
-	var aliasLines []string
-	if len(zhAliases) > 0 {
-		aliasLines = append(aliasLines, "    zh: "+yamlInlineList(zhAliases))
+	if aliasesIndex < 0 {
+		return lines
 	}
-	if len(enAliases) > 0 {
-		aliasLines = append(aliasLines, "    en: "+yamlInlineList(enAliases))
+	frontmatter, _, ok := knowledgebase.ParseFrontmatter("---\n" + strings.Join(lines, "\n") + "\n---\n")
+	if !ok {
+		return lines
 	}
-	if aliasesIndex >= 0 {
-		aliasesEnd := aliasesIndex + 1
-		for aliasesEnd < len(lines) {
-			if strings.TrimSpace(lines[aliasesEnd]) != "" && leadingSpaceCount(lines[aliasesEnd]) <= 2 {
-				break
-			}
-			aliasesEnd++
+	missingZH := !hasChineseRoutingAlias(frontmatter.Routing.Aliases) && len(generatedZH) > 0
+	missingEN := !hasEnglishRoutingAlias(frontmatter.Routing.Aliases) && len(generatedEN) > 0
+	if !missingZH && !missingEN {
+		return lines
+	}
+	aliasesEnd := routingAliasesBlockEnd(lines, aliasesIndex)
+	block := routingAliasBlockLines(lines[aliasesIndex], lines[aliasesIndex+1:aliasesEnd])
+	if missingZH {
+		block = upsertRoutingAliasLine(block, "zh", generatedZH)
+	}
+	if missingEN {
+		block = upsertRoutingAliasLine(block, "en", generatedEN)
+	}
+	return replaceLines(lines, aliasesIndex, aliasesEnd, append([]string{"  aliases:"}, block...)...)
+}
+
+func routingAliasesBlockEnd(lines []string, aliasesIndex int) int {
+	end := aliasesIndex + 1
+	for end < len(lines) {
+		if strings.TrimSpace(lines[end]) != "" && leadingSpaceCount(lines[end]) <= 2 {
+			break
 		}
-		block := append([]string{"  aliases:"}, aliasLines...)
-		return replaceLines(lines, aliasesIndex, aliasesEnd, block...)
+		end++
 	}
-	if routingIndex >= 0 {
-		block := append([]string{"  aliases:"}, aliasLines...)
-		return insertLines(lines, routingIndex+1, block...)
+	return end
+}
+
+func routingAliasBlockLines(aliasesLine string, rest []string) []string {
+	_, inlineValue, _ := strings.Cut(strings.TrimSpace(aliasesLine), ":")
+	block := []string{}
+	if inlineListHasValues(inlineValue) {
+		block = append(block, "    values: "+strings.TrimSpace(inlineValue))
 	}
-	block := append([]string{"routing:", "  aliases:"}, aliasLines...)
-	return append(lines, block...)
+	return append(block, rest...)
+}
+
+func upsertRoutingAliasLine(block []string, language string, values []string) []string {
+	if len(values) == 0 {
+		return block
+	}
+	replacement := "    " + language + ": " + yamlInlineList(values)
+	for index := 0; index < len(block); index++ {
+		line := block[index]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "-") {
+			continue
+		}
+		if leadingSpaceCount(line) != 4 {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok || strings.TrimSpace(key) != language {
+			continue
+		}
+		if strings.TrimSpace(value) == "" || !inlineListHasValues(value) {
+			out := append([]string{}, block[:index]...)
+			out = append(out, replacement)
+			return append(out, block[index+1:]...)
+		}
+		return block
+	}
+	return append(append([]string{}, block...), replacement)
 }
 
 func locateRoutingAliases(lines []string) (routingIndex, aliasesIndex int, hasAliases bool) {
@@ -687,12 +750,40 @@ func domainRepairPrompt(thinPaths, aliasPaths []string, language string) string 
 	}
 	if len(aliasPaths) > 0 {
 		builder.WriteString("\n## Repair bilingual routing aliases\n\n")
-		builder.WriteString("Each listed Domain frontmatter must contain `routing.aliases.zh` and `routing.aliases.en`. Add at least one real Chinese alias containing Chinese characters and one specific English alias. Use stable capability names, product/API names, and common user task terminology. Do not use broad standalone aliases such as system, data, feature, or module; put broad search terms under `routing.keywords` instead. Preserve existing valid aliases and the Domain body.\n")
+		builder.WriteString("Each listed Domain frontmatter must contain `routing.aliases.zh` and `routing.aliases.en`. Edit every listed file in this pass; do not skip any.\n")
+		builder.WriteString("For each file, keep existing valid aliases and make the frontmatter contain a routing block in exactly this shape (fill both languages; never leave a list empty):\n\n")
+		builder.WriteString("routing:\n  aliases:\n    zh: [<至少一个含中文字符的具体中文别名>]\n    en: [<at least one specific English alias>]\n  keywords:\n    en: [<broad search terms>]\n\n")
+		builder.WriteString("Rules: the `zh` list must contain real Chinese aliases containing Chinese characters - if the page title or content is in English, invent a natural Chinese capability name (for example 登录与令牌, 会话管理, 媒体与增值). The `en` list must contain specific English aliases. Use stable capability names, product/API names, and common user task terminology. Do not use broad standalone aliases such as system, data, feature, or module; put broad search terms under `routing.keywords` instead. Preserve existing valid aliases and the Domain body.\n")
 		for _, relative := range aliasPaths {
 			builder.WriteString("- `" + domainSourcePath(relative) + "`\n")
 		}
 	}
 	return builder.String()
+}
+
+// chineseDescriptionAliases extracts short Chinese clauses from the
+// frontmatter description so English-titled Domains still get deterministic
+// Chinese routing aliases when the model omits them.
+func chineseDescriptionAliases(frontmatter string) []string {
+	description := frontmatterScalar(frontmatter, "description")
+	if !containsCJKText(description) {
+		return nil
+	}
+	var aliases []string
+	for _, clause := range strings.FieldsFunc(description, func(r rune) bool {
+		return r == '。' || r == '；' || r == ';' || r == '\n' || r == '！' || r == '？' || r == '!' || r == '?'
+	}) {
+		clause = strings.TrimSpace(clause)
+		runes := []rune(clause)
+		if len(runes) < 3 || len(runes) > 40 || !containsCJKText(clause) {
+			continue
+		}
+		aliases = append(aliases, clause)
+		if len(aliases) >= 2 {
+			break
+		}
+	}
+	return uniqueNonEmptyStrings(aliases...)
 }
 
 func domainSourcePath(relative string) string {

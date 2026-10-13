@@ -3,6 +3,7 @@ package wikicompiler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"nexus-agents/internal/knowledgebase"
 	"os"
 	"os/exec"
@@ -324,6 +325,52 @@ func TestOpenWikiDoesNotReportSafeNormalizationAsWarnings(t *testing.T) {
 	}
 }
 
+func TestOpenWikiFillsMissingBilingualAliasLanguageDeterministically(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		aliases string
+	}{
+		{name: "zh only", aliases: "    zh: [事件总线]\n"},
+		{name: "empty zh with en", aliases: "    zh: []\n    en: [EventCenter]\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, root, "openwiki/index.md", "# Domains\n")
+			writeFile(t, root, "openwiki/domains/event-system/domain.md", "---\ntype: Domain\ntitle: 事件系统\ndescription: Owns in-process event dispatch.\nresource: Packages/com.dotdot.event-center/Runtime/EventCenter.cs\ntags: [events, unity]\ntimestamp: 2026-07-24T00:00:00+08:00\nrouting:\n  aliases:\n"+test.aliases+"---\n# 事件系统\n\nEventCenter owns synchronous event dispatch, listener registration, diagnostics, and related verification guidance.\n")
+			files, _, err := ReadAndNormalizeOpenWiki(root, "KnowledgeBase/project")
+			if err != nil {
+				t.Fatal(err)
+			}
+			domain := string(files["KnowledgeBase/project/domains/event-system/index.md"])
+			fm, _, ok := knowledgebase.ParseFrontmatter(domain)
+			if !ok || !hasChineseRoutingAlias(fm.Routing.Aliases) || !hasEnglishRoutingAlias(fm.Routing.Aliases) {
+				t.Fatalf("missing language was not filled deterministically: %#v\n%s", fm.Routing.Aliases, domain)
+			}
+			if test.name == "zh only" && (len(fm.Routing.Aliases.ZH) != 1 || fm.Routing.Aliases.ZH[0] != "事件总线") {
+				t.Fatalf("explicit zh aliases were not preserved: %#v\n%s", fm.Routing.Aliases, domain)
+			}
+			if strings.Count(domain, "\nrouting:\n") != 1 {
+				t.Fatalf("routing metadata was duplicated:\n%s", domain)
+			}
+		})
+	}
+
+	t.Run("english title with chinese description", func(t *testing.T) {
+		root := t.TempDir()
+		writeFile(t, root, "openwiki/index.md", "# Domains\n")
+		writeFile(t, root, "openwiki/domains/sdk-architecture/domain.md", "---\ntype: Domain\ntitle: SDK Architecture\ndescription: SDK 架构职责与集成边界。统一入口与配置。\nresource: Packages/com.centurygame.rtc.sdk/Runtime\ntags: [sdk]\ntimestamp: 2026-07-24T00:00:00+08:00\nrouting:\n  aliases:\n    en: [SDK architecture]\n---\n# SDK Architecture\n\nThe SDK owns client entrypoints, configuration surfaces, integration boundaries, compatibility cautions, and focused verification paths.\n")
+		files, _, err := ReadAndNormalizeOpenWiki(root, "KnowledgeBase/project")
+		if err != nil {
+			t.Fatal(err)
+		}
+		domain := string(files["KnowledgeBase/project/domains/sdk-architecture/index.md"])
+		fm, _, ok := knowledgebase.ParseFrontmatter(domain)
+		if !ok || !hasChineseRoutingAlias(fm.Routing.Aliases) || !hasEnglishRoutingAlias(fm.Routing.Aliases) {
+			t.Fatalf("chinese description aliases were not derived: %#v\n%s", fm.Routing.Aliases, domain)
+		}
+	})
+}
+
 func TestOpenWikiPreservesExplicitDomainRoutingAliases(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "openwiki/index.md", "# Domains\n")
@@ -487,5 +534,58 @@ func runGit(t *testing.T, root string, args ...string) {
 	command := exec.Command("git", append([]string{"-C", root}, args...)...)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+}
+
+func TestChunkPathArgsRespectsBudget(t *testing.T) {
+	var paths []string
+	for i := 0; i < 5; i++ {
+		paths = append(paths, "aaaaaaaa") // cost 9 each
+	}
+	batches := chunkPathArgs(paths, 20)
+	if len(batches) != 3 || len(batches[0]) != 2 || len(batches[1]) != 2 || len(batches[2]) != 1 {
+		t.Fatalf("batches = %#v", batches)
+	}
+	batches = chunkPathArgs([]string{strings.Repeat("x", 50)}, 10)
+	if len(batches) != 1 || len(batches[0]) != 1 {
+		t.Fatalf("oversized path must form its own batch: %#v", batches)
+	}
+	if batches := chunkPathArgs(nil, 10); len(batches) != 0 {
+		t.Fatalf("empty manifest batches = %#v", batches)
+	}
+}
+
+func TestWorkspacePrepareChunksLargeManifests(t *testing.T) {
+	root := initRepository(t)
+	var manifest []string
+	for i := 0; i < 1200; i++ {
+		relative := fmt.Sprintf("src/module_%03d/file_with_a_reasonably_long_name_%03d.go", i, i)
+		writeFile(t, root, relative, "package module\n")
+		manifest = append(manifest, relative)
+	}
+	writeFile(t, root, "NOTES.md", "not in the manifest\n")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "initial")
+
+	manager := WorkspaceManager{}
+	workspace, err := manager.Prepare(context.Background(), WorkspaceInput{
+		DataRoot: t.TempDir(), ProjectID: "demo", RunID: "run-1",
+		ProjectRoot: root, Revision: "HEAD", Manifest: manifest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Remove(workspace)
+	for _, relative := range []string{manifest[0], manifest[len(manifest)-1]} {
+		if _, err := os.Stat(filepath.Join(workspace.RepositoryRoot, filepath.FromSlash(relative))); err != nil {
+			t.Fatalf("manifest file %s missing: %v", relative, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workspace.RepositoryRoot, "NOTES.md")); err == nil {
+		t.Fatal("files outside the manifest must not be extracted")
+	}
+	leftovers, err := filepath.Glob(filepath.Join(workspace.Root, "*.tar"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("temporary archives not cleaned up: %#v (%v)", leftovers, err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -200,6 +201,25 @@ func (s *Service) AdoptExisting(ctx context.Context, request ProjectRequest) (Sy
 	return SyncResult{State: state, Run: run, Message: "Existing knowledge base adopted without file changes."}, nil
 }
 
+// ManifestArgvEstimate approximates the characters a path list adds to a
+// subprocess command line (path plus separator), used to diagnose argv limits.
+func ManifestArgvEstimate(paths []string) int {
+	total := 0
+	for _, value := range paths {
+		total += len(value) + 1
+	}
+	return total
+}
+
+func manifestRunMetadata(files, chars, dropped int) json.RawMessage {
+	payload := map[string]int{"manifestFiles": files, "manifestChars": chars, "manifestDropped": dropped}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 func (s *Service) InitializePreview(ctx context.Context, request InitializeRequest) (SyncResult, error) {
 	return s.compilePreview(ctx, request, false)
 }
@@ -267,7 +287,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	run.Branch = gitState.Branch
 	run.TargetRevision = gitState.Head
 	s.recordRunStage(&run, StageScanningRepository, 25)
-	inventory, err := BuildInventory(ctx, request.ProjectRoot, s.git, s.codeGraph, profile.Scan.Limits)
+	inventory, err := BuildInventory(ctx, request.ProjectRoot, s.git, s.codeGraph, profile.Scan)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -276,6 +296,13 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 		allPaths = append(allPaths, file.Path)
 	}
 	manifest := IncludedPaths(profile, allPaths)
+	manifest, manifestDropped := LimitManifest(profile, manifest, profile.Scan.Limits.MaxFilesPerRun)
+	if manifestDropped > 0 {
+		run.Warnings = append(run.Warnings, fmt.Sprintf("scan.limits.maxFilesPerRun truncated the manifest: kept %d highest-priority files, dropped %d", len(manifest), manifestDropped))
+	}
+	run.Warnings = append(run.Warnings, ProfileWarnings(profile)...)
+	manifestChars := ManifestArgvEstimate(manifest)
+	run.Metadata = manifestRunMetadata(len(manifest), manifestChars, manifestDropped)
 	s.recordRunStage(&run, StagePreparingKnowledge, 38)
 	var impact CodeGraphImpact
 	impactAvailable := false
@@ -301,7 +328,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	state.LastError = ""
 	state.Status = StatusChecking
 	_ = s.store.SaveState(state)
-	log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=started branch=%s revision=%s selected_files=%d", request.ProjectID, run.ID, run.Kind, gitState.Branch, gitState.Head, len(manifest))
+	log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=started branch=%s revision=%s selected_files=%d manifest_chars=%d", request.ProjectID, run.ID, run.Kind, gitState.Branch, gitState.Head, len(manifest), manifestChars)
 
 	externalRoot := s.store.projectPath(request.ProjectID, "runs", safeID(run.ID), "external")
 	s.recordRunStage(&run, StageFetchingExternalEvidence, 50)

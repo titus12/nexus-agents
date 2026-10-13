@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestProfileRoundTripAndSafetyRules(t *testing.T) {
@@ -105,5 +107,108 @@ func TestRepositoryKnowledgeProfilesMatchCurrentSchema(t *testing.T) {
 		if !profile.KnowledgeGraph.Enabled || profile.KnowledgeGraph.Version != TestedGBrainVersion {
 			t.Fatalf("knowledge graph settings in %s = %#v", relative, profile.KnowledgeGraph)
 		}
+	}
+}
+
+func TestScanExtensionsDefaultNormalizeAndValidation(t *testing.T) {
+	profile := DefaultProfile()
+	if got := EffectiveExtensions(profile); len(got) != 2 || got[0] != "cs" || got[1] != "go" {
+		t.Fatalf("default extensions = %#v", got)
+	}
+	profile.Scan.Extensions = []string{".CS", " go ", "go", "md"}
+	data, err := SerializeProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseProfile(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Scan.Extensions; len(got) != 3 || got[0] != "cs" || got[1] != "go" || got[2] != "md" {
+		t.Fatalf("normalized extensions = %#v", got)
+	}
+	for _, invalid := range [][]string{{"c++"}, {"../x"}, {"a b"}} {
+		profile := DefaultProfile()
+		profile.Scan.Extensions = invalid
+		if _, err := SerializeProfile(profile); err == nil {
+			t.Fatalf("expected %q to be rejected", invalid)
+		}
+	}
+	if !ExtensionAllowed(parsed.Scan.Extensions, ".cs") || !ExtensionAllowed(parsed.Scan.Extensions, "CS") {
+		t.Fatal("ExtensionAllowed should match normalized extensions")
+	}
+	if ExtensionAllowed(parsed.Scan.Extensions, ".md.cs") || ExtensionAllowed(parsed.Scan.Extensions, "") {
+		t.Fatal("ExtensionAllowed must reject unknown or empty extensions")
+	}
+}
+
+func TestScanExtensionsAbsentFallsBackToCodeDefault(t *testing.T) {
+	data, err := SerializeProfile(DefaultProfile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	scan := raw["scan"].(map[string]interface{})
+	delete(scan, "extensions")
+	stripped, err := yaml.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseProfile(stripped)
+	if err != nil {
+		t.Fatalf("legacy profile without scan.extensions must load: %v", err)
+	}
+	if got := parsed.Scan.Extensions; len(got) != 2 || got[0] != "cs" || got[1] != "go" {
+		t.Fatalf("fallback extensions = %#v", got)
+	}
+}
+
+func TestLimitManifestKeepsHigherPriority(t *testing.T) {
+	profile := DefaultProfile()
+	profile.Scan.Rules = []ScanRule{
+		{Pattern: "core/**", Action: "include", Priority: "high"},
+		{Pattern: "extras/**", Action: "include", Priority: "low"},
+	}
+	paths := []string{"extras/b.go", "core/b.go", "extras/a.go", "core/a.go"}
+	kept, dropped := LimitManifest(profile, paths, 2)
+	if dropped != 2 || len(kept) != 2 {
+		t.Fatalf("kept/dropped = %#v / %d", kept, dropped)
+	}
+	if kept[0] != "core/a.go" || kept[1] != "core/b.go" {
+		t.Fatalf("priority order = %#v", kept)
+	}
+	kept, dropped = LimitManifest(profile, paths, 10)
+	if dropped != 0 || len(kept) != 4 {
+		t.Fatalf("under-limit keep = %#v dropped=%d", kept, dropped)
+	}
+}
+
+func TestProfileWarningsDetectsConflictsAndShadowing(t *testing.T) {
+	profile := DefaultProfile()
+	profile.Scan.Rules = []ScanRule{
+		{Pattern: "Packages/**", Action: "exclude"},
+		{Pattern: "Packages/**", Action: "include"},
+		{Pattern: "Packages/com.acme/sdk/Client.cs", Action: "include"},
+		{Pattern: "docs/**", Action: "exclude"},
+		{Pattern: "src/**", Action: "include"},
+	}
+	warnings := ProfileWarnings(profile)
+	var conflicts, shadows int
+	for _, warning := range warnings {
+		if strings.Contains(warning, "both include and exclude") {
+			conflicts++
+		}
+		if strings.Contains(warning, "shadowed by exclude") && strings.Contains(warning, "Packages/com.acme/sdk/Client.cs") {
+			shadows++
+		}
+		if strings.Contains(warning, "src/**") {
+			t.Fatalf("healthy include flagged: %q", warning)
+		}
+	}
+	if conflicts != 1 || shadows != 1 {
+		t.Fatalf("warnings = %#v", warnings)
 	}
 }

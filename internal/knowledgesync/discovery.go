@@ -55,15 +55,24 @@ type DiscoveryClient interface {
 	ProposeScanPolicy(ctx context.Context, inventory RepositoryInventory) ([]byte, error)
 }
 
-func BuildInventory(ctx context.Context, projectRoot string, runner GitRunner, codeGraph CodeGraphClient, limits ScanLimits) (RepositoryInventory, error) {
-	if limits.MaxFilesPerRun <= 0 {
-		limits.MaxFilesPerRun = DefaultProfile().Scan.Limits.MaxFilesPerRun
+// InventoryFileSafetyCap bounds how many committed files are parsed into the
+// inventory. It protects memory on very large repositories and is deliberately
+// independent from scan.limits.maxFilesPerRun, which bounds the final manifest
+// after include/exclude rules (see LimitManifest) so generated bulk can never
+// crowd out source directories by alphabetical order.
+const InventoryFileSafetyCap = 200000
+
+func BuildInventory(ctx context.Context, projectRoot string, runner GitRunner, codeGraph CodeGraphClient, scan ScanSettings) (RepositoryInventory, error) {
+	limits := scan.Limits
+	if limits.MaxFileSizeKB <= 0 {
+		limits.MaxFileSizeKB = DefaultProfile().Scan.Limits.MaxFileSizeKB
 	}
+	allowedExtensions := normalizeExtensions(scan.Extensions)
 	state, err := ReadGitState(ctx, runner, projectRoot)
 	if err != nil {
 		return RepositoryInventory{}, err
 	}
-	files, err := ListCommittedFiles(ctx, runner, projectRoot, state.Head, limits.MaxFilesPerRun+1)
+	files, err := ListCommittedFiles(ctx, runner, projectRoot, state.Head, InventoryFileSafetyCap+1)
 	if err != nil {
 		return RepositoryInventory{}, err
 	}
@@ -72,9 +81,9 @@ func BuildInventory(ctx context.Context, projectRoot string, runner GitRunner, c
 		Files: []InventoryFile{}, DirectoryStats: []DirectoryStat{}, Manifests: []string{},
 		Readmes: []string{}, ExistingKB: []string{},
 	}
-	if len(files) > limits.MaxFilesPerRun {
+	if len(files) > InventoryFileSafetyCap {
 		inventory.Truncated = true
-		files = files[:limits.MaxFilesPerRun]
+		files = files[:InventoryFileSafetyCap]
 	}
 	inventory.TrackedFiles = len(files)
 	directories := map[string]*DirectoryStat{}
@@ -83,14 +92,24 @@ func BuildInventory(ctx context.Context, projectRoot string, runner GitRunner, c
 		if IsHardExcluded(relative) {
 			continue
 		}
-		if isLikelyBinaryPath(relative) {
-			continue
-		}
 		size := committedFile.Size
 		if size > int64(limits.MaxFileSizeKB)*1024 {
 			continue
 		}
 		ext := strings.ToLower(path.Ext(relative))
+		base := strings.ToLower(path.Base(relative))
+		if isManifest(base, ext) {
+			inventory.Manifests = append(inventory.Manifests, relative)
+		}
+		if strings.HasPrefix(base, "readme") {
+			inventory.Readmes = append(inventory.Readmes, relative)
+		}
+		if strings.HasPrefix(strings.ToLower(relative), "knowledgebase/") {
+			inventory.ExistingKB = append(inventory.ExistingKB, relative)
+		}
+		if !ExtensionAllowed(allowedExtensions, ext) || isLikelyBinaryPath(relative) {
+			continue
+		}
 		category := inventoryCategory(relative)
 		inventory.Files = append(inventory.Files, InventoryFile{Path: relative, Category: category, Size: size})
 		inventory.Extensions[ext]++
@@ -105,16 +124,6 @@ func BuildInventory(ctx context.Context, projectRoot string, runner GitRunner, c
 		}
 		stat.FileCount++
 		stat.Extensions[ext]++
-		base := strings.ToLower(path.Base(relative))
-		if isManifest(base, ext) {
-			inventory.Manifests = append(inventory.Manifests, relative)
-		}
-		if strings.HasPrefix(base, "readme") {
-			inventory.Readmes = append(inventory.Readmes, relative)
-		}
-		if strings.HasPrefix(strings.ToLower(relative), "knowledgebase/") {
-			inventory.ExistingKB = append(inventory.ExistingKB, relative)
-		}
 	}
 	for _, stat := range directories {
 		inventory.DirectoryStats = append(inventory.DirectoryStats, *stat)
@@ -134,7 +143,7 @@ func BuildInventory(ctx context.Context, projectRoot string, runner GitRunner, c
 
 func DiscoverPolicy(ctx context.Context, projectRoot string, runner GitRunner, client DiscoveryClient, codeGraph CodeGraphClient) (ScanPolicyProposal, error) {
 	profile := DefaultProfile()
-	inventory, err := BuildInventory(ctx, projectRoot, runner, codeGraph, profile.Scan.Limits)
+	inventory, err := BuildInventory(ctx, projectRoot, runner, codeGraph, profile.Scan)
 	if err != nil {
 		return ScanPolicyProposal{}, err
 	}

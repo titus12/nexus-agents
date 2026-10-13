@@ -3,9 +3,11 @@ package knowledgesync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +24,7 @@ func TestInventoryUsesTrackedFilesAndClassifiesChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	inventory, err := BuildInventory(context.Background(), root, ExecGitRunner{}, nil, ScanLimits{MaxFileSizeKB: 512, MaxFilesPerRun: 100})
+	inventory, err := BuildInventory(context.Background(), root, ExecGitRunner{}, nil, ScanSettings{Source: "git-tracked", Limits: ScanLimits{MaxFileSizeKB: 512, MaxFilesPerRun: 100}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,11 +134,54 @@ func TestDiscoverPolicyRetainsDeterministicCoverageAfterAIRefinement(t *testing.
 	}
 }
 
+func TestInventoryFiltersToCodeExtensionsRegardlessOfDirectoryOrder(t *testing.T) {
+	root := initTestRepository(t)
+	for i := 0; i < 120; i++ {
+		writeRepoFile(t, root, fmt.Sprintf("aaa-generated/chunk_%03d.data.txt", i), "junk\n")
+	}
+	writeRepoFile(t, root, "aaa-generated/helper.py", "print('junk')\n")
+	writeRepoFile(t, root, "zzz-src/pkg/service.go", "package pkg\n")
+	writeRepoFile(t, root, "zzz-src/pkg/Service.cs", "class Service {}\n")
+	writeRepoFile(t, root, "zzz-src/NOTES.md", "# notes\n")
+	writeRepoFile(t, root, "README.md", "# readme\n")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "initial")
+
+	inventory, err := BuildInventory(context.Background(), root, ExecGitRunner{}, nil, ScanSettings{
+		Source: "git-tracked", Limits: ScanLimits{MaxFileSizeKB: 512, MaxFilesPerRun: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := map[string]bool{}
+	for _, file := range inventory.Files {
+		selected[file.Path] = true
+	}
+	if !selected["zzz-src/pkg/service.go"] || !selected["zzz-src/pkg/Service.cs"] {
+		t.Fatalf("source files were crowded out by generated bulk: %#v", selected)
+	}
+	for path := range selected {
+		if strings.HasSuffix(path, ".txt") || strings.HasSuffix(path, ".py") || strings.HasSuffix(path, ".md") {
+			t.Fatalf("non-code file entered the scan scope: %s", path)
+		}
+	}
+	if len(inventory.Readmes) != 1 || inventory.Readmes[0] != "README.md" {
+		t.Fatalf("readme context = %#v", inventory.Readmes)
+	}
+
+	profile := DefaultProfile()
+	profile.Scan.Rules = []ScanRule{{Pattern: "zzz-src/**", Action: "include", Priority: "high"}}
+	manifest := IncludedPaths(profile, []string{"zzz-src/pkg/service.go", "zzz-src/pkg/Service.cs"})
+	kept, dropped := LimitManifest(profile, manifest, 1)
+	if dropped != 1 || len(kept) != 1 || kept[0] != "zzz-src/pkg/Service.cs" {
+		t.Fatalf("manifest limit kept/dropped = %#v / %d", kept, dropped)
+	}
+}
+
 type staticDiscoveryClient struct {
 	response []byte
 	err      error
 }
-
 func (c staticDiscoveryClient) ProposeScanPolicy(context.Context, RepositoryInventory) ([]byte, error) {
 	if c.err != nil {
 		return nil, c.err

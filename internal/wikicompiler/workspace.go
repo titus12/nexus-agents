@@ -27,6 +27,36 @@ type Workspace struct {
 
 type WorkspaceManager struct{}
 
+// manifestArgBudget bounds the characters a single git invocation spends on
+// manifest path arguments. Windows refuses to spawn processes whose command
+// line exceeds ~32k characters, so large manifests are archived in batches.
+const manifestArgBudget = 20000
+
+// chunkPathArgs splits paths into batches whose path arguments stay within the
+// budget. A single oversized path still forms its own batch.
+func chunkPathArgs(paths []string, budget int) [][]string {
+	if budget <= 0 {
+		budget = manifestArgBudget
+	}
+	var batches [][]string
+	var current []string
+	currentLen := 0
+	for _, value := range paths {
+		cost := len(value) + 1
+		if len(current) > 0 && currentLen+cost > budget {
+			batches = append(batches, current)
+			current = nil
+			currentLen = 0
+		}
+		current = append(current, value)
+		currentLen += cost
+	}
+	if len(current) > 0 {
+		batches = append(batches, current)
+	}
+	return batches
+}
+
 func (m *WorkspaceManager) Prepare(ctx context.Context, input WorkspaceInput) (Workspace, error) {
 	dataRoot, err := filepath.Abs(input.DataRoot)
 	if err != nil {
@@ -46,24 +76,30 @@ func (m *WorkspaceManager) Prepare(ctx context.Context, input WorkspaceInput) (W
 	if err := os.MkdirAll(repositoryRoot, 0o755); err != nil {
 		return Workspace{}, err
 	}
-	archivePath := filepath.Join(root, "repository.tar")
 	revision := strings.TrimSpace(input.Revision)
 	if revision == "" {
 		revision = "HEAD"
 	}
-	args := []string{"-C", input.ProjectRoot, "archive", "--format=tar", "-o", archivePath, revision}
+	batches := [][]string{nil}
 	if len(input.Manifest) > 0 {
-		args = append(args, "--")
-		args = append(args, input.Manifest...)
+		batches = chunkPathArgs(input.Manifest, manifestArgBudget)
 	}
-	command := exec.CommandContext(ctx, "git", args...)
-	if output, err := command.CombinedOutput(); err != nil {
-		return Workspace{}, fmt.Errorf("create isolated Git snapshot: %w: %s", err, bounded(string(output), 4096))
+	for index, batch := range batches {
+		archivePath := filepath.Join(root, fmt.Sprintf("repository-%03d.tar", index))
+		args := []string{"-C", input.ProjectRoot, "archive", "--format=tar", "-o", archivePath, revision}
+		if len(batch) > 0 {
+			args = append(args, "--")
+			args = append(args, batch...)
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		if output, err := command.CombinedOutput(); err != nil {
+			return Workspace{}, fmt.Errorf("create isolated Git snapshot (batch %d/%d): %w: %s", index+1, len(batches), err, bounded(string(output), 4096))
+		}
+		if err := extractTarSecure(archivePath, repositoryRoot); err != nil {
+			return Workspace{}, err
+		}
+		_ = os.Remove(archivePath)
 	}
-	if err := extractTarSecure(archivePath, repositoryRoot); err != nil {
-		return Workspace{}, err
-	}
-	_ = os.Remove(archivePath)
 	return Workspace{Root: root, RepositoryRoot: repositoryRoot}, nil
 }
 
