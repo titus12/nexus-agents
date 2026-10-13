@@ -11,7 +11,7 @@ import (
 )
 
 // TestResponseToSSEFullSequence verifies the SSE stream contains the full
-// Codex Responses event sequence (the fix for "发消息没通").
+// Codex Responses event sequence (the fix for "鍙戞秷鎭病閫?).
 func TestResponseToSSEFullSequence(t *testing.T) {
 	resp := map[string]any{
 		"id":     "resp_test123",
@@ -150,7 +150,7 @@ func TestChatResponseToResponseWithToolCall(t *testing.T) {
 // ChatGPT Codex backend for subscription routes.
 func TestCodexOpenAIBaseURLRedirect(t *testing.T) {
 	route := Route{
-		ID:       "gpt-5.5",
+		ID:       "gpt-6-luna",
 		BaseURL:  "https://api.openai.com/v1",
 		AuthMode: "codex_openai",
 	}
@@ -657,8 +657,8 @@ func TestProbeModelsUsesCodexResponsesAuthAndCandidateModel(t *testing.T) {
 	defer fake.Close()
 
 	service := NewService(Config{Routes: []Route{{
-		ID:       "gpt-5.5",
-		Model:    "gpt-5.5",
+		ID:       "gpt-6-luna",
+		Model:    "gpt-6-luna",
 		API:      "responses",
 		BaseURL:  fake.URL + "/backend-api/codex",
 		AuthMode: "codex_openai",
@@ -703,14 +703,14 @@ func TestProbeModelsCanReuseLastCodexCredentials(t *testing.T) {
 	defer fake.Close()
 
 	service := NewService(Config{Routes: []Route{{
-		ID:       "gpt-5.5",
-		Model:    "gpt-5.5",
+		ID:       "gpt-6-luna",
+		Model:    "gpt-6-luna",
 		API:      "responses",
 		BaseURL:  fake.URL + "/backend-api/codex",
 		AuthMode: "codex_openai",
 	}}})
 
-	req := httptest.NewRequest("POST", "/proxy/codex/v1/responses", strings.NewReader(`{"model":"gpt-5.5","input":"hello"}`))
+	req := httptest.NewRequest("POST", "/proxy/codex/v1/responses", strings.NewReader(`{"model":"gpt-6-luna","input":"hello"}`))
 	req.Header.Set("Authorization", "Bearer remembered-token")
 	rec := httptest.NewRecorder()
 	service.ServeHTTP(rec, req)
@@ -724,5 +724,65 @@ func TestProbeModelsCanReuseLastCodexCredentials(t *testing.T) {
 	}
 	if capturedAuthorization != "Bearer remembered-token" {
 		t.Fatalf("expected remembered authorization, got %q", capturedAuthorization)
+	}
+}
+
+// TestProxyResponsesForcesPinnedReasoningEffort verifies that a route pinned to
+// reasoning effort "max" cannot be downgraded by the request payload: the proxy
+// rewrites reasoning.effort (and keeps other reasoning fields intact).
+func TestProxyResponsesForcesPinnedReasoningEffort(t *testing.T) {
+	var capturedBody map[string]any
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		writeJSON(w, http.StatusOK, map[string]any{"id": "resp_x", "object": "response", "status": "completed", "model": "gpt-6-luna"})
+	}))
+	defer fake.Close()
+
+	service := NewService(Config{Routes: []Route{{
+		ID:              "gpt-6-luna",
+		Model:           "gpt-6-luna",
+		API:             "responses",
+		BaseURL:         fake.URL + "/backend-api/codex",
+		AuthMode:        "codex_openai",
+		ReasoningEffort: "max",
+	}}})
+
+	// Request tries to lower the effort; the pin must win.
+	req := httptest.NewRequest("POST", "/proxy/codex/v1/responses",
+		strings.NewReader(`{"model":"gpt-6-luna","input":"hi","reasoning":{"effort":"low","summary":"auto"}}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	service.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	reasoning, ok := capturedBody["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected reasoning object upstream, got %#v", capturedBody["reasoning"])
+	}
+	if reasoning["effort"] != "max" {
+		t.Fatalf("expected pinned effort max, got %#v", reasoning["effort"])
+	}
+	if reasoning["summary"] != "auto" {
+		t.Fatalf("expected other reasoning fields preserved, got %#v", reasoning)
+	}
+
+	// A request without reasoning gets it injected too.
+	capturedBody = nil
+	req = httptest.NewRequest("POST", "/proxy/codex/v1/responses",
+		strings.NewReader(`{"model":"gpt-6-luna","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec = httptest.NewRecorder()
+	service.ServeHTTP(rec, req)
+	reasoning, ok = capturedBody["reasoning"].(map[string]any)
+	if !ok || reasoning["effort"] != "max" {
+		t.Fatalf("expected injected effort max, got %#v", capturedBody["reasoning"])
+	}
+
+	// The model catalog advertises max as the default for the pinned route.
+	entry := modelCatalogEntry(service.config.Routes[0], 0)
+	if entry["default_reasoning_level"] != "max" {
+		t.Fatalf("expected catalog default reasoning max, got %#v", entry["default_reasoning_level"])
 	}
 }

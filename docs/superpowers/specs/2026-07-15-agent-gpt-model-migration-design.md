@@ -21,7 +21,7 @@ Use the current Codex GPT tiers as follows:
 
 | Role class | Model | Rationale |
 | --- | --- | --- |
-| Architecture, high-risk evaluation, logic/security review, asset safety | `gpt-5.6-terra` | High-capability reasoning and coding tier, selected as the replacement for former GPT-5.5 / DeepSeek Pro premium roles. |
+| Architecture, high-risk evaluation, logic/security review, asset safety | `gpt-5.6-terra` | High-capability reasoning and coding tier, selected as the replacement for former GPT-6 Luna / DeepSeek Pro premium roles. |
 | Standard implementation, debugger, reviewer, regression evaluation | `gpt-5.4` | Stable general-purpose implementation and review tier. |
 | Fast edits, lookup, gatekeeping, workflow first-pass evaluation | `gpt-5.6-luna` | Fast and lower-cost tier, selected as the replacement for former GPT-5.4-mini / DeepSeek Flash roles. |
 

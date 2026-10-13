@@ -125,7 +125,7 @@ func TestUnityUIFeatureTemplateUsesOnlySupportedGPTSubagentModels(t *testing.T) 
 		if strings.Contains(text, "deepseek-v4-pro") || strings.Contains(text, "deepseek-v4-flash") {
 			t.Fatalf("expected %s to avoid unsupported DeepSeek subagent models", file)
 		}
-		if !strings.Contains(text, "gpt-5.4") || !strings.Contains(text, "gpt-5.5") {
+		if !strings.Contains(text, "gpt-6-luna") || !strings.Contains(text, "gpt-6-luna") {
 			t.Fatalf("expected %s to use the approved GPT subagent model tiers", file)
 		}
 	}

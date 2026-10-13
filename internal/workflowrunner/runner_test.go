@@ -91,7 +91,7 @@ func TestRunnerCompleteAttachesWorkflowTokenUsage(t *testing.T) {
 	if err := store.RecordTokenUsage(codexrouter.TokenUsageEvent{
 		WorkflowRunID:     run.ID,
 		Role:              "worker",
-		Model:             "gpt-5.5",
+		Model:             "gpt-6-luna",
 		InputTokens:       1000,
 		CachedInputTokens: 500,
 		OutputTokens:      120,
@@ -102,7 +102,7 @@ func TestRunnerCompleteAttachesWorkflowTokenUsage(t *testing.T) {
 	if err := store.RecordWorkflowRouteEvent(codexrouter.WorkflowRouteEvent{
 		WorkflowRunID:  run.ID,
 		Role:           "worker",
-		Model:          "gpt-5.5",
+		Model:          "gpt-6-luna",
 		StatusCode:     200,
 		DurationMS:     1500,
 		RequestBytes:   2048,

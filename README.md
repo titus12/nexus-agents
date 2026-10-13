@@ -88,7 +88,7 @@ Codex Desktop
            ▼
     codexrouter.Service  根据 model 字段分流
            │
-           ├─ model = gpt-5.5 / gpt-5.4 / gpt-5.4-mini
+           ├─ model = gpt-6-luna / gpt-5.4 / gpt-5.4-mini
            │      └─ proxyResponses()   ← 直接透传
            │           ├─ 替换 model 字段
            │           ├─ 透传 Codex 专属 Headers（Session-Id、X-Codex-* 等）
@@ -112,7 +112,7 @@ Codex Desktop
 
 | Slug | 显示名称 | 后端地址 | 认证方式 | 图片支持 |
 |------|---------|---------|---------|---------|
-| `gpt-5.5` | GPT-5.5 | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
+| `gpt-6-luna` | GPT-6 Luna | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
 | `gpt-5.4` | GPT-5.4 | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
 | `gpt-5.4-mini` | GPT-5.4 Mini | `chatgpt.com/backend-api/codex` | 订阅 token 透传 | ✅ |
 | `deepseek-v4-pro` | DeepSeek V4 Pro | `proxy/deepseek/v1` | `DEEPSEEK_API_KEY` | — |
@@ -140,7 +140,7 @@ internal/codexrouter/
 ```toml
 # IMPORTANT: Do not modify nexus-codex config. Managed by restart_local.ps1.
 model_provider = "nexus-codex"
-model = "gpt-5.5"
+model = "gpt-6-luna"
 model_catalog_json = "C:/Users/Administrator/.codex/nexus-model-catalog.json"
 
 [model_providers.nexus-codex]
@@ -252,3 +252,7 @@ $env:NEXUS_EXTERNAL_MARKDOWN_TOKEN="..."
 转换服务接收 `{"url":"https://..."}`，返回包含 `title`、`markdown`、可选
 `revision`/`updatedAt` 的 JSON。飞书快照只用于本次初始化或补全，代码和
 CodeGraph 事实始终优先。
+
+## 中书省需求工作流
+
+`requirements-v1` 已成为中书省唯一工作流，新建任务默认使用新版。旧中书建图、组审、冻结、fast-track 与专用角色协议已退役。历史任务可只读查看或通过 `--migrate-task` 导入新版，迁移后重新审查与批准。门下省继续生成实施方案。操作、角色差异矩阵和历史迁移见 [运行说明](docs/multi/runtime/requirements-workflow-v1.md)，实际验证与尚未完成的真实品质、飞书验收见 [重构验证](docs/multi/runtime/requirements-workflow-validation-20261007.md)。

@@ -122,7 +122,7 @@ function renderAgentsPage() {
       </div>
       <div class="asset-card-footer">
         <div class="asset-chip-row">
-          ${chip(agent.model, agent.model.includes("mini") ? "orange" : agent.model === "gpt-5.5" ? "purple" : "teal")}
+          ${chip(agent.model, agent.model.includes("mini") ? "orange" : agent.model === "gpt-6-luna" ? "purple" : "teal")}
           ${chip(`${agent.rules} rules`, "purple")}
           ${chip(`${agent.skills} skills`, "teal")}
         </div>

@@ -4136,7 +4136,7 @@ onMounted(loadData);
             <section class="panel panel-pad">
               <div class="section-title">Codex Config</div>
               <pre class="code-block">model_provider = "nexus-codex"
-model = "gpt-5.5"
+model = "gpt-6-luna"
 model_catalog_json = "C:/Users/YOUR_USER/.codex/nexus-model-catalog.json"
 
 [model_providers.nexus-codex]

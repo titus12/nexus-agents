@@ -88,6 +88,10 @@ type Route struct {
 	Priority              int      `json:"priority"`
 	DropParams            []string `json:"dropParams,omitempty"`
 	StructuredOutputModes []string `json:"structuredOutputModes,omitempty"`
+	// ReasoningEffort pins the Responses API `reasoning.effort` for this route.
+	// Requests cannot lower it: the proxy always rewrites the effort to this
+	// value so quality tiers stay enforced (e.g. gpt-6-luna runs at "max").
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 }
 
 type Service struct {
@@ -151,7 +155,7 @@ func DefaultConfig() Config {
 	claudeBaseURL := getenvDefault("NEXUS_CLAUDE_BASE_URL", "https://lumos.diandian.info/winky/claude/v1")
 	claudeProvider := getenvDefault("NEXUS_CLAUDE_PROVIDER", "Winky Claude")
 	return Config{
-		DefaultModel: "gpt-5.5",
+		DefaultModel: "gpt-6-luna",
 		Routes: []Route{
 			{
 				ID:          "gpt-5.6-sol",
@@ -187,15 +191,16 @@ func DefaultConfig() Config {
 				Priority:    2,
 			},
 			{
-				ID:          "gpt-5.5",
-				DisplayName: "GPT-5.5",
-				Description: "GPT subscription model through ChatGPT Codex backend.",
-				API:         "responses",
-				BaseURL:     "https://chatgpt.com/backend-api/codex",
-				Model:       "gpt-5.5",
-				Provider:    "Codex subscription",
-				AuthMode:    "codex_openai",
-				Priority:    3,
+				ID:              "gpt-6-luna",
+				DisplayName:     "GPT-6 Luna",
+				Description:     "GPT subscription model through ChatGPT Codex backend.",
+				API:             "responses",
+				BaseURL:         "https://chatgpt.com/backend-api/codex",
+				Model:           "gpt-6-luna",
+				Provider:        "Codex subscription",
+				AuthMode:        "codex_openai",
+				Priority:        3,
+				ReasoningEffort: "max",
 			},
 			{
 				ID:          "gpt-5.4",
@@ -533,6 +538,14 @@ func (s *Service) proxyResponses(w http.ResponseWriter, r *http.Request, request
 		payload = map[string]any{}
 	}
 	payload["model"] = route.Model
+	if effort := strings.TrimSpace(route.ReasoningEffort); effort != "" {
+		reasoning, _ := payload["reasoning"].(map[string]any)
+		if reasoning == nil {
+			reasoning = map[string]any{}
+		}
+		reasoning["effort"] = effort
+		payload["reasoning"] = reasoning
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, openAIError("invalid request body", http.StatusBadRequest))
@@ -1248,6 +1261,22 @@ func modelCatalogEntry(route Route, index int) map[string]any {
 	priority := route.Priority
 	if priority == 0 && index > 0 {
 		priority = index
+	}
+	if effort := strings.TrimSpace(route.ReasoningEffort); effort != "" {
+		defaultReasoning = effort
+		known := false
+		for _, level := range reasoningLevels {
+			if level["effort"] == effort {
+				known = true
+				break
+			}
+		}
+		if !known {
+			reasoningLevels = append(reasoningLevels, map[string]string{
+				"effort":      effort,
+				"description": "Maximum reasoning depth for the hardest problems",
+			})
+		}
 	}
 	// Responses routes support image input; chat-completions routes are text-only in v1.
 	inputModalities := []string{"text"}

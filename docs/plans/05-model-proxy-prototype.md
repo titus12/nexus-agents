@@ -22,7 +22,7 @@ Model Proxy is global service configuration. It is referenced by Agents and Work
 ## Route Requirements
 V1 route table contains:
 
-- Codex `gpt-5.5` passthrough to official Codex backend.
+- Codex `gpt-6-luna` passthrough to official Codex backend.
 - Codex `gpt-5.4` to Winky `deepseek-v4-pro`.
 - Codex `gpt-5.4-mini` to Winky `deepseek-v4-flash`.
 - Claude `/v1/messages` to Winky Claude or Winky DeepSeek by model prefix.

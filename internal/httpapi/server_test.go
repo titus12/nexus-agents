@@ -1467,7 +1467,7 @@ func TestModelRouteEndpoint(t *testing.T) {
 		"gpt-5.6-sol":       "gpt-5.6-sol",
 		"gpt-5.6-terra":     "gpt-5.6-terra",
 		"gpt-5.6-luna":      "gpt-5.6-luna",
-		"gpt-5.5":           "gpt-5.5",
+		"gpt-6-luna":           "gpt-6-luna",
 		"gpt-5.4":           "gpt-5.4",
 		"gpt-5.4-mini":      "gpt-5.4-mini",
 		"deepseek-v4-pro":   "deepseek-v4-pro",
@@ -1880,10 +1880,10 @@ func TestModelRouteResolveEndpoint(t *testing.T) {
 			wantPassthrough: true,
 		},
 		{
-			name:            "codex gpt-5.5 passthrough",
-			path:            "/api/model-routes/resolve?client=codex&model=gpt-5.5",
+			name:            "codex gpt-6-luna passthrough",
+			path:            "/api/model-routes/resolve?client=codex&model=gpt-6-luna",
 			wantProvider:    "ChatGPT Subscription",
-			wantTarget:      "gpt-5.5",
+			wantTarget:      "gpt-6-luna",
 			wantPassthrough: true,
 		},
 		{
@@ -2092,33 +2092,33 @@ func TestCodexRouterResponsesPassesGPTSubscriptionBearer(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode upstream request: %v", err)
 		}
-		if body.Model != "gpt-5.5" || body.Input != "hello gpt" {
+		if body.Model != "gpt-6-luna" || body.Input != "hello gpt" {
 			t.Fatalf("unexpected passthrough body: %#v", body)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"id":          "resp_subscription",
 			"object":      "response",
 			"status":      "completed",
-			"model":       "gpt-5.5",
+			"model":       "gpt-6-luna",
 			"output_text": "hello from subscription",
 		})
 	}))
 	defer upstream.Close()
 
 	server := NewServerWithCodexRouter(codexrouter.NewService(codexrouter.Config{
-		DefaultModel: "gpt-5.5",
+		DefaultModel: "gpt-6-luna",
 		Routes: []codexrouter.Route{{
-			ID:          "gpt-5.5",
-			DisplayName: "GPT-5.5",
+			ID:          "gpt-6-luna",
+			DisplayName: "GPT-6 Luna",
 			API:         "responses",
 			BaseURL:     upstream.URL + "/backend-api/codex",
-			Model:       "gpt-5.5",
+			Model:       "gpt-6-luna",
 			Provider:    "Codex subscription",
 			AuthMode:    "codex_openai",
 		}},
 	}))
 
-	request := httptest.NewRequest(http.MethodPost, "/proxy/codex/v1/responses", strings.NewReader(`{"model":"gpt-5.5","input":"hello gpt"}`))
+	request := httptest.NewRequest(http.MethodPost, "/proxy/codex/v1/responses", strings.NewReader(`{"model":"gpt-6-luna","input":"hello gpt"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer codex-token")
 	response := httptest.NewRecorder()
@@ -2169,12 +2169,12 @@ func TestCodexModelProbeEndpointProbesCandidates(t *testing.T) {
 	defer upstream.Close()
 
 	server := NewServerWithCodexRouter(codexrouter.NewService(codexrouter.Config{
-		DefaultModel: "gpt-5.5",
+		DefaultModel: "gpt-6-luna",
 		Routes: []codexrouter.Route{{
-			ID:       "gpt-5.5",
+			ID:       "gpt-6-luna",
 			API:      "responses",
 			BaseURL:  upstream.URL + "/backend-api/codex",
-			Model:    "gpt-5.5",
+			Model:    "gpt-6-luna",
 			AuthMode: "codex_openai",
 		}},
 	}))

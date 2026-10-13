@@ -24,7 +24,7 @@
 **Files:**
 - Modify: `internal/catalog/catalog.go`
 
-- [ ] Replace `ModelRoutes()` with five routes: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `deepseek-v4-pro`, `deepseek-v4-flash`.
+- [ ] Replace `ModelRoutes()` with five routes: `gpt-6-luna`, `gpt-5.4`, `gpt-5.4-mini`, `deepseek-v4-pro`, `deepseek-v4-flash`.
 - [ ] Replace `ResolveModelRoute()` so only Codex/Codex Responses resolves these five models.
 - [ ] Ensure GPT routes use passthrough and Codex bearer auth; DeepSeek routes use Winky endpoint and `DEEPSEEK_API_KEY`.
 - [ ] Run the targeted route tests and confirm they pass.

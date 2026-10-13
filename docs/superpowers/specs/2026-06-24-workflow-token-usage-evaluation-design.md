@@ -1,4 +1,4 @@
-﻿# Workflow Token Usage Evaluation Design
+# Workflow Token Usage Evaluation Design
 
 Date: 2026-06-24
 
@@ -62,7 +62,7 @@ Aggregated task metric shape:
         "totalTokens": 7700,
         "cacheHitRate": 71.4,
         "outputInputRatio": 10.0,
-        "models": {"gpt-5.5": 2}
+        "models": {"gpt-6-luna": 2}
       }
     }
   }

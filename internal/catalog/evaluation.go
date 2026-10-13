@@ -1674,7 +1674,7 @@ func evaluationModelPolicy(run TaskRun) map[string]any {
 	costWeight := 0.38
 	primary := "deepseek-v4-pro"
 	secondary := "deepseek-v4-flash"
-	escalationModel := "gpt-5.5"
+	escalationModel := "gpt-6-luna"
 	highRiskWorkflow := workflow == "code-review" || workflow == "refactor" || workflow == "bugfix" || isUnityEvaluationWorkflow(workflow)
 	failedTask := normalizeTaskStatus(run.SubmittedStatus) == "failed"
 	if highRiskWorkflow {
@@ -1687,17 +1687,18 @@ func evaluationModelPolicy(run TaskRun) map[string]any {
 	}
 	log.Printf("[evaluation] model policy workflow=%s primary=%s escalation=%s high_risk=%t failed=%t", run.WorkflowType, primary, escalationModel, highRiskWorkflow, failedTask)
 	return map[string]any{
-		"mode":             "tiered_arbiter_v2",
-		"selectionGoal":    "balance_accuracy_and_cost",
-		"accuracyWeight":   accuracyWeight,
-		"costWeight":       costWeight,
-		"primaryModel":     primary,
-		"secondaryModel":   secondary,
-		"arbiterModel":     primary,
-		"escalationModel":  escalationModel,
-		"escalateWhen":     []any{"low_confidence", "failed_task", "score_gray_zone", "high_risk_workflow", "high_severity_proposal", "cross_project_recurring_issue"},
-		"highRiskWorkflow": highRiskWorkflow,
-		"failedTask":       failedTask,
+		"mode":                      "tiered_arbiter_v2",
+		"selectionGoal":             "balance_accuracy_and_cost",
+		"accuracyWeight":            accuracyWeight,
+		"costWeight":                costWeight,
+		"primaryModel":              primary,
+		"secondaryModel":            secondary,
+		"arbiterModel":              primary,
+		"escalationModel":           escalationModel,
+		"escalationReasoningEffort": "max",
+		"escalateWhen":              []any{"low_confidence", "failed_task", "score_gray_zone", "high_risk_workflow", "high_severity_proposal", "cross_project_recurring_issue"},
+		"highRiskWorkflow":          highRiskWorkflow,
+		"failedTask":                failedTask,
 	}
 }
 

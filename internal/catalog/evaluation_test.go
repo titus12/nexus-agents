@@ -279,10 +279,10 @@ func TestEvaluationStoreTokenUsageAggregationByRole(t *testing.T) {
 	defer store.Close()
 
 	events := []codexrouter.TokenUsageEvent{
-		{WorkflowRunID: "wf_run_token", Role: "worker", Model: "gpt-5.5", InputTokens: 100, CachedInputTokens: 40, OutputTokens: 10, TotalTokens: 110},
-		{WorkflowRunID: "wf_run_token", Role: "worker", Model: "gpt-5.5", InputTokens: 50, CachedInputTokens: 10, OutputTokens: 5, TotalTokens: 55},
+		{WorkflowRunID: "wf_run_token", Role: "worker", Model: "gpt-6-luna", InputTokens: 100, CachedInputTokens: 40, OutputTokens: 10, TotalTokens: 110},
+		{WorkflowRunID: "wf_run_token", Role: "worker", Model: "gpt-6-luna", InputTokens: 50, CachedInputTokens: 10, OutputTokens: 5, TotalTokens: 55},
 		{WorkflowRunID: "wf_run_token", Role: "reviewer", Model: "deepseek-v4-pro", InputTokens: 30, OutputTokens: 7, TotalTokens: 37},
-		{WorkflowRunID: "other", Role: "worker", Model: "gpt-5.5", InputTokens: 999, OutputTokens: 999},
+		{WorkflowRunID: "other", Role: "worker", Model: "gpt-6-luna", InputTokens: 999, OutputTokens: 999},
 	}
 	for _, event := range events {
 		if err := store.RecordTokenUsage(event); err != nil {
@@ -297,7 +297,7 @@ func TestEvaluationStoreTokenUsageAggregationByRole(t *testing.T) {
 		t.Fatalf("unexpected aggregate: %#v ok=%v", usage, ok)
 	}
 	worker := usage.Roles["worker"]
-	if worker.RequestCount != 2 || worker.Models["gpt-5.5"] != 2 || worker.CacheHitRate != 33.3 {
+	if worker.RequestCount != 2 || worker.Models["gpt-6-luna"] != 2 || worker.CacheHitRate != 33.3 {
 		t.Fatalf("unexpected worker rollup: %#v", worker)
 	}
 	reviewer := usage.Roles["reviewer"]
@@ -335,7 +335,7 @@ func TestEvaluationIncludesTokenEfficiencyScore(t *testing.T) {
 			"totalTokens":   340000,
 			"cacheHitRate":  5,
 		}},
-		Context:  map[string]any{"rules": []any{"bugfix-core"}, "agent": "debugger", "model": "gpt-5.5"},
+		Context:  map[string]any{"rules": []any{"bugfix-core"}, "agent": "debugger", "model": "gpt-6-luna"},
 		Evidence: map[string]any{"verification": map[string]any{"passed": true}},
 	}); err != nil {
 		t.Fatalf("submit task run: %v", err)
@@ -362,8 +362,8 @@ func TestEvaluationStoreRouteMetricsAggregationByRole(t *testing.T) {
 	}
 	defer store.Close()
 	events := []codexrouter.WorkflowRouteEvent{
-		{WorkflowRunID: "wf_run_route", Role: "worker", Model: "gpt-5.5", StatusCode: 200, DurationMS: 1000, RequestBytes: 100, ToolCount: 3, InputItemCount: 2, ToolCallCount: 1},
-		{WorkflowRunID: "wf_run_route", Role: "worker", Model: "gpt-5.5", StatusCode: 502, DurationMS: 2000, RequestBytes: 150, ToolCount: 3, InputItemCount: 2, ToolCallCount: 0},
+		{WorkflowRunID: "wf_run_route", Role: "worker", Model: "gpt-6-luna", StatusCode: 200, DurationMS: 1000, RequestBytes: 100, ToolCount: 3, InputItemCount: 2, ToolCallCount: 1},
+		{WorkflowRunID: "wf_run_route", Role: "worker", Model: "gpt-6-luna", StatusCode: 502, DurationMS: 2000, RequestBytes: 150, ToolCount: 3, InputItemCount: 2, ToolCallCount: 0},
 		{WorkflowRunID: "wf_run_route", Role: "reviewer", Model: "deepseek-v4-pro", StatusCode: 200, DurationMS: 3000, RequestBytes: 250, ToolCount: 1, InputItemCount: 1, ToolCallCount: 2},
 	}
 	for _, event := range events {
@@ -379,7 +379,7 @@ func TestEvaluationStoreRouteMetricsAggregationByRole(t *testing.T) {
 		t.Fatalf("unexpected route metrics: %#v", metrics)
 	}
 	worker := metrics.Roles["worker"]
-	if worker.RequestCount != 2 || worker.ErrorCount != 1 || worker.Models["gpt-5.5"] != 2 || worker.AverageRequestDurationMS != 1500 {
+	if worker.RequestCount != 2 || worker.ErrorCount != 1 || worker.Models["gpt-6-luna"] != 2 || worker.AverageRequestDurationMS != 1500 {
 		t.Fatalf("unexpected worker route rollup: %#v", worker)
 	}
 }
@@ -402,7 +402,7 @@ func TestEvaluationIncludesRouteHealthScore(t *testing.T) {
 			"durationMs":    20 * 60 * 1000,
 			"toolCallCount": 0,
 		}},
-		Context:  map[string]any{"rules": []any{"bugfix-core"}, "agent": "debugger", "model": "gpt-5.5"},
+		Context:  map[string]any{"rules": []any{"bugfix-core"}, "agent": "debugger", "model": "gpt-6-luna"},
 		Evidence: map[string]any{"verification": map[string]any{"passed": true}},
 	}); err != nil {
 		t.Fatalf("submit task run: %v", err)
@@ -431,16 +431,16 @@ func TestEvaluationStoreTaskRunsAndStatisticsIncludeAggregatedMetrics(t *testing
 		ProjectID:       "sample",
 		WorkflowType:    "bugfix",
 		SubmittedStatus: "success",
-		Context:         map[string]any{"agent": "debugger", "model": "gpt-5.5"},
+		Context:         map[string]any{"agent": "debugger", "model": "gpt-6-luna"},
 		Evidence:        map[string]any{"verification": map[string]any{"hasVerification": true, "passed": true}},
 	})
 	if err != nil {
 		t.Fatalf("submit task run: %v", err)
 	}
-	if err := store.RecordTokenUsage(codexrouter.TokenUsageEvent{WorkflowRunID: run.ID, Role: "worker", Model: "gpt-5.5", InputTokens: 100, OutputTokens: 20, TotalTokens: 120}); err != nil {
+	if err := store.RecordTokenUsage(codexrouter.TokenUsageEvent{WorkflowRunID: run.ID, Role: "worker", Model: "gpt-6-luna", InputTokens: 100, OutputTokens: 20, TotalTokens: 120}); err != nil {
 		t.Fatalf("record token usage: %v", err)
 	}
-	if err := store.RecordWorkflowRouteEvent(codexrouter.WorkflowRouteEvent{WorkflowRunID: run.ID, Role: "worker", Model: "gpt-5.5", StatusCode: 200, DurationMS: 1500}); err != nil {
+	if err := store.RecordWorkflowRouteEvent(codexrouter.WorkflowRouteEvent{WorkflowRunID: run.ID, Role: "worker", Model: "gpt-6-luna", StatusCode: 200, DurationMS: 1500}); err != nil {
 		t.Fatalf("record route event: %v", err)
 	}
 	runs, err := store.TaskRuns()
