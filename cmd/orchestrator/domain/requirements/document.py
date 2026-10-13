@@ -48,16 +48,29 @@ def commit_draft(current, payload, consensus):
     return replace(draft, document_digest=text_digest(rendered))
 
 
-def validate_draft(draft, consensus, decisions=()):
+def validate_draft(draft, consensus, decisions=(), locks=()):
     issues = []
-    def issue(rule, section_ids=(), req_ids=(), owner='solver'):
+    def issue(rule, section_ids=(), req_ids=(), owner='solver', claim=None, acceptance=None):
         issues.append(ReviewIssue(f'mechanical-{rule}-{len(issues)+1}', rule, tuple(section_ids), tuple(req_ids),
-                                  rule, '正文无法交付', 'blocking', owner, '补齐该语义与对应来源'))
+                                  claim or rule, '正文无法交付', 'blocking', owner, acceptance or '补齐该语义与对应来源'))
     if not draft or not draft.title.strip():
         issue('DRAFT_EMPTY')
         return tuple(issues)
     if text_digest(render_markdown(draft)) != draft.document_digest:
         raise ValueError('DOCUMENT_HASH_MISMATCH')
+    from .chapter_lock import locked_violations
+    order = {kind: index for index, kind in enumerate(CANONICAL_ORDER)}
+    for kind, status in locked_violations(draft, locks):
+        title = next((lock.title for lock in locks if lock.kind == kind), KIND_TITLES.get(kind, kind))
+        matches = [s.section_id for s in draft.sections if s.kind == kind]
+        if status == 'missing':
+            issue('LOCKED_SECTION_MISSING', matches, owner='solver',
+                  claim=f'第{order.get(kind, 0) + 1}章（{title}）已被使用者确认，但正文中已找不到该章的确认版本',
+                  acceptance='恢复该章的已确认原文')
+        else:
+            issue('LOCKED_SECTION_CHANGED', matches, owner='solver',
+                  claim=f'第{order.get(kind, 0) + 1}章（{title}）已被使用者确认，正文必须保持与确认版本逐字一致',
+                  acceptance='恢复该章的已确认原文')
     known_req = {c.requirement_id for c in consensus.claims}
     known_dec = set(consensus.active_decision_ids)
     known_fact = {f.fact_id for f in consensus.facts}

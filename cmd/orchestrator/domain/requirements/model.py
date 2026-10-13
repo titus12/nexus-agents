@@ -449,6 +449,23 @@ class IssueResponse:
     response: str
 
 
+# 旧快照缺失的顶层字段及默认值（from_dict 在严格校验前补齐，不做数据迁移）。
+_BACKFILL_TOP_LEVEL = {'chapter_locks': []}
+
+
+@dataclass(frozen=True)
+class ChapterLock:
+    """使用者对一章的确认记录；摘要之下正文必须逐字保持。"""
+
+    kind: str
+    title: str
+    content_digest: str
+    document_version: int
+    actor_id: str
+    event_id: str
+    confirmed_at: str
+
+
 @dataclass(frozen=True)
 class RequirementsState:
     sources: tuple[SourceRecord, ...] = ()
@@ -475,6 +492,7 @@ class RequirementsState:
     published_ref: str = ''
     evidence_answers: tuple[EvidenceAnswer, ...] = ()
     solver_responses: tuple[IssueResponse, ...] = ()
+    chapter_locks: tuple[ChapterLock, ...] = ()
 
     def __post_init__(self):
         for records, field in ((self.sources, 'source_id'), (self.decisions, 'decision_id'),
@@ -508,6 +526,14 @@ class RequirementsState:
             from .document import render_markdown
             if text_digest(render_markdown(self.draft)) != self.draft.document_digest:
                 raise ValueError('DOCUMENT_HASH_MISMATCH')
+        if self.chapter_locks:
+            from .document import CANONICAL_ORDER
+            kinds = [lock.kind for lock in self.chapter_locks]
+            if len(kinds) != len(set(kinds)):
+                raise ValueError('duplicate chapter lock kind')
+            for lock in self.chapter_locks:
+                if lock.kind not in CANONICAL_ORDER:
+                    raise ValueError('invalid chapter lock kind')
         if self.approval:
             from .review import review_input_digest, AXES
             if (not self.draft or not self.review_stamp or not self.review_stamp.passed
@@ -531,6 +557,9 @@ class RequirementsState:
 
     @classmethod
     def from_dict(cls, value):
+        # 旧快照早于部分顶层字段：先补默认再严格校验，不做数据迁移。
+        value = {**_BACKFILL_TOP_LEVEL, **value}
+
         def require_fields(record_type, raw):
             if raw is None:
                 return

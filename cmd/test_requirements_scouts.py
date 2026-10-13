@@ -181,14 +181,19 @@ class ScoutMergeTests(unittest.TestCase):
         self.assertIn('探针 docs 未完成', unavailable[1]['observation'])
         self.assertEqual(unavailable[1]['local_key'], 'docs.gap-1')
 
-    def test_intent_failure_returns_the_last_outcome_verbatim(self):
+    def test_intent_failure_rebinds_the_parent_request_id(self):
         failures = {'intent': [EffectOutcome(status='FAILED', event_name='FAIL',
-                                             event_payload={'error_code': 'AGENT_TIMEOUT'},
+                                             event_payload={'error_code': 'AGENT_TIMEOUT',
+                                                            'request_id': 'req-1-scout-intent'},
+                                             request_id='req-1-scout-intent',
                                              operation_id='child-intent')] * 2}
         inner = ScriptedInner(self.root, failures=failures)
         outcome = self.merged(inner)
         self.assertEqual(outcome.event_name, 'FAIL')
         self.assertEqual(outcome.event_payload['error_code'], 'AGENT_TIMEOUT')
+        parent = 'task-t:e1:1:REQ_ANALYZE:attempt-1'
+        self.assertEqual(outcome.request_id, parent)
+        self.assertEqual(outcome.event_payload['request_id'], parent)
         self.assertEqual(inner.calls, 3)  # two intent attempts plus the code probe
 
     def test_intent_exception_still_fails_cleanly(self):
@@ -312,7 +317,7 @@ class ScoutPassthroughTests(unittest.TestCase):
         config = ScoutConfig.from_env(env)
         self.assertTrue(config.enabled)
         self.assertEqual(config.facets, ('intent', 'code', 'docs'))
-        self.assertEqual(config.timeout('docs'), 300.0)
+        self.assertEqual(config.timeout('docs'), 2100.0)
         self.assertEqual(config.attempts('intent'), 2)
         self.assertEqual(config.fact_cap, 12)
         self.assertEqual(ScoutConfig.from_env({'REQUIREMENTS_SCOUT': '0'}).enabled, False)

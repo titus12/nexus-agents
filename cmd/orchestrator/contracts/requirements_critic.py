@@ -13,4 +13,8 @@ CONTRACT = requirement_contract('REQ_REVIEW', 'review-critic',
      'Every blocker needs stable identity, basis, impact, owner and fixed acceptance. Optional improvements do not block.',
      'Never author content, approve on behalf of the user or demand implementation recipes.',
      'Do not repeat structural checks already reported as lint-* advisory issues; judge intent, scenarios and gaps. '
-     'A pending marker 【待确认】 is a user-owned open question, not a Solver defect.'))
+     'A pending marker 【待确认】 is a user-owned open question, not a Solver defect.',
+     'Judge each chapter against the chapter contract in the skill. Report misplaced, duplicated or function-violating '
+     'content with rule chapter-misplaced, chapter-duplicate or chapter-function-violation; mark blocking only when it '
+     'changes how downstream readers understand scope, behavior or acceptance.',
+     'Chapter problems already reported by a lint-* advisory issue must not be reported again.'))

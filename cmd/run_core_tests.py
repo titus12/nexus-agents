@@ -15,7 +15,8 @@ import uuid
 from pathlib import Path
 CORE_TESTS = ('test_linear_fsm_architecture', 'test_linear_fsm_direct_transport', 'test_linear_fsm_effects', 'test_linear_fsm_engine', 'test_linear_fsm_failures', 'test_linear_fsm_locking', 'test_linear_fsm_nodes', 'test_linear_fsm_persistence', 'test_linear_fsm_reducer', 'test_linear_fsm_states', 'test_linear_fsm_transitions', 'test_linear_fsm_transport', 'test_linear_fsm_dto_migration', 'test_linear_fsm_parallel_effects', 'test_node_join_unstructured', 'test_linear_fsm_concurrency', 'test_linear_fsm_terminal_run_status', 'test_linear_fsm_entrypoint', 'test_linear_fsm_no_legacy_references', 'test_linear_fsm_recovery', 'test_linear_fsm_notification_safety', 'test_linear_fsm_menxia', 'test_structured_backfill', 'test_evidence_quote_gate', 'test_json_bom_v31', 'test_analyst_partition', 'test_completed_result_grace', 'test_retry_feedback_prompt', 'test_runtime_notice_reply', 'test_requirements_cutover', 'test_requirements_workflow_e2e', 'test_requirements_recovery', 'test_requirements_review', 'test_requirements_questions', 'test_requirements_metrics', 'test_requirements_rubric', 'test_requirements_draft_first', 'test_requirements_lint',
     'test_requirements_provenance', 'test_requirements_quotes', 'test_requirements_budget',
-    'test_requirements_scouts')
+    'test_requirements_scouts', 'test_requirements_stability', 'test_requirements_review_brief',
+    'test_requirements_skills', 'test_requirements_chapter_lock')
 
 def _selected_module_names() -> set[str]:
     return set(CORE_TESTS)

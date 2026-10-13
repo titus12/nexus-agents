@@ -116,8 +116,8 @@ class ScoutConfig:
             record('SCOUT_CONFIG_INVALID', label='facets', entry=','.join(facets),
                    reason=f'truncated to {MAX_FACETS}')
             facets = facets[:MAX_FACETS]
-        timeouts = _parse_pairs(str(env.get('REQUIREMENTS_SCOUT_TIMEOUTS', 'intent=600,*=300')),
-                                lambda value: max(1.0, float(value)), {'intent': 600.0, '*': 300.0}, 'timeouts')
+        timeouts = _parse_pairs(str(env.get('REQUIREMENTS_SCOUT_TIMEOUTS', 'intent=2400,*=2100')),
+                                lambda value: max(1.0, float(value)), {'intent': 2400.0, '*': 2100.0}, 'timeouts')
         attempts = _parse_pairs(str(env.get('REQUIREMENTS_SCOUT_ATTEMPTS', 'intent=2,*=1')),
                                 lambda value: max(1, int(value)), {'intent': 2, '*': 1}, 'attempts')
         try:
@@ -134,7 +134,7 @@ class ScoutConfig:
                    attempts=attempts, fact_cap=fact_cap, max_parallel=max_parallel)
 
     def timeout(self, facet: str) -> float:
-        return float(self._timeouts.get(facet, self._timeouts.get('*', 300.0)))
+        return float(self._timeouts.get(facet, self._timeouts.get('*', 2100.0)))
 
     def attempts(self, facet: str) -> int:
         return int(self._attempts.get(facet, self._attempts.get('*', 1)))
@@ -345,9 +345,12 @@ class ScoutFanoutRunner:
         by_facet = {probe.facet: probe for probe in probes}
         intent = by_facet['intent']
         if intent.clean is None:
-            if intent.outcome is not None:
-                return intent.outcome  # let the outer runner turn it into repair feedback
             original_request_id = str(request.payload.get('request_id') or request.idempotency_key)
+            if intent.outcome is not None:
+                payload = dict(intent.outcome.event_payload or {})
+                payload['request_id'] = original_request_id
+                return replace(intent.outcome, event_payload=payload,
+                               request_id=original_request_id)  # let the outer runner turn it into repair feedback
             return EffectOutcome(status='FAILED', event_name='FAIL',
                                  event_payload={'error_code': 'SCOUT_INTENT_PROBE_FAILED',
                                                 'reason': intent.report['failure']},

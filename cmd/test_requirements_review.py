@@ -44,3 +44,15 @@ class ReviewTests(unittest.TestCase):
     def test_first_review_needs_all_axes(self):
         with self.assertRaisesRegex(ValueError, 'COVERAGE_INCOMPLETE'):
             merge_review(self.state, {'issues': [], 'coverage': []})
+
+    def test_chapter_misplaced_issue_is_accepted_and_routes_to_solver_repair(self):
+        issue = {'rule': 'chapter-misplaced', 'section_ids': ['S_constraints'], 'requirement_ids': [],
+                 'claim': '"不做后台重试"属于本次范围取舍，写在约束第2行，应归责任边界',
+                 'impact': '下游会把范围取舍当成外部限制', 'severity': 'blocking', 'owner': 'solver',
+                 'acceptance': '移到责任边界后本章仍成立'}
+        merged = merge_review(self.state, review_payload([issue]))
+        row = next(i for i in merged.issues if i.rule == 'chapter-misplaced')
+        self.assertEqual(row.status, 'open')
+        self.assertEqual(row.acceptance, '移到责任边界后本章仍成立')
+        self.assertFalse(merged.review_stamp.passed)
+        self.assertEqual(next_repair_route(merged), 'REVIEW_NEEDS_DRAFT')

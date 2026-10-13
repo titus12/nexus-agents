@@ -82,6 +82,9 @@ class ContinuationState:
         if event.name in ('ANSWERS_SUBMITTED','REQUIREMENTS_APPROVED'):
             return StateDecision(update=ContextUpdate(requirements=replace(context.requirements,
                 reason='需求已交接；旧回答或批准不能修改当前实施输入，请提出明确需求变更。')))
+        if event.name == 'REQUIREMENTS_SECTION_CONFIRMED':
+            return StateDecision(update=ContextUpdate(requirements=replace(context.requirements,
+                reason='需求已交接；章节确认不再适用。')))
         if event.name == 'REQUIREMENTS_FEEDBACK':
             from ..domain.requirements.consensus import add_feedback
             from ..domain.requirements.model import SourceRecord, next_id

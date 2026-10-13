@@ -1,6 +1,8 @@
 """Add durable progress intents to committed requirements/Menxia transitions."""
 from dataclasses import replace
+from pathlib import Path
 from ..domain.decisions import EffectRequest
+from ..domain.requirements.review_brief import NOTIFICATION_CLIP, BRIEF_SUFFIX, brief_head
 from .reducer import LinearContextReducer
 from .repository import WorkflowSnapshot
 
@@ -54,6 +56,13 @@ def progress_text(before, event, after):
         lines.append('请查看已发送的澄清卡片。')
     if target == 'REQ_CONFIRM_WAIT':
         lines.append('需求评审已通过，请查看需求文档和确认卡片。')
+        lines.append('')
+        head = brief_head(req)
+        if len(head) > NOTIFICATION_CLIP:
+            head = head[:NOTIFICATION_CLIP] + BRIEF_SUFFIX
+        lines.append(head)
+        lines.append('阅读摘要：' + (str(Path(req.review_document_ref).with_name('review-brief.md'))
+                              if req.review_document_ref else '见需求文档同目录 review-brief.md'))
     if target == 'REQ_RETRY_WAIT' and req.recovery:
         failure = req.recovery.failure
         lines.append('原因：' + failure.code + '；' + failure.message[:500])

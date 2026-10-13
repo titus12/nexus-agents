@@ -57,6 +57,11 @@ def build_dispatch(context, state, target, kind='initial', retry=False):
     dispatch['answers'] = [asdict(a) for a in state.answers]
     dispatch['solver_responses'] = [asdict(a) for a in state.solver_responses]
     dispatch['work_queue'] = [asdict(w) for w in state.work_queue if w.status == 'pending']
+    if target in ('REQ_DRAFT','REQ_REVIEW') and state.chapter_locks:
+        from .chapter_lock import locked_payload
+        locked = locked_payload(state)
+        if locked:
+            dispatch['locked_sections'] = locked
     if target == 'REQ_REVIEW':
         reusable = [c for c in state.review_stamp.coverage if c.axis != 'consistency'
                     and c.basis_digest == coverage_basis(state,c.section_ids)] if state.review_stamp else []

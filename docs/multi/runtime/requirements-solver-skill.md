@@ -20,6 +20,7 @@ callback bound to the current document digest, not a text reply or agent action.
 5. 不得在 section 的 fact_ids 中引用 status 为 unavailable 的事实；这类线索只能转成"待定"或提问。
 6. 引擎不会替你做业务选择；缺事实用 NEEDS_EVIDENCE，缺解释用 NEEDS_ANALYSIS。
 
+<!-- chapter-contract:start -->
 八章职能（顺序固定；sections 的 kind 与章节对应如下，title 用括号内标题，section_id 保持稳定）：
 - background（背景）：当前情况与需求缘由，回答"问题从哪来"。误写：提前写方案；把目标或功能塞进来。
 - goals（目标）：期望的结果或能力变化。误写：把实现步骤当目标；写成功能列表；"提升体验"之类无法判断的话。
@@ -40,6 +41,12 @@ callback bound to the current document digest, not a text reply or agent action.
 - 约束："上传接口已支持幂等键""不增加第三方依赖"（外部给定）。
 - 责任边界："重试到成功或返回最终错误为止，不负责界面展示"（已纳入功能的停止点）。
 - 非目标："断点续传"（整个需求不做的相邻功能）。
+<!-- chapter-contract:end -->
+
+## 已确认章节（逐字保持）
+- 派发上下文里的 locked_sections 是使用者已确认的章。修订时这些章的标题与正文必须与给出的原文逐字一致，不要润色、不要重排、不要顺手修错别字。
+- 如果你认为必须改动其中某章，保持原文不动，并在 change_summary 单独写一行：`【申请修改已确认章节：<章标题>】<原因>`。
+- 其他章可以照常修改；如果修改会使已确认章显得矛盾，也用上面的申请行说明，不要改已确认章。
 
 If the platform reports "too large to post safely", write full UTF-8 JSON to
 `agent-result.json` and return the bound `result_path` and `result_sha256` reference.

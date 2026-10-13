@@ -2,7 +2,7 @@
 
 - 日期：2026-10-10
 - 状态：定稿，可直接实施。无待澄清项；残留决定均已在 §4 给出默认值，实施者不得自行更改默认。
-- **执行顺序以 `docs/superpowers/specs/2026-10-10-zhongshu-output-stability-roadmap.md` 为准。** 本文 T0（rubric）、T1–T4 与 A 的 T7、T8 已在工作区落地；本批只做其中的 §6.2/§6.3 skill 文本（并入章节契约），T5（探针并发）与 T6 延后。
+- **执行顺序以 `docs/superpowers/specs/2026-10-10-zhongshu-complete-plan.md`（总纲）为准。** 本文 T0（rubric）、T1–T4 与 A 的 T7、T8 已在工作区落地；T5（探针并发）、T6.2（fixtures）、§6.1–6.3 skill 文本、§7 规格修订由总纲 P3/P5/P7 点名采用，其余按总纲取舍。
 - **本文是主文档。** 补充篇 `docs/superpowers/specs/2026-10-10-zhongshu-requirements-workflow-v2-revision.md`（下称“补充篇 A”）只提供两个增量任务，须在本文 T4 之后、T5 之前做：A 的 **T7**（来源片段编号 + 引用对齐，解决模型逐字抄引用的机械失败，其中 `verify_facts` 与 `_accept_probe` 要调用它）和 **T8**（格式修复不占语义预算）。A 的其余内容与本文冲突处，以本文为准。本文 T0 另需追加 A 的评分表（`rubric.py`）与失败来源分类（`failure_origin`）。本文 T3 的 lint 另需追加 A 取舍表里说明的三条 advisory 规则。
 - 基线：`docs/superpowers/specs/2026-10-07-zhongshu-requirements-workflow-requirements.md`（下称"原规格"）与 `docs/superpowers/plans/2026-10-07-zhongshu-requirements-workflow-implementation-plan.md`（下称"原计划"）。本文是对二者的增量修订，冲突处以本文为准。
 - 代码根：`cmd/orchestrator/`（下称 `orch/`）。所有命令加 `rtk` 前缀（用户全局规则）；测试入口见 §9。

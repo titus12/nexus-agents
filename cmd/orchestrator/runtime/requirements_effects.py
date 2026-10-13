@@ -13,6 +13,7 @@ from ..domain.requirements.model import RequirementsState, canonical, text_diges
 from ..domain.requirements.document import render_markdown, validate_draft
 from ..domain.requirements.review import review_input_digest
 from ..domain.requirements.provenance import render_provenance
+from ..domain.requirements.review_brief import render_review_brief
 from ..domain.errors import DomainError
 
 logger = logging.getLogger('review_orchestrator_fsm')
@@ -40,13 +41,14 @@ def materialize(root, state, approved=False):
         raise ValueError('VALID_REVIEW_REQUIRED')
     if state.consensus.pending_source_ids:
         raise ValueError('UNINTERPRETED_HUMAN_INPUT')
-    if validate_draft(draft, state.consensus):
+    if validate_draft(draft, state.consensus, locks=state.chapter_locks):
         raise ValueError('MECHANICAL_DOCUMENT_INVALID')
     if approved and (not state.approval or state.approval.review_input_digest != stamp.input_digest):
         raise ValueError('VERIFIED_APPROVAL_REQUIRED')
     suffix = state.approval.approval_id if approved else stamp.input_digest
     directory = Path(root) / 'requirements' / ('approved' if approved else 'drafts') / f'v{draft.version:03d}-{draft.document_digest}-{suffix}'
     files = {'requirements.md':render_markdown(draft).encode('utf-8'),
+             'review-brief.md':render_review_brief(state).encode('utf-8'),
              'consensus.json':canonical(state.consensus).encode('utf-8'),
              'traceability.json':canonical({'sections':[{'section_id':s.section_id,'requirement_ids':s.requirement_ids,
                 'decision_ids':s.decision_ids,'fact_ids':s.fact_ids} for s in draft.sections],
@@ -136,7 +138,7 @@ class RequirementsEffects:
             if changes:
                 return EffectOutcome('SUCCEEDED','FACTS_CHANGED',{'changes':changes})
         if kind == 'requirements_step':
-            issues = validate_draft(state.draft, state.consensus)
+            issues = validate_draft(state.draft, state.consensus, locks=state.chapter_locks)
             return EffectOutcome('SUCCEEDED', 'REPAIR_CONTENT' if issues else 'VALID', {})
         if kind == 'requirements_retry':
             dwell = self.external_retry_dwell(state)

@@ -135,9 +135,20 @@ class RequirementsWorkflowState:
                     payload.get('actor_id','local-operator'),event.event_id,event.occurred_at)
                 return StateDecision(update=ContextUpdate(requirements=replace(state,sources=state.sources+(source,),
                     reason='已批准；补充登记为后续需求变更：'+payload['text'])))
-            updated = add_feedback(state, payload['text'], event.event_id, payload.get('actor_id','local-operator'), event.occurred_at)
+            from .chapter_lock import release_locks
+            from .document import KIND_TITLES
+            text = payload['text']
+            requested = tuple(payload.get('section_kinds') or ())
+            valid = tuple(kind for kind in requested if kind in KIND_TITLES)
+            ignored = tuple(kind for kind in requested if kind not in KIND_TITLES)
+            if valid:
+                text = '【针对章节：' + '、'.join(KIND_TITLES[kind] for kind in valid) + '】' + text
+            updated = add_feedback(state, text, event.event_id, payload.get('actor_id','local-operator'), event.occurred_at)
             if updated == state:
                 return StateDecision()
+            updated = release_locks(updated, valid if requested else None)
+            if ignored:
+                updated = replace(updated, reason='未识别的章节，已忽略：' + '、'.join(ignored))
             if self.name in ('REQ_BLOCKED','REQ_ENGINE_ERROR','REQ_RETRY_WAIT'):
                 return StateDecision(update=ContextUpdate(requirements=updated))
             updated = replace(updated, budget=new_work_epoch(updated.budget, digest((payload['text'], 'feedback'))))
@@ -168,7 +179,7 @@ class RequirementsWorkflowState:
         except BudgetExceeded as error:
             return self.fail(context, state, str(error), str(error))
         except (ValueError, KeyError, TypeError) as error:
-            if action in ('ANSWERS_SUBMITTED','REQUIREMENTS_APPROVED','RECOVERY_INPUT'):
+            if action in ('ANSWERS_SUBMITTED','REQUIREMENTS_APPROVED','REQUIREMENTS_SECTION_CONFIRMED','RECOVERY_INPUT'):
                 return StateDecision(update=ContextUpdate(requirements=replace(state, reason=str(error))))
             return self.fail(context, state, 'REQUIREMENTS_RESULT_INVALID', str(error), shape=self.name in ROLES,
                              artifact=str(payload.get('result_artifact_id') or payload.get('raw_reply_path') or ''))
@@ -180,6 +191,8 @@ class RequirementsWorkflowState:
             facts = tuple(replace(f,status='unavailable',source_fingerprint=changes[f.fact_id])
                           if f.fact_id in changes else f for f in state.consensus.facts)
             state = revise_consensus(state,facts=facts)
+            from .chapter_lock import release_locks
+            state = release_locks(state, fact_ids=tuple(changes))
             findings = tuple(ReviewIssue('source-changed-'+identity,'SOURCE_VERSION_CHANGED',
                 tuple(s.section_id for s in state.draft.sections if identity in s.fact_ids),(),
                 '被正文引用的事实来源已变化','原来的审查依据不再有效','blocking','analyst','核对当前来源并提供对应引文') for identity in changes)
@@ -247,7 +260,7 @@ class RequirementsWorkflowState:
                 state = replace(state,work_queue=state.work_queue+(work,))
                 return self.goto(context, state, action, kind='evidence' if action == 'NEEDS_EVIDENCE' else 'initial')
         if self.name == 'REQ_VALIDATE' and action in ('VALID','REPAIR_CONTENT'):
-            mechanical = validate_draft(state.draft, state.consensus, state.decisions)
+            mechanical = validate_draft(state.draft, state.consensus, state.decisions, state.chapter_locks)
             lint = lint_draft(state.draft, state.consensus, state.sources)
             issues = tuple(i for i in state.issues
                            if not i.issue_id.startswith(('mechanical-','lint-'))) + mechanical + lint
@@ -314,6 +327,21 @@ class RequirementsWorkflowState:
             state = replace(state, review_document_ref=payload['document_ref'], review_gate_id=payload['gate_id'],
                             review_cloud_ref=payload.get('cloud_revision_ref',''))
             return self.goto(context, state, action)
+        if action == 'REQUIREMENTS_SECTION_CONFIRMED':
+            if self.name != 'REQ_CONFIRM_WAIT':
+                return StateDecision(update=ContextUpdate(requirements=replace(state, reason='当前不能确认章节：' + self.name)))
+            actor = payload.get('actor_id','')
+            from .authorization import authorized_actor
+            from .chapter_lock import confirm_sections
+            if not authorized_actor(actor,context.request.decision_actor_ids,payload):
+                raise ValueError('UNAUTHORIZED_SECTION_CONFIRMATION')
+            if payload.get('document_digest') != state.draft.document_digest or payload.get('gate_id') != state.review_gate_id:
+                raise ValueError('STALE_SECTION_CONFIRMATION')
+            if not state.review_stamp or not state.review_stamp.passed or state.review_stamp.input_digest != review_input_digest(state.draft, state.consensus):
+                raise ValueError('VALID_REVIEW_REQUIRED')
+            updated = confirm_sections(state, tuple(payload.get('section_kinds', ())), actor_id=actor,
+                                       event_id=event.event_id, occurred_at=event.occurred_at or '')
+            return StateDecision(update=ContextUpdate(requirements=updated))
         if self.name == 'REQ_CONFIRM_WAIT' and action == 'REQUIREMENTS_APPROVED':
             actor = payload.get('actor_id','')
             from .authorization import authorized_actor

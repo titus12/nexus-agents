@@ -661,6 +661,18 @@ def _format_elapsed(seconds: float) -> str:
     return f"{remainder} 秒"
 
 
+def _resolve_section_kinds(parser, tokens):
+    from .domain.requirements.document import KIND_TITLES
+    kinds = []
+    for token in tokens:
+        kind = token if token in KIND_TITLES else next((k for k, t in KIND_TITLES.items() if t == token), None)
+        if not kind:
+            parser.error(f'unknown section kind or title: {token}')
+        if kind not in kinds:
+            kinds.append(kind)
+    return kinds
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_logging(retention_hours=72)
     parser = argparse.ArgumentParser(description="Review Orchestrator immutable linear FSM")
@@ -682,6 +694,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--answer-file','--requirements-answer',help='Structured answers JSON for a persisted requirements task.')
     parser.add_argument('--feedback-file','--requirements-feedback',help='UTF-8 requirements feedback for a persisted task.')
     parser.add_argument('--approve-requirements',metavar='DOCUMENT_SHA256')
+    parser.add_argument('--confirm-sections', nargs='+', metavar=('DOCUMENT_SHA256','KIND'),
+                        help='Confirm chapters of the current draft by digest; KIND accepts English kind or Chinese title.')
+    parser.add_argument('--feedback-sections', nargs='+', metavar='KIND',
+                        help='Modifier for --feedback-file: unlock the given chapters for this feedback.')
+    parser.add_argument('--requirements-status', metavar='TASK_ID',
+                        help='Read-only chapter lock/status view of a persisted requirements task.')
     parser.add_argument('--recovery-note-file','--recovery-note',help='Verified prerequisite_changed or bind_card_receipt JSON.')
     parser.add_argument("--task-type", default="review")
     parser.add_argument("--plan-schema", choices=("canonical-v1",), default=None,
@@ -699,9 +717,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     actions = (args.new is not None, bool(args.resume), bool(args.cancel),
-               bool(args.inspect_task), bool(args.migrate_task), args.check_prerequisites)
+               bool(args.inspect_task), bool(args.migrate_task), args.check_prerequisites,
+               bool(args.requirements_status))
     if sum(actions) != 1:
-        parser.error('choose exactly one of --new, --resume, --cancel, --inspect-task, --migrate-task')
+        parser.error('choose exactly one of --new, --resume, --cancel, --inspect-task, --migrate-task, --requirements-status')
     resuming = args.resume or args.cancel or args.inspect_task
     if resuming and any((args.workflow,args.communication,args.decision_actor_id,args.project_root)):
         parser.error('workflow, communication, decision owners and project root are fixed when creating a task')
@@ -715,9 +734,11 @@ def main(argv: list[str] | None = None) -> int:
             or not actor[3:].isalnum()):
             parser.error('--decision-actor-id must be a real Feishu open_id (ou_ followed by letters/digits); '
                          'replace the example placeholder before starting a task')
-    inputs = [args.answer_file,args.feedback_file,args.approve_requirements,args.recovery_note_file,args.repair_decision_owner]
+    inputs = [args.answer_file,args.feedback_file,args.approve_requirements,args.confirm_sections,args.recovery_note_file,args.repair_decision_owner]
     if any(inputs) and (not args.resume or sum(bool(x) for x in inputs)!=1):
         parser.error('use exactly one requirements input with --resume TASK_ID')
+    if args.feedback_sections and not args.feedback_file:
+        parser.error('--feedback-sections is a modifier for --feedback-file')
     if args.plan_schema is not None and (args.resume or args.cancel or args.inspect_task):
         parser.error("--plan-schema is only valid when creating a new task")
     if args.no_external_notifications:
@@ -741,6 +762,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.inspect_task:
             from .runtime.requirements_cutover import inspect_task
             print(json.dumps(inspect_task(args.runs_root, args.inspect_task), ensure_ascii=False, indent=2))
+            return 0
+        if args.requirements_status:
+            from .runtime.requirements_cutover import requirements_status
+            print(json.dumps(requirements_status(args.runs_root, args.requirements_status), ensure_ascii=False, indent=2))
             return 0
         if args.resume or args.cancel:
             from .runtime.requirements_cutover import inspect_task
@@ -803,11 +828,23 @@ def main(argv: list[str] | None = None) -> int:
                 text = Path(args.feedback_file).read_text(encoding='utf-8-sig').strip()
                 if not text:
                     parser.error('feedback must not be empty')
-                app.requirements_runtime.submit('REQUIREMENTS_FEEDBACK',{'text':text,'actor_id':'local-operator'},'local-feedback:'+uuid.uuid4().hex)
+                payload = {'text': text, 'actor_id': 'local-operator'}
+                if args.feedback_sections:
+                    payload['section_kinds'] = _resolve_section_kinds(parser, args.feedback_sections)
+                app.requirements_runtime.submit('REQUIREMENTS_FEEDBACK', payload, 'local-feedback:'+uuid.uuid4().hex)
             elif args.approve_requirements:
                 current = app.ctx.requirements
                 app.requirements_runtime.submit('REQUIREMENTS_APPROVED',{'document_digest':args.approve_requirements,
                     'gate_id':current.review_gate_id,'actor_id':'local-operator'},'local-approval:'+uuid.uuid4().hex)
+            elif args.confirm_sections:
+                if len(args.confirm_sections) < 2:
+                    parser.error('--confirm-sections needs DOCUMENT_SHA256 followed by at least one chapter kind')
+                current = app.ctx.requirements
+                app.requirements_runtime.submit('REQUIREMENTS_SECTION_CONFIRMED',
+                    {'document_digest': args.confirm_sections[0], 'gate_id': current.review_gate_id,
+                     'actor_id': 'local-operator',
+                     'section_kinds': _resolve_section_kinds(parser, args.confirm_sections[1:])},
+                    'local-section-confirm:'+uuid.uuid4().hex)
             elif args.recovery_note_file:
                 from .runtime.requirements_recovery import verified_recovery
                 evidence = json.loads(Path(args.recovery_note_file).read_text(encoding='utf-8-sig'))

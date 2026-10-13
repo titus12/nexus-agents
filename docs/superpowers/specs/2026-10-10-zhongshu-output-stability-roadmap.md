@@ -2,7 +2,9 @@
 
 - 日期：2026-10-10
 - 状态：可开工。无待澄清项；用户已确认的决定见 §0，实施者不得更改。
-- **本文是执行顺序的唯一依据。** 它取代两份旧文档里的任务排序，但不取代其细节：
+- **【已并入总纲】** 执行顺序以 `docs/superpowers/specs/2026-10-10-zhongshu-complete-plan.md` 为准。本文仅 §S0–§S5 作为该总纲的附件 R 继续有效；本文 §0 第 3、4 条与 §6 延后表（不做逐章确认/探针/上锁）已作废。
+- **【§1 现状已过期】** 本文 §1 写的"skill 仍是旧版、探针未做"已不成立：探针（B T5/T6）和三份新 skill 文本已提交（`ea1e6b6`）。现状以总纲 §2 为准；§S1 第 1 条"全文替换 skill"不要做，改为总纲 P3 的"加标记块"。
+- ~~本文是执行顺序的唯一依据。~~ 它取代两份旧文档里的任务排序，但不取代其细节：
   - 主文档 B：`docs/superpowers/specs/2026-10-10-zhongshu-scout-draft-first-modification.md`
   - 补充篇 A：`docs/superpowers/specs/2026-10-10-zhongshu-requirements-workflow-v2-revision.md`
   - 引用 "B §x / B Tn / A Tn" 即指上述文档对应处。冲突处以本文为准。

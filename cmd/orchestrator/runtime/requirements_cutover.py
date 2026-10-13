@@ -40,6 +40,19 @@ def inspect_task(runs_root, task_id):
             'context':context, 'historical_read_only':context.get('request',{}).get('workflow') != 'requirements-v1'}
 
 
+def requirements_status(runs_root, task_id):
+    """Read-only chapter-lock view; raw persisted JSON, never from_dict."""
+    original = inspect_task(runs_root, task_id)
+    requirements = original['context'].get('requirements') or {}
+    draft = requirements.get('draft') or {}
+    return {'task_id': original['task_id'],
+            'state': (original['context'].get('progression') or {}).get('state',''),
+            'document_digest': draft.get('document_digest',''),
+            'review_gate_id': requirements.get('review_gate_id',''),
+            'chapter_locks': requirements.get('chapter_locks') or [],
+            'historical_read_only': original['historical_read_only']}
+
+
 def migrate_historical_task(runs_root, task_id, *, communication=None, actor_ids=None):
     root = task_root(runs_root, task_id)
     for name in ('task.lock','requirements-run.lock','run.lock'):

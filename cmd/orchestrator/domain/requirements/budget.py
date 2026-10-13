@@ -28,7 +28,7 @@ def charge_dispatch(ledger, logical_dispatch_id, kind='initial', attempt=1):
         raise BudgetExceeded('TOTAL_CALL_BUDGET_EXHAUSTED')
     if ledger.calls >= 12:
         raise BudgetExceeded('MODEL_CALL_BUDGET_EXHAUSTED')
-    if kind == 'semantic' and ledger.semantic_repairs >= 3:
+    if kind == 'semantic' and ledger.semantic_repairs >= 5:
         raise BudgetExceeded('SEMANTIC_REPAIR_BUDGET_EXHAUSTED')
     if kind == 'evidence' and ledger.evidence_repairs >= 2:
         raise BudgetExceeded('EVIDENCE_REPAIR_BUDGET_EXHAUSTED')

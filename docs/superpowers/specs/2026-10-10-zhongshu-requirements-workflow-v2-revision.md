@@ -3,7 +3,7 @@
 > **重要：本文已降级为补充篇，主文档是 `docs/superpowers/specs/2026-10-10-zhongshu-scout-draft-first-modification.md`（下称“主文档 B”）。**
 > 本文与 B 在拓扑和文档模型上冲突，**冲突处一律以 B 为准**。实施者只做下表标“实施”的部分；标“不实施”的部分保留仅供背景参考，**不要按其中的任务编号（P0–P4、T0.x–T3.9）开工**。
 
-> **执行顺序以 `docs/superpowers/specs/2026-10-10-zhongshu-output-stability-roadmap.md` 为准。** 本文 T7、T8 已在工作区落地，无需再做。
+> **执行顺序以 `docs/superpowers/specs/2026-10-10-zhongshu-complete-plan.md`（总纲）为准。** 本文 T7、T8 已在工作区落地，无需再做。
 
 ### 取舍表
 

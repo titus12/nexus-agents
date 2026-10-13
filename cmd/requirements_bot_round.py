@@ -52,22 +52,24 @@ def cleanup_issues(cookie: str = '') -> int:
     cancelled through the CLI instead.  ``cookie`` is kept for call-site
     compatibility and ignored.
     """
-    result = subprocess.run(['multica', 'issue', 'list', '--limit', '50',
-                             '--output', 'json'], capture_output=True, timeout=180)
-    output = (result.stdout or b'').decode('utf-8', 'replace').lstrip('﻿')
-    if result.returncode != 0:
-        log('cleanup list failed rc=%d %s' % (result.returncode, (result.stderr or b'').decode('utf-8', 'replace')[-200:]))
-        return 1
-    try:
-        data = json.loads(output)
-    except ValueError:
-        log('cleanup list unparsable: %s' % output[-200:])
-        return 1
-    rows = data.get('issues') or data.get('items') or (data if isinstance(data, list) else [])
-    active = ('todo', 'in_progress', 'in_review', 'blocked', 'backlog', 'reopened')
+    rows = []
+    for status in ('todo', 'in_progress', 'in_review', 'blocked', 'backlog', 'reopened'):
+        result = subprocess.run(['multica', 'issue', 'list', '--status', status, '--limit', '50',
+                                 '--output', 'json'], capture_output=True, timeout=180)
+        output = (result.stdout or b'').decode('utf-8', 'replace').lstrip('﻿')
+        if result.returncode != 0:
+            log('cleanup list failed rc=%d %s' % (result.returncode, (result.stderr or b'').decode('utf-8', 'replace')[-200:]))
+            return 1
+        try:
+            data = json.loads(output)
+        except ValueError:
+            log('cleanup list unparsable: %s' % output[-200:])
+            return 1
+        rows.extend(data.get('issues') or data.get('items') or (data if isinstance(data, list) else []))
+    terminal = ('cancelled', 'canceled', 'completed', 'done', 'closed', 'archived', 'skipped')
     stale = [row for row in rows if isinstance(row, dict)
              and str(row.get('title') or '').startswith('Review: RTC-SDK')
-             and row.get('status') in active]
+             and str(row.get('status') or '').strip().lower() not in terminal]
     failures = 0
     for row in stale:
         cancel = subprocess.run(['multica', 'issue', 'status', str(row['id']), 'cancelled'],
