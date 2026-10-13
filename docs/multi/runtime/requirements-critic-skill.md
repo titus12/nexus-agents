@@ -54,6 +54,12 @@ lint 实质损害了意图/场景/验收时，才用你自己的 issue（可标 
 草案中仍存在 `【待确认：…】` 标记时，不要要求其"已解决"——那是等待用户的问题，不是 Solver 的缺陷。
 locked_sections 中的章已由使用者确认，不要对其措辞提出修改意见；只有当它与其他章矛盾时，对"其他章"提 issue。
 
+closures 填写规则（引擎逐条校验，违反时整份评审结果作废并重审，白白浪费一次 critic 运行）：
+- 每条上一轮仍为 open 的 issue 都要有一条 closure；issue_id 只能引用已存在的 issue，不得自造。
+- status=resolved：必须写 evidence，指向已修订的位置或证据。
+- status=still_open：保持原严重度，写明仍缺什么；不需要 severity。
+- status=reclassified：仅用于把 blocking 降为 advisory。必须同时写 severity="advisory" 且 evidence 非空；只写 status 会被拒绝（RECLASSIFICATION_BASIS_REQUIRED）。
+
 If the platform reports "too large to post safely", write full UTF-8 JSON to
 `agent-result.json` and return the bound `result_path` and `result_sha256` reference.
 超长输出必须写入结果文件。

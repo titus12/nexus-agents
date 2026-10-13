@@ -9,7 +9,7 @@ from .model import EvidenceAnswer, IssueResponse, ReviewIssue, decode
 from .consensus import apply_analysis, add_feedback
 from .consensus import revise_consensus
 from .questions import merge_questions, eligible_questions, open_round, accept_answers, cover_blocking_assumptions
-from .questions import propose_answer_changes
+from .questions import propose_answer_changes, clarify_round_cap_reached
 from .document import new_skeleton, commit_draft, validate_draft
 from .lint import lint_draft
 from .review import merge_review, next_repair_route, review_input_digest
@@ -239,7 +239,7 @@ class RequirementsWorkflowState:
                 if any(r.issue_id not in {i.issue_id for i in state.issues} or not r.response.strip() for r in responses):
                     raise ValueError('SOLVER_RESPONSE_BINDING_INVALID')
                 state = replace(state,solver_responses=tuple(r for r in state.solver_responses if r.issue_id not in {a.issue_id for a in responses})+responses)
-                if eligible_questions(state):
+                if eligible_questions(state) and not clarify_round_cap_reached(state):
                     state = open_round(state,'REQ_DRAFT',context.request.decision_actor_ids)
                     return self.goto(context,state,'NEEDS_CLARIFICATION')
                 return self.goto(context, state, 'NEEDS_ANALYSIS' if state.consensus.pending_source_ids else 'DRAFT_READY')

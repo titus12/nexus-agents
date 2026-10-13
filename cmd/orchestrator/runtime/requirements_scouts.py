@@ -318,7 +318,8 @@ class ScoutFanoutRunner:
         self._close_probe_issue(result)
         record('SCOUT_PROBE_DONE', task_id=getattr(request, 'task_id', ''), facet=facet,
                status=result.report['status'], attempts=result.report['attempts'],
-               facts=result.report['facts_accepted'], failure=result.report['failure'][:120])
+                facts=result.report['facts_accepted'], failure=result.report['failure'][:120],
+               seconds=result.report['seconds'])
         return result
 
     def _write_report(self, request, request_id: str, probes, merged: dict) -> None:
@@ -433,9 +434,17 @@ class ScoutFanoutRunner:
         facets = self._config.facets
         record('SCOUT_FANOUT_START', task_id=request.task_id, facets=','.join(facets))
         workers = max(1, min(len(facets), self._config.max_parallel))
+        fanout_started = time.monotonic()
+
+        def run_probe(pair):
+            index, facet = pair[0], pair[1]
+            # waited_s is the time this probe sat behind the worker cap (ANALYST_MAX_WORKERS).
+            record('SCOUT_PROBE_START', task_id=getattr(request, 'task_id', ''), facet=facet, index=index,
+                   workers=workers, waited_s=round(time.monotonic() - fanout_started, 1))
+            return self._run_probe(request, facet, index)
+
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='scout') as pool:
-            probes = list(pool.map(lambda pair: self._run_probe(request, pair[1], pair[0]),
-                                   list(enumerate(facets, 1))))
+            probes = list(pool.map(run_probe, list(enumerate(facets, 1))))
         outcome = self._merge(request, probes)
         if not isinstance(outcome, EffectOutcome):  # defensive; _merge returns outcomes
             return self.inner.run_once(request)

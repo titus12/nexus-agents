@@ -95,6 +95,32 @@ class RequirementsNotificationTests(unittest.TestCase):
             with self.assertRaisesRegex(RequirementsPrerequisiteError,'decision_actor_ids'):
                 port.preflight()
 
+    def test_gateway_not_ready_midrun_is_transient_not_blocking(self):
+        from types import SimpleNamespace
+        from pathlib import Path
+        from orchestrator.domain.decisions import EffectRequest
+        from orchestrator.requirements_gateway import GatewayStore
+        from orchestrator.requirements_port import RequirementsTransientError
+        from orchestrator.runtime.requirements_effects import RequirementsEffects
+        from requirements_test_support import make_state
+        with tempfile.TemporaryDirectory() as directory:
+            port = FeishuRequirementsPort(Path(directory), GatewayStore(Path(directory)/'gateway.sqlite'),
+                                          actor_ids=('ou_operator',), chat_id='oc_chat',
+                                          http=Mock(base_url='https://example.invalid'), publisher=Mock())
+            with patch.dict('os.environ', {'FEISHU_GATE_APP_ID': 'cli_test', 'FEISHU_GATE_APP_SECRET': 's'}):
+                port.preflight(include_gateway=False)
+                with self.assertRaisesRegex(RequirementsPrerequisiteError, 'ready card gateway'):
+                    port.preflight()
+                with self.assertRaises(RequirementsTransientError) as caught:
+                    port.publish_clarification('task-x', SimpleNamespace(rounds=(), questions=()), 'key-1')
+            self.assertIsInstance(caught.exception, ConnectionError)
+            request = EffectRequest('key-1', 'requirements_clarification', 'task-x', 'key-1',
+                                    payload={'state': make_state().to_dict()})
+            outcome = RequirementsEffects(directory, port).run_once(request)
+            self.assertEqual(outcome.event_name, 'FAIL')
+            self.assertEqual(outcome.event_payload['error_code'], 'COMMUNICATION_TRANSIENT')
+            self.assertTrue(outcome.event_payload['retryable'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -17,4 +17,5 @@ CONTRACT = requirement_contract('REQ_REVIEW', 'review-critic',
      'Judge each chapter against the chapter contract in the skill. Report misplaced, duplicated or function-violating '
      'content with rule chapter-misplaced, chapter-duplicate or chapter-function-violation; mark blocking only when it '
      'changes how downstream readers understand scope, behavior or acceptance.',
-     'Chapter problems already reported by a lint-* advisory issue must not be reported again.'))
+     'Chapter problems already reported by a lint-* advisory issue must not be reported again.',
+     'Closures: resolved needs evidence; reclassified (blocking to advisory) needs severity="advisory" and evidence; issue_id must name an existing open issue. Any closure violation voids the whole review result.'))

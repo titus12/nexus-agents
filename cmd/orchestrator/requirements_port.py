@@ -94,7 +94,7 @@ class FeishuRequirementsPort(LocalRequirementsPort):
         self.http = http or FeishuHttpAdapter()
         self.publisher = publisher or FeishuReviewDocumentPublisher(root,strict_readback=True,chat_id=self.chat_id)
 
-    def preflight(self):
+    def preflight(self, *, include_gateway=True):
         missing = []
         if not self.actor_ids and self.owner_policy == 'explicit':
             missing.append('decision_actor_ids (--decision-actor-id)')
@@ -104,10 +104,21 @@ class FeishuRequirementsPort(LocalRequirementsPort):
             missing.append('FEISHU_GATE_APP_ID')
         if not os.environ.get('FEISHU_GATE_APP_SECRET',''):
             missing.append('FEISHU_GATE_APP_SECRET')
-        if self.app_id and not self.store.ready(self.app_id):
+        if include_gateway and self.app_id and not self.store.ready(self.app_id):
             missing.append('ready card gateway')
         if missing:
             raise RequirementsPrerequisiteError('DECISION_OWNER_CHAT_OR_READY_CARD_GATEWAY_MISSING: '+', '.join(missing))
+
+    def ensure_gateway_ready(self):
+        """Mid-run gateway readiness degrades to a transient failure, never a block.
+
+        A stale gateway heartbeat (2026-10-13: SSL errors, ready=false for 6.5
+        minutes) used to fail the whole round as REQ_BLOCKED via PREREQUISITE_MISSING.
+        Raising a ConnectionError subclass here lets the effect layer retry the
+        publication with backoff instead.
+        """
+        if self.app_id and not self.store.ready(self.app_id):
+            raise RequirementsTransientError('ready card gateway is not ready (heartbeat stale); publication will retry')
 
     def publish_notice(self, task_id, state, key, target):
         from .adapters import feishu_notifications_enabled
@@ -226,7 +237,8 @@ class FeishuRequirementsPort(LocalRequirementsPort):
         return message
 
     def publish_clarification(self, task_id, state, key):
-        self.preflight()
+        self.preflight(include_gateway=False)
+        self.ensure_gateway_ready()
         round_ = state.rounds[-1]
         by_id = {q.question_id:q for q in state.questions}
         chunks = [round_.question_ids[n:n+5] for n in range(0,len(round_.question_ids),5)]

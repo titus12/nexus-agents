@@ -16,6 +16,15 @@ from ..requirements_observability import record, answer_progress
 
 logger = logging.getLogger("review_orchestrator_fsm")
 
+# States whose DOMAIN_TRANSITION line carries the failure reason.  The reason is
+# the one the failing state wrote (``fail()``), whichever action led there:
+# RETRYABLE_FAILURE, PREREQUISITE_MISSING (e.g. the card gateway preflight) or
+# ENGINE_FAILURE all land in these states.
+FAILURE_LOG_STATES = frozenset({
+    "REQ_BLOCKED", "REQ_ENGINE_ERROR", "REQ_RETRY_WAIT",
+    "BLOCKED", "RETRY_WAIT", "HUMAN_GATE", "PERSISTENCE_DEGRADED", "FAILED",
+})
+
 
 def _failure_reason(event: DomainEvent) -> str:
     payload = event.payload if isinstance(event.payload, dict) else None
@@ -158,9 +167,12 @@ class WorkflowEngine:
                        new_answer_count=(len(after_context.requirements.answers) - len(before.context.requirements.answers)
                                          if after_context.requirements and before.context.requirements else 0),
                        **answer_progress(after_context.requirements, event.payload.get('round_id', '')))
+            failure_text = ''
+            if after_context.progression.state in FAILURE_LOG_STATES:
+                failure_text = str(getattr(after_context.requirements, 'reason', '') or '')[:300]
             logger.info(
                 "DOMAIN_TRANSITION task_id=%s transition_id=%s event=%s "
-                "before=%s:%s after=%s:%s action=%s reason=%s effects=%s",
+                "before=%s:%s after=%s:%s action=%s reason=%s effects=%s failure=%r",
                 event.task_id,
                 commit_result.transition_id,
                 event.name,
@@ -171,6 +183,7 @@ class WorkflowEngine:
                 decision.transition.action if decision.transition else "",
                 decision.transition.reason_code if decision.transition else "",
                 len(decision.effects),
+                failure_text,
             )
         except BaseException as error:
             try:

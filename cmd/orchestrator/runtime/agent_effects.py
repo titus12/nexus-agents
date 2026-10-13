@@ -7,7 +7,7 @@ workflow snapshot.
 from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -39,6 +39,21 @@ def _menxia_infra_failure(result: WorkerResult) -> bool:
 REMOTE_FAILURE_SALVAGE_POLLS = 3
 REMOTE_FAILURE_SALVAGE_INTERVAL = 2.0
 COMPLETED_RESULT_GRACE_SECONDS = 60.0
+
+@dataclass
+class _RunTiming:
+    """Per-run timestamps for the AGENT_RUN_SUMMARY line (observability only)."""
+    started: float
+    state: str = ''
+    role: str = ''
+    request_id: str = ''
+    admitted: float | None = None
+    dispatched: float | None = None
+    running: float | None = None
+    terminal: float | None = None
+    polls: int = 0
+    status_seconds: float = 0.0
+    last_status: str = ''
 ROLE_DISPATCH_TIMEOUTS: dict[str, float] = {'review-analyst': 1800.0, 'review-critic': 1200.0, 'review-solver': 1800.0}
 
 def resolve_dispatch_role_timeouts(*, include_defaults: bool=True) -> dict[str, float]:
@@ -164,8 +179,19 @@ class AgentWorkerRunner:
         return (effective, self._max_polls)
 
     def run_once(self, request: EffectRequest) -> EffectOutcome:
+        timing = _RunTiming(started=self._clock(), state=str(request.payload.get('target_state') or ''))
+        outcome: EffectOutcome | None = None
+        try:
+            outcome = self._run_once(request, timing)
+            return outcome
+        finally:
+            self._log_run_summary(request, timing, outcome)
+
+    def _run_once(self, request: EffectRequest, timing: _RunTiming) -> EffectOutcome:
         payload = request.payload
         dispatch = self._dispatch_request(request, payload)
+        timing.role = dispatch.role
+        timing.request_id = dispatch.request_id
         effective_timeout, effective_max_polls = self._effective_dispatch_limits(dispatch.role, payload)
         deadline = self._clock() + effective_timeout
         deadline_at = request.deadline_at or datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + effective_timeout, timezone.utc).isoformat()
@@ -181,6 +207,7 @@ class AgentWorkerRunner:
             if receipt is None:
                 raise TransportError('agent concurrency admission deadline reached')
             lease_id = receipt.lease_id
+            timing.admitted = self._clock()
         try:
             recover = getattr(self._transport, 'recover_completed', None)
             if callable(recover):
@@ -195,6 +222,7 @@ class AgentWorkerRunner:
                 receipt = self._transport.dispatch(dispatch)
             if not isinstance(receipt, DispatchReceipt) or not receipt.confirmed:
                 raise TransportError('agent dispatch was not confirmed')
+            timing.dispatched = self._clock()
             correlated_request_id = receipt.request_id or dispatch.request_id
             poll = PollRequest(request.task_id, correlated_request_id, receipt.operation_id)
             last_status: RemoteRunStatus | None = None
@@ -203,7 +231,15 @@ class AgentWorkerRunner:
                     break
                 if lease_id is not None and (not self._admission.refresh(lease_id)):
                     raise LeaseLostError('agent admission lease was lost')
+                status_started = self._clock()
                 status = self._transport.status(poll)
+                timing.status_seconds += self._clock() - status_started
+                timing.polls += 1
+                timing.last_status = str(getattr(status, 'status', '') or '')
+                if timing.running is None and timing.last_status == 'RUNNING':
+                    timing.running = self._clock()
+                if timing.terminal is None and timing.last_status in ('COMPLETED', 'FAILED'):
+                    timing.terminal = self._clock()
                 if not isinstance(status, RemoteRunStatus):
                     raise TransportError('agent transport returned an invalid run status')
                 last_status = status
@@ -240,6 +276,25 @@ class AgentWorkerRunner:
         finally:
             if lease_id is not None:
                 self._admission.release(lease_id)
+
+    def _log_run_summary(self, request: EffectRequest, timing: _RunTiming, outcome: EffectOutcome | None) -> None:
+        """One line per agent run: admission wait, queue to running, run, result read."""
+        now = self._clock()
+
+        def span(begin: float | None, end: float | None) -> str:
+            return '' if begin is None or end is None else f'{end - begin:.1f}'
+
+        failure = getattr(outcome, 'failure', None)
+        logger.info(
+            'AGENT_RUN_SUMMARY task_id=%s request_id=%s role=%s state=%s admit_wait_s=%s '
+            'dispatch_to_running_s=%s run_s=%s result_s=%s total_s=%s polls=%s status_s=%.1f '
+            'last_status=%s outcome=%s failure=%s',
+            request.task_id, timing.request_id or '-', timing.role or '-', timing.state or '-',
+            span(timing.started, timing.admitted), span(timing.dispatched, timing.running),
+            span(timing.running, timing.terminal), span(timing.terminal, now),
+            f'{now - timing.started:.1f}', timing.polls, timing.status_seconds,
+            timing.last_status or '-', outcome.event_name if outcome is not None else 'EXCEPTION',
+            getattr(failure, 'error_code', '') or '-')
 
     def _cancel_remote_runs(self, poll: PollRequest) -> None:
         """Best-effort stop the stale remote runs before the FSM retries."""

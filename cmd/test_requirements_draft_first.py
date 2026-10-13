@@ -3,6 +3,7 @@ import json
 from dataclasses import asdict
 import tempfile
 import unittest
+from unittest.mock import patch
 from orchestrator.app import OrchestratorApp
 from orchestrator.transport.external import ExternalMessage
 from requirements_test_support import question
@@ -11,12 +12,13 @@ from test_requirements_workflow_e2e import Scripted, context, pump
 
 class DraftFirstScript(Scripted):
     def __init__(self, blocking_assumption=False, solver_questions=(), action='DRAFT_READY',
-                 analyst_questions=False):
+                 analyst_questions=False, every_draft_questions=False):
         super().__init__()
         self.blocking_assumption = blocking_assumption
         self.solver_questions = tuple(solver_questions)
         self.action = action
         self.analyst_questions = analyst_questions
+        self.every_draft_questions = every_draft_questions
         self.analyses = 0
         self.drafts = 0
 
@@ -33,8 +35,23 @@ class DraftFirstScript(Scripted):
         elif request.target_state == 'REQ_DRAFT':
             self.drafts += 1
             body['action'] = self.action if self.drafts == 1 else 'DRAFT_READY'
-            if self.drafts == 1 and self.solver_questions:
-                body['questions'] = [asdict(question(identity)) for identity in self.solver_questions]
+            if self.every_draft_questions:
+                identity = self.solver_questions[self.drafts - 1 if self.drafts <= len(self.solver_questions) else -1]
+                identities = (identity,)
+            else:
+                identities = self.solver_questions if self.drafts == 1 else ()
+            if identities:
+                rows = []
+                for item in identities:
+                    row = asdict(question(item))
+                    if self.every_draft_questions:
+                        # Distinct topic per wave: merge_questions dedupes by
+                        # content (topic_key+text+options), so a verbatim re-ask
+                        # would be dropped instead of opening the next round.
+                        row['topic_key'] = 'retry-wave-%d' % self.drafts
+                        row['question'] = row['question'] + '（第%d轮补充）' % self.drafts
+                    rows.append(row)
+                body['questions'] = rows
             consensus = request.context['consensus']
             for section in body['document']['sections']:
                 if section['kind'] in ('behavior', 'acceptance'):
@@ -106,6 +123,31 @@ class DraftFirstTests(unittest.TestCase):
             submit_answers(app, 'manual')
             pump(app, 'REQ_REVIEW')
             self.assertEqual(len(app.ctx.requirements.rounds), 1)
+
+    def test_clarify_round_cap_stops_new_rounds_after_limit(self):
+        script_questions = ('q-000001', 'q-000002')
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict('os.environ', {'REQUIREMENTS_CLARIFY_ROUND_CAP': '1'}):
+                app = OrchestratorApp(context(), directory,
+                                      multica=DraftFirstScript(solver_questions=script_questions,
+                                                               every_draft_questions=True),
+                                      poll_interval=0, timeout_seconds=2)
+                pump(app, 'REQ_CLARIFY_WAIT')
+                submit_answers(app, 'manual')
+                pump(app, 'REQ_REVIEW')
+            self.assertEqual(len(app.ctx.requirements.rounds), 1)
+            self.assertEqual(app.ctx.requirements.draft.version, 3)
+
+    def test_without_cap_a_fresh_draft_question_opens_another_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = OrchestratorApp(context(), directory,
+                                  multica=DraftFirstScript(solver_questions=('q-000001', 'q-000002'),
+                                                           every_draft_questions=True),
+                                  poll_interval=0, timeout_seconds=2)
+            pump(app, 'REQ_CLARIFY_WAIT')
+            submit_answers(app, 'manual')
+            pump(app, 'REQ_CLARIFY_WAIT')
+            self.assertEqual(len(app.ctx.requirements.rounds), 2)
 
 
 if __name__ == '__main__':

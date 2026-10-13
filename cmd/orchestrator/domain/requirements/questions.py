@@ -1,4 +1,5 @@
 """Question identities, dependency-aware rounds and atomic partial submissions."""
+import os
 from dataclasses import replace
 from .authorization import authorized_actor
 from types import SimpleNamespace
@@ -68,6 +69,25 @@ def eligible_questions(state):
     done_ids = {q.question_id for q in state.questions if (q.question_id, q.revision) in answered}
     return tuple(q for q in state.questions if (q.question_id, q.revision) not in answered
                  and set(q.depends_on_question_ids) <= done_ids)
+
+
+def clarify_round_cap_reached(state):
+    """Cap DRAFT-initiated clarify rounds (REQUIREMENTS_CLARIFY_ROUND_CAP, 0=unlimited).
+
+    Each answered round invites the solver to raise fresh questions, which can
+    ping-pong for an hour (8 rounds observed 2026-10-13).  Past the cap the
+    draft proceeds on the recorded decisions instead of opening round N+1.
+    """
+    raw = os.environ.get('REQUIREMENTS_CLARIFY_ROUND_CAP', '').strip()
+    if not raw:
+        return False
+    try:
+        cap = int(raw)
+    except ValueError:
+        return False
+    if cap <= 0:
+        return False
+    return sum(1 for r in state.rounds if r.return_to == 'REQ_DRAFT') >= cap
 
 
 def cover_blocking_assumptions(state):

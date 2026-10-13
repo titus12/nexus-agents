@@ -93,7 +93,7 @@ def merge_review(state, payload):
             issues[issues.index(old)] = replace(old, status='resolved')
         elif decision == 'reclassified':
             if not closure.get('evidence') or closure.get('severity') != 'advisory':
-                raise ValueError('RECLASSIFICATION_BASIS_REQUIRED')
+                raise ValueError(f"RECLASSIFICATION_BASIS_REQUIRED: closure {closure['issue_id']!r} with status=reclassified needs severity='advisory' and non-empty evidence (got severity={closure.get('severity')!r}, evidence={'present' if closure.get('evidence') else 'missing'})")
             issues[issues.index(old)] = replace(old, severity='advisory')
     coverage = []
     if state.review_stamp:

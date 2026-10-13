@@ -31,6 +31,10 @@ REQUEST_DEFAULT = REPORTS / 'request.txt'
 COOKIE_DEFAULT = Path(os.environ.get('TEMP', '')) / 'opencode' / 'multica-cookie.txt'
 STUCK_STATES = ('REQ_CLARIFY_WAIT', 'REQ_CONFIRM_WAIT', 'REQ_BLOCKED',
                 'REQ_ENGINE_ERROR', 'REQ_RETRY_WAIT')
+# Acceptance rounds poll tighter than the original 15 s: the engine's agent-run
+# poll and the bot's patrol each add up to 15 s per run and per gate.
+POLL_INTERVAL_SECONDS = int(os.environ.get('ROUND_POLL_INTERVAL', '5'))
+PATROL_SECONDS = float(os.environ.get('ROUND_PATROL_SECONDS', '5'))
 
 
 def log(message: str) -> None:
@@ -161,6 +165,11 @@ def submit_answers(task_id: str, snapshot: dict, scenario: str = 'recommend') ->
         answer = recommendation_answer(by_id.get(question_id, {}), scenario)
         if answer is None:
             return False, 'UNSUPPORTED_BLOCKING_QUESTION:' + question_id
+        if scenario == 'recommend' and len(rounds) > 1:
+            # Follow-up round: the proxy user has already confirmed once, so the
+            # answer closes the topic instead of inviting another question wave.
+            answer = {**answer, 'free_text': (answer.get('free_text', '') +
+                '；以上为最终口径，请基于当前信息直接完成文档，不要再提出新的澄清问题，未决项按推荐值作为假设写入。')}
         rows.append(answer)
     if not rows:
         return False, 'NOTHING_TO_ANSWER'
@@ -288,7 +297,7 @@ def launch(request_text: str) -> tuple[int, object]:
         [sys.executable, '-X', 'utf8', str(CLI),
          '--runs-root', str(RUNS), '--project', '1e41be52-4460-4fba-9360-0c60cfc18c92',
          '--project-type', 'unity', '--task-type', 'review',
-         '--poll-interval', '15', '--timeout', '900', '--new', request_text],
+         '--poll-interval', str(POLL_INTERVAL_SECONDS), '--timeout', '900', '--new', request_text],
         cwd=str(REPO / 'multica'), stdout=handle, stderr=subprocess.STDOUT,
         creationflags=creationflags)
     return process.pid, handle
@@ -455,7 +464,7 @@ def patrol(task_id: str, pid: int, silence_timeout: int, wait_cap: int,
             log('patrol state=%s (journal idle, last record: %s)' % (
                 state, last.get('record_type') if last else 'none'))
             last_heartbeat = time.time()
-        time.sleep(15)
+        time.sleep(PATROL_SECONDS)
     return 'failure', 'round timeout', visited
 
 
@@ -506,6 +515,24 @@ def last_dispatch_role(task_id: str) -> str:
     return 'unknown'
 
 
+def build_timing(task_id: str) -> str:
+    """Write the round's engine-log timing artifact; best effort, never fatal."""
+    out = REPORTS / 'timing' / ('%s.json' % task_id)
+    try:
+        completed = subprocess.run(
+            [sys.executable, '-X', 'utf8', str(REPO / 'cmd' / 'requirements_round_timing.py'),
+             '--task', task_id, '--logs-dir', str(LOGS), '--out', str(out)],
+            capture_output=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        log('timing summary failed: %r' % (error,))
+        return ''
+    if completed.returncode:
+        log('timing summary rc=%d: %s' % (completed.returncode, (completed.stderr or b'').decode('utf-8', 'replace')[-200:]))
+        return ''
+    log('timing summary written: %s' % out)
+    return str(out)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request-file', type=Path, default=REQUEST_DEFAULT)
@@ -517,6 +544,15 @@ def main() -> int:
     parser.add_argument('--scenario', choices=('recommend', 'reject'), default='recommend',
                         help='reject: answer clarify rounds against the recommendation (negative path)')
     arguments = parser.parse_args()
+
+    # Acceptance-round levers handed to the driver process (os.environ.setdefault
+    # keeps an explicit operator override authoritative).
+    os.environ.setdefault('REQUIREMENTS_CLARIFY_ROUND_CAP', '3')
+    os.environ.setdefault('ANALYST_MAX_WORKERS', '4')
+    # Two facets serialise on the daemon path mutex in in_place mode (~15-25min);
+    # docs is the slowest, least reliable facet (1256s / REMOTE_RUN_FAILED) and
+    # constraints grew to 1370-1783s, so both stay out of the acceptance set.
+    os.environ.setdefault('REQUIREMENTS_SCOUT_FACETS', 'intent,code')
 
     request_text = arguments.request_file.read_text(encoding='utf-8-sig').strip()
     if not arguments.skip_cleanup:
@@ -569,6 +605,7 @@ def main() -> int:
     record_round({'task_id': task_id, 'outcome': outcome, 'duration_sec': duration,
                   'note': note, 'states': visited, 'started_at': started_at,
                   'finished_at': time.time(), 'final_state': final_state,
+                  'timing_file': build_timing(task_id),
                   'scenario': arguments.scenario})
     log('round %s: %s (%s)' % (task_id, outcome, note[:160]))
     return 0 if outcome == 'success' else 1
