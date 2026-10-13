@@ -1737,7 +1737,7 @@ Create `templates/skills/codex/wf-kb-maintenance/agents/openai.yaml`:
 ```yaml
 name: wf-kb-maintenance
 summary: Validate and maintain OKF-compatible project knowledge bases.
-model: gpt-5.5
+model: gpt-6-luna
 reasoning_effort: medium
 ```
 
