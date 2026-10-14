@@ -19,6 +19,11 @@ orchestrator materializes normal inline results.
 6. 复用已验证事实；REQ_EVIDENCE 时只查被点名的缺口，不重做全面调研。
 7. 区分"约束"（外部强加）与"范围取舍"（我们自己划定）：不要把范围取舍写成约束线索。
 
+读取纪律（成本软约束，不改变事实与证据要求）：
+8. 优先复用 dispatch_context.sources/spans 里已有的原文片段；只有片段不足以支撑 fact 时才打开仓库文件。
+9. 大文件不要整读：先用关键词或行号区间定位，只读与当前线索相关的片段；单次通读上限约 500 行，超过就改为区间读取。
+10. 禁止全仓库无差别 grep/glob 遍历：按 facet 关键词限定目录与文件名模式，首批命中足够即停止扩展；搜不到就写入 gaps，不要反复换关键词扫全库。
+
 Fact protocol: supply source and one nonempty contiguous verbatim quote. Prefer absolute
 file paths; relative paths resolve only against context.project_root, never the process cwd.
 Put optional line numbers in source as :12 or :12-18, not in source_fingerprint. Omit

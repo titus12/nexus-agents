@@ -194,7 +194,13 @@ def accept_answers(state, submission):
                               round_.round_id, options, text, disposition, source.source_id, event_id)
         answers.append(answer)
         if disposition != 'defer':
-            old = tuple(d for d in active_decisions(replace(state, sources=tuple(sources), decisions=tuple(decisions))) if d.topic_key == q.topic_key)
+            # Supersede only decisions born from answers to THIS question: a
+            # new decision on the same topic_key from a different question is
+            # complementary context, not a replacement (R58: q-003/q-004/q-005
+            # shared topic 'req-tlv-scope' and silently ate each other).
+            answered_question = {a.source_id: a.question_id for a in answers}
+            old = tuple(d for d in active_decisions(replace(state, sources=tuple(sources), decisions=tuple(decisions)))
+                        if answered_question.get(d.source_id) == q.question_id)
             related = q.related_requirement_ids
             if not related:
                 related = (next_id(claims, 'requirement_id', 'req'),)

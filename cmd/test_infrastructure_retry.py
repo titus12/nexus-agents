@@ -12,6 +12,7 @@ from orchestrator.domain.context import (
 from orchestrator.domain.errors import FailureRecord, is_infrastructure_failure
 from orchestrator.domain.events import DomainEvent
 from orchestrator.domain.states import MenxiaGroupCriticState
+from orchestrator.adapters import _fanout_child_title
 from orchestrator.runtime import nodes
 from orchestrator.runtime.agent_effects import AgentNodeWorkerRunner, AgentWorkerRunner
 from orchestrator.runtime.nodes import (
@@ -419,6 +420,41 @@ class WorkerRetryReDispatchTests(unittest.TestCase):
             ["task-1:MENXIA_GROUP_CRITIC:6:worker-01"],
         )
         self.assertEqual(worker_result.status, "SUCCEEDED")
+
+
+class FanoutChildTitleTests(unittest.TestCase):
+    """The multica fan-out child title must be scoped to the request_id.
+
+    ensure_child_issue can only fire the assignment run when it CREATES the
+    child issue, so a retry that resolves to an existing completed/failed
+    child title silently re-polls a dead run (observed as R56's instant
+    REMOTE_RUN_FAILED / AGENT_RESULT_MISSING loop).  Embedding the request_id
+    gives every fresh attempt a fresh child while crash recovery re-dispatching
+    the same request_id still reuses the existing child deterministically.
+    """
+
+    def test_scoped_title_appends_the_request_id(self) -> None:
+        title = _fanout_child_title(
+            {"fanout_title": "[scout:code] task-1"}, "task-1:e1:1:REQ_ANALYZE:attempt-2-scout-code"
+        )
+
+        self.assertEqual(
+            title,
+            "[scout:code] task-1 · task-1:e1:1:REQ_ANALYZE:attempt-2-scout-code",
+        )
+
+    def test_missing_base_title_falls_back_to_the_request_id(self) -> None:
+        self.assertEqual(_fanout_child_title({}, "req-1"), "fanout req-1")
+        self.assertEqual(_fanout_child_title({"fanout_title": "  "}, "req-1"), "fanout req-1")
+        self.assertEqual(_fanout_child_title(None, "req-1"), "fanout req-1")
+
+    def test_a_fresh_attempt_gets_a_fresh_title_and_replays_reuse_one(self) -> None:
+        first = _fanout_child_title({"fanout_title": "scout"}, "task-1:attempt-1-scout-code")
+        second = _fanout_child_title({"fanout_title": "scout"}, "task-1:attempt-2-scout-code")
+        replay = _fanout_child_title({"fanout_title": "scout"}, "task-1:attempt-1-scout-code")
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(first, replay)
 
 
 if __name__ == "__main__":

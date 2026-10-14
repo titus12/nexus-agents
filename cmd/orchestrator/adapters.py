@@ -308,6 +308,24 @@ class RequestLookupError(RuntimeError):
     """The external request index could not be queried safely."""
 
 
+def _fanout_child_title(context: object, request_id: str) -> str:
+    """Compose the deterministic fan-out child issue title for one dispatch.
+
+    The title embeds the request_id so a retry carrying a fresh attempt gets a
+    brand-new child issue: ``ensure_child_issue`` can only fire the assignment
+    run at creation time, so a reused completed/failed child issue would
+    silently swallow the retry.  Re-dispatching the same request_id (crash
+    recovery) still resolves to the same title and reuses the child.
+    """
+
+    base_title = ""
+    if isinstance(context, dict):
+        base_title = str(context.get("fanout_title") or "").strip()
+    if base_title:
+        return f"{base_title} · {request_id}"
+    return f"fanout {request_id}"
+
+
 def _declared_role_modes(structured_output: object) -> tuple[str, ...]:
     """Role modes the dispatched role contract declares as legal.
 
@@ -1190,9 +1208,12 @@ class MulticaCliAdapter:
             # assignment run that does the real work.  This avoids the extra
             # placeholder assignment run (and its poisoned session) that a
             # separate follow-up comment would cause.
-            title = str(request.context.get("fanout_title") or "").strip() or (
-                f"fanout {request.request_id}"
-            )
+            # The child title is scoped to the request_id so a retry with a
+            # fresh attempt creates a brand-new child issue (a reused
+            # completed/failed issue cannot fire another assignment run);
+            # re-dispatching the same request_id after a crash still reuses
+            # the existing child deterministically.
+            title = _fanout_child_title(request.context, request.request_id)
             child_id = self.ensure_child_issue(
                 fanout_parent, request.agent_id, title, content
             )

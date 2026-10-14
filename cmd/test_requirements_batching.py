@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from requirements_test_support import make_state, question
 from orchestrator.domain.requirements.model import AssumptionRecord
+from orchestrator.domain.requirements.consensus import active_decisions
 from orchestrator.domain.requirements.questions import cover_blocking_assumptions, open_round, accept_answers
 from orchestrator.requirements_cards import clarification_card
 from orchestrator.requirements_gateway import GatewayStore
@@ -14,6 +15,46 @@ from orchestrator.requirements_port import FeishuRequirementsPort, RequirementsP
 
 
 class BatchingTests(unittest.TestCase):
+    def test_answers_to_different_questions_on_one_topic_coexist(self):
+        state = make_state()
+        q1 = replace(question('q-000001'), topic_key='scope', question='范围怎么定？')
+        q2 = replace(question('q-000002'), topic_key='scope', question='约束怎么定？')
+        state = replace(state, questions=(q1, q2))
+        state = open_round(state, 'REQ_ANALYZE')
+        state = accept_answers(state, {'round_id': state.rounds[-1].round_id, 'actor_id': 'local-operator',
+            'event_id': 'answers-1', 'answers': [
+                {'question_id': 'q-000001', 'question_revision': 1, 'option_ids': ['manual']},
+                {'question_id': 'q-000002', 'question_revision': 1, 'option_ids': ['automatic']}]})
+        scope = [d for d in active_decisions(state) if d.topic_key == 'scope']
+        self.assertEqual(len(scope), 2)
+        self.assertEqual({d.supersedes_ids for d in scope}, {()})
+
+    def test_re_answered_question_supersedes_only_its_own_decision(self):
+        state = make_state()
+        q1 = replace(question('q-000001'), topic_key='scope', question='范围怎么定？')
+        q2 = replace(question('q-000002'), topic_key='scope', question='约束怎么定？')
+        state = replace(state, questions=(q1, q2))
+        state = open_round(state, 'REQ_ANALYZE')
+        state = accept_answers(state, {'round_id': state.rounds[-1].round_id, 'actor_id': 'local-operator',
+            'event_id': 'answers-1', 'answers': [
+                {'question_id': 'q-000001', 'question_revision': 1, 'option_ids': ['manual']},
+                {'question_id': 'q-000002', 'question_revision': 1, 'option_ids': ['automatic']}]})
+        state = replace(state, questions=(replace(q1, revision=2), q2))
+        state = open_round(state, 'REQ_ANALYZE')
+        self.assertEqual(state.rounds[-1].question_ids, ('q-000001',))
+        state = accept_answers(state, {'round_id': state.rounds[-1].round_id, 'actor_id': 'local-operator',
+            'event_id': 'answers-2', 'answers': [
+                {'question_id': 'q-000001', 'question_revision': 2, 'option_ids': ['automatic']}]})
+        scope = [d for d in active_decisions(state) if d.topic_key == 'scope']
+        self.assertEqual(len(scope), 2)
+        first = next(d for d in state.decisions if d.conclusion == '由业务触发')
+        rev2 = next(d for d in state.decisions if first.decision_id in d.supersedes_ids)
+        self.assertEqual(rev2.conclusion, '自动重试')
+        self.assertEqual({d.decision_id for d in scope},
+                         {rev2.decision_id, next(d.decision_id for d in scope if d.decision_id != rev2.decision_id)})
+        self.assertTrue(any(d.topic_key == 'scope' and d.conclusion == '自动重试' and d.decision_id != rev2.decision_id
+                            for d in scope))
+
     def test_rejected_synthesized_constraint_cannot_be_reintroduced_by_model(self):
         from orchestrator.domain.requirements.consensus import apply_analysis
         state = make_state()
