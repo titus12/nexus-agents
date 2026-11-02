@@ -17,6 +17,7 @@ type fakeCompiler struct {
 	initializeCalls int
 	updateCalls     int
 	lastInput       wikicompiler.CompileInput
+	err             error
 }
 
 type fakeGraphCoordinator struct {
@@ -44,12 +45,18 @@ func (f *fakeGraphCoordinator) Runs(string) ([]knowledgegraph.SyncRun, error) {
 func (f *fakeCompiler) Initialize(ctx context.Context, input wikicompiler.CompileInput) (wikicompiler.GeneratedBundle, error) {
 	f.initializeCalls++
 	f.lastInput = input
+	if f.err != nil {
+		return wikicompiler.GeneratedBundle{}, f.err
+	}
 	return testGeneratedBundle(), nil
 }
 
 func (f *fakeCompiler) Update(ctx context.Context, input wikicompiler.CompileInput) (wikicompiler.GeneratedBundle, error) {
 	f.updateCalls++
 	f.lastInput = input
+	if f.err != nil {
+		return wikicompiler.GeneratedBundle{}, f.err
+	}
 	return testGeneratedBundle(), nil
 }
 
@@ -194,11 +201,15 @@ func TestCompileManifestUsesCodeExtensionsAndRecordsDiagnostics(t *testing.T) {
 			t.Fatalf("non-code file entered the manifest: %s", path)
 		}
 	}
-	var metadata map[string]int
+	var metadata struct {
+		ManifestFiles int    `json:"manifestFiles"`
+		ManifestChars int    `json:"manifestChars"`
+		ManifestMode  string `json:"manifestMode"`
+	}
 	if err := json.Unmarshal(result.Run.Metadata, &metadata); err != nil {
 		t.Fatalf("run metadata = %s (%v)", result.Run.Metadata, err)
 	}
-	if metadata["manifestFiles"] != len(compiler.lastInput.ScanManifest) || metadata["manifestChars"] <= 0 {
+	if metadata.ManifestFiles != len(compiler.lastInput.ScanManifest) || metadata.ManifestChars <= 0 || metadata.ManifestMode != "full" {
 		t.Fatalf("run metadata = %#v", metadata)
 	}
 	shadowed := false

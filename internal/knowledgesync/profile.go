@@ -19,12 +19,14 @@ import (
 )
 
 const (
-	ProfileVersion               = 1
-	ProfileRelativePath          = "KnowledgeBase/Setting.yaml"
-	DefaultKnowledgeRoot         = "KnowledgeBase/project"
-	TestedOpenWikiVersion        = "0.2.0"
-	TestedKnowledgeGraphProvider = "gbrain"
-	TestedGBrainVersion          = gbrain.TestedVersion
+	ProfileVersion                = 1
+	ProfileRelativePath           = "KnowledgeBase/Setting.yaml"
+	DefaultKnowledgeRoot          = "KnowledgeBase/project"
+	TestedOpenWikiVersion         = "0.2.0"
+	TestedKnowledgeGraphProvider  = "gbrain"
+	TestedGBrainVersion           = gbrain.TestedVersion
+	DefaultMaxFilesPerUpdate      = 200
+	DefaultOpenWikiTimeoutMinutes = 20
 )
 
 var ErrProfileNotFound = errors.New("knowledge sync profile not found")
@@ -79,8 +81,9 @@ type ScanRule struct {
 }
 
 type ScanLimits struct {
-	MaxFileSizeKB  int `json:"maxFileSizeKB" yaml:"maxFileSizeKB"`
-	MaxFilesPerRun int `json:"maxFilesPerRun" yaml:"maxFilesPerRun"`
+	MaxFileSizeKB     int `json:"maxFileSizeKB" yaml:"maxFileSizeKB"`
+	MaxFilesPerRun    int `json:"maxFilesPerRun" yaml:"maxFilesPerRun"`
+	MaxFilesPerUpdate int `json:"maxFilesPerUpdate" yaml:"maxFilesPerUpdate"`
 }
 
 type InstructionSettings struct {
@@ -97,8 +100,9 @@ type CodeGraphSettings struct {
 }
 
 type OpenWikiSettings struct {
-	Enabled bool   `json:"enabled" yaml:"enabled"`
-	Version string `json:"version" yaml:"version"`
+	Enabled        bool   `json:"enabled" yaml:"enabled"`
+	Version        string `json:"version" yaml:"version"`
+	TimeoutMinutes int    `json:"timeoutMinutes" yaml:"timeoutMinutes"`
 }
 
 type KnowledgeGraphSettings struct {
@@ -172,7 +176,7 @@ func DefaultProfile() Profile {
 			Source:     "git-tracked",
 			Extensions: append([]string(nil), DefaultScanExtensions...),
 			Rules:      []ScanRule{},
-			Limits:     ScanLimits{MaxFileSizeKB: 512, MaxFilesPerRun: 3000},
+			Limits:     ScanLimits{MaxFileSizeKB: 512, MaxFilesPerRun: 3000, MaxFilesPerUpdate: DefaultMaxFilesPerUpdate},
 		},
 		Instructions: InstructionSettings{
 			RequiredTopics: []string{"service-responsibility", "integration-boundaries", "data-ownership", "verification-paths"},
@@ -180,7 +184,7 @@ func DefaultProfile() Profile {
 		CodeGraph: CodeGraphSettings{
 			Enabled: true, ImpactDepth: 2, IncludeCallers: true, IncludeCallees: true, IncludeRelatedTests: true,
 		},
-		OpenWiki: OpenWikiSettings{Enabled: true, Version: TestedOpenWikiVersion},
+		OpenWiki: OpenWikiSettings{Enabled: true, Version: TestedOpenWikiVersion, TimeoutMinutes: DefaultOpenWikiTimeoutMinutes},
 		KnowledgeGraph: KnowledgeGraphSettings{
 			Enabled:   true,
 			Provider:  TestedKnowledgeGraphProvider,
@@ -287,6 +291,12 @@ func ValidateProfile(profile Profile) error {
 	if profile.Scan.Limits.MaxFilesPerRun < 1 || profile.Scan.Limits.MaxFilesPerRun > 50000 {
 		return fmt.Errorf("scan.limits.maxFilesPerRun must be between 1 and 50000")
 	}
+	if profile.Scan.Limits.MaxFilesPerUpdate < 1 || profile.Scan.Limits.MaxFilesPerUpdate > 50000 {
+		return fmt.Errorf("scan.limits.maxFilesPerUpdate must be between 1 and 50000")
+	}
+	if profile.OpenWiki.TimeoutMinutes < 5 || profile.OpenWiki.TimeoutMinutes > 120 {
+		return fmt.Errorf("openWiki.timeoutMinutes must be between 5 and 120")
+	}
 	if profile.Schedule.IntervalMinutes < 1 || profile.Schedule.IntervalMinutes > 10080 {
 		return fmt.Errorf("schedule.intervalMinutes must be between 1 and 10080")
 	}
@@ -365,6 +375,9 @@ func normalizeProfile(profile *Profile) {
 	profile.Discovery.Strategy = strings.TrimSpace(profile.Discovery.Strategy)
 	profile.Scan.Source = strings.ToLower(strings.TrimSpace(profile.Scan.Source))
 	profile.Scan.Extensions = normalizeExtensions(profile.Scan.Extensions)
+	if profile.Scan.Limits.MaxFilesPerUpdate <= 0 {
+		profile.Scan.Limits.MaxFilesPerUpdate = DefaultMaxFilesPerUpdate
+	}
 	for index := range profile.Scan.Rules {
 		profile.Scan.Rules[index].Pattern = normalizeRelativePath(profile.Scan.Rules[index].Pattern)
 		profile.Scan.Rules[index].Action = strings.ToLower(strings.TrimSpace(profile.Scan.Rules[index].Action))
@@ -378,6 +391,9 @@ func normalizeProfile(profile *Profile) {
 	profile.Instructions.RequiredTopics = uniqueSorted(profile.Instructions.RequiredTopics)
 	profile.Instructions.Additional = strings.TrimSpace(profile.Instructions.Additional)
 	profile.OpenWiki.Version = strings.TrimPrefix(strings.TrimSpace(profile.OpenWiki.Version), "v")
+	if profile.OpenWiki.TimeoutMinutes <= 0 {
+		profile.OpenWiki.TimeoutMinutes = DefaultOpenWikiTimeoutMinutes
+	}
 	profile.KnowledgeGraph.Provider = strings.ToLower(strings.TrimSpace(profile.KnowledgeGraph.Provider))
 	profile.KnowledgeGraph.Version = strings.TrimPrefix(strings.TrimSpace(profile.KnowledgeGraph.Version), "v")
 	profile.KnowledgeGraph.Brain = strings.TrimSpace(profile.KnowledgeGraph.Brain)

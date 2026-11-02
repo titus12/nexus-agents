@@ -211,13 +211,90 @@ func ManifestArgvEstimate(paths []string) int {
 	return total
 }
 
-func manifestRunMetadata(files, chars, dropped int) json.RawMessage {
-	payload := map[string]int{"manifestFiles": files, "manifestChars": chars, "manifestDropped": dropped}
+func manifestRunMetadata(mode string, files, chars, dropped, changed, delta int, base string) json.RawMessage {
+	payload := map[string]any{
+		"manifestMode":    mode,
+		"manifestFiles":   files,
+		"manifestChars":   chars,
+		"manifestDropped": dropped,
+		"changedFiles":    changed,
+		"deltaFiles":      delta,
+		"baseRevision":    base,
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil
 	}
 	return data
+}
+
+func pathSet(paths []string) map[string]bool {
+	set := make(map[string]bool, len(paths))
+	for _, value := range paths {
+		if value != "" {
+			set[value] = true
+		}
+	}
+	return set
+}
+
+func uniquePathList(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	result := make([]string, 0, len(paths))
+	for _, value := range paths {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func filterPathList(paths []string, allowed map[string]bool) []string {
+	result := make([]string, 0, len(paths))
+	for _, value := range paths {
+		if allowed[value] {
+			result = append(result, value)
+		}
+	}
+	return uniquePathList(result)
+}
+
+func syncFailureBackoff(failures int) time.Duration {
+	switch failures {
+	case 1:
+		return 30 * time.Minute
+	case 2:
+		return 2 * time.Hour
+	default:
+		return 6 * time.Hour
+	}
+}
+
+func resetSyncFailures(state *KnowledgeSyncState) {
+	state.ConsecutiveFailures = 0
+	state.NextRetryAt = ""
+}
+
+func recordSyncFailure(state *KnowledgeSyncState) {
+	state.ConsecutiveFailures++
+	if state.ConsecutiveFailures >= MaxConsecutiveSyncFailures {
+		state.Status = StatusBlocked
+		state.NextRetryAt = ""
+		return
+	}
+	state.Status = StatusFailed
+	state.NextRetryAt = time.Now().Add(syncFailureBackoff(state.ConsecutiveFailures)).Format(time.RFC3339)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Service) InitializePreview(ctx context.Context, request InitializeRequest) (SyncResult, error) {
@@ -266,11 +343,12 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 			run.Error = boundedText(returnErr.Error(), 2000)
 			run.EndedAt = time.Now().Format(time.RFC3339)
 			s.recordRunStage(&run, StageFailed, run.Progress)
-			state.Status = StatusFailed
+			state.LastAttemptedCommit = firstNonEmpty(run.TargetRevision, state.LastAttemptedCommit)
 			state.LastError = run.Error
+			recordSyncFailure(&state)
 			_ = s.store.SaveRun(run)
 			_ = s.store.SaveState(state)
-			log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=failed stage=%s duration_ms=%d error=%q", request.ProjectID, run.ID, run.Kind, run.Stage, time.Since(started).Milliseconds(), run.Error)
+			log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=failed stage=%s duration_ms=%d failures=%d next_retry=%s error=%q", request.ProjectID, run.ID, run.Kind, run.Stage, time.Since(started).Milliseconds(), state.ConsecutiveFailures, state.NextRetryAt, run.Error)
 		}
 	}()
 
@@ -295,40 +373,146 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	for _, file := range inventory.Files {
 		allPaths = append(allPaths, file.Path)
 	}
-	manifest := IncludedPaths(profile, allPaths)
-	manifest, manifestDropped := LimitManifest(profile, manifest, profile.Scan.Limits.MaxFilesPerRun)
+	includedAll := IncludedPaths(profile, allPaths)
+	includedSet := pathSet(includedAll)
+	baseRevision := state.LastProcessedCommit
+
+	manifestMode := "full"
+	manifestLimit := profile.Scan.Limits.MaxFilesPerRun
+	manifestCandidates := includedAll
+	changedFiles := 0
+	deltaFiles := 0
+	deltaChanged := []string(nil)
+	var impact CodeGraphImpact
+	impactAvailable := false
+	s.recordRunStage(&run, StagePreparingKnowledge, 38)
+
+	if update && baseRevision != "" && baseRevision != gitState.Head {
+		changes, diffErr := DiffCommitted(ctx, s.git, request.ProjectRoot, baseRevision, gitState.Head)
+		switch {
+		case errors.Is(diffErr, ErrGitBaseMissing):
+			manifestMode = "full_base_missing"
+			run.Warnings = append(run.Warnings, "The previous base revision is unavailable; a full manifest will be generated.")
+		case diffErr != nil:
+			return SyncResult{}, diffErr
+		default:
+			manifestMode = "delta"
+			manifestLimit = profile.Scan.Limits.MaxFilesPerUpdate
+			if manifestLimit <= 0 {
+				manifestLimit = DefaultMaxFilesPerUpdate
+			}
+			deletedPaths := make([]string, 0)
+			for _, change := range changes {
+				if strings.HasPrefix(change.Status, "D") {
+					deletedPaths = append(deletedPaths, change.Path)
+				}
+				if strings.HasPrefix(change.Status, "R") || strings.HasPrefix(change.Status, "C") {
+					deletedPaths = append(deletedPaths, change.OldPath)
+				}
+			}
+			extensions := EffectiveExtensions(profile)
+			deletedCandidates := make([]string, 0, len(deletedPaths))
+			for _, deletedPath := range deletedPaths {
+				if ExtensionAllowed(extensions, filepath.Ext(deletedPath)) {
+					deletedCandidates = append(deletedCandidates, deletedPath)
+				}
+			}
+			if deletedIncluded := IncludedPaths(profile, deletedCandidates); len(deletedIncluded) > 0 {
+				return SyncResult{}, fmt.Errorf("delta contains %d deleted or renamed included files; run a full enrichment to refresh their knowledge", len(deletedIncluded))
+			}
+			for _, change := range changes {
+				if includedSet[change.Path] {
+					deltaChanged = append(deltaChanged, change.Path)
+				}
+			}
+			deltaChanged = uniquePathList(deltaChanged)
+			changedFiles = len(deltaChanged)
+			if changedFiles == 0 {
+				now := time.Now().Format(time.RFC3339)
+				state.ProjectID = request.ProjectID
+				state.ProjectRoot = filepath.Clean(request.ProjectRoot)
+				state.Branch = gitState.Branch
+				state.LastAttemptedCommit = gitState.Head
+				state.LastProcessedCommit = gitState.Head
+				state.LastSuccessfulAt = now
+				state.LastCheckedAt = now
+				state.LastKnowledgeHash, _ = knowledgeHash(request.ProjectRoot)
+				state.LastError = ""
+				state.Status = StatusUpToDate
+				resetSyncFailures(&state)
+				run.Status = "succeeded"
+				run.ReasonCode = "no_included_delta"
+				run.Reason = "No included source files changed; the knowledge baseline advanced without OpenWiki."
+				run.EndedAt = now
+				run.Metadata = manifestRunMetadata("delta-noop", 0, 0, 0, 0, 0, baseRevision)
+				s.recordRunStage(&run, StageCompleted, 100)
+				if err := s.store.SaveRun(run); err != nil {
+					return SyncResult{}, err
+				}
+				if err := s.store.SaveState(state); err != nil {
+					return SyncResult{}, err
+				}
+				_ = s.export(request.ProjectID, request.ProjectRoot)
+				return SyncResult{State: state, Run: run, Message: "No included source changes; knowledge baseline advanced."}, nil
+			}
+			if changedFiles > manifestLimit {
+				return SyncResult{}, fmt.Errorf("delta change set exceeds scan.limits.maxFilesPerUpdate (%d > %d); split the commit or raise the limit", changedFiles, manifestLimit)
+			}
+			manifestCandidates = deltaChanged
+			if profile.CodeGraph.Enabled && s.codeGraph != nil {
+				s.recordRunStage(&run, StageAnalyzingCodeGraph, 45)
+				if resolvedImpact, impactErr := s.codeGraph.Impact(request.ProjectRoot, deltaChanged, profile.CodeGraph.ImpactDepth); impactErr == nil {
+					impact = resolvedImpact
+					impactAvailable = true
+					extra := append(append(append(append([]string{}, impact.Routes...), impact.Callers...), impact.Callees...), impact.Tests...)
+					manifestCandidates = uniquePathList(append(append([]string{}, deltaChanged...), filterPathList(extra, includedSet)...))
+				} else {
+					run.Warnings = append(run.Warnings, "CodeGraph impact analysis failed: "+boundedText(impactErr.Error(), 500))
+				}
+			}
+			deltaFiles = len(manifestCandidates)
+		}
+	}
+
+	manifest := []string(nil)
+	manifestDropped := 0
+	if manifestMode == "delta" {
+		manifest = append(manifest, deltaChanged...)
+		remaining := manifestLimit - len(manifest)
+		if remaining > 0 {
+			changedSet := pathSet(deltaChanged)
+			extras := make([]string, 0, len(manifestCandidates))
+			for _, candidate := range manifestCandidates {
+				if !changedSet[candidate] {
+					extras = append(extras, candidate)
+				}
+			}
+			extras, _ = LimitManifest(profile, extras, remaining)
+			manifest = append(manifest, extras...)
+		}
+		manifestDropped = len(manifestCandidates) - len(manifest)
+	} else {
+		manifest, manifestDropped = LimitManifest(profile, manifestCandidates, manifestLimit)
+	}
 	if manifestDropped > 0 {
-		run.Warnings = append(run.Warnings, fmt.Sprintf("scan.limits.maxFilesPerRun truncated the manifest: kept %d highest-priority files, dropped %d", len(manifest), manifestDropped))
+		limitName := "scan.limits.maxFilesPerRun"
+		if manifestMode == "delta" {
+			limitName = "scan.limits.maxFilesPerUpdate"
+		}
+		run.Warnings = append(run.Warnings, fmt.Sprintf("%s truncated the manifest: kept %d highest-priority files, dropped %d", limitName, len(manifest), manifestDropped))
 	}
 	run.Warnings = append(run.Warnings, ProfileWarnings(profile)...)
 	manifestChars := ManifestArgvEstimate(manifest)
-	run.Metadata = manifestRunMetadata(len(manifest), manifestChars, manifestDropped)
-	s.recordRunStage(&run, StagePreparingKnowledge, 38)
-	var impact CodeGraphImpact
-	impactAvailable := false
-	if update && profile.CodeGraph.Enabled && s.codeGraph != nil && state.LastProcessedCommit != "" && state.LastProcessedCommit != gitState.Head {
-		s.recordRunStage(&run, StageAnalyzingCodeGraph, 45)
-		if changes, diffErr := DiffCommitted(ctx, s.git, request.ProjectRoot, state.LastProcessedCommit, gitState.Head); diffErr == nil {
-			changedPaths := make([]string, 0, len(changes))
-			for _, change := range changes {
-				changedPaths = append(changedPaths, change.Path)
-			}
-			if resolvedImpact, impactErr := s.codeGraph.Impact(request.ProjectRoot, changedPaths, profile.CodeGraph.ImpactDepth); impactErr == nil {
-				impact = resolvedImpact
-				impactAvailable = true
-			} else {
-				run.Warnings = append(run.Warnings, "CodeGraph impact analysis failed: "+boundedText(impactErr.Error(), 500))
-			}
-		}
-	}
+	run.Metadata = manifestRunMetadata(manifestMode, len(manifest), manifestChars, manifestDropped, changedFiles, deltaFiles, baseRevision)
 	state.ProjectID = request.ProjectID
 	state.ProjectRoot = filepath.Clean(request.ProjectRoot)
 	state.Branch = gitState.Branch
+	state.LastAttemptedCommit = gitState.Head
 	state.LastCheckedAt = run.StartedAt
 	state.LastError = ""
 	state.Status = StatusChecking
 	_ = s.store.SaveState(state)
-	log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=started branch=%s revision=%s selected_files=%d manifest_chars=%d", request.ProjectID, run.ID, run.Kind, gitState.Branch, gitState.Head, len(manifest), manifestChars)
+	log.Printf("[knowledge-sync] compile project=%s run=%s kind=%s status=started branch=%s revision=%s manifest_mode=%s selected_files=%d manifest_chars=%d changed_files=%d delta_files=%d", request.ProjectID, run.ID, run.Kind, gitState.Branch, gitState.Head, manifestMode, len(manifest), manifestChars, changedFiles, deltaFiles)
 
 	externalRoot := s.store.projectPath(request.ProjectID, "runs", safeID(run.ID), "external")
 	s.recordRunStage(&run, StageFetchingExternalEvidence, 50)
@@ -354,6 +538,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 		Language: profile.Knowledge.Language, RequiredTopics: profile.Instructions.RequiredTopics,
 		AdditionalInstructions: profile.Instructions.Additional, ScanManifest: manifest,
 		ExternalSources: compilerExternal,
+		Timeout:         time.Duration(profile.OpenWiki.TimeoutMinutes) * time.Minute,
 	}
 	if update {
 		compileInput.ExistingKnowledge, err = readExistingKnowledge(request.ProjectRoot)
@@ -429,6 +614,7 @@ func (s *Service) compilePreview(ctx context.Context, request InitializeRequest,
 	state.ProfileHash = profileHash
 	state.LastCheckedAt = now
 	state.LastError = ""
+	resetSyncFailures(&state)
 	if err := s.store.SaveRun(run); err != nil {
 		return SyncResult{}, err
 	}
@@ -519,6 +705,7 @@ func (s *Service) checkUpdatesLocked(ctx context.Context, request ProjectRequest
 	if state.LastProcessedCommit == gitState.Head && !pendingWasResolved {
 		state.Status = StatusUpToDate
 		state.LastCheckedAt = now
+		resetSyncFailures(&state)
 		run.ReasonCode = "head_unchanged"
 		run.Reason = "HEAD is unchanged and there is no active Proposal."
 		run.NextAction = "none"
@@ -567,6 +754,7 @@ func (s *Service) checkUpdatesLocked(ctx context.Context, request ProjectRequest
 		state.LastSuccessfulAt = now
 		state.LastKnowledgeHash, _ = knowledgeHash(request.ProjectRoot)
 		state.Status = StatusUpToDate
+		resetSyncFailures(&state)
 		run.Warnings = validationWarnings(report)
 		run.ReasonCode = "knowledge_only_change"
 		run.Reason = "Only approved KnowledgeBase files changed."
@@ -580,6 +768,7 @@ func (s *Service) checkUpdatesLocked(ctx context.Context, request ProjectRequest
 		state.LastProcessedCommit = gitState.Head
 		state.LastSuccessfulAt = now
 		state.Status = StatusUpToDate
+		resetSyncFailures(&state)
 		run.ReasonCode = map[ChangeClass]string{
 			ChangeTestsOnly: "tests_only_change",
 			ChangeGenerated: "generated_only_change",
@@ -643,6 +832,7 @@ func (s *Service) ApplyProposal(ctx context.Context, request ProjectRequest, pro
 	state.Status = StatusReady
 	state.PendingProposalID = ""
 	state.LastError = ""
+	resetSyncFailures(&state)
 	if err := s.store.SaveState(state); err != nil {
 		return SyncResult{}, err
 	}
@@ -987,6 +1177,7 @@ func (s *Service) RejectProposal(request ProjectRequest, proposalID string) (Syn
 	state.PendingProposalID = ""
 	state.Status = StatusReady
 	state.LastCheckedAt = time.Now().Format(time.RFC3339)
+	resetSyncFailures(&state)
 	if err := s.store.SaveState(state); err != nil {
 		return SyncResult{}, err
 	}

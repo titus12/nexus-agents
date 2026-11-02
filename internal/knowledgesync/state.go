@@ -21,6 +21,7 @@ const (
 	StatusApplying        SyncStatus = "applying"
 	StatusUpToDate        SyncStatus = "up_to_date"
 	StatusFailed          SyncStatus = "failed"
+	StatusBlocked         SyncStatus = "blocked"
 )
 
 type SyncStage string
@@ -45,11 +46,14 @@ type KnowledgeSyncState struct {
 	ProjectRoot         string     `json:"projectRoot"`
 	Branch              string     `json:"branch"`
 	LastProcessedCommit string     `json:"lastProcessedCommit"`
+	LastAttemptedCommit string     `json:"lastAttemptedCommit,omitempty"`
 	LastKnowledgeHash   string     `json:"lastKnowledgeHash"`
 	LastCheckedAt       string     `json:"lastCheckedAt"`
 	LastSuccessfulAt    string     `json:"lastSuccessfulAt"`
 	Status              SyncStatus `json:"status"`
 	PendingProposalID   string     `json:"pendingProposalId,omitempty"`
+	ConsecutiveFailures int        `json:"consecutiveFailures,omitempty"`
+	NextRetryAt         string     `json:"nextRetryAt,omitempty"`
 	CompilerVersion     string     `json:"compilerVersion"`
 	ProfileHash         string     `json:"profileHash"`
 	LastError           string     `json:"lastError,omitempty"`
@@ -80,6 +84,10 @@ type SyncRun struct {
 }
 
 const maxRetainedKnowledgeRecords = 10
+
+// MaxConsecutiveSyncFailures stops automatic scheduling after this many
+// consecutive failed OpenWiki runs. Manual checks remain available.
+const MaxConsecutiveSyncFailures = 3
 
 type StateStore struct {
 	Root string

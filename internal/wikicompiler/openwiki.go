@@ -28,6 +28,11 @@ type ExecCommandRunner struct {
 
 func (r ExecCommandRunner) Run(ctx context.Context, directory string, environment map[string]string, name string, args ...string) (CommandResult, error) {
 	command := exec.CommandContext(ctx, name, args...)
+	configureProcess(command)
+	command.WaitDelay = 5 * time.Second
+	command.Cancel = func() error {
+		return killProcessTree(command)
+	}
 	command.Dir = directory
 	command.Env = os.Environ()
 	for key, value := range environment {
@@ -42,6 +47,9 @@ func (r ExecCommandRunner) Run(ctx context.Context, directory string, environmen
 	command.Stdout = stdout
 	command.Stderr = stderr
 	err := command.Run()
+	if err == nil && ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	return CommandResult{Stdout: stdout.String(), Stderr: stderr.String()}, err
 }
 
@@ -118,7 +126,10 @@ func (o *OpenWiki) compile(ctx context.Context, input CompileInput, update bool)
 		return GeneratedBundle{}, err
 	}
 
-	timeout := o.Timeout
+	timeout := input.Timeout
+	if timeout <= 0 {
+		timeout = o.Timeout
+	}
 	if timeout <= 0 {
 		timeout = 20 * time.Minute
 	}

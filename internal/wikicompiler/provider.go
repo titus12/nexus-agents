@@ -1,6 +1,9 @@
 package wikicompiler
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Provider interface {
 	Initialize(ctx context.Context, input CompileInput) (GeneratedBundle, error)
@@ -21,6 +24,7 @@ type CompileInput struct {
 	ExistingKnowledge      map[string][]byte
 	ExternalSources        []ExternalSource
 	Environment            map[string]string
+	Timeout                time.Duration
 }
 
 type ExternalSource struct {

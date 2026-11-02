@@ -19,6 +19,7 @@ type Scheduler struct {
 	Service  *Service
 	Projects ScheduledProjectProvider
 	Interval time.Duration
+	Now      func() time.Time
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 }
@@ -59,18 +60,45 @@ func (s *Scheduler) Stop() {
 }
 
 func (s *Scheduler) check(ctx context.Context) {
+	now := s.now()
 	for _, project := range s.Projects.KnowledgeSyncProjects() {
 		profile, err := LoadProfile(project.ProjectRoot)
 		if err != nil || !profile.Schedule.Enabled {
 			continue
 		}
 		state, stateErr := s.Service.Status(project.ProjectID)
+		if stateErr == nil && shouldSkipScheduledSync(state, now) {
+			continue
+		}
 		if stateErr == nil && state.LastCheckedAt != "" {
 			lastChecked, parseErr := time.Parse(time.RFC3339, state.LastCheckedAt)
-			if parseErr == nil && time.Since(lastChecked) < time.Duration(profile.Schedule.IntervalMinutes)*time.Minute {
+			if parseErr == nil && now.Sub(lastChecked) < time.Duration(profile.Schedule.IntervalMinutes)*time.Minute {
 				continue
 			}
 		}
 		_, _ = s.Service.CheckUpdates(ctx, ProjectRequest{ProjectID: project.ProjectID, ProjectRoot: project.ProjectRoot})
 	}
+}
+
+func (s *Scheduler) now() time.Time {
+	if s != nil && s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+// shouldSkipScheduledSync is the automatic-scheduling circuit breaker. Manual
+// checks bypass it; a succeeded run clears the failure counter and retry time.
+func shouldSkipScheduledSync(state KnowledgeSyncState, now time.Time) bool {
+	if state.Status == StatusBlocked || state.ConsecutiveFailures >= MaxConsecutiveSyncFailures {
+		return true
+	}
+	if state.NextRetryAt == "" {
+		return false
+	}
+	nextRetry, err := time.Parse(time.RFC3339, state.NextRetryAt)
+	if err != nil {
+		return false
+	}
+	return now.Before(nextRetry)
 }

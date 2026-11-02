@@ -1,0 +1,2 @@
+# Install in a dedicated gateway virtual environment, separate from orchestration Python.
+lark-oapi==1.7.3
